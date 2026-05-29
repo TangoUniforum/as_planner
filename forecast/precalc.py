@@ -1194,6 +1194,223 @@ def _build_facility_assignment_plan(
     return plan
 
 
+def _build_reservation_plan(
+    horizon_labels: list[str],
+    initial_state: FacilityState,
+    facility: FacilityConfig,
+    batch_week_facts: dict[tuple[str, str], BatchWeekFact],
+    batch_lifecycles: dict[str, BatchLifecycle],
+    harvest_demands: list[HarvestDemand],
+    bottlenecks: list[Bottleneck],
+    control: Optional[ControlParams] = None,
+) -> dict[tuple[str, str], TankAssignmentPlan]:
+    """ANTICIPATORY reservation-grid scheduler (see
+    docs/GREENFIELD_RESERVATION_SCHEDULER_DESIGN.md).
+
+    Cohort-outer (not week-outer): processes cohorts in a fixed FIFO
+    priority order and RESERVES each cohort's full forward (tank, week)
+    trajectory before moving to the next cohort. Because a cohort's
+    whole future is marked on the grid before later cohorts are
+    processed, a big cohort's grow-out tanks are HELD for it rather than
+    lost to a later cohort grabbing them first (the B46-class
+    under-allocation the reactive coordinator suffers).
+
+    Reserve-forward / release-forward semantics: claiming tank t at week
+    w marks grid[t][w..end_of_cohort] = bid; a harvest-driven shrink
+    un-marks the shed tank from that week forward. Cells are time-shared
+    across cohorts — a tank a cohort needs at W40 can serve another at
+    W20 — so this does NOT over-subscribe the way lifetime-max did.
+
+    System choice uses forward-peak (minimize resulting peak system
+    biomass) — the staggering rule. Tank choice within a system is
+    lowest-free-id. Deterministic, no scoring weights.
+    """
+    H = len(horizon_labels)
+    if H == 0:
+        return {}
+    week_idx = {wl: i for i, wl in enumerate(horizon_labels)}
+
+    tank_to_system: dict[int, str] = {
+        t.tank_id: t.system_id for t in facility.tanks if t.type == "OG"
+    }
+    og_tanks_by_system: dict[str, list[int]] = {}
+    for tid, s in tank_to_system.items():
+        og_tanks_by_system.setdefault(s, []).append(tid)
+    for s in og_tanks_by_system:
+        og_tanks_by_system[s].sort()
+    sixn_systems = frozenset({"OG6N"})
+
+    # grid[tid] = list over horizon weeks of owning batch_id or None.
+    grid: dict[int, list] = {tid: [None] * H for tid in tank_to_system}
+
+    # Per-cohort SW week facts (sorted by week index) + per-tank biomass.
+    cohort_weeks: dict[str, list[tuple[int, BatchWeekFact]]] = {}
+    per_tank_bio: dict[str, list[float]] = {}
+    for (b, wl), f in batch_week_facts.items():
+        if f.stage != "SW" or wl not in week_idx:
+            continue
+        cohort_weeks.setdefault(b, []).append((week_idx[wl], f))
+    for b, lst in cohort_weeks.items():
+        lst.sort()
+        arr = [0.0] * H
+        for w, f in lst:
+            arr[w] = f.biomass_kg_after_harvest / max(
+                1, f.tanks_needed_at_density_cap)
+        per_tank_bio[b] = arr
+
+    # PR seed: pre-existing batch tanks at forecast start.
+    pr_tanks: dict[str, set] = {}
+    for tid, tank in initial_state.tanks_by_id.items():
+        if tank.batch_id and tank.type == "OG":
+            pr_tanks.setdefault(tank.batch_id, set()).add(tid)
+
+    # Priority order. RESERVATION_ORDER env selects:
+    #   "fifo" (default) — by input_date (operational fact)
+    #   "peak" — largest peak tank-demand first (packs better: the most
+    #            constrained cohorts reserve before the facility fills)
+    import os as _os
+    _peak_demand = {
+        b: max((f.tanks_needed_at_density_cap for _w, f in wks), default=0)
+        for b, wks in cohort_weeks.items()
+    }
+    if _os.environ.get("RESERVATION_ORDER", "fifo") == "peak":
+        order = sorted(cohort_weeks.keys(),
+                       key=lambda b: (-_peak_demand[b], b))
+    else:
+        order = sorted(
+            cohort_weeks.keys(),
+            key=lambda b: (
+                (batch_lifecycles[b].input_date or date.max)
+                if b in batch_lifecycles else date.max,
+                b,
+            ),
+        )
+
+    def _sys_load(sys: str) -> list[float]:
+        curve = [0.0] * H
+        for tid in og_tanks_by_system.get(sys, []):
+            row = grid[tid]
+            for w in range(H):
+                owner = row[w]
+                if owner is not None:
+                    curve[w] += per_tank_bio.get(owner, _ZERO)[w]
+        return curve
+
+    _ZERO = [0.0] * H
+
+    def _free_for_span(tid: int, w0: int, w1: int) -> bool:
+        row = grid[tid]
+        for w in range(w0, w1 + 1):
+            if row[w] is not None:
+                return False
+        return True
+
+    def _reserve(tid: int, bid: str, w0: int, w1: int) -> None:
+        row = grid[tid]
+        for w in range(w0, w1 + 1):
+            row[w] = bid
+
+    def _release_from(tid: int, bid: str, w0: int) -> None:
+        row = grid[tid]
+        for w in range(w0, H):
+            if row[w] == bid:
+                row[w] = None
+
+    notes_per_pair: dict[tuple[str, str], list[str]] = {}
+
+    for bid in order:
+        wks = cohort_weeks[bid]
+        last_w = wks[-1][0]
+        held: set = set()
+        # Seed PR tanks as held (reserved from week 0 across the span;
+        # they'll be released/migrated as eligibility + needs dictate).
+        for tid in sorted(pr_tanks.get(bid, set())):
+            if tid in grid:
+                _reserve(tid, bid, wks[0][0], last_w)
+                held.add(tid)
+
+        for w, f in wks:
+            needed = max(0, f.tanks_needed_at_density_cap)
+            eligible = set(f.eligible_systems)
+            notes = notes_per_pair.setdefault((bid, horizon_labels[w]), [])
+
+            # Release held tanks no longer in eligible systems (e.g. the
+            # OG1/2 tanks when the cohort crosses 1 kg → must exit to
+            # OG3-6). Released from THIS week forward.
+            for tid in sorted(held):
+                if tank_to_system.get(tid) not in eligible:
+                    _release_from(tid, bid, w)
+                    held.discard(tid)
+
+            held_in_elig = [t for t in held
+                            if tank_to_system.get(t) in eligible]
+
+            # Shrink (harvest): release surplus held tanks from w forward.
+            if len(held_in_elig) > needed:
+                # Release highest tank_id first (newest), OG1/2 before
+                # OG3-6 when both present.
+                shed = sorted(
+                    held_in_elig,
+                    key=lambda t: (
+                        0 if tank_to_system.get(t) not in _OG12 else 1, -t),
+                )[: len(held_in_elig) - needed]
+                for tid in shed:
+                    _release_from(tid, bid, w)
+                    held.discard(tid)
+            # Grow / catch up: reserve more eligible tanks for w..last_w.
+            elif len(held_in_elig) < needed:
+                shortfall = needed - len(held_in_elig)
+                # Forward-peak system order over eligible (non-6N) systems.
+                cand_systems = [s for s in eligible if s not in sixn_systems]
+                cohort_ptc = per_tank_bio.get(bid, _ZERO)
+                scored = []
+                for s in cand_systems:
+                    load = _sys_load(s)
+                    peak = max(load[x] + cohort_ptc[x] for x in range(H))
+                    scored.append((peak, s))
+                scored.sort()
+                got = 0
+                for _peak, s in scored:
+                    if got >= shortfall:
+                        break
+                    for tid in og_tanks_by_system.get(s, []):
+                        if got >= shortfall:
+                            break
+                        if tid in held:
+                            continue
+                        if _free_for_span(tid, w, last_w):
+                            _reserve(tid, bid, w, last_w)
+                            held.add(tid)
+                            got += 1
+                if got < shortfall:
+                    bottlenecks.append(Bottleneck(
+                        week_label=horizon_labels[w],
+                        system_id=None,
+                        kind="reservation_unmet",
+                        detail=(f"{bid} W={horizon_labels[w]} needs {needed} "
+                                f"tanks; reserved {len(held_in_elig)+got}"),
+                        deficit=shortfall - got,
+                    ))
+                    notes.append(
+                        f"reservation short: need {needed}, got "
+                        f"{len(held_in_elig)+got}")
+
+    # Materialize plan from the grid.
+    plan: dict[tuple[str, str], TankAssignmentPlan] = {}
+    for bid, wks in cohort_weeks.items():
+        for w, f in wks:
+            wl = horizon_labels[w]
+            tanks = [tid for tid in tank_to_system
+                     if grid[tid][w] == bid]
+            plan[(bid, wl)] = TankAssignmentPlan(
+                batch_id=bid,
+                week_label=wl,
+                tank_ids=sorted(tanks),
+                notes=notes_per_pair.get((bid, wl), []),
+            )
+    return plan
+
+
 def _build_migration_plan(
     horizon_labels: list[str],
     initial_state: FacilityState,
@@ -1700,19 +1917,33 @@ def build_precalc_canvas(
     migration: dict[tuple[str, str], MigrationStep] = {}
     assignment_plan: dict[tuple[str, str], TankAssignmentPlan] = {}
     if initial_state is not None:
-        # New facility-assignment coordinator (session 1: empty plan,
-        # not yet consumed by _build_migration_plan).
-        assignment_plan = _build_facility_assignment_plan(
-            horizon_labels=horizon_labels,
-            initial_state=initial_state,
-            facility=facility,
-            batch_week_facts=batch_week_facts,
-            batch_lifecycles=batch_lifecycles,
-            harvest_demands=harvest_demands,
-            weekly_facility=weekly_facility,
-            bottlenecks=bottlenecks,
-            control=control,
-        )
+        # Assignment coordinator. RESERVATION_PLAN env selects the new
+        # anticipatory reservation-grid scheduler; default is the
+        # incremental event-loop coordinator.
+        import os as _os
+        if _os.environ.get("RESERVATION_PLAN"):
+            assignment_plan = _build_reservation_plan(
+                horizon_labels=horizon_labels,
+                initial_state=initial_state,
+                facility=facility,
+                batch_week_facts=batch_week_facts,
+                batch_lifecycles=batch_lifecycles,
+                harvest_demands=harvest_demands,
+                bottlenecks=bottlenecks,
+                control=control,
+            )
+        else:
+            assignment_plan = _build_facility_assignment_plan(
+                horizon_labels=horizon_labels,
+                initial_state=initial_state,
+                facility=facility,
+                batch_week_facts=batch_week_facts,
+                batch_lifecycles=batch_lifecycles,
+                harvest_demands=harvest_demands,
+                weekly_facility=weekly_facility,
+                bottlenecks=bottlenecks,
+                control=control,
+            )
         availability, migration = _build_migration_plan(
             horizon_labels=horizon_labels,
             initial_state=initial_state,
