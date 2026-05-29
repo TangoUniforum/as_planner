@@ -1,0 +1,88 @@
+● Here's a self-contained resume prompt — paste it into a fresh Claude Code session in this directory:
+
+  ---
+  Resume building a Python production-forecast tool for Atlantic Sapphire salmon
+  operations. Working dir: Python/. Inputs come from Forecast.xlsm in this folder.
+  Outputs are written back to the same workbook. Replaces a legacy VBA tool (v8)
+  in Tool/ (parent folder) — we're greenfield in Python/.
+
+  WHAT'S BUILT (in forecast/ package):
+  - models.py: ControlParams, BatchInput, BiologyTables, FacilityConfig, TankConfig,
+    BatchWeekState, CalibrationResidual
+  - excel_io.py: readers for Control / BatchRegistry / Tables / FacilityConfig;
+    writers for BiologyProjection and Diagnostics sheets
+  - biology.py: per-batch weekly forward sim Egg→FW→SW with mortality, scheduled
+    culling (days 170/215/260), handling mortality at transfers, truncated-normal
+    cull uplift via TranOG_CV, final reconciliation cull at TranOG to land count on
+    TranOG_Count, and back-solver (bisection) for suggested FW_Correction
+  - run.py: entry point. Run with `python run.py` from Python/.
+
+  KEY DESIGN DECISIONS:
+  - Mathematical/analytical approach (no LP). Calculate as much as possible up
+    front; only iterate where unavoidable.
+  - Per-batch lifecycle: Egg (0 biomass, mortality only) → FW at TranSF_date
+    (starts at 0.15 g, handling-mortality fraction applied) → SW at TranOG_date
+    (handling mortality → record pre-cull avg-wt residual vs target → final cull
+    sized to TranOG_Count → flip stage).
+  - FW_Correction = operator-supplied SGR_FW multiplier (tool back-solves a
+    suggested value so projected pre-cull avg wt at TranOG hits TranOG_AvgWt).
+  - SGR_Correction = operator-supplied SGR_SW multiplier.
+  - TranOG_CV drives truncated-normal cull-uplift math for both scheduled and
+    reconciliation culls. Bottom 5% cull on CV 16% ≈ +1.7% avg-wt uplift.
+  - Handling Mortality on the Control sheet stores a percentage value: cell
+    value 0.01 means 0.01% = 0.0001 fraction applied per transfer event.
+  - Past-TranOG batches (TranOG_Date <= forecast_start) are EXCLUDED from
+    the projection — they'll be sourced from a separate operational-state
+    input layer not yet built.
+  - Mortality table values are weekly % held forward step-wise from each
+    Week_From_Input reference point.
+  - Weekly growth grid: ticks at Input_Date + N*7 days. Back-solver mirrors
+    this same grid (had a 1-week-offset bug — now fixed).
+
+  SHEET CLASSIFICATION:
+  - INPUTS my code reads: Control, BatchRegistry, Tables, FacilityConfig
+  - INPUTS to wire when populated: HarvestPlan, FacilityLimits, SystemLimits
+  - REFERENCE ONLY (structure templates, never read as input): TransferPlan,
+    WeeklyEngine, WeeklyReport, MonthlyReport, FacilityMap, ProductionReport,
+    FeedForecastWeekly, FeedForecastMonthly, BatchLocations, HarvestLookups,
+    Daily Harvest Schedule, AccumulatedOutput, ValidationLog
+  - MY OUTPUTS so far: BiologyProjection, Diagnostics
+
+  6N TANK RULES (not yet implemented — for placement layer):
+  - 6N as PURGE system (Control "6N growth" = "no"): sister pairs 61/67, 63/69,
+    65/71. Each week the 6N tank with lowest count is harvested; fish destined
+    for harvest are moved into the just-emptied pair → 2-week rolling purge
+    pipeline before harvest. Pairs always stocked/harvested as a pair, but a
+    single tank can be used if only one batch.
+  - 6N as PRODUCTION system (Control "6N growth" = "yes"): tanks 67/69/71
+    unavailable; 61/63/65 used for growth. Harvest is from source tank after
+    an off-feed period (days, NEW Control field to be added).
+
+  NATURAL NEXT STEPS:
+  1. Wire HarvestPlan / FacilityLimits / SystemLimits readers when operator
+     populates them.
+  2. Source past-TranOG batches' current state from an operational-state input
+     so they appear in the projection (currently excluded).
+  3. Placement layer: assign batches × weeks → tanks within density / feed /
+     system / facility caps. Generate the TransferPlan as output.
+  4. 6N purge-mode harvest pipeline logic.
+  5. Harvest + feed forecast outputs (HarvestReport, FeedForecastWeekly, etc.).
+
+  Quick verification: run `python run.py` from Python/. Should produce 15-batch
+  BiologyProjection (~600 rows) and a Diagnostics sheet with suggested
+  FW_Correction per batch. Calibrated batches (e.g. B54 at FW=0.801) should
+  show ~0% residual.
+
+  There's an auto-memory at C:\Users\julian.f\.claude\projects\
+  C--Users-julian-f-OneDrive---Atlantic-Sapphire-Production-Forecasts-Tool\memory\
+  MEMORY.md from the prior LP-based Option C project — ignore those entries,
+  the new tool is greenfield with a different paradigm.
+
+  ---
+  Two notes:
+  - Save this somewhere outside the repo (or paste straight into the fresh session) so it survives the
+  reboot.
+  - The new session will not see this conversation's tool-result outputs, but with the prompt above plus
+  the code on disk it can read Python/forecast/*.py and verify state itself before continuing.
+
+✻ Churned for 34s

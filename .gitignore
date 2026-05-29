@@ -1,0 +1,23 @@
+# Greenfield forecast tool — code repo (separate from the shared Tool/
+# as_forecast repo). Excludes the mutable workbook + transient artifacts.
+
+# The I/O workbook: large binary, rewritten every run. Not tracked here;
+# it's the shared data fixture in the parent folder.
+Forecast.xlsm
+*.xlsm
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+
+# Editor / tooling
+.claude/
+.vscode/
+.idea/
+
+# Transient diagnostic outputs (scripts write these)
+scripts/*_output.txt
+scripts/_*.txt
+*.tmp
+_exp_*.xlsm

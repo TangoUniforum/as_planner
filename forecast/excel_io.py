@@ -1,0 +1,1435 @@
+"""Read inputs and write outputs against Forecast.xlsm."""
+from __future__ import annotations
+
+import re
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Iterable, Optional
+
+import openpyxl
+from openpyxl.utils import get_column_letter
+
+from .models import (
+    BatchInput,
+    BiologyTables,
+    CalibrationResidual,
+    ControlParams,
+    FacilityConfig,
+    PinnedHarvest,
+    PinnedTransfer,
+    TankConfig,
+    BatchWeekState,
+)
+from .time_grid import (
+    iso_week_label as _iso_week_label,
+    label_for_date as _label_for_date,
+    parse_iso_label as _parse_iso_label,
+)
+
+
+# ---------- Control ----------
+
+def _control_lookup(rows: dict[int, list], label_col: int = 1, value_col: int = 2):
+    """Build label -> value dict from Control sheet rows (case/space-insensitive label)."""
+    out: dict[str, object] = {}
+    for r, row in rows.items():
+        label = row[label_col - 1] if len(row) >= label_col else None
+        value = row[value_col - 1] if len(row) >= value_col else None
+        if isinstance(label, str) and label.strip():
+            key = re.sub(r"\s+", " ", label.strip().lower()).rstrip(":")
+            out[key] = value
+    return out
+
+
+def read_control(wb) -> ControlParams:
+    ws = wb["Control"]
+    rows = {i + 1: list(row) for i, row in enumerate(ws.iter_rows(values_only=True))}
+    L = _control_lookup(rows)
+
+    def get(key, default=None):
+        return L.get(re.sub(r"\s+", " ", key.lower()).rstrip(":"), default)
+
+    horizon_raw = get("forecast horizon (weeks)") or get("horizon")
+    if isinstance(horizon_raw, str):
+        m = re.search(r"\d+", horizon_raw)
+        horizon = int(m.group()) if m else 52
+    else:
+        horizon = int(horizon_raw or 52)
+
+    sixn_raw = get("6n growth")
+    sixn_growth = isinstance(sixn_raw, str) and sixn_raw.strip().lower() in {"yes", "y", "true", "1"}
+
+    return ControlParams(
+        forecast_start=get("forecast start date") or get("forecast start"),
+        horizon_weeks=horizon,
+        scenario_name=str(get("scenario name") or get("scenario") or "Forecast"),
+        max_feed_per_day_kg=float(get("max feed/day (kg)") or 0),
+        max_biomass_kg=float(get("max biomass (kg)") or 0),
+        max_harvest_per_week=float(get("max harvest/week") or 0),
+        min_harvest_weight_g=float(get("min harvest weight (g)") or 0),
+        min_harvest_per_week=float(get("min harvest/week") or 0),
+        min_tank_control=float(get("min tank control") or 0),
+        max_tank_density_kg_m3=float(get("max tank density (kg/m³)") or get("max tank density (kg/m�)") or 85),
+        default_hog_yield=float(get("default hog yield") or 0.81),
+        facility_biomass_deviation_pct=float(get("target biomass deviation") or 0.01),
+        handling_mortality_pct=float(get("handling mortality") or 0.01),
+        sixn_growth=sixn_growth,
+        sixn_production_start=get("6n production start date"),
+        sixn_transition_weeks=get("6n transition window (weeks)"),
+        tran_og_default_tanks=int(get("default tanks tranog") or 3),
+        global_buffer_pct=float(get("global buffer") or 0.05),
+        starvation_period_days=int(get("starvation period (days)") or 10),
+    )
+
+
+# ---------- BatchRegistry ----------
+
+def read_batches(wb) -> list[BatchInput]:
+    ws = wb["BatchRegistry"]
+    header_row_idx = None
+    rows = list(ws.iter_rows(values_only=True))
+    for i, row in enumerate(rows):
+        if row and row[0] == "Batch_ID":
+            header_row_idx = i
+            break
+    if header_row_idx is None:
+        raise ValueError("BatchRegistry: header row 'Batch_ID' not found")
+
+    headers = [str(h).strip() if h is not None else "" for h in rows[header_row_idx]]
+    idx = {h: i for i, h in enumerate(headers)}
+
+    def cell(row, name, default=None):
+        i = idx.get(name)
+        if i is None or i >= len(row):
+            return default
+        v = row[i]
+        return default if v is None else v
+
+    out: list[BatchInput] = []
+    for row in rows[header_row_idx + 1:]:
+        if not row or not row[0]:
+            continue
+        bid = cell(row, "Batch_ID")
+        if not bid:
+            continue
+        out.append(BatchInput(
+            batch_id=str(bid),
+            input_date=cell(row, "Input_Date"),
+            input_count=int(cell(row, "Input_Count") or 0),
+            tran_sf_date=cell(row, "TranSF_date"),
+            tran_og_date=cell(row, "TranOG_Date"),
+            tran_og_count=int(cell(row, "TranOG_Count") or 0) or None,
+            tran_og_avg_wt_g=float(cell(row, "TranOG_AvgWt") or 0) or None,
+            tran_og_cv=float(cell(row, "TranOG_CV") or 16.0),
+            fcr_model=str(cell(row, "FCR_Model") or ""),
+            fw_correction=float(cell(row, "FW_Correction") or 1.0),
+            sgr_correction=float(cell(row, "SGR_Correction") or 1.0),
+            notes=str(cell(row, "Notes") or ""),
+        ))
+    return out
+
+
+# ---------- Tables ----------
+
+def read_biology_tables(wb) -> BiologyTables:
+    ws = wb["Tables"]
+    rows = list(ws.iter_rows(values_only=True))
+    # Header is at row 3 (index 2). Layout (cols 1-indexed):
+    # 1=Size, 2=SGR_FW, 3=SGR_SW, 4=FCR_1.21, 5=FCR_1.18, 6=FCR_1.16,
+    # 8=Week_From_Input, 9=Mortality_%, 11=Feed Type, 12=Max Size,
+    # 15=Days Since Input, 16=Culling %
+    tables = BiologyTables(fcr_by_model={"1.21": [], "1.18": [], "1.16": []})
+    for row in rows[3:]:  # data starts row 4 (index 3)
+        size = row[0] if len(row) > 0 else None
+        sgr_fw = row[1] if len(row) > 1 else None
+        sgr_sw = row[2] if len(row) > 2 else None
+        fcr_121 = row[3] if len(row) > 3 else None
+        fcr_118 = row[4] if len(row) > 4 else None
+        fcr_116 = row[5] if len(row) > 5 else None
+        if isinstance(size, (int, float)):
+            tables.sgr_size_g.append(float(size))
+            tables.sgr_fw_pct_day.append(float(sgr_fw) if isinstance(sgr_fw, (int, float)) else None)
+            tables.sgr_sw_pct_day.append(float(sgr_sw) if isinstance(sgr_sw, (int, float)) else None)
+            tables.fcr_size_g.append(float(size))
+            tables.fcr_by_model["1.21"].append(float(fcr_121) if isinstance(fcr_121, (int, float)) else float("nan"))
+            tables.fcr_by_model["1.18"].append(float(fcr_118) if isinstance(fcr_118, (int, float)) else float("nan"))
+            tables.fcr_by_model["1.16"].append(float(fcr_116) if isinstance(fcr_116, (int, float)) else float("nan"))
+
+        wfi = row[7] if len(row) > 7 else None
+        mort = row[8] if len(row) > 8 else None
+        if isinstance(wfi, (int, float)) and isinstance(mort, (int, float)):
+            tables.mortality_week_from_input.append(int(wfi))
+            tables.mortality_pct_weekly.append(float(mort))
+
+        # Feed Type (col 11) + Max Size (col 12) -- ascending by max size.
+        feed_name = row[10] if len(row) > 10 else None
+        max_size = row[11] if len(row) > 11 else None
+        if isinstance(feed_name, str) and feed_name.strip() and isinstance(max_size, (int, float)):
+            tables.feed_types.append((float(max_size), feed_name.strip()))
+
+        # Days Since Input (col 15) + Culling % (col 16).
+        dsi = row[14] if len(row) > 14 else None
+        cull = row[15] if len(row) > 15 else None
+        if isinstance(dsi, (int, float)) and isinstance(cull, (int, float)):
+            tables.culling.append((int(dsi), float(cull)))
+
+    tables.feed_types.sort(key=lambda x: x[0])
+    tables.culling.sort(key=lambda x: x[0])
+    return tables
+
+
+# ---------- FacilityConfig ----------
+
+def read_facility_config(wb) -> FacilityConfig:
+    ws = wb["FacilityConfig"]
+    rows = list(ws.iter_rows(values_only=True))
+    header_idx = None
+    for i, row in enumerate(rows):
+        if row and row[0] == "LocationID":
+            header_idx = i
+            break
+    if header_idx is None:
+        raise ValueError("FacilityConfig: header row 'LocationID' not found")
+
+    tanks: list[TankConfig] = []
+    for row in rows[header_idx + 1:]:
+        if not row or not row[0]:
+            continue
+        tanks.append(TankConfig(
+            location_id=str(row[0]),
+            department=str(row[1] or ""),
+            stage=str(row[2] or ""),
+            system_id=str(row[3] or ""),
+            tank_id=int(row[4]) if row[4] is not None else -1,
+            volume_m3=float(row[5] or 0),
+            max_density_kg_m3=float(row[6] or 0),
+            max_feed_kg_day=float(row[7] or 0),
+            type=str(row[8] or ""),
+        ))
+    return FacilityConfig(tanks=tanks)
+
+
+# ---------- Pinned-plan input readers (HarvestPlan + TransferPlan) ----------
+
+def _parse_week_cell(cell, forecast_start) -> tuple[Optional[str], str]:
+    """Best-effort: turn a 'Week' column cell into (week_label, raw_text).
+
+    Accepted forms:
+      - datetime / date  → ISO label of that date's forecast week
+      - 'YYYY-Www' string → that label
+      - integer N (with forecast_start.year as context) → 'YYYY-W##'
+        interpreted as ISO week N of forecast_start.year if it falls
+        within the horizon; else None
+      - anything else → (None, raw text)
+    """
+    if cell is None:
+        return None, ""
+    if isinstance(cell, datetime):
+        return _label_for_date(cell, forecast_start), cell.date().isoformat()
+    if isinstance(cell, (int, float)):
+        n = int(cell)
+        fs_year = (forecast_start.year if hasattr(forecast_start, "year") else
+                   forecast_start.date().year if hasattr(forecast_start, "date") else None)
+        if fs_year and 1 <= n <= 53:
+            label = f"{fs_year}-W{n:02d}"
+            return label, str(n)
+        return None, str(n)
+    s = str(cell).strip()
+    if _parse_iso_label(s) is not None:
+        return s, s
+    return None, s
+
+
+def read_pinned_harvests(wb, forecast_start) -> list[PinnedHarvest]:
+    """Parse operator-pinned rows from the HarvestPlan sheet.
+
+    Header row: Week, Batch, Tank, Count (fish), Gross_AvgWt (kg),
+    Gross_Biomass (kg), HOG_Yield (ratio), HOG_AvgWt (kg), HOG_Biomass (kg),
+    Pinned. Only rows with `Pinned` column set to TRUE/1/'TRUE'/'YES' are
+    treated as operator pins. Auto-generated rows (with blank Pinned) are
+    ignored so the output sheet doesn't accidentally re-feed itself.
+    """
+    if "HarvestPlan" not in wb.sheetnames:
+        return []
+    ws = wb["HarvestPlan"]
+    rows = list(ws.iter_rows(values_only=True))
+    header_idx = None
+    pin_col = None
+    for i, row in enumerate(rows):
+        if row and isinstance(row[0], str) and row[0].strip().lower() == "week":
+            header_idx = i
+            # Locate "Pinned" column if present.
+            for j, h in enumerate(row):
+                if isinstance(h, str) and h.strip().lower() == "pinned":
+                    pin_col = j
+                    break
+            break
+    if header_idx is None:
+        return []
+    out: list[PinnedHarvest] = []
+    for row in rows[header_idx + 1:]:
+        if not row:
+            continue
+        if row[1] is None or row[2] is None or row[3] is None:
+            continue
+        # If a Pinned column exists, only rows explicitly marked count.
+        if pin_col is not None:
+            pin_val = row[pin_col] if pin_col < len(row) else None
+            if isinstance(pin_val, bool):
+                is_pinned = pin_val
+            elif isinstance(pin_val, (int, float)):
+                is_pinned = bool(pin_val)
+            elif isinstance(pin_val, str):
+                is_pinned = pin_val.strip().lower() in ("true", "yes", "y", "1", "x")
+            else:
+                is_pinned = False
+            if not is_pinned:
+                continue
+        wk_label, raw = _parse_week_cell(row[0], forecast_start)
+        try:
+            tank_id = int(row[2])
+        except (TypeError, ValueError):
+            continue
+        out.append(PinnedHarvest(
+            week_label=wk_label,
+            raw_week_cell=raw,
+            batch_id=str(row[1]).strip(),
+            tank_id=tank_id,
+            count=float(row[3] or 0),
+            gross_avg_wt_kg=float(row[4] or 0),
+            gross_biomass_kg=float(row[5] or 0),
+            hog_yield=float(row[6] or 0),
+            hog_avg_wt_kg=float(row[7] or 0),
+            hog_biomass_kg=float(row[8] or 0),
+        ))
+    return out
+
+
+def read_pinned_transfers(wb, forecast_start) -> list[PinnedTransfer]:
+    """Parse operator-pinned rows from the TransferPlan sheet (left block).
+
+    Header row: Week, Batch, From_Tank, To_Tank, Count (fish), Avg_Weight (kg),
+    Grade, CV (%). The right-side 'WEEKLY OPERATIONAL GUIDANCE' overlay is
+    ignored (we only parse the structured rows starting at the canonical
+    header).
+    """
+    if "TransferPlan" not in wb.sheetnames:
+        return []
+    ws = wb["TransferPlan"]
+    rows = list(ws.iter_rows(values_only=True))
+    header_idx = None
+    for i, row in enumerate(rows):
+        if row and isinstance(row[0], str) and row[0].strip().lower() == "week":
+            header_idx = i
+            break
+    if header_idx is None:
+        return []
+    out: list[PinnedTransfer] = []
+    for row in rows[header_idx + 1:]:
+        if not row:
+            continue
+        if row[1] is None or row[2] is None or row[3] is None:
+            continue
+        wk_label, raw = _parse_week_cell(row[0], forecast_start)
+        out.append(PinnedTransfer(
+            week_label=wk_label,
+            raw_week_cell=raw,
+            batch_id=str(row[1]).strip(),
+            from_tank=str(row[2]).strip(),
+            to_tank=str(row[3]).strip(),
+            count=float(row[4] or 0),
+            avg_weight_kg=float(row[5] or 0),
+            grade=str(row[6] or "").strip(),
+            cv_pct=float(row[7] or 0) if len(row) > 7 else 0.0,
+        ))
+    return out
+
+
+# ---------- Writer: BiologyProjection sheet ----------
+
+def write_biology_projection(wb, states: Iterable[BatchWeekState], sheet_name: str = "BiologyProjection") -> None:
+    if sheet_name in wb.sheetnames:
+        del wb[sheet_name]
+    ws = wb.create_sheet(sheet_name)
+    headers = [
+        "Batch", "Week", "WeekStart", "DaysSinceInput", "WeekFromInput",
+        "Stage", "Count", "AvgWt_g", "Biomass_kg", "SGR_pct_day", "FCR",
+        "FeedType", "Mortality_pct_wk", "Cull_pct", "Cull_Count",
+        "Cull_Biomass_kg", "Feed_kg_day", "Feed_kg_week",
+    ]
+    ws.append(headers)
+    for s in states:
+        ws.append([
+            s.batch_id, s.week_label, s.week_start, s.days_since_input,
+            s.week_from_input, s.stage, round(s.count, 1), round(s.avg_weight_g, 3),
+            round(s.biomass_kg, 1), round(s.sgr_pct_day, 4), round(s.fcr, 4),
+            s.feed_type, round(s.mortality_pct_weekly, 4), round(s.cull_event_pct, 4),
+            round(s.cull_count_week, 0) if s.cull_count_week > 0 else None,
+            round(s.cull_biomass_kg_week, 1) if s.cull_biomass_kg_week > 0 else None,
+            round(s.feed_kg_day, 2), round(s.feed_kg_week, 1),
+        ])
+
+    widths = {1: 8, 2: 12, 3: 14, 4: 14, 5: 14, 6: 6, 7: 12, 8: 10,
+              9: 13, 10: 12, 11: 8, 12: 18, 13: 16, 14: 9,
+              15: 12, 16: 16, 17: 12, 18: 13}
+    for c, w in widths.items():
+        ws.column_dimensions[get_column_letter(c)].width = w
+
+
+def write_batch_locations(wb, batch_locations, sheet_name: str = "BatchLocations") -> None:
+    """Per-(week, batch, tank) occupancy from the placement plan."""
+    if sheet_name in wb.sheetnames:
+        del wb[sheet_name]
+    ws = wb.create_sheet(sheet_name)
+    ws.append(["BATCH LOCATIONS"])
+    ws.append(["Per-tank batch occupancy from the forecast plan. Auto-generated."])
+    ws.append([])
+    ws.append([
+        "Week", "Week_Start", "Batch", "Tank", "System",
+        "Count (fish)", "AvgWt (kg)", "Biomass (kg)", "Density (kg/m3)",
+    ])
+    for r in batch_locations:
+        ws.append([
+            r.week_label, r.week_start, r.batch_id, r.tank_id, r.system_id,
+            round(r.count, 0),
+            round(r.avg_wt_g / 1000.0, 3),
+            round(r.biomass_kg, 0),
+            round(r.density_kg_m3, 1),
+        ])
+    widths = {1: 11, 2: 12, 3: 8, 4: 6, 5: 9, 6: 12, 7: 11, 8: 13, 9: 14}
+    for c, w in widths.items():
+        ws.column_dimensions[get_column_letter(c)].width = w
+
+
+def write_harvest_plan_output(
+    wb,
+    harvest_events,
+    default_hog_yield: float,
+    facility_limits_hog: dict,
+    sheet_name: str = "HarvestPlan",
+) -> None:
+    """Per-event harvest plan: tank-level Gross + HOG columns.
+
+    `facility_limits_hog` is a dict `{week_label: hog_yield}` for per-week
+    HOG yield overrides; default falls back to `default_hog_yield`.
+    """
+    if sheet_name in wb.sheetnames:
+        del wb[sheet_name]
+    ws = wb.create_sheet(sheet_name)
+    ws.append(["HARVEST PLAN"])
+    ws.append([
+        "Per-harvest event. Auto-generated rows are not re-read as pins. "
+        "To pin a specific row across runs, set the 'Pinned' column to TRUE."
+    ])
+    ws.append([])
+    ws.append([
+        "Week", "Batch", "Tank", "Count (fish)",
+        "Gross_AvgWt (kg)", "Gross_Biomass (kg)",
+        "HOG_Yield (ratio)", "HOG_AvgWt (kg)", "HOG_Biomass (kg)",
+        "Pinned",
+    ])
+    events_sorted = sorted(harvest_events, key=lambda e: (e.event_date, e.source_tank_id))
+    for ev in events_sorted:
+        wk = iso_week_label(ev.event_date)
+        gross_avg_kg = ev.avg_wt_g / 1000.0
+        gross_biomass = ev.count * gross_avg_kg
+        hog_yield = facility_limits_hog.get(wk, default_hog_yield)
+        hog_avg = gross_avg_kg * hog_yield
+        hog_biomass = gross_biomass * hog_yield
+        ws.append([
+            wk, ev.batch_id, ev.source_tank_id,
+            round(ev.count, 0),
+            round(gross_avg_kg, 3),
+            round(gross_biomass, 0),
+            round(hog_yield, 4),
+            round(hog_avg, 3),
+            round(hog_biomass, 0),
+            None,   # Pinned — operator sets TRUE to keep across runs
+        ])
+    widths = {1: 11, 2: 8, 3: 6, 4: 13, 5: 16, 6: 17, 7: 17, 8: 14, 9: 16, 10: 8}
+    for c, w in widths.items():
+        ws.column_dimensions[get_column_letter(c)].width = w
+
+
+def write_transfer_plan_output(
+    wb,
+    transfer_events,
+    tranog_events,
+    grade_events=None,
+    sheet_name: str = "TransferPlan",
+) -> None:
+    """Per-event transfer + TranOG + Grade plan.
+
+    Row schema: Week, Batch, From_Tank, To_Tank, Count, Avg_Weight (kg),
+    Type, CV (%), Status. From_Tank is 'FW' for TranOG; multi-tank source
+    for Grade is comma-separated.
+    """
+    if sheet_name in wb.sheetnames:
+        del wb[sheet_name]
+    ws = wb.create_sheet(sheet_name)
+    ws.append(["TRANSFER PLAN"])
+    ws.append(["Per-event: batch, week, from/to tanks, count, avg weight, type, status."])
+    ws.append([])
+    ws.append([
+        "Week", "Batch", "From_Tank", "To_Tank",
+        "Count (fish)", "Avg_Weight (kg)", "Type", "CV (%)", "Status",
+    ])
+
+    rows: list[tuple] = []
+    for ev in tranog_events:
+        wk = iso_week_label(ev.event_date)
+        for dest in ev.destinations:
+            rows.append((
+                ev.event_date, wk, ev.batch_id, "FW", dest.tank_id,
+                dest.count, dest.avg_wt_g / 1000.0,
+                "TranOG", dest.cv_pct, "applied",
+            ))
+    for ev in transfer_events:
+        # Show ALL events, including rejected ones (count_transferred==0)
+        # so the audit can account for every state change attempt.
+        ct = getattr(ev, "count_transferred", None)
+        if ct is None:
+            status = "applied"
+        elif ct <= 0:
+            status = "rejected"
+        elif ct < sum(d.count for d in ev.destinations) - 0.5:
+            status = "partial"
+        else:
+            status = "applied"
+        wk = iso_week_label(ev.event_date)
+        for dest in ev.destinations:
+            rows.append((
+                ev.event_date, wk, ev.batch_id, str(ev.source_tank_id), dest.tank_id,
+                dest.count, dest.avg_wt_g / 1000.0,
+                "Transfer", dest.cv_pct, status,
+            ))
+    for ev in (grade_events or []):
+        wk = iso_week_label(ev.event_date)
+        src_str = ",".join(str(t) for t in ev.source_tank_ids)
+        for dest in ev.destinations:
+            rows.append((
+                ev.event_date, wk, ev.batch_id, src_str, dest.tank_id,
+                dest.count, dest.avg_wt_g / 1000.0,
+                "Grade", dest.cv_pct, "applied",
+            ))
+    rows.sort(key=lambda r: (r[0], r[2]))
+
+    for r in rows:
+        ws.append([
+            r[1], r[2], r[3], r[4],
+            round(r[5], 0),
+            round(r[6], 3),
+            r[7],
+            round(r[8], 1) if r[8] else None,
+            r[9],
+        ])
+    widths = {1: 11, 2: 8, 3: 10, 4: 8, 5: 13, 6: 14, 7: 9, 8: 8, 9: 10}
+    for c, w in widths.items():
+        ws.column_dimensions[get_column_letter(c)].width = w
+
+
+def write_daily_harvest_schedule(
+    wb,
+    harvest_events,
+    forecast_start,
+    default_hog_yield: float,
+    facility_limits_hog: dict,
+    sheet_name: str = "Daily Harvest Schedule",
+) -> None:
+    """Mon-Fri split of weekly harvests with HOG conversions.
+
+    Each Harvest event is distributed evenly across the Mon-Fri operating
+    days of its ISO week. Days before `forecast_start` or after the
+    horizon are dropped.
+    """
+    from datetime import timedelta
+    if sheet_name in wb.sheetnames:
+        del wb[sheet_name]
+    ws = wb.create_sheet(sheet_name)
+    ws.append(["DAILY HARVEST SCHEDULE"])
+    ws.append([f"Weekly harvests split Mon-Fri. Forecast start {forecast_start}"])
+    ws.append([])
+    ws.append([
+        "Year", "Week", "Date", "Tank", "Batch", "Count (fish)",
+        "Weight (kg HOG)", "Avg Weight (kg HOG)", "Live Weight (kg)",
+    ])
+
+    fs = forecast_start.date() if hasattr(forecast_start, "date") else forecast_start
+    events_sorted = sorted(harvest_events, key=lambda e: (e.event_date, e.source_tank_id))
+    for ev in events_sorted:
+        ev_date = ev.event_date.date() if hasattr(ev.event_date, "date") else ev.event_date
+        # Mon-Fri of this event's ISO week, filtered to forecast horizon.
+        monday = ev_date - timedelta(days=ev_date.weekday())
+        mon_fri = [monday + timedelta(days=i) for i in range(5) if monday + timedelta(days=i) >= fs]
+        if not mon_fri:
+            mon_fri = [ev_date]  # fall back to event date itself
+        per_day_count = ev.count / len(mon_fri)
+        per_day_live_kg = per_day_count * ev.avg_wt_g / 1000.0
+        wk_label = iso_week_label(ev_date)
+        hog_yield = facility_limits_hog.get(wk_label, default_hog_yield)
+        per_day_hog_kg = per_day_live_kg * hog_yield
+        hog_avg_kg = (ev.avg_wt_g / 1000.0) * hog_yield
+        iso_y, iso_w, _ = ev_date.isocalendar()
+        for d in mon_fri:
+            ws.append([
+                iso_y, iso_w, d, ev.source_tank_id, ev.batch_id,
+                round(per_day_count, 0),
+                round(per_day_hog_kg, 0),
+                round(hog_avg_kg, 3),
+                round(per_day_live_kg, 0),
+            ])
+    widths = {1: 6, 2: 6, 3: 12, 4: 6, 5: 8, 6: 12, 7: 15, 8: 17, 9: 14}
+    for c, w in widths.items():
+        ws.column_dimensions[get_column_letter(c)].width = w
+
+
+def write_harvest_report(
+    wb,
+    harvest_events,
+    default_hog_yield: float,
+    facility_limits_hog: dict,
+    sheet_name: str = "HarvestReport",
+) -> None:
+    """Per-week harvest aggregates: total fish + biomass + HOG."""
+    if sheet_name in wb.sheetnames:
+        del wb[sheet_name]
+    ws = wb.create_sheet(sheet_name)
+    ws.append(["HARVEST REPORT"])
+    ws.append(["Per-week harvest totals."])
+    ws.append([])
+    ws.append([
+        "Week", "Batches", "Tanks", "Count (fish)",
+        "Avg_AvgWt (kg)", "Gross_Biomass (kg)",
+        "HOG_Yield", "HOG_AvgWt (kg)", "HOG_Biomass (kg)",
+    ])
+
+    from collections import defaultdict
+    by_week: dict[str, list] = defaultdict(list)
+    for ev in harvest_events:
+        wk = iso_week_label(ev.event_date)
+        by_week[wk].append(ev)
+
+    for wk in sorted(by_week.keys()):
+        evs = by_week[wk]
+        total_count = sum(e.count for e in evs)
+        total_biomass = sum(e.count * e.avg_wt_g / 1000.0 for e in evs)
+        avg_wt_kg = (total_biomass / total_count) if total_count > 0 else 0.0
+        batches = sorted({e.batch_id for e in evs})
+        tanks = sorted({e.source_tank_id for e in evs})
+        hog_yield = facility_limits_hog.get(wk, default_hog_yield)
+        hog_avg = avg_wt_kg * hog_yield
+        hog_biomass = total_biomass * hog_yield
+        ws.append([
+            wk,
+            ",".join(batches),
+            ",".join(str(t) for t in tanks),
+            round(total_count, 0),
+            round(avg_wt_kg, 3),
+            round(total_biomass, 0),
+            round(hog_yield, 4),
+            round(hog_avg, 3),
+            round(hog_biomass, 0),
+        ])
+    widths = {1: 11, 2: 14, 3: 16, 4: 13, 5: 14, 6: 17, 7: 10, 8: 14, 9: 16}
+    for c, w in widths.items():
+        ws.column_dimensions[get_column_letter(c)].width = w
+
+
+def write_feed_forecast_weekly(
+    wb,
+    biology_states_by_batch,
+    forecast_start,
+    sheet_name: str = "FeedForecastWeekly",
+) -> None:
+    """Per-week facility-wide feed forecast.
+
+    Aggregates per-batch weekly feed projections (from biology) into a
+    single facility-level series.
+    """
+    if sheet_name in wb.sheetnames:
+        del wb[sheet_name]
+    ws = wb.create_sheet(sheet_name)
+    ws.append(["FEED FORECAST — WEEKLY"])
+    ws.append(["Per-week facility-wide feed projections from biology."])
+    ws.append([])
+    ws.append(["Week", "Feed_kg_week", "Feed_kg_day (peak)", "Active_Batches"])
+
+    from collections import defaultdict
+    by_week_total: dict[str, float] = defaultdict(float)
+    by_week_peak: dict[str, float] = defaultdict(float)
+    by_week_batches: dict[str, set] = defaultdict(set)
+    for batch_id, states in biology_states_by_batch.items():
+        for s in states:
+            by_week_total[s.week_label] += s.feed_kg_week
+            by_week_peak[s.week_label] = max(by_week_peak[s.week_label], s.feed_kg_day)
+            if s.feed_kg_week > 0:
+                by_week_batches[s.week_label].add(batch_id)
+
+    for wk in sorted(by_week_total.keys()):
+        ws.append([
+            wk,
+            round(by_week_total[wk], 0),
+            round(by_week_peak[wk], 0),
+            len(by_week_batches[wk]),
+        ])
+    widths = {1: 11, 2: 14, 3: 19, 4: 16}
+    for c, w in widths.items():
+        ws.column_dimensions[get_column_letter(c)].width = w
+
+
+def write_feed_forecast_monthly(
+    wb,
+    biology_states_by_batch,
+    forecast_start,
+    sheet_name: str = "FeedForecastMonthly",
+) -> None:
+    """Per-month rollup of weekly feed projections."""
+    if sheet_name in wb.sheetnames:
+        del wb[sheet_name]
+    ws = wb.create_sheet(sheet_name)
+    ws.append(["FEED FORECAST — MONTHLY"])
+    ws.append(["Per-month facility-wide feed projections from biology."])
+    ws.append([])
+    ws.append(["Month", "Feed_kg_month", "Feed_kg_day (avg)", "Feed_kg_day (peak)"])
+
+    from collections import defaultdict
+    by_month: dict[str, float] = defaultdict(float)
+    by_month_peak: dict[str, float] = defaultdict(float)
+    by_month_days: dict[str, int] = defaultdict(int)
+    for batch_id, states in biology_states_by_batch.items():
+        for s in states:
+            mo = s.week_start.strftime("%Y-%m") if hasattr(s.week_start, "strftime") else str(s.week_start)[:7]
+            by_month[mo] += s.feed_kg_week
+            by_month_peak[mo] = max(by_month_peak[mo], s.feed_kg_day)
+            by_month_days[mo] += 7
+
+    for mo in sorted(by_month.keys()):
+        days = by_month_days[mo] or 1
+        avg_day = by_month[mo] / days
+        ws.append([
+            mo,
+            round(by_month[mo], 0),
+            round(avg_day, 0),
+            round(by_month_peak[mo], 0),
+        ])
+    widths = {1: 10, 2: 15, 3: 19, 4: 19}
+    for c, w in widths.items():
+        ws.column_dimensions[get_column_letter(c)].width = w
+
+
+def write_weekly_report(
+    wb,
+    batch_locations,
+    harvest_events,
+    batch_week_states=None,
+    sheet_name: str = "WeeklyReport",
+) -> None:
+    """Per-(week, batch) aggregated snapshot: count, biomass, feed, harvest, cull.
+
+    Rolls up the BatchLocations rows (which are per-tank) into one row
+    per (week, batch). Adds harvest + cull totals from harvest_events
+    and batch_week_states. FW-pre-TranOG weeks with culls but no
+    BatchLocations rows still emit a row carrying the cull totals.
+    """
+    if sheet_name in wb.sheetnames:
+        del wb[sheet_name]
+    ws = wb.create_sheet(sheet_name)
+    ws.append(["WEEKLY REPORT"])
+    ws.append(["Per-(week, batch) aggregate across all tanks. Auto-generated."])
+    ws.append([])
+    ws.append([
+        "Week", "Week_Start", "Batch", "Tanks",
+        "Count (fish)", "AvgWt (kg)", "Biomass (kg)",
+        "Peak_Density (kg/m3)",
+        "Harvest_Count (fish)", "Harvest_Biomass (kg)",
+        "Cull_Count (fish)", "Cull_Biomass (kg)",
+    ])
+
+    # Aggregate locations by (week, batch).
+    from collections import defaultdict
+    agg: dict[tuple, dict] = defaultdict(
+        lambda: {"tanks": [], "count": 0.0, "biomass": 0.0, "peak_density": 0.0,
+                 "week_start": None},
+    )
+    for r in batch_locations:
+        key = (r.week_label, r.batch_id)
+        e = agg[key]
+        e["tanks"].append(r.tank_id)
+        e["count"] += r.count
+        e["biomass"] += r.biomass_kg
+        e["peak_density"] = max(e["peak_density"], r.density_kg_m3)
+        e["week_start"] = r.week_start
+
+    # Harvests by (week, batch).
+    harvest_agg: dict[tuple, dict] = defaultdict(lambda: {"count": 0.0, "biomass": 0.0})
+    for ev in harvest_events:
+        wk = iso_week_label(ev.event_date)
+        e = harvest_agg[(wk, ev.batch_id)]
+        e["count"] += ev.count
+        e["biomass"] += ev.count * ev.avg_wt_g / 1000.0
+
+    # Culls by (week, batch) from biology projection.
+    cull_agg: dict[tuple, dict] = defaultdict(lambda: {"count": 0.0, "biomass": 0.0, "week_start": None})
+    for s in batch_week_states or ():
+        if s.cull_count_week <= 0:
+            continue
+        e = cull_agg[(s.week_label, s.batch_id)]
+        e["count"] += s.cull_count_week
+        e["biomass"] += s.cull_biomass_kg_week
+        e["week_start"] = s.week_start
+
+    rows = sorted(set(agg.keys()) | set(cull_agg.keys()))
+    for k in rows:
+        wk, b = k
+        a = agg.get(k, {"tanks": [], "count": 0.0, "biomass": 0.0,
+                        "peak_density": 0.0, "week_start": None})
+        h = harvest_agg.get(k, {"count": 0.0, "biomass": 0.0})
+        c = cull_agg.get(k, {"count": 0.0, "biomass": 0.0, "week_start": None})
+        avg_wt_kg = (a["biomass"] / a["count"]) if a["count"] > 0 else 0.0
+        ws.append([
+            wk, a["week_start"] or c["week_start"], b,
+            ",".join(str(t) for t in sorted(a["tanks"])) if a["tanks"] else None,
+            round(a["count"], 0) if a["count"] > 0 else None,
+            round(avg_wt_kg, 3) if a["count"] > 0 else None,
+            round(a["biomass"], 0) if a["biomass"] > 0 else None,
+            round(a["peak_density"], 1) if a["peak_density"] > 0 else None,
+            round(h["count"], 0) if h["count"] > 0 else None,
+            round(h["biomass"], 0) if h["biomass"] > 0 else None,
+            round(c["count"], 0) if c["count"] > 0 else None,
+            round(c["biomass"], 1) if c["biomass"] > 0 else None,
+        ])
+    widths = {1: 11, 2: 12, 3: 8, 4: 18, 5: 13, 6: 11, 7: 13, 8: 18,
+              9: 18, 10: 19, 11: 16, 12: 17}
+    for c, w in widths.items():
+        ws.column_dimensions[get_column_letter(c)].width = w
+
+
+def write_monthly_report(
+    wb,
+    batch_locations,
+    harvest_events,
+    batch_week_states=None,
+    sheet_name: str = "MonthlyReport",
+) -> None:
+    """Per-(month, batch) rollup of weekly per-batch state + harvest + cull."""
+    if sheet_name in wb.sheetnames:
+        del wb[sheet_name]
+    ws = wb.create_sheet(sheet_name)
+    ws.append(["MONTHLY REPORT"])
+    ws.append(["Per-(month, batch) aggregate. Closing-of-month state + harvest sum + cull sum."])
+    ws.append([])
+    ws.append([
+        "Month", "Batch", "Closing_Tanks",
+        "Closing_Count (fish)", "Closing_AvgWt (kg)", "Closing_Biomass (kg)",
+        "Harvest_Count (fish)", "Harvest_Biomass (kg)",
+        "Cull_Count (fish)", "Cull_Biomass (kg)",
+    ])
+
+    from collections import defaultdict
+    # For closing state per (month, batch): take the last week in the month.
+    by_month_batch: dict[tuple[str, str], dict] = {}
+    for r in batch_locations:
+        mo = r.week_start.strftime("%Y-%m") if hasattr(r.week_start, "strftime") else str(r.week_start)[:7]
+        key = (mo, r.batch_id)
+        e = by_month_batch.setdefault(key, {
+            "last_week": "", "tanks": [], "count": 0.0, "biomass": 0.0,
+        })
+        # Reset on new week within the month (we want the LAST week's snapshot).
+        if r.week_label > e["last_week"]:
+            e["last_week"] = r.week_label
+            e["tanks"] = []
+            e["count"] = 0.0
+            e["biomass"] = 0.0
+        if r.week_label == e["last_week"]:
+            e["tanks"].append(r.tank_id)
+            e["count"] += r.count
+            e["biomass"] += r.biomass_kg
+
+    harvest_agg: dict[tuple, dict] = defaultdict(lambda: {"count": 0.0, "biomass": 0.0})
+    for ev in harvest_events:
+        ev_d = ev.event_date.date() if hasattr(ev.event_date, "date") else ev.event_date
+        mo = ev_d.strftime("%Y-%m")
+        e = harvest_agg[(mo, ev.batch_id)]
+        e["count"] += ev.count
+        e["biomass"] += ev.count * ev.avg_wt_g / 1000.0
+
+    cull_agg: dict[tuple, dict] = defaultdict(lambda: {"count": 0.0, "biomass": 0.0})
+    for s in batch_week_states or ():
+        if s.cull_count_week <= 0:
+            continue
+        mo = s.week_start.strftime("%Y-%m") if hasattr(s.week_start, "strftime") else str(s.week_start)[:7]
+        e = cull_agg[(mo, s.batch_id)]
+        e["count"] += s.cull_count_week
+        e["biomass"] += s.cull_biomass_kg_week
+
+    keys = sorted(set(by_month_batch) | set(harvest_agg) | set(cull_agg))
+    for k in keys:
+        mo, b = k
+        a = by_month_batch.get(k, {"tanks": [], "count": 0.0, "biomass": 0.0})
+        h = harvest_agg.get(k, {"count": 0.0, "biomass": 0.0})
+        c = cull_agg.get(k, {"count": 0.0, "biomass": 0.0})
+        avg_wt = (a["biomass"] / a["count"]) if a["count"] > 0 else 0.0
+        ws.append([
+            mo, b,
+            ",".join(str(t) for t in sorted(a["tanks"])) if a["tanks"] else None,
+            round(a["count"], 0) if a["count"] > 0 else None,
+            round(avg_wt, 3) if a["count"] > 0 else None,
+            round(a["biomass"], 0) if a["biomass"] > 0 else None,
+            round(h["count"], 0) if h["count"] > 0 else None,
+            round(h["biomass"], 0) if h["biomass"] > 0 else None,
+            round(c["count"], 0) if c["count"] > 0 else None,
+            round(c["biomass"], 1) if c["biomass"] > 0 else None,
+        ])
+    widths = {1: 10, 2: 8, 3: 18, 4: 19, 5: 17, 6: 17, 7: 18, 8: 19, 9: 16, 10: 17}
+    for c, w in widths.items():
+        ws.column_dimensions[get_column_letter(c)].width = w
+
+
+def write_reconciliation_report(
+    wb,
+    batch_locations,
+    batch_week_states,
+    harvest_events,
+    tranog_events,
+    initial_state,
+    sheet_name: str = "ReconciliationReport",
+) -> None:
+    """Per-(batch, week) count + biomass balance check (OG side).
+
+    Formula: open - mortality - harvest + input = expected_close.
+    (Cull is FW-side: applied before fish reach OG; the `input` count
+    is already POST-cull, so cull doesn't enter this OG-side balance.
+    Shown in the output for transparency only.)
+
+    Open for first week = PR-hydrated initial count (in-flight batches)
+    or 0 (incoming batches arrive via TranOG events).
+    """
+    if sheet_name in wb.sheetnames:
+        del wb[sheet_name]
+    ws = wb.create_sheet(sheet_name)
+    ws.append(["RECONCILIATION REPORT"])
+    ws.append([
+        "Per-(batch, week) count + biomass balance. open - mortality - cull - "
+        "harvest + input = expected_close. Mismatches above tolerance are flagged."
+    ])
+    ws.append([])
+    ws.append([
+        "Week", "Batch",
+        "Open_Count", "Mortality_Count", "Cull_Count", "Harvest_Count",
+        "Input_Count", "Expected_Close", "Actual_Close",
+        "Count_Delta",
+        "Open_Bio_kg", "Growth_kg", "Mort_kg", "Cull_kg",
+        "Harvest_kg", "Input_kg",
+        "Expected_Bio_kg", "Actual_Bio_kg", "Biomass_Delta_kg",
+        "Flag",
+    ])
+
+    from collections import defaultdict
+
+    # Initial counts/biomass from PR-hydrated state.
+    pr_count: dict[str, float] = defaultdict(float)
+    pr_biomass: dict[str, float] = defaultdict(float)
+    if initial_state is not None:
+        for tank in initial_state.tanks_by_id.values():
+            if tank.batch_id:
+                pr_count[tank.batch_id] += tank.count
+                pr_biomass[tank.batch_id] += tank.biomass_kg
+
+    # Per-(batch, week) aggregates from BatchLocations.
+    loc_count: dict[tuple[str, str], float] = defaultdict(float)
+    loc_biomass: dict[tuple[str, str], float] = defaultdict(float)
+    weeks_seen: set[str] = set()
+    week_start_by_label: dict[str, object] = {}
+    for r in batch_locations:
+        loc_count[(r.batch_id, r.week_label)] += r.count
+        loc_biomass[(r.batch_id, r.week_label)] += r.biomass_kg
+        weeks_seen.add(r.week_label)
+        week_start_by_label[r.week_label] = r.week_start
+    weeks = sorted(weeks_seen)
+
+    # Per-(batch, week) mortality % + cull count + cull biomass + SGR.
+    mort_pct: dict[tuple[str, str], float] = {}
+    sgr_pct_day: dict[tuple[str, str], float] = {}
+    cull_count: dict[tuple[str, str], float] = {}
+    cull_biomass: dict[tuple[str, str], float] = {}
+    for s in (batch_week_states or []):
+        mort_pct[(s.batch_id, s.week_label)] = s.mortality_pct_weekly
+        sgr_pct_day[(s.batch_id, s.week_label)] = s.sgr_pct_day
+        cull_count[(s.batch_id, s.week_label)] = s.cull_count_week or 0
+        cull_biomass[(s.batch_id, s.week_label)] = s.cull_biomass_kg_week or 0
+
+    # Per-(batch, week) harvest count + biomass from events.
+    from .time_grid import iso_week_label
+    harv_count: dict[tuple[str, str], float] = defaultdict(float)
+    harv_biomass: dict[tuple[str, str], float] = defaultdict(float)
+    for ev in (harvest_events or []):
+        wk = iso_week_label(ev.event_date)
+        harv_count[(ev.batch_id, wk)] += ev.count
+        harv_biomass[(ev.batch_id, wk)] += ev.count * ev.avg_wt_g / 1000.0
+
+    # Per-(batch, week) input count + biomass from TranOG events.
+    tin_count: dict[tuple[str, str], float] = defaultdict(float)
+    tin_biomass: dict[tuple[str, str], float] = defaultdict(float)
+    for ev in (tranog_events or []):
+        wk = iso_week_label(ev.event_date)
+        total_c = sum(d.count for d in ev.destinations)
+        total_b = sum(d.count * d.avg_wt_g / 1000.0 for d in ev.destinations)
+        tin_count[(ev.batch_id, wk)] += total_c
+        tin_biomass[(ev.batch_id, wk)] += total_b
+
+    # Walk batches × weeks, write rows + flag mismatches.
+    TOLERANCE = 100.0   # fish; below this absolute, treat as numerical noise
+    all_batches = sorted({b for (b, _) in loc_count} | set(pr_count.keys()))
+    for batch in all_batches:
+        prev_count = pr_count.get(batch, 0.0)
+        prev_biomass = pr_biomass.get(batch, 0.0)
+        for wk in weeks:
+            actual_c = loc_count.get((batch, wk), 0.0)
+            actual_b = loc_biomass.get((batch, wk), 0.0)
+            if prev_count == 0 and actual_c == 0:
+                continue
+            m_pct = mort_pct.get((batch, wk), 0.0) or 0.0
+            mort = prev_count * (m_pct / 100.0)
+            cull = cull_count.get((batch, wk), 0.0) or 0.0
+            cull_b = cull_biomass.get((batch, wk), 0.0) or 0.0
+            hv_c = harv_count.get((batch, wk), 0.0)
+            hv_b = harv_biomass.get((batch, wk), 0.0)
+            in_c = tin_count.get((batch, wk), 0.0)
+            in_b = tin_biomass.get((batch, wk), 0.0)
+            # OG-side balance: cull is FW-side (input is already post-cull),
+            # so cull is shown as informational but not subtracted.
+            expected_c = prev_count - mort - hv_c + in_c
+            # Biomass timing (matches Phase D order):
+            #   pre-biology: harvest
+            #   biology: growth + mortality + TranOG (mid-week arrival)
+            # TranOG fish only get partial-week growth (~half).
+            sgr = sgr_pct_day.get((batch, wk), 0.0)
+            growth_factor = (1.0 + sgr / 100.0) ** 7
+            partial_factor = 1.0 + (growth_factor - 1.0) * 0.5
+            bio_full_growth = prev_biomass - hv_b
+            growth_full = bio_full_growth * (growth_factor - 1.0)
+            growth_tnin = in_b * (partial_factor - 1.0)
+            growth_kg = growth_full + growth_tnin
+            mort_kg = bio_full_growth * (m_pct / 100.0)
+            expected_b = bio_full_growth + growth_full - mort_kg + in_b + growth_tnin
+            delta_c = actual_c - expected_c
+            delta_b = actual_b - expected_b
+            flag = ""
+            if abs(delta_c) > TOLERANCE and abs(delta_c) > 0.005 * max(actual_c, prev_count, 1):
+                flag = "COUNT_DRIFT"
+            elif abs(delta_b) > 1000 and abs(delta_b) > 0.02 * max(actual_b, prev_biomass, 1):
+                flag = "BIO_DRIFT"
+            ws.append([
+                wk, batch,
+                round(prev_count, 0),
+                round(mort, 0) if mort > 0 else None,
+                round(cull, 0) if cull > 0 else None,
+                round(hv_c, 0) if hv_c > 0 else None,
+                round(in_c, 0) if in_c > 0 else None,
+                round(expected_c, 0),
+                round(actual_c, 0),
+                round(delta_c, 0),
+                round(prev_biomass, 0),
+                round(growth_kg, 0) if growth_kg > 0 else None,
+                round(mort_kg, 0) if mort_kg > 0 else None,
+                round(cull_b, 0) if cull_b > 0 else None,
+                round(hv_b, 0) if hv_b > 0 else None,
+                round(in_b, 0) if in_b > 0 else None,
+                round(expected_b, 0),
+                round(actual_b, 0),
+                round(delta_b, 0),
+                flag,
+            ])
+            prev_count = actual_c
+            prev_biomass = actual_b
+
+    widths = {1: 11, 2: 7, 3: 11, 4: 13, 5: 11, 6: 13, 7: 11, 8: 14,
+              9: 13, 10: 12,
+              11: 12, 12: 11, 13: 10, 14: 9, 15: 12, 16: 11,
+              17: 16, 18: 14, 19: 16, 20: 11}
+    for c, w in widths.items():
+        ws.column_dimensions[get_column_letter(c)].width = w
+
+
+def write_tank_continuity_audit(
+    wb,
+    batch_locations,
+    batch_week_states,
+    harvest_events,
+    transfer_events,
+    grade_events,
+    tranog_events,
+    initial_state,
+    sheet_name: str = "TankContinuityAudit",
+) -> None:
+    """Per-(tank, week, batch) reconciliation.
+
+    Formula: open - mortality - harvest_out - transfer_out + transfer_in
+             - grade_out + grade_in + tranog_in = expected_close
+    Compares to BatchLocations actual close. Flags any drift > tolerance.
+
+    Open for first week = PR-hydrated initial tank count (in-flight).
+    Batch transitions in a tank: when tank batch changes week-over-week,
+    each batch gets its own row showing its arrival/departure path.
+    """
+    if sheet_name in wb.sheetnames:
+        del wb[sheet_name]
+    ws = wb.create_sheet(sheet_name)
+    ws.append(["TANK CONTINUITY AUDIT"])
+    ws.append([
+        "Per-(tank, week) count balance: every count change is accounted for "
+        "by an event (mortality, harvest, transfer, grade, TranOG)."
+    ])
+    ws.append([])
+    ws.append([
+        # Count balance
+        "Week", "Tank", "Batch", "Open_Count", "Mortality",
+        "Harvest_Out", "Transfer_Out", "Transfer_In",
+        "Grade_Out", "Grade_In", "TranOG_In",
+        "Expected_Close", "Actual_Close", "Delta", "Flag",
+        # Biomass balance
+        "Open_Bio_kg", "Growth_kg", "Mort_kg",
+        "Harvest_Out_kg", "Transfer_Out_kg", "Transfer_In_kg",
+        "Grade_Out_kg", "Grade_In_kg", "TranOG_In_kg",
+        "Expected_Close_kg", "Actual_Close_kg", "Delta_kg", "Bio_Flag",
+    ])
+
+    from collections import defaultdict
+    from .time_grid import iso_week_label
+
+    # Per-(tank, week) state from BatchLocations.
+    tank_wk_state: dict[tuple[int, str], tuple[str, float]] = {}
+    weeks_seen: set[str] = set()
+    for r in batch_locations:
+        tank_wk_state[(r.tank_id, r.week_label)] = (r.batch_id, r.count)
+        weeks_seen.add(r.week_label)
+    weeks = sorted(weeks_seen)
+    all_tanks = sorted({t for (t, _) in tank_wk_state})
+
+    # PR-hydrated initial tank state.
+    pr_tank: dict[int, tuple[str | None, float]] = {}
+    if initial_state is not None:
+        for tid, tank in initial_state.tanks_by_id.items():
+            if not tank.is_empty:
+                pr_tank[tid] = (tank.batch_id, tank.count)
+
+    # Per-batch per-week mortality % + SGR (from BatchWeekState).
+    mort_pct: dict[tuple[str, str], float] = {}
+    sgr_pct_day: dict[tuple[str, str], float] = {}
+    for s in (batch_week_states or []):
+        mort_pct[(s.batch_id, s.week_label)] = s.mortality_pct_weekly
+        sgr_pct_day[(s.batch_id, s.week_label)] = s.sgr_pct_day
+
+    # Per-(tank, week) event aggregates — counts AND biomass (kg).
+    harvest_out: dict[tuple[int, str], float] = defaultdict(float)
+    harvest_out_kg: dict[tuple[int, str], float] = defaultdict(float)
+    for ev in (harvest_events or []):
+        wk = iso_week_label(ev.event_date)
+        harvest_out[(ev.source_tank_id, wk)] += ev.count
+        harvest_out_kg[(ev.source_tank_id, wk)] += ev.count * ev.avg_wt_g / 1000.0
+
+    transfer_out: dict[tuple[int, str], float] = defaultdict(float)
+    transfer_out_kg: dict[tuple[int, str], float] = defaultdict(float)
+    transfer_in: dict[tuple[int, str], float] = defaultdict(float)
+    transfer_in_kg: dict[tuple[int, str], float] = defaultdict(float)
+    for ev in (transfer_events or []):
+        ct = getattr(ev, "count_transferred", None)
+        if ct is None or ct <= 0:
+            continue   # rejected transfers don't count
+        wk = iso_week_label(ev.event_date)
+        # Split count_transferred proportionally across destinations.
+        total_planned = sum(d.count for d in ev.destinations) or 1.0
+        # Weighted-average avg_wt across destinations (~source avg_wt).
+        avg_wt_g = sum(d.count * d.avg_wt_g for d in ev.destinations) / total_planned
+        transfer_out[(ev.source_tank_id, wk)] += ct
+        transfer_out_kg[(ev.source_tank_id, wk)] += ct * avg_wt_g / 1000.0
+        for d in ev.destinations:
+            share = d.count / total_planned
+            transfer_in[(d.tank_id, wk)] += ct * share
+            transfer_in_kg[(d.tank_id, wk)] += ct * share * d.avg_wt_g / 1000.0
+
+    grade_out: dict[tuple[int, str], float] = defaultdict(float)
+    grade_out_kg: dict[tuple[int, str], float] = defaultdict(float)
+    grade_in: dict[tuple[int, str], float] = defaultdict(float)
+    grade_in_kg: dict[tuple[int, str], float] = defaultdict(float)
+    for ev in (grade_events or []):
+        wk = iso_week_label(ev.event_date)
+        total_dest = sum(d.count for d in ev.destinations)
+        avg_wt_g = (sum(d.count * d.avg_wt_g for d in ev.destinations) / total_dest
+                    if total_dest > 0 else 0.0)
+        for src_tid in ev.source_tank_ids:
+            grade_out[(src_tid, wk)] += total_dest / len(ev.source_tank_ids)
+            grade_out_kg[(src_tid, wk)] += (
+                total_dest / len(ev.source_tank_ids) * avg_wt_g / 1000.0
+            )
+        for d in ev.destinations:
+            grade_in[(d.tank_id, wk)] += d.count
+            grade_in_kg[(d.tank_id, wk)] += d.count * d.avg_wt_g / 1000.0
+
+    tranog_in: dict[tuple[int, str], float] = defaultdict(float)
+    tranog_in_kg: dict[tuple[int, str], float] = defaultdict(float)
+    for ev in (tranog_events or []):
+        wk = iso_week_label(ev.event_date)
+        for d in ev.destinations:
+            tranog_in[(d.tank_id, wk)] += d.count
+            tranog_in_kg[(d.tank_id, wk)] += d.count * d.avg_wt_g / 1000.0
+
+    # Per-(tank, week) biomass from BatchLocations.
+    tank_wk_bio: dict[tuple[int, str], float] = {}
+    for r in batch_locations:
+        tank_wk_bio[(r.tank_id, r.week_label)] = r.biomass_kg
+
+    pr_tank_bio: dict[int, float] = {}
+    if initial_state is not None:
+        for tid, tank in initial_state.tanks_by_id.items():
+            if not tank.is_empty:
+                pr_tank_bio[tid] = tank.biomass_kg
+
+    TOLERANCE = 50.0      # fish
+    BIO_TOLERANCE = 500.0  # kg
+
+    for tid in all_tanks:
+        prev_batch, prev_count = pr_tank.get(tid, (None, 0.0))
+        prev_biomass = pr_tank_bio.get(tid, 0.0)
+        for wk in weeks:
+            cur = tank_wk_state.get((tid, wk))
+            cur_batch, cur_count = cur if cur else (None, 0.0)
+            cur_biomass = tank_wk_bio.get((tid, wk), 0.0)
+            if prev_count == 0 and cur_count == 0:
+                continue
+
+            # ---- Count balance ----
+            m_pct = mort_pct.get((prev_batch, wk), 0.0) if prev_batch else 0.0
+            mort = prev_count * (m_pct / 100.0)
+            h_out = harvest_out.get((tid, wk), 0.0)
+            t_out = transfer_out.get((tid, wk), 0.0)
+            t_in = transfer_in.get((tid, wk), 0.0)
+            g_out = grade_out.get((tid, wk), 0.0)
+            g_in = grade_in.get((tid, wk), 0.0)
+            tn_in = tranog_in.get((tid, wk), 0.0)
+            expected_count = prev_count - mort - h_out - t_out + t_in - g_out + g_in + tn_in
+            delta_count = cur_count - expected_count
+            flag = ""
+            if abs(delta_count) > TOLERANCE and abs(delta_count) > 0.005 * max(cur_count, prev_count, 1):
+                flag = "TANK_DRIFT"
+
+            # ---- Biomass balance ----
+            # Phase D event order per week:
+            #   1) 6N purge harvests + Layer 2 harvest demands (pre-biology)
+            #   2) Migration transfers (pre-biology)
+            #   3) Day-by-day biology: mortality + growth + TranOG entries
+            #   4) Density-trigger Grade events (post-biology)
+            h_out_kg = harvest_out_kg.get((tid, wk), 0.0)
+            t_out_kg = transfer_out_kg.get((tid, wk), 0.0)
+            t_in_kg = transfer_in_kg.get((tid, wk), 0.0)
+            g_out_kg = grade_out_kg.get((tid, wk), 0.0)
+            g_in_kg = grade_in_kg.get((tid, wk), 0.0)
+            tn_in_kg = tranog_in_kg.get((tid, wk), 0.0)
+            # Use the batch present in tank DURING biology for SGR.
+            bio_batch = cur_batch or prev_batch
+            sgr = sgr_pct_day.get((bio_batch, wk), 0.0) if bio_batch else 0.0
+            growth_factor = (1.0 + sgr / 100.0) ** 7
+            # TranOG entries fire MID-WEEK (the TranOG date can fall any
+            # day in the ISO week), so they only get partial-week growth.
+            # Approximate as half-week growth for tn_in fish.
+            partial_factor = 1.0 + (growth_factor - 1.0) * 0.5
+            # Biomass that grew the FULL week (in tank at start of biology):
+            bio_full_growth = prev_biomass - h_out_kg - t_out_kg + t_in_kg
+            growth_full = bio_full_growth * (growth_factor - 1.0)
+            growth_tnin = tn_in_kg * (partial_factor - 1.0)
+            growth_kg = growth_full + growth_tnin
+            mort_kg = bio_full_growth * (m_pct / 100.0)  # tn_in too young
+            # Expected close = biomass after biology, then grade events:
+            bio_after_biology = bio_full_growth + growth_full - mort_kg + tn_in_kg + growth_tnin
+            expected_bio = bio_after_biology - g_out_kg + g_in_kg
+            delta_bio = cur_biomass - expected_bio
+            bio_flag = ""
+            if abs(delta_bio) > BIO_TOLERANCE and abs(delta_bio) > 0.01 * max(cur_biomass, prev_biomass, 1):
+                bio_flag = "BIO_DRIFT"
+
+            display_batch = cur_batch or (prev_batch if prev_count > 0 else "")
+            ws.append([
+                wk, tid, display_batch,
+                round(prev_count, 0),
+                round(mort, 0) if mort > 0 else None,
+                round(h_out, 0) if h_out > 0 else None,
+                round(t_out, 0) if t_out > 0 else None,
+                round(t_in, 0) if t_in > 0 else None,
+                round(g_out, 0) if g_out > 0 else None,
+                round(g_in, 0) if g_in > 0 else None,
+                round(tn_in, 0) if tn_in > 0 else None,
+                round(expected_count, 0),
+                round(cur_count, 0),
+                round(delta_count, 0),
+                flag,
+                round(prev_biomass, 0),
+                round(growth_kg, 0) if growth_kg > 0 else None,
+                round(mort_kg, 0) if mort_kg > 0 else None,
+                round(h_out_kg, 0) if h_out_kg > 0 else None,
+                round(t_out_kg, 0) if t_out_kg > 0 else None,
+                round(t_in_kg, 0) if t_in_kg > 0 else None,
+                round(g_out_kg, 0) if g_out_kg > 0 else None,
+                round(g_in_kg, 0) if g_in_kg > 0 else None,
+                round(tn_in_kg, 0) if tn_in_kg > 0 else None,
+                round(expected_bio, 0),
+                round(cur_biomass, 0),
+                round(delta_bio, 0),
+                bio_flag,
+            ])
+            prev_batch = cur_batch
+            prev_count = cur_count
+            prev_biomass = cur_biomass
+
+    widths = {1: 11, 2: 6, 3: 7, 4: 11, 5: 10, 6: 11, 7: 11, 8: 11,
+              9: 9, 10: 9, 11: 10, 12: 14, 13: 12, 14: 9, 15: 11,
+              16: 12, 17: 11, 18: 11, 19: 13, 20: 14, 21: 13,
+              22: 11, 23: 11, 24: 11, 25: 16, 26: 14, 27: 11, 28: 9}
+    for c, w in widths.items():
+        ws.column_dimensions[get_column_letter(c)].width = w
+
+
+def write_facility_map(
+    wb,
+    batch_locations,
+    facility,
+    sheet_name: str = "FacilityMap",
+) -> None:
+    """Tank × Week matrix showing which batch occupies each tank each week.
+
+    Cell value is the batch_id (or blank if empty). Rows are tanks
+    ordered by system then tank_id; columns are forecast weeks in
+    chronological order.
+    """
+    if sheet_name in wb.sheetnames:
+        del wb[sheet_name]
+    ws = wb.create_sheet(sheet_name)
+    ws.append(["FACILITY MAP"])
+    ws.append(["Per-tank occupancy across weeks. Cell = batch_id; blank = empty."])
+    ws.append([])
+
+    # Order tanks by system + tank_id (OG tanks only for compactness).
+    og_tanks = sorted(
+        [t for t in facility.tanks if t.type == "OG"],
+        key=lambda t: (t.system_id, t.tank_id),
+    )
+    # Weeks in chronological order.
+    weeks = sorted({r.week_label for r in batch_locations})
+
+    # Build occupancy map (tank, week) → batch_id
+    occ: dict[tuple[int, str], str] = {}
+    for r in batch_locations:
+        occ[(r.tank_id, r.week_label)] = r.batch_id
+
+    # Header row: Tank | System | Vol_m3 | <week1> | <week2> | ...
+    header = ["Tank", "System", "Vol_m3"] + weeks
+    ws.append(header)
+
+    for t in og_tanks:
+        row = [t.location_id, t.system_id, t.volume_m3]
+        for wk in weeks:
+            row.append(occ.get((t.tank_id, wk), ""))
+        ws.append(row)
+    # Column widths
+    ws.column_dimensions[get_column_letter(1)].width = 10
+    ws.column_dimensions[get_column_letter(2)].width = 7
+    ws.column_dimensions[get_column_letter(3)].width = 8
+    for c in range(4, 4 + len(weeks)):
+        ws.column_dimensions[get_column_letter(c)].width = 10
+
+
+def write_advisory(
+    wb,
+    residuals,
+    placement_warnings,
+    scheduler_warnings,
+    bottlenecks,
+    sheet_name: str = "Advisory",
+) -> None:
+    """Consolidated diagnostics + warnings from every layer."""
+    if sheet_name in wb.sheetnames:
+        del wb[sheet_name]
+    ws = wb.create_sheet(sheet_name)
+    ws.append(["ADVISORY"])
+    ws.append([f"Generated: {datetime.now().isoformat(timespec='seconds')}"])
+
+    entries: list[tuple[str, str]] = []
+    for r in residuals:
+        if abs(r.residual_pct) >= 0.5:
+            sug = (f"; suggested FW_Correction = {r.suggested_fw_correction:.3f}"
+                   if r.suggested_fw_correction is not None else "")
+            entries.append((
+                "FW Calibration",
+                f"Batch {r.batch_id} TranOG {r.tran_og_date.date()}: "
+                f"residual {r.residual_pct:+.2f}%{sug}",
+            ))
+    for b in bottlenecks:
+        entries.append((f"Bottleneck / {b.kind}", f"{b.week_label}: {b.detail}"))
+    for w in scheduler_warnings:
+        entries.append(("Harvest Scheduler", w))
+    for w in placement_warnings:
+        if "INV-4" in w:
+            cat = "INV-4 (1 kg rule)"
+        elif "INV-5" in w:
+            cat = "INV-5 (min_tank_control)"
+        elif "INV-1" in w:
+            cat = "INV-1 (one-batch-per-tank)"
+        elif "6N" in w or "purge" in w.lower():
+            cat = "6N Pipeline"
+        elif "TranOG" in w:
+            cat = "TranOG Entry"
+        elif w.startswith("[B]"):
+            cat = "Placement / Phase B"
+        elif w.startswith("[C]"):
+            cat = "Placement / Phase C"
+        elif w.startswith("[D]"):
+            cat = "Placement / Phase D"
+        else:
+            cat = "Placement"
+        entries.append((cat, w))
+
+    ws.append([f"{len(entries)} issue(s) found"])
+    ws.append([])
+    ws.append(["#", "Category", "Detail"])
+    for i, (cat, detail) in enumerate(entries, 1):
+        ws.append([i, cat, detail])
+
+    widths = {1: 6, 2: 30, 3: 110}
+    for c, w in widths.items():
+        ws.column_dimensions[get_column_letter(c)].width = w
+
+
+def write_calibration_diagnostics(
+    wb,
+    residuals: Iterable[CalibrationResidual],
+    sheet_name: str = "Diagnostics",
+) -> None:
+    if sheet_name in wb.sheetnames:
+        del wb[sheet_name]
+    ws = wb.create_sheet(sheet_name)
+    ws.append(["FW Calibration: projected pre-cull avg wt vs target at TranOG_Date, plus suggested FW_Correction"])
+    ws.append([
+        "Batch", "TranOG_Date", "Target_AvgWt_g",
+        "Current_FW_Correction", "Projected_PreCull_AvgWt_g", "Residual_pct",
+        "Suggested_FW_Correction",
+    ])
+    for r in residuals:
+        ws.append([
+            r.batch_id, r.tran_og_date, round(r.target_avg_wt_g, 2),
+            round(r.current_fw_correction, 4),
+            round(r.projected_pre_cull_avg_wt_g, 2), round(r.residual_pct, 2),
+            None if r.suggested_fw_correction is None else round(r.suggested_fw_correction, 4),
+        ])
+    widths = {1: 8, 2: 12, 3: 16, 4: 22, 5: 26, 6: 12, 7: 24}
+    for c, w in widths.items():
+        ws.column_dimensions[get_column_letter(c)].width = w
+
+
+# ---------- Workbook helpers ----------
+
+def load_workbook(path: Path):
+    return openpyxl.load_workbook(path, keep_vba=True, data_only=True)
+
+
+def iso_week_label(d: datetime) -> str:
+    y, w, _ = d.isocalendar()
+    return f"{y}-W{w:02d}"

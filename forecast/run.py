@@ -1,0 +1,374 @@
+"""Entry point for the forecast pipeline."""
+from __future__ import annotations
+
+import argparse
+import time
+from pathlib import Path
+
+from .biology import project_all_batches, project_in_flight_batch
+from .harvest_scheduler import schedule_harvests, summarize_demands
+from .placement import run_placement, summarize_placement
+from .precalc import build_precalc_canvas, print_canvas_summary
+from .sixn import is_purge_mode
+from .caps import (
+    apply_buffer_pct,
+    apply_facility_buffer,
+    read_facility_limits,
+    read_system_limits,
+    resolve_facility_cap,
+    METRIC_BIOMASS,
+    METRIC_FEED_DAY,
+    METRIC_MAX_HARVEST,
+    METRIC_MIN_HARVEST,
+)
+from .excel_io import (
+    load_workbook,
+    read_batches,
+    read_biology_tables,
+    read_control,
+    read_facility_config,
+    read_pinned_harvests,
+    read_pinned_transfers,
+    write_advisory,
+    write_batch_locations,
+    write_biology_projection,
+    write_calibration_diagnostics,
+    write_daily_harvest_schedule,
+    write_facility_map,
+    write_feed_forecast_monthly,
+    write_feed_forecast_weekly,
+    write_harvest_plan_output,
+    write_harvest_report,
+    write_monthly_report,
+    write_reconciliation_report,
+    write_tank_continuity_audit,
+    write_transfer_plan_output,
+    write_weekly_report,
+)
+from .caps import METRIC_HOG_YIELD
+from .production_report import (
+    hydrate_facility_state,
+    read_production_report,
+    summarize_fw_records,
+    summarize_hydration,
+)
+from .state import FacilityState
+
+
+def main(workbook_path: str | Path | None = None) -> int:
+    path = Path(workbook_path or Path(__file__).resolve().parent.parent / "Forecast.xlsm")
+    t0 = time.time()
+    print(f"Loading {path} ...")
+    wb = load_workbook(path)
+
+    control = read_control(wb)
+    batches = read_batches(wb)
+    tables = read_biology_tables(wb)
+    facility = read_facility_config(wb)
+
+    print(f"  Control: scenario={control.scenario_name}, start={control.forecast_start.date()}, "
+          f"horizon={control.horizon_weeks}w, 6N growth={control.sixn_growth}")
+    print(f"           handling mortality per transfer = {control.handling_mortality_pct}% "
+          f"(= {control.handling_mortality_pct / 100:.6f} fraction)")
+    print(f"  Batches: {len(batches)} in registry")
+    print(f"  Tables : {len(tables.sgr_size_g)} SGR rows, {len(tables.mortality_pct_weekly)} mortality rows, "
+          f"{len(tables.feed_types)} feed types, {len(tables.culling)} cull events")
+    print(f"  Tanks  : {len(facility.tanks)}")
+
+    # ----- Hydrate FacilityState from ProductionReport -----
+    pr_closing, og_records, fw_records = read_production_report(wb)
+    state = FacilityState.from_facility_config(facility, today=control.forecast_start.date())
+    hydration_warns = hydrate_facility_state(state, og_records, batches)
+    summary = summarize_hydration(state)
+    print(f"\n  ProductionReport: closing {pr_closing}, "
+          f"{len(og_records)} OG (batch, tank) rows + {len(fw_records)} FW physical-unit rows")
+    print(f"  Hydrated OG state @ {state.today}: {summary['occupied_tanks']}/{summary['total_tanks']} "
+          f"tanks occupied, {summary['num_batches_in_facility']} batches in facility, "
+          f"total OG biomass {summary['total_biomass_kg']:,.0f} kg")
+    for system in sorted(summary["by_system_biomass"]):
+        b = summary["by_system_biomass"][system]
+        o = summary["by_system_occupied"][system]
+        total = len(state.tanks_in_system(system))
+        if b > 0 or o > 0:
+            print(f"    {system:>5}: {b:>10,.0f} kg  in {o}/{total} tanks")
+    fw_rolled = summarize_fw_records(fw_records)
+    if fw_rolled:
+        print(f"  FW in-flight rollup (not in TankState; representation TBD):")
+        per_system: dict[str, dict] = {}
+        for (batch, system), info in fw_rolled.items():
+            e = per_system.setdefault(system, {"count": 0.0, "biomass_kg": 0.0, "batches": set(), "units": 0})
+            e["count"] += info["count"]
+            e["biomass_kg"] += info["biomass_kg"]
+            e["batches"].add(batch)
+            e["units"] += info["units"]
+        for system, info in sorted(per_system.items()):
+            print(f"    {system:>5}: {info['biomass_kg']:>10,.0f} kg, "
+                  f"{info['count']:>10,.0f} fish across {info['units']} units "
+                  f"in batches {sorted(info['batches'])}")
+    for w in hydration_warns:
+        print(f"  WARN: {w}")
+    inv_warns = state.check_invariants(min_tank_control=control.min_tank_control)
+    if inv_warns:
+        print(f"  Invariant violations at hydration ({len(inv_warns)}):")
+        for w in inv_warns:
+            print(f"    - {w}")
+
+    # ----- Caps + pinned plans -----
+    fs_date = control.forecast_start.date() if hasattr(control.forecast_start, "date") else control.forecast_start
+    facility_limits = read_facility_limits(wb, fs_date)
+    system_limits = read_system_limits(wb, fs_date)
+    pinned_harvests = read_pinned_harvests(wb, fs_date)
+    pinned_transfers = read_pinned_transfers(wb, fs_date)
+    print(f"\n  Caps + pinned plans:")
+    print(f"    FacilityLimits overrides: {len(facility_limits.overrides)}")
+    print(f"    SystemLimits caps:        {len(system_limits.caps)}")
+    print(f"    Pinned harvests:          {len(pinned_harvests)}")
+    print(f"    Pinned transfers:         {len(pinned_transfers)}")
+    print(f"    Control R24 deviation:    ±{control.facility_biomass_deviation_pct*100:.1f}% (biomass + feed)")
+    print(f"    Control R29 global buf:   ±{control.global_buffer_pct*100:.1f}% (system caps)")
+    print(f"    Default TranOG tanks:     {control.tran_og_default_tanks}")
+    print(f"    Starvation period:        {control.starvation_period_days} days (6N production mode)")
+    # Show resolved facility caps for the first forecast week.
+    from .time_grid import forecast_week_labels as _fw_labels
+    first_label = _fw_labels(fs_date, 1)[0]
+    bio_cap = resolve_facility_cap(METRIC_BIOMASS, first_label, facility_limits, control)
+    feed_cap = resolve_facility_cap(METRIC_FEED_DAY, first_label, facility_limits, control)
+    mx_hv = resolve_facility_cap(METRIC_MAX_HARVEST, first_label, facility_limits, control)
+    mn_hv = resolve_facility_cap(METRIC_MIN_HARVEST, first_label, facility_limits, control)
+    print(f"    {first_label} facility caps (resolved):")
+    if bio_cap:
+        lo, hi = apply_facility_buffer(bio_cap, METRIC_BIOMASS, control)
+        print(f"      biomass:  {bio_cap:>10,.0f} kg  band [{lo:,.0f}, {hi:,.0f}]")
+    if feed_cap:
+        lo, hi = apply_facility_buffer(feed_cap, METRIC_FEED_DAY, control)
+        print(f"      feed/day: {feed_cap:>10,.0f} kg  band [{lo:,.0f}, {hi:,.0f}]")
+    if mn_hv and mx_hv:
+        print(f"      harvest count: [{mn_hv:,.0f}, {mx_hv:,.0f}]  (strict)")
+
+    # Batches already represented in PR hydration are tracked via the
+    # in-flight projection — exclude them from the incoming-batch
+    # projection to avoid double-counting (the boundary case is a batch
+    # whose TranOG is just after PR closing but before forecast_start).
+    in_flight_ids = {t.batch_id for t in state.tanks_by_id.values() if t.batch_id}
+    incoming_batches = [b for b in batches if b.batch_id not in in_flight_ids]
+    states, residuals, splits, warnings = project_all_batches(incoming_batches, tables, control)
+    print(f"\n  Projected {len(states)} batch-week rows across {len({s.batch_id for s in states})} batches (incoming)")
+    print(f"  TranOG size-class splits captured: {len(splits)}")
+    for w in warnings:
+        print(f"  WARN: {w}")
+
+    # ----- In-flight batches: forward-project per batch using PR-hydrated state -----
+    batch_by_id = {b.batch_id: b for b in batches}
+    in_flight_states: list = []
+    for batch_id, tank_list in [(bid, state.tanks_for_batch(bid)) for bid in {t.batch_id for t in state.tanks_by_id.values() if t.batch_id}]:
+        b_meta = batch_by_id.get(batch_id)
+        if b_meta is None:
+            continue
+        total_count = sum(t.count for t in tank_list)
+        total_biomass = sum(t.biomass_kg for t in tank_list)
+        if total_count <= 0:
+            continue
+        agg_avg_wt = total_biomass * 1000.0 / total_count
+        agg_cv = tank_list[0].cv_pct if tank_list else 16.0
+        in_flight_states.extend(
+            project_in_flight_batch(b_meta, tables, control, total_count, agg_avg_wt, agg_cv)
+        )
+    in_flight_batches = sorted({s.batch_id for s in in_flight_states})
+    print(f"  In-flight projection: {len(in_flight_states)} batch-week rows across "
+          f"{len(in_flight_batches)} batches {in_flight_batches}")
+
+    # ----- Layer 2: harvest scheduler -----
+    states_by_batch: dict[str, list] = {}
+    for s in states + in_flight_states:
+        states_by_batch.setdefault(s.batch_id, []).append(s)
+    # Precalc the achievable biomass trajectory under min-only harvest.
+    # The scheduler tracks this curve instead of chasing the unachievable
+    # facility cap when carrying capacity is the binding constraint.
+    from .harvest_scheduler import project_biomass_under_min_only
+    biomass_projection = project_biomass_under_min_only(
+        states_by_batch, batch_by_id, control, facility_limits,
+    )
+    demands, sched_warns = schedule_harvests(
+        states_by_batch, batch_by_id, pinned_harvests, control, facility_limits,
+        projected_biomass=biomass_projection,
+    )
+    summary_d = summarize_demands(demands)
+    print(f"\n  Harvest scheduler: {summary_d['rows']} demand rows, "
+          f"total {summary_d['total_count']:,.0f} fish, "
+          f"{summary_d['total_biomass_kg']:,.0f} kg")
+    if summary_d["by_source"]:
+        print(f"    by source:")
+        for src, info in sorted(summary_d["by_source"].items()):
+            print(f"      {src:<18}: {info['rows']:>4} rows, "
+                  f"{info['count']:>10,.0f} fish, {info['biomass_kg']:>10,.0f} kg")
+    weeks_with_demand = sorted(summary_d["by_week"].keys())
+    if weeks_with_demand:
+        print(f"    weeks with demand: {weeks_with_demand[0]}..{weeks_with_demand[-1]} "
+              f"({len(weeks_with_demand)} weeks)")
+        print(f"    first weeks:")
+        for lbl in weeks_with_demand[:5]:
+            info = summary_d["by_week"][lbl]
+            print(f"      {lbl}: {info['count']:>10,.0f} fish, {info['biomass_kg']:>10,.0f} kg "
+                  f"({info['rows']} batches)")
+    for w in sched_warns[:10]:
+        print(f"  SCHED-WARN: {w}")
+    if len(sched_warns) > 10:
+        print(f"  ... ({len(sched_warns) - 10} more scheduler warnings)")
+
+    # ----- Stage 1: precalc canvas (deterministic landscape) -----
+    canvas = build_precalc_canvas(
+        control=control,
+        batches=batches,
+        tables=tables,
+        facility=facility,
+        facility_limits=facility_limits,
+        system_limits=system_limits,
+        biology_states_by_batch=states_by_batch,
+        splits=splits,
+        harvest_demands=demands,
+        pinned_harvests=pinned_harvests,
+        pinned_transfers=pinned_transfers,
+        initial_state=state,
+        projected_biomass_by_week=biomass_projection,
+    )
+    print_canvas_summary(canvas)
+
+    # ----- Stage 2: placement (work-in-progress; consumes canvas in next cut) -----
+    purge = is_purge_mode(control, fs_date)
+    print(f"\n  Placement walk ({'6N=purge' if purge else '6N=production'}) [Stage 2 WIP]:")
+    placement, final_state = run_placement(
+        state, batch_by_id, states_by_batch, demands, splits,
+        system_limits, control, facility, tables,
+        migration_plan=canvas.migration_plan,
+    )
+    p_summary = summarize_placement(placement, final_state)
+    print(f"    Phase A load rows:      {p_summary['load_rows']:>4}")
+    print(f"    Phase B sys assigns:    {p_summary['system_assignments']:>4}")
+    print(f"    Phase C tank assigns:   {p_summary['tank_assignments']:>4}")
+    print(f"    Phase D events:")
+    print(f"      TranOG entries:       {p_summary['tranog_events']:>4}  "
+          f"({p_summary['tranog_fish_placed']:,.0f} fish placed)")
+    print(f"      Transfers:            {p_summary['transfer_events']:>4}")
+    print(f"      Harvests:             {p_summary['harvest_events']:>4}  "
+          f"({p_summary['harvest_count_total']:,.0f} fish, "
+          f"{p_summary['harvest_kg_total']:,.0f} kg)")
+    print(f"    BatchLocations rows:    {p_summary['location_rows']:>4}")
+    print(f"    End-of-horizon: {p_summary['end_state_occupied_tanks']} tanks occupied, "
+          f"{p_summary['end_state_biomass_kg']:,.0f} kg biomass remaining")
+    for system in sorted(p_summary["end_state_biomass_by_system"]):
+        b = p_summary["end_state_biomass_by_system"][system]
+        if b > 0:
+            occupied = sum(1 for t in final_state.tanks_in_system(system) if not t.is_empty)
+            total = len(final_state.tanks_in_system(system))
+            print(f"      {system:>5}: {b:>10,.0f} kg in {occupied}/{total} tanks")
+    for w in placement.warnings[:10]:
+        print(f"    PLACE-WARN: {w}")
+    if len(placement.warnings) > 10:
+        print(f"    ... ({len(placement.warnings) - 10} more placement warnings)")
+
+    # ----- Facility-wide fish accounting (FW culls + OG harvests) -----
+    cull_count_total = sum(s.cull_count_week for s in states)
+    cull_biomass_total = sum(s.cull_biomass_kg_week for s in states)
+    cull_count_in_flight = sum(s.cull_count_week for s in in_flight_states)
+    cull_biomass_in_flight = sum(s.cull_biomass_kg_week for s in in_flight_states)
+    print(f"\n  Cull totals (FW-side biology: scheduled bottom culls + "
+          f"TranOG handling-mort + reconciliation cull):")
+    print(f"    Incoming-batch culls:   {cull_count_total:>12,.0f} fish  "
+          f"({cull_biomass_total:>10,.1f} kg)")
+    if cull_count_in_flight > 0:
+        print(f"    In-flight-batch culls:  {cull_count_in_flight:>12,.0f} fish  "
+              f"({cull_biomass_in_flight:>10,.1f} kg)")
+    print(f"    Total culled:           {cull_count_total + cull_count_in_flight:>12,.0f} fish  "
+          f"({cull_biomass_total + cull_biomass_in_flight:>10,.1f} kg)")
+    print(f"    Per-(week, batch) breakdown in BiologyProjection / WeeklyReport / MonthlyReport.")
+
+    # Calibration summary.
+    if residuals:
+        print("\n  FW calibration (projected pre-cull avg wt at TranOG vs target; suggested correction lands batch on target):")
+        print(f"  {'Batch':<6} {'TranOG':<11} {'Target_g':>9} {'CurFW':>6} {'Projected_g':>12} {'Residual_%':>11} {'SugFW':>7}")
+        for r in residuals:
+            sug = f"{r.suggested_fw_correction:.3f}" if r.suggested_fw_correction is not None else "  --  "
+            print(f"  {r.batch_id:<6} {r.tran_og_date.date()} "
+                  f"{r.target_avg_wt_g:>9.2f} {r.current_fw_correction:>6.3f} "
+                  f"{r.projected_pre_cull_avg_wt_g:>12.2f} "
+                  f"{r.residual_pct:>10.2f}% {sug:>7}")
+
+    write_biology_projection(wb, states + in_flight_states)
+    write_calibration_diagnostics(wb, residuals)
+
+    # Write the plan outputs from Stage 2 placement.
+    write_batch_locations(wb, placement.batch_locations)
+    # Per-week HOG yield overrides from FacilityLimits.
+    facility_hog_overrides = {
+        wk_label: y
+        for (wk_label, metric), y in facility_limits.overrides.items()
+        if metric == METRIC_HOG_YIELD
+    }
+    write_harvest_plan_output(
+        wb, placement.harvest_events,
+        default_hog_yield=control.default_hog_yield,
+        facility_limits_hog=facility_hog_overrides,
+    )
+    write_transfer_plan_output(
+        wb, placement.transfer_events, placement.tranog_events,
+        grade_events=placement.grade_events,
+    )
+    write_advisory(
+        wb,
+        residuals=residuals,
+        placement_warnings=placement.warnings,
+        scheduler_warnings=sched_warns,
+        bottlenecks=canvas.bottlenecks,
+    )
+    write_daily_harvest_schedule(
+        wb, placement.harvest_events, fs_date,
+        default_hog_yield=control.default_hog_yield,
+        facility_limits_hog=facility_hog_overrides,
+    )
+    write_harvest_report(
+        wb, placement.harvest_events,
+        default_hog_yield=control.default_hog_yield,
+        facility_limits_hog=facility_hog_overrides,
+    )
+    write_feed_forecast_weekly(wb, states_by_batch, fs_date)
+    write_feed_forecast_monthly(wb, states_by_batch, fs_date)
+    all_states = states + in_flight_states
+    write_weekly_report(wb, placement.batch_locations, placement.harvest_events, all_states)
+    write_monthly_report(wb, placement.batch_locations, placement.harvest_events, all_states)
+    write_reconciliation_report(
+        wb,
+        placement.batch_locations,
+        all_states,
+        placement.harvest_events,
+        placement.tranog_events,
+        state,
+    )
+    write_tank_continuity_audit(
+        wb,
+        placement.batch_locations,
+        all_states,
+        placement.harvest_events,
+        placement.transfer_events,
+        placement.grade_events,
+        placement.tranog_events,
+        state,
+    )
+    write_facility_map(wb, placement.batch_locations, facility)
+
+    # Sheet count: 13 output sheets + ReconciliationReport + TankContinuityAudit.
+    n_output_sheets = 15
+    wb.save(path)
+    wb.close()
+    print(f"\nWrote {n_output_sheets} output sheets to {path}  ({time.time() - t0:.2f}s)")
+    return 0
+
+
+def _cli():
+    p = argparse.ArgumentParser()
+    p.add_argument("--workbook", default=None)
+    a = p.parse_args()
+    return main(a.workbook)
+
+
+if __name__ == "__main__":
+    raise SystemExit(_cli())
