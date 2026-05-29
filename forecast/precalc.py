@@ -1360,17 +1360,22 @@ def _build_reservation_plan(
             # Grow / catch up: reserve more eligible tanks for w..last_w.
             elif len(held_in_elig) < needed:
                 shortfall = needed - len(held_in_elig)
-                # Forward-peak system order over eligible (non-6N) systems.
                 cand_systems = [s for s in eligible if s not in sixn_systems]
                 cohort_ptc = per_tank_bio.get(bid, _ZERO)
+                # Stickiness: systems the cohort ALREADY occupies come
+                # first (no extra system spread / fragmentation), then
+                # NEW systems ordered by forward-peak (staggering).
+                own_systems = {tank_to_system.get(t) for t in held}
+                own_systems.discard(None)
                 scored = []
                 for s in cand_systems:
                     load = _sys_load(s)
                     peak = max(load[x] + cohort_ptc[x] for x in range(H))
-                    scored.append((peak, s))
+                    sticky = 0 if s in own_systems else 1
+                    scored.append((sticky, peak, s))
                 scored.sort()
                 got = 0
-                for _peak, s in scored:
+                for _sticky, _peak, s in scored:
                     if got >= shortfall:
                         break
                     for tid in og_tanks_by_system.get(s, []):
