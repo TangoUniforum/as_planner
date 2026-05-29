@@ -1,8 +1,31 @@
 # Greenfield reservation-grid scheduler — design
 
+> **STATUS 2026-05-29: BUILT + SHELVED.** Implemented as
+> `_build_reservation_plan` (behind `RESERVATION_PLAN=1` flag on branch
+> `feature/reservation-scheduler`). One focused tuning pass done. Runs
+> clean (0 drift, all TranOG placed) but underperforms the incremental
+> coordinator and tuning didn't close the gap:
+>
+> | Approach | Violations | Worst |
+> |---|---|---|
+> | Incremental coordinator (default) | **212** | 185 |
+> | Reservation FIFO (first cut) | 348 | 194 |
+> | Reservation FIFO + sticky tuning | 344 | 208 |
+> | Reservation peak-order + tuning | 383 | 203 |
+>
+> Root cause: cohort-outer greedy commits the future by cohort priority,
+> under-allocating cohorts that lose the race (B47/B44/B45/B48 far worse
+> than under the incremental's per-week + even-out). Span/order/
+> stickiness levers don't help (per-week marking yields the same grid).
+> The dominant residual is operator-side PR concentration, which neither
+> approach fixes — so the cohort-outer rewrite was never justified.
+> **Decision: keep the incremental coordinator (212) as the shipping
+> default; preserve this as a documented capability for a future
+> global/ILP exploration or a cleaner workbook.**
+
 Forward-looking design for the greenfield `Python/forecast/` coordinator
 (see `GREENFIELD_COORDINATOR_LOCKS.md` for the current incremental
-coordinator). NOT YET IMPLEMENTED. This document specifies the
+coordinator). Originally NOT YET IMPLEMENTED. This document specifies the
 anticipatory tank-reservation scheduler that replaces the incremental
 per-week event loop's reactive acquisition with forward reservation.
 
