@@ -205,18 +205,16 @@ class FacilityState:
     def check_invariants(
         self,
         min_tank_control: float = 0.0,
-        og12_one_kg_avg_wt_g: float = 1000.0,
     ) -> list[str]:
         """Snapshot-time invariant checks. Returns list of violation strings.
 
         INV-1 (one batch per tank): structurally enforced by TankState
-          (batch_id is a single Optional[str]). Re-checked here trivially.
+          (batch_id is a single Optional[str]).
         INV-5 (min_tank_control floor): any non-empty tank with count
           below threshold is flagged. Force-empty repair is the
           placement layer's responsibility.
-        OG1/2 >= 1 kg fish: tanks in OG1/OG2 holding fish above the
-          threshold are noted (used by the placement layer to gate
-          INV-4 repair routing).
+        Density: per-tank biomass/volume vs max_density_kg_m3 is flagged
+          (OG6N excluded in purge mode).
 
         INV-2 (identity changes only via events), INV-3 (count balance),
         and INV-4 (no within-OG1/2 transfer above 1 kg) are enforced

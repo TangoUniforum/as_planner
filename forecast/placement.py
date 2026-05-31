@@ -697,49 +697,6 @@ def _pick_fifo_move_in_batches(
     return [bid for _, _, bid in out]
 
 
-def _pick_fifo_move_in_batch(
-    state: FacilityState,
-    batch_meta: dict[str, BatchInput],
-    control: ControlParams,
-) -> Optional[str]:
-    """Single-batch wrapper for back-compat; returns first FIFO candidate."""
-    out = _pick_fifo_move_in_batches(state, batch_meta, control)
-    return out[0] if out else None
-
-
-def _pick_fifo_move_in_batch_old(
-    state: FacilityState,
-    batch_meta: dict[str, BatchInput],
-    control: ControlParams,
-) -> Optional[str]:
-    """Pick the oldest production batch with avg_wt ≥ min_harvest_weight.
-
-    Production = OG tanks NOT in OG6N/OG6S. Per user H10: FIFO by
-    input_date, then by avg_wt (closer to harvest preferred — but
-    rarely binds since input_dates are unique).
-    """
-    min_wt = control.min_harvest_weight_g
-    candidates: list[tuple[date, float, str]] = []
-    for b in batch_meta.values():
-        if b.input_date is None:
-            continue
-        input_d = b.input_date.date() if hasattr(b.input_date, "date") else b.input_date
-        # Eligible tanks: production OG, holding this batch, above min wt.
-        prod_tanks = [
-            t for t in state.tanks_by_id.values()
-            if t.batch_id == b.batch_id and not t.is_empty
-            and t.system_id not in _SIXN_SYSTEMS
-            and t.avg_wt_g >= min_wt
-        ]
-        if not prod_tanks:
-            continue
-        # Pick the highest avg wt among this batch's eligible tanks as tiebreaker.
-        max_wt = max(t.avg_wt_g for t in prod_tanks)
-        candidates.append((input_d, -max_wt, b.batch_id))
-    candidates.sort()
-    return candidates[0][2] if candidates else None
-
-
 def _run_sixn_purge_week(
     state: FacilityState,
     pair_queue: list[tuple[int, int]],

@@ -355,11 +355,9 @@ def main(workbook_path: str | Path | None = None) -> int:
     )
     write_facility_map(wb, placement.batch_locations, facility)
 
-    # Sheet count: 13 output sheets + ReconciliationReport + TankContinuityAudit.
-    n_output_sheets = 15
     wb.save(path)
     wb.close()
-    print(f"\nWrote {n_output_sheets} output sheets to {path}  ({time.time() - t0:.2f}s)")
+    print(f"\nSaved workbook {path}  ({time.time() - t0:.2f}s)")
     return 0
 
 

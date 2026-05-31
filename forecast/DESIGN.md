@@ -265,17 +265,16 @@ Output is each batch's full **load curve** + **system corridor**
 through the forecast horizon, derived deterministically with no
 dependence between batches.
 
-**Lifetime-max tank sizing.** `tanks_min_B(W)` is not the current
-week's density requirement — it is the **maximum** density requirement
-over the cohort's remaining lifecycle until the next harvest-driven
-biomass shrink. A backward sweep over each batch's weekly facts
-propagates each future peak back to earlier weeks, so the plan demands
-the full lifecycle tank count from the cohort's first OG week. Rationale:
-a tank claimed while a batch is under 1 kg can be filled via a legal
-intra-OG1/2 split; once the batch crosses 1 kg, INV-4 forbids intra-OG1/2
-moves and the only way to spread the cohort is one-tank-at-a-time
-cross-system migration throttled by INV-1. Sizing for the lifetime peak
-up front avoids being caught short when the free pool dries up.
+**Per-week density sizing.** `tanks_min_B(W)` is the current week's
+density requirement only — `ceil(biomass_post(W) / (max_kg × 0.85))`,
+with the 15% headroom matching the runtime Grade-split trigger.
+Originally this was followed by a backward lifetime-max sweep to claim
+OG1/2 tanks before the 1 kg lock engaged, but that was reverted (see
+Q-COORD.G in the lock record): the exit-at-1 kg rule + per-week
+`EVT_MIGRATE` swap moves fish out of OG1/2 into OG3-6 (any-to-any
+transfer allowed, no lock), so the coordinator's incremental
+`EVT_ADD` is correct and lifetime-max actively harmed by demanding
+peak tank counts simultaneously and over-subscribing OG3-6.
 
 ### 7.1a Facility assignment coordinator (precalc, between A and B)
 
@@ -413,15 +412,18 @@ LP / MILP is a future wrapper only if forward precalc proves
 insufficient. The coordinator (§7.1a) deliberately avoids it: a
 deterministic interval-layout pass keeps the plan defendable.
 
-**Status (2026-05-28, `feature/precalc-coordinator`).** Coordinator
-implemented and wired (migration plan derives diffs from the assignment
-table). Empirical on reference workbook: 0 count/biomass drift, all 7
-TranOG arrivals placed, harvest output 8.99M kg (vs 8.59M pre-
-coordinator — better cohort spreading). Density violations 353 (vs 324
-pre-coordinator) — the residual is PR-concentration-bound (B47/B46
-arrive over-concentrated from ProductionReport and cannot be spread
-under the operational rules without operator-side PR correction). See
-`docs/GREENFIELD_COORDINATOR_LOCKS.md` for the full lock record.
+**Status (2026-05-29, `feature/reservation-scheduler`).** Coordinator
+locked through Q-COORD.A–I (exit-at-1 kg + EVT_MIGRATE 1:1 swap +
+forward-peak system routing + even-out density pass). The reservation-
+grid alternative was built behind a flag and shelved after failing to
+beat the incremental coordinator. Empirical on reference workbook:
+0 count/biomass drift, all 7 TranOG arrivals placed,
+**212 density violations** (worst 185 kg/m³). Of those, the
+best-way-out floor analysis (`scripts/best_way_out.py`) shows 49 are
+physically forced (OG3-6 grow-out 1-3 tanks over capacity at peak) and
+~163 are scheduling-addressable but bounded by the system-progression
+law. See `docs/GREENFIELD_COORDINATOR_LOCKS.md` for the full lock
+record.
 
 ---
 

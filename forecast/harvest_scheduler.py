@@ -196,12 +196,6 @@ def schedule_harvests(
         key=lambda b: _batch_age_key(batches_by_id[b]) if b in batches_by_id else date.max,
     )
 
-    # TranOG pre-pull retired: precalc migration_plan now proves the OG1/2 ->
-    # OG3+ cascade is feasible without forcing extra harvest. Forcing pre-
-    # TranOG max harvest was destabilizing biomass downward. Operator cascade
-    # is honored by precalc, not by inflating min_hv.
-    min_bump_by_week: dict[str, float] = {}
-
     # --- Walk weeks in chronological label order. ---
     for label in horizon_labels:
         # Effective inventory per batch in this week label.
@@ -223,10 +217,6 @@ def schedule_harvests(
         bio_cap = resolve_facility_cap(METRIC_BIOMASS, label, facility_limits, control)
         max_hv = resolve_facility_cap(METRIC_MAX_HARVEST, label, facility_limits, control)
         min_hv = resolve_facility_cap(METRIC_MIN_HARVEST, label, facility_limits, control)
-        bio_band_hi = (
-            apply_facility_buffer(bio_cap, METRIC_BIOMASS, control)[1]
-            if bio_cap else float("inf")
-        )
 
         # Pinned harvests already account for some weekly count.
         weekly_count = sum(d.count for d in demands if d.week_label == label)
@@ -304,11 +294,6 @@ def schedule_harvests(
 
         # HARD CLIP to operational bounds from Control.
         target_count = max(weekly_min, min(weekly_max, target_count))
-
-        # TranOG pre-pull bump (cascade demand) adds on top, capped at max.
-        bump = min_bump_by_week.get(label, 0.0)
-        if bump > 0:
-            target_count = min(weekly_max, target_count + bump)
 
         # ----- Pull FIFO from mature batches to hit target_count ------
         need = target_count - weekly_count

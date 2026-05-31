@@ -61,6 +61,10 @@ _OG12 = frozenset({"OG1N", "OG1S", "OG2N", "OG2S"})
 _OG36 = frozenset({"OG3N", "OG3S", "OG4N", "OG4S",
                    "OG5N", "OG5S", "OG6N", "OG6S"})
 _OG_ALL = _OG12 | _OG36
+# Pipeline-owned (excluded from coordinator's free pool in purge mode).
+# Narrower than placement._SIXN_SYSTEMS, which also includes OG6S; here
+# only the depuration tanks (61/63/65 main, 67/69/71 sister) live.
+_SIXN_PIPELINE = frozenset({"OG6N"})
 
 _STD_NORMAL = NormalDist()
 
@@ -229,21 +233,17 @@ class TankAssignmentPlan:
     facility assignment coordinator.
 
     Sits one layer above MigrationStep: the coordinator decides WHICH
-    tanks each batch occupies each week (with cross-batch coordination,
-    system load balancing, and stickiness baked into the scoring), and
-    MigrationStep derives the keep/add/drop diff by comparing two
-    consecutive weeks' assignments. This separation lets a single
-    canonical assignment drive both the migration cascade and any
-    downstream consumer (Phase B/C, Phase D events, audits).
-
-    Score breakdown is retained for diagnostics — the operator can see
-    why a particular tank was assigned to a particular batch (e.g., "+800
-    stickiness, -45 system feed load, +120 shortfall urgency").
+    tanks each batch occupies each week (deterministic rules, no
+    scoring weights), and MigrationStep derives the keep/add/drop diff
+    by comparing two consecutive weeks' assignments. A single canonical
+    assignment drives both the migration cascade and any downstream
+    consumer (Phase B/C, Phase D events, audits). `notes` carries
+    per-(batch, week) explanations (e.g. overflow into OG3+ when OG1/2
+    is short, or coordinator bottlenecks).
     """
     batch_id: str
     week_label: str
     tank_ids: list[int]
-    score_breakdown: dict[str, float] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
 
 
@@ -399,19 +399,8 @@ def _build_batch_week_facts(
 
     # Density-aware sizing: each tank packed to 85% of cap, leaving 15%
     # growth headroom. Same threshold as runtime Grade-split trigger so
-    # precalc and Phase D agree.
-    #
-    # Per-week sizing is followed by a backward lifetime-max sweep so
-    # each week's tanks_needed reflects the projected biomass peak over
-    # the remaining lifecycle (until next harvest-driven shrink). This
-    # is the precalc-first answer: the migration plan claims all
-    # lifecycle-required tanks upfront and the sticky-floor in
-    # _build_migration_plan keeps them allocated. No runtime lookahead
-    # needed — the canonical tank trajectory is decided once at canvas
-    # build time. Combined with the OG12 1 kg rule, this lets the
-    # migration plan split cohorts BEFORE 1 kg (when intra-OG12 moves
-    # are still legal) instead of waiting for density to cross the
-    # 80.75 kg/m^3 trigger when the lock is already engaged.
+    # precalc and Phase D agree. Per-week sizing only — the lifetime-max
+    # backward sweep was removed (see NOTE below).
     DENSITY_TARGET_PCT = 0.85
     effective_max_kg = max_kg * DENSITY_TARGET_PCT
 
@@ -648,101 +637,47 @@ def _build_facility_assignment_plan(
     facility: FacilityConfig,
     batch_week_facts: dict[tuple[str, str], BatchWeekFact],
     batch_lifecycles: dict[str, BatchLifecycle],
-    harvest_demands: list[HarvestDemand],
-    weekly_facility: dict[str, WeeklyFacilityFact],
     bottlenecks: list[Bottleneck],
     control: Optional[ControlParams] = None,
 ) -> dict[tuple[str, str], TankAssignmentPlan]:
-    """Coordinated per-(batch, week) tank assignment via score-based greedy.
+    """Deterministic event-driven coordinator producing the canonical
+    per-(batch, week) tank assignment.
 
-    THIS IS THE PROJECT'S PRECALC-FIRST FACILITY COORDINATOR.
+    THIS IS THE PROJECT'S PRECALC-FIRST FACILITY COORDINATOR. It
+    produces a `TankAssignmentPlan[(batch, week)] -> tank_ids` that
+    Phase B/C/D consume via the thin diff layer `_build_migration_plan`.
 
-    The original `_build_migration_plan` does per-week assignment with
-    FIFO-oldest-first batch ordering — greedy on age, with no
-    cross-batch demand balancing, no system load awareness, and no
-    transfer-minimization objective. That worked when the facility was
-    over-subscribed in only a narrow way, but on this workbook it
-    leaves the youngest cohort (B47) with zero tank adds at W20
-    because B41-B45 (older) consumed the free pool first.
+    Algorithm — single chronological pass over a sorted event list, no
+    scoring weights. Events (within a week, lower priority runs first):
 
-    This coordinator replaces FIFO with a score-based greedy that
-    explicitly weighs the four objectives the project lead has
-    articulated:
+      EVT_PR_INIT (0)      — seed each PR batch's starting tank set.
+      EVT_PR_REBALANCE (1) — at forecast start ONLY, release PR tanks
+                             beyond a batch's per-week need so they
+                             rejoin the free pool for under-allocated
+                             batches. The sole week the sticky floor
+                             allows a non-harvest tank drop.
+      EVT_MIGRATE (2)      — for each OG1/2 tank a batch still holds at
+                             >=1 kg, claim one free OG3-6 tank and
+                             release the OG1/2 tank (1:1 swap; exit-at-
+                             1kg per the system-progression law).
+      EVT_TRANOG (3)       — hard placement of a TranOG arrival into
+                             OG1/2 with OG3+ overflow; bottleneck if
+                             still short.
+      EVT_RELEASE (4)      — harvest shrinks the batch; release tanks
+                             BEFORE the same week's adds.
+      EVT_ADD (5)          — per-week TARGET top-up: top the batch up
+                             toward its per-week tanks_needed by
+                             claiming free tanks. Sticky-first (systems
+                             the batch already occupies), then new
+                             systems ordered by forward-peak biomass
+                             (Q-COORD.H), then lowest-numbered free
+                             tank within the chosen system.
 
-      1. Each batch's per-week tank count is met (sized via lifetime-
-         max in `_build_batch_week_facts`).
-      2. Tanks are distributed across systems so per-system biomass +
-         feed load is even (no system pinned at cap while others sit
-         half-empty).
-      3. Week-over-week tank stickiness is maximized (minimizes the
-         number of Transfer events Phase D has to emit).
-      4. Operational rules are honored as HARD filters: TranOG arrivals
-         go to OG1/2 (with OG3+ overflow), ≥1 kg batches must end up
-         in OG3+, 6N pipeline tanks are pipeline-owned, etc.
-
-    Algorithm (deterministic single-pass forward walk):
-
-      For each week W in chronological order:
-        a. Settle biomass-driven drain: read harvest_demands and the
-           harvest scheduler's per-batch biomass targets to determine
-           which tanks fully empty this week. The actual drain logic
-           lives in Phase D — here we only project the resulting tank
-           state from biomass-level decisions (NOT picking specific
-           tanks to drain). Per project lead: "we should do that
-           based purely on biomass... not from an actual tank
-           perspective because that will fall apart as the larger
-           tanks get emptied and the smaller tanks get filled."
-        b. Snapshot free_pool[sys] = OG tanks not occupied by any
-           batch's prev assignment (excluding OG6N pipeline-owned).
-        c. Build per-batch demand: needed = fact.tanks_needed_at_density_cap.
-           Each batch has prev_tanks from W-1's assignment plus
-           eligibility set (OG12 for TranOG, OG3+ for ≥1 kg, OG_ALL
-           otherwise).
-        d. Score-based assignment:
-           For each (batch, candidate_tank) pair where:
-             - tank is in batch's eligible_systems
-             - tank is in prev OR free_pool
-           compute score = sum of:
-             + STICKY_BONUS (1000) if tank in prev_tanks (transfer
-               minimization)
-             + SHORTFALL_URGENCY * (needed - assigned_so_far) /
-               needed (cross-batch fairness — under-allocated
-               batches priced higher)
-             - SYSTEM_LOAD_PENALTY * (current_system_biomass /
-               system_biomass_cap) (system load balance)
-             - SYSTEM_FEED_PENALTY * (current_system_feed /
-               system_feed_cap) (system feed balance)
-           Sort all (batch, tank) candidates by score desc, assign
-           top-scoring pairs greedily, recompute scores when a
-           batch's assigned count or a system's load changes.
-        e. Emit TankAssignmentPlan per batch with the resulting
-           tank set and score_breakdown for diagnostics.
-
-    Why deterministic greedy not LP: the project's saved feedback
-    rules ("precalc-first... leave as much as possible to algorithm
-    and as little as possible to optimization") plus the need for the
-    plan to be defendable per the Phase B2 dual-assert pattern. A
-    deterministic algorithm produces the same plan every run and the
-    score breakdown explains every assignment.
-
-    SESSION 1 SCOPE (this file revision):
-      - Data structure + function signature + algorithm spec.
-      - Function builds an empty plan; PrecalcCanvas stores it but
-        `_build_migration_plan` does NOT yet consume it. The existing
-        migration plan + Phase D output are unchanged. Baseline
-        density violation count = 324 (regression check).
-
-    SESSION 2: implement the score function + greedy loop and produce
-    a real assignment plan, still parallel to the existing migration
-    plan (diagnostic only — both run, side-by-side comparison).
-
-    SESSION 3: wire `_build_migration_plan` to derive its keep/add/
-    drop diffs from the assignment plan. Migration plan becomes a
-    thin diff layer.
-
-    SESSION 4: 6N purge interaction + TranOG branch + edge cases.
-
-    SESSION 5: regression suite + docs + golden-cell update.
+    Determinism — every assignment traces to a stated rule, never to a
+    tuned weight (Q-COORD.E). Batch order within a (week, event) is
+    FIFO by input_date. Releases pick OG3+ before OG1/2, highest
+    tank_id first. The sticky floor (Q-COORD.B) is enforced by
+    construction: only EVT_RELEASE and EVT_PR_REBALANCE shed tanks.
     """
     plan: dict[tuple[str, str], TankAssignmentPlan] = {}
 
@@ -751,8 +686,6 @@ def _build_facility_assignment_plan(
     for t in facility.tanks:
         if t.type == "OG":
             tank_to_system[t.tank_id] = t.system_id
-    og12_systems = frozenset({"OG1N", "OG1S", "OG2N", "OG2S"})
-    sixn_systems = frozenset({"OG6N"})
     all_og_tanks = sorted(tank_to_system.keys())
 
     # ---- Step 1: build per-batch tank-count timelines ----
@@ -795,16 +728,14 @@ def _build_facility_assignment_plan(
             tank_owner[tid] = bid
 
     # ---- Step 3: build the event list ----
-    # Event types and priorities (lower = processed first within a week):
-    #   PR_INIT (0)         — pre-existing batch's starting tank set
-    #   TRANOG_ARRIVAL (1)  — hard placement into OG12 (with OG3+ overflow)
-    #   HARVEST_RELEASE (2) — batch shrinks; releases tanks BEFORE adds
-    #   GROWTH_ADD (3)      — batch grows; claims newly-freed + free pool
+    # Event priorities (lower = processed first within a week). The
+    # ordering matters: PR seeds before any redistribution, REBALANCE
+    # frees PR surplus before MIGRATE/TRANOG/ADD compete for it, MIGRATE
+    # frees nursery tanks BEFORE TRANOG arrivals claim them, and RELEASE
+    # runs BEFORE ADD so freed capacity rejoins the pool the same week.
     EVT_PR_INIT = 0
-    EVT_PR_REBALANCE = 1   # release surplus tanks at forecast start so they
-                            # rejoin the free pool for under-allocated batches
-    EVT_MIGRATE = 2        # exit OG1/2 -> OG3-6 at the 1 kg crossing; frees
-                            # nursery tanks BEFORE TranOG arrivals claim them
+    EVT_PR_REBALANCE = 1
+    EVT_MIGRATE = 2
     EVT_TRANOG = 3
     EVT_RELEASE = 4
     EVT_ADD = 5
@@ -925,7 +856,7 @@ def _build_facility_assignment_plan(
             tid for tid in all_og_tanks
             if tank_owner[tid] is None
             and tank_to_system.get(tid) in sys_set
-            and tank_to_system.get(tid) not in sixn_systems
+            and tank_to_system.get(tid) not in _SIXN_PIPELINE
         )
 
     notes_per_pair: dict[tuple[str, str], list[str]] = {}
@@ -983,7 +914,7 @@ def _build_facility_assignment_plan(
         cohort_ptc = per_tank_curve.get(cohort_bid, [0.0] * H)
         scored = []
         for s in candidate_systems:
-            if s in sixn_systems:
+            if s in _SIXN_PIPELINE:
                 continue
             load = _system_load_curve(s)
             peak = max(load[w] + cohort_ptc[w] for w in range(H)) if H else 0.0
@@ -1010,7 +941,7 @@ def _build_facility_assignment_plan(
             candidates = sorted(
                 batch_set,
                 key=lambda tid: (
-                    0 if tank_to_system.get(tid) not in og12_systems else 1,
+                    0 if tank_to_system.get(tid) not in _OG12 else 1,
                     -tid,
                 ),
             )
@@ -1034,7 +965,7 @@ def _build_facility_assignment_plan(
             # needed. Deterministic pick (alphabetical system, lowest
             # free tank_id) — no scoring.
             og12_held = sorted(t for t in batch_set
-                               if tank_to_system.get(t) in og12_systems)
+                               if tank_to_system.get(t) in _OG12)
             swapped = 0
             for og12_tid in og12_held:
                 claimed = None
@@ -1042,7 +973,7 @@ def _build_facility_assignment_plan(
                 # resulting peak system biomass (staggering), not
                 # alphabetically — so exit-at-1 kg levels OG3-6 load.
                 for sys in _route_systems(eligible_set, bid):
-                    if sys in sixn_systems:
+                    if sys in _SIXN_PIPELINE:
                         continue
                     for t in og_tank_ids_by_system.get(sys, []):
                         if tank_owner[t] is None:
@@ -1068,12 +999,12 @@ def _build_facility_assignment_plan(
         elif etype == EVT_TRANOG:
             # Hard placement: pick `delta` empty OG12 tanks; cascade to
             # OG3+ if OG12 insufficient (density-preservation overflow).
-            og12_free = _free_pool_in_systems(set(og12_systems))
+            og12_free = _free_pool_in_systems(set(_OG12))
             picked = list(og12_free[:delta])
             if len(picked) < delta:
                 og3_systems = {s for s in eligible_set
-                               if s not in og12_systems
-                               and s not in sixn_systems}
+                               if s not in _OG12
+                               and s not in _SIXN_PIPELINE}
                 if not og3_systems:
                     og3_systems = {"OG3N", "OG3S", "OG4N", "OG4S",
                                    "OG5N", "OG5S", "OG6S"}
@@ -1104,7 +1035,7 @@ def _build_facility_assignment_plan(
             candidates = sorted(
                 batch_set,
                 key=lambda tid: (
-                    0 if tank_to_system.get(tid) in og12_systems else 1,
+                    0 if tank_to_system.get(tid) in _OG12 else 1,
                     -tid,
                 ),
             )
@@ -1141,7 +1072,7 @@ def _build_facility_assignment_plan(
                 for sys in preferred_systems + other_systems:
                     if len(picked) >= shortfall:
                         break
-                    if sys in sixn_systems:
+                    if sys in _SIXN_PIPELINE:
                         continue
                     for t in og_tank_ids_by_system.get(sys, []):
                         if len(picked) >= shortfall:
@@ -1194,228 +1125,6 @@ def _build_facility_assignment_plan(
     return plan
 
 
-def _build_reservation_plan(
-    horizon_labels: list[str],
-    initial_state: FacilityState,
-    facility: FacilityConfig,
-    batch_week_facts: dict[tuple[str, str], BatchWeekFact],
-    batch_lifecycles: dict[str, BatchLifecycle],
-    harvest_demands: list[HarvestDemand],
-    bottlenecks: list[Bottleneck],
-    control: Optional[ControlParams] = None,
-) -> dict[tuple[str, str], TankAssignmentPlan]:
-    """ANTICIPATORY reservation-grid scheduler (see
-    docs/GREENFIELD_RESERVATION_SCHEDULER_DESIGN.md).
-
-    Cohort-outer (not week-outer): processes cohorts in a fixed FIFO
-    priority order and RESERVES each cohort's full forward (tank, week)
-    trajectory before moving to the next cohort. Because a cohort's
-    whole future is marked on the grid before later cohorts are
-    processed, a big cohort's grow-out tanks are HELD for it rather than
-    lost to a later cohort grabbing them first (the B46-class
-    under-allocation the reactive coordinator suffers).
-
-    Reserve-forward / release-forward semantics: claiming tank t at week
-    w marks grid[t][w..end_of_cohort] = bid; a harvest-driven shrink
-    un-marks the shed tank from that week forward. Cells are time-shared
-    across cohorts — a tank a cohort needs at W40 can serve another at
-    W20 — so this does NOT over-subscribe the way lifetime-max did.
-
-    System choice uses forward-peak (minimize resulting peak system
-    biomass) — the staggering rule. Tank choice within a system is
-    lowest-free-id. Deterministic, no scoring weights.
-    """
-    H = len(horizon_labels)
-    if H == 0:
-        return {}
-    week_idx = {wl: i for i, wl in enumerate(horizon_labels)}
-
-    tank_to_system: dict[int, str] = {
-        t.tank_id: t.system_id for t in facility.tanks if t.type == "OG"
-    }
-    og_tanks_by_system: dict[str, list[int]] = {}
-    for tid, s in tank_to_system.items():
-        og_tanks_by_system.setdefault(s, []).append(tid)
-    for s in og_tanks_by_system:
-        og_tanks_by_system[s].sort()
-    sixn_systems = frozenset({"OG6N"})
-
-    # grid[tid] = list over horizon weeks of owning batch_id or None.
-    grid: dict[int, list] = {tid: [None] * H for tid in tank_to_system}
-
-    # Per-cohort SW week facts (sorted by week index) + per-tank biomass.
-    cohort_weeks: dict[str, list[tuple[int, BatchWeekFact]]] = {}
-    per_tank_bio: dict[str, list[float]] = {}
-    for (b, wl), f in batch_week_facts.items():
-        if f.stage != "SW" or wl not in week_idx:
-            continue
-        cohort_weeks.setdefault(b, []).append((week_idx[wl], f))
-    for b, lst in cohort_weeks.items():
-        lst.sort()
-        arr = [0.0] * H
-        for w, f in lst:
-            arr[w] = f.biomass_kg_after_harvest / max(
-                1, f.tanks_needed_at_density_cap)
-        per_tank_bio[b] = arr
-
-    # PR seed: pre-existing batch tanks at forecast start.
-    pr_tanks: dict[str, set] = {}
-    for tid, tank in initial_state.tanks_by_id.items():
-        if tank.batch_id and tank.type == "OG":
-            pr_tanks.setdefault(tank.batch_id, set()).add(tid)
-
-    # Priority order. RESERVATION_ORDER env selects:
-    #   "fifo" (default) — by input_date (operational fact)
-    #   "peak" — largest peak tank-demand first (packs better: the most
-    #            constrained cohorts reserve before the facility fills)
-    import os as _os
-    _peak_demand = {
-        b: max((f.tanks_needed_at_density_cap for _w, f in wks), default=0)
-        for b, wks in cohort_weeks.items()
-    }
-    if _os.environ.get("RESERVATION_ORDER", "fifo") == "peak":
-        order = sorted(cohort_weeks.keys(),
-                       key=lambda b: (-_peak_demand[b], b))
-    else:
-        order = sorted(
-            cohort_weeks.keys(),
-            key=lambda b: (
-                (batch_lifecycles[b].input_date or date.max)
-                if b in batch_lifecycles else date.max,
-                b,
-            ),
-        )
-
-    def _sys_load(sys: str) -> list[float]:
-        curve = [0.0] * H
-        for tid in og_tanks_by_system.get(sys, []):
-            row = grid[tid]
-            for w in range(H):
-                owner = row[w]
-                if owner is not None:
-                    curve[w] += per_tank_bio.get(owner, _ZERO)[w]
-        return curve
-
-    _ZERO = [0.0] * H
-
-    def _free_for_span(tid: int, w0: int, w1: int) -> bool:
-        row = grid[tid]
-        for w in range(w0, w1 + 1):
-            if row[w] is not None:
-                return False
-        return True
-
-    def _reserve(tid: int, bid: str, w0: int, w1: int) -> None:
-        row = grid[tid]
-        for w in range(w0, w1 + 1):
-            row[w] = bid
-
-    def _release_from(tid: int, bid: str, w0: int) -> None:
-        row = grid[tid]
-        for w in range(w0, H):
-            if row[w] == bid:
-                row[w] = None
-
-    notes_per_pair: dict[tuple[str, str], list[str]] = {}
-
-    for bid in order:
-        wks = cohort_weeks[bid]
-        last_w = wks[-1][0]
-        held: set = set()
-        # Seed PR tanks as held (reserved from week 0 across the span;
-        # they'll be released/migrated as eligibility + needs dictate).
-        for tid in sorted(pr_tanks.get(bid, set())):
-            if tid in grid:
-                _reserve(tid, bid, wks[0][0], last_w)
-                held.add(tid)
-
-        for w, f in wks:
-            needed = max(0, f.tanks_needed_at_density_cap)
-            eligible = set(f.eligible_systems)
-            notes = notes_per_pair.setdefault((bid, horizon_labels[w]), [])
-
-            # Release held tanks no longer in eligible systems (e.g. the
-            # OG1/2 tanks when the cohort crosses 1 kg → must exit to
-            # OG3-6). Released from THIS week forward.
-            for tid in sorted(held):
-                if tank_to_system.get(tid) not in eligible:
-                    _release_from(tid, bid, w)
-                    held.discard(tid)
-
-            held_in_elig = [t for t in held
-                            if tank_to_system.get(t) in eligible]
-
-            # Shrink (harvest): release surplus held tanks from w forward.
-            if len(held_in_elig) > needed:
-                # Release highest tank_id first (newest), OG1/2 before
-                # OG3-6 when both present.
-                shed = sorted(
-                    held_in_elig,
-                    key=lambda t: (
-                        0 if tank_to_system.get(t) not in _OG12 else 1, -t),
-                )[: len(held_in_elig) - needed]
-                for tid in shed:
-                    _release_from(tid, bid, w)
-                    held.discard(tid)
-            # Grow / catch up: reserve more eligible tanks for w..last_w.
-            elif len(held_in_elig) < needed:
-                shortfall = needed - len(held_in_elig)
-                cand_systems = [s for s in eligible if s not in sixn_systems]
-                cohort_ptc = per_tank_bio.get(bid, _ZERO)
-                # Stickiness: systems the cohort ALREADY occupies come
-                # first (no extra system spread / fragmentation), then
-                # NEW systems ordered by forward-peak (staggering).
-                own_systems = {tank_to_system.get(t) for t in held}
-                own_systems.discard(None)
-                scored = []
-                for s in cand_systems:
-                    load = _sys_load(s)
-                    peak = max(load[x] + cohort_ptc[x] for x in range(H))
-                    sticky = 0 if s in own_systems else 1
-                    scored.append((sticky, peak, s))
-                scored.sort()
-                got = 0
-                for _sticky, _peak, s in scored:
-                    if got >= shortfall:
-                        break
-                    for tid in og_tanks_by_system.get(s, []):
-                        if got >= shortfall:
-                            break
-                        if tid in held:
-                            continue
-                        if _free_for_span(tid, w, last_w):
-                            _reserve(tid, bid, w, last_w)
-                            held.add(tid)
-                            got += 1
-                if got < shortfall:
-                    bottlenecks.append(Bottleneck(
-                        week_label=horizon_labels[w],
-                        system_id=None,
-                        kind="reservation_unmet",
-                        detail=(f"{bid} W={horizon_labels[w]} needs {needed} "
-                                f"tanks; reserved {len(held_in_elig)+got}"),
-                        deficit=shortfall - got,
-                    ))
-                    notes.append(
-                        f"reservation short: need {needed}, got "
-                        f"{len(held_in_elig)+got}")
-
-    # Materialize plan from the grid.
-    plan: dict[tuple[str, str], TankAssignmentPlan] = {}
-    for bid, wks in cohort_weeks.items():
-        for w, f in wks:
-            wl = horizon_labels[w]
-            tanks = [tid for tid in tank_to_system
-                     if grid[tid][w] == bid]
-            plan[(bid, wl)] = TankAssignmentPlan(
-                batch_id=bid,
-                week_label=wl,
-                tank_ids=sorted(tanks),
-                notes=notes_per_pair.get((bid, wl), []),
-            )
-    return plan
-
-
 def _build_migration_plan(
     horizon_labels: list[str],
     initial_state: FacilityState,
@@ -1424,32 +1133,17 @@ def _build_migration_plan(
     batch_lifecycles: dict[str, BatchLifecycle],
     harvest_demands: list[HarvestDemand],
     bottlenecks: list[Bottleneck],
+    assignment_plan: dict[tuple[str, str], TankAssignmentPlan],
     control: Optional[ControlParams] = None,
-    assignment_plan: Optional[dict[tuple[str, str], TankAssignmentPlan]] = None,
 ) -> tuple[dict[tuple[str, str], int], dict[tuple[str, str], MigrationStep]]:
-    """Project per-(week, system) tank availability + per-(batch, week) cascade.
+    """Thin diff layer over the coordinator's `assignment_plan`.
 
-    Walks weeks chronologically. Each week:
-      1. Apply tank-emptying dynamics matching Phase D's actual behavior:
-         - Purge mode: drain the 6N head pair, then move-in fish from the
-           FIFO oldest production batch into the pair's main tank (mirrors
-           placement._run_sixn_purge_week).
-         - Production mode (no purge): drain via Layer 2 harvest_demands
-           (smallest-count tank first).
-      2. Compute free tanks per system.
-      3. Process batches FIFO: assign tanks honoring the 1 kg rule
-         (>=1 kg cannot ADD an OG12 tank; OG12 transit residual allowed).
-      4. Emit MigrationStep with keep/add/drop.
-      5. Emit tranog_unmet Bottleneck if a TranOG week has insufficient OG12.
+    The coordinator (`_build_facility_assignment_plan`) owns the
+    WHICH-tanks decision; this function derives the per-(batch, week)
+    keep/add/drop bookkeeping that Phase B/C/D consume by diffing
+    consecutive weeks of the canonical assignment plan.
 
     Returns (tank_availability_by_week_system, migration_plan).
-
-    If `assignment_plan` is provided (session 3+ wiring), this function
-    derives MigrationStep entries from per-(batch, week) diffs of the
-    canonical assignment plan rather than running its own FIFO greedy
-    allocator. The migration plan becomes a thin diff layer: the
-    coordinator owns the WHICH-tanks decision, this function owns the
-    keep/add/drop bookkeeping that Phase B/C/D consume.
     """
     # System lookup per tank.
     tank_to_system: dict[int, str] = {}
@@ -1461,423 +1155,49 @@ def _build_migration_plan(
     for sys in og_tank_ids_by_system:
         og_tank_ids_by_system[sys].sort()
 
-    # ---- Diff-based path: derive MigrationStep from assignment_plan ----
-    if assignment_plan:
-        og12_systems_local = frozenset({"OG1N", "OG1S", "OG2N", "OG2S"})
-        sixn_systems_local = frozenset({"OG6N"})
-        plan_out: dict[tuple[str, str], MigrationStep] = {}
-        availability_out: dict[tuple[str, str], int] = {}
-        # Per-batch prev tanks (running, week-over-week).
-        prev_by_batch: dict[str, set[int]] = {
-            bid: set(tids) for bid, tids in batch_tanks.items()
-        } if 'batch_tanks' in dir() else {}
-        # Re-derive batch_tanks for the diff path (avoid relying on later
-        # body initialization).
-        prev_by_batch = {}
-        for tid, tank in initial_state.tanks_by_id.items():
-            if tank.batch_id and tank.type == "OG":
-                prev_by_batch.setdefault(tank.batch_id, set()).add(tid)
-        # Compute per-system free-tank availability per week from the
-        # union of assigned tanks across all batches that week.
-        for wl in horizon_labels:
-            occupied: set[int] = set()
-            for (bid, w), entry in assignment_plan.items():
-                if w == wl:
-                    occupied.update(entry.tank_ids)
-            for sys, tids in og_tank_ids_by_system.items():
-                availability_out[(wl, sys)] = sum(
-                    1 for t in tids if t not in occupied
-                )
-        # Emit MigrationStep per (batch, week) from diffs.
-        for (bid, wl), entry in assignment_plan.items():
-            this_set = set(entry.tank_ids)
-            prev_set = prev_by_batch.get(bid, set())
-            fact = batch_week_facts.get((bid, wl))
-            is_tranog = bool(fact and fact.is_tranog_week)
-            keep = sorted(this_set & prev_set)
-            add = sorted(this_set - prev_set)
-            drop = sorted(prev_set - this_set)
-            og12_transit = sum(
-                1 for t in keep
-                if tank_to_system.get(t) in og12_systems_local
-                and not is_tranog
-            )
-            plan_out[(bid, wl)] = MigrationStep(
-                batch_id=bid,
-                week_label=wl,
-                keep_tanks=keep,
-                add_tanks=add,
-                drop_tanks=drop,
-                is_tranog=is_tranog,
-                og12_transit_count=og12_transit,
-                notes=list(entry.notes),
-            )
-            prev_by_batch[bid] = this_set
-        return availability_out, plan_out
-    # ---- End diff-based path ----
-
-    # 6N pipeline state: pair queue (initialized only if relevant). The pairs
-    # are ordered ascending by combined fish count at PR — same rule as
-    # sixn.initial_purge_pair_queue (operator H10).
-    sixn_pair_queue: list[tuple[int, int]] = []
-    SIXN_PAIRS_LOCAL = [(61, 67), (63, 69), (65, 71)]
-    if control is not None:
-        # Determine if we start in purge mode (any week is purge).
-        pair_counts = []
-        for p in SIXN_PAIRS_LOCAL:
-            total = sum(initial_state.tanks_by_id[t].count
-                        for t in p if t in initial_state.tanks_by_id
-                        and not initial_state.tanks_by_id[t].is_empty)
-            if total > 0:
-                pair_counts.append((p, total))
-        pair_counts.sort(key=lambda x: x[1])
-        sixn_pair_queue = [p for p, _ in pair_counts]
-
-    # Initial per-batch tank occupancy from PR.
-    batch_tanks: dict[str, list[int]] = {}
-    tank_to_batch: dict[int, str] = {}
-    tank_count_at_pr: dict[int, float] = {}
+    plan_out: dict[tuple[str, str], MigrationStep] = {}
+    availability_out: dict[tuple[str, str], int] = {}
+    # Per-batch prev tanks (running, week-over-week). Seed from PR.
+    prev_by_batch: dict[str, set[int]] = {}
     for tid, tank in initial_state.tanks_by_id.items():
         if tank.batch_id and tank.type == "OG":
-            batch_tanks.setdefault(tank.batch_id, []).append(tid)
-            tank_to_batch[tid] = tank.batch_id
-            tank_count_at_pr[tid] = tank.count
-    for bid in batch_tanks:
-        batch_tanks[bid].sort()
-
-    # Harvest demands grouped by (week, batch).
-    harvest_by_bw: dict[tuple[str, str], float] = {}
-    for d in harvest_demands:
-        key = (d.week_label, d.batch_id)
-        harvest_by_bw[key] = harvest_by_bw.get(key, 0.0) + d.count
-
-    # Layer-2 weekly demand totals (used by 6N pipeline to size move-ins).
-    demand_count_by_week: dict[str, float] = {}
-    for d in harvest_demands:
-        demand_count_by_week[d.week_label] = (
-            demand_count_by_week.get(d.week_label, 0.0) + d.count
-        )
-
-    # Track cumulative harvest per batch (to know when a batch is fully gone).
-    cum_harvest: dict[str, float] = {bid: 0.0 for bid in batch_tanks}
-    # Per-tank current count estimate (decays with harvest; updated each week).
-    tank_count: dict[int, float] = dict(tank_count_at_pr)
-
-    # FIFO order across all known batches (oldest input_date first).
-    fifo_order = sorted(
-        batch_lifecycles.keys(),
-        key=lambda b: batch_lifecycles[b].input_date or date.max,
-    )
-
-    plan: dict[tuple[str, str], MigrationStep] = {}
-    availability: dict[tuple[str, str], int] = {}
-
-    og12_systems = {"OG1N", "OG1S", "OG2N", "OG2S"}
-    sixn_systems = {"OG6N"}
-
-    # Helpers from sixn module — imported lazily to avoid circular import.
-    from .sixn import is_purge_mode as _is_purge
-
-    for week_idx, week_label in enumerate(horizon_labels):
-        # Determine purge mode this week from control + week_start.
-        week_start_date = None
-        bwf_any = next((f for (b, w), f in batch_week_facts.items() if w == week_label), None)
-        if bwf_any is not None:
-            week_start_date = bwf_any.week_start
-        purge_this_week = (control is not None and week_start_date is not None
-                           and _is_purge(control, week_start_date))
-
-        # ---- 1. Apply tank dynamics for THIS week ----
-        if purge_this_week and sixn_pair_queue:
-            # 6N purge pipeline simulation (mirrors Phase D's
-            # _run_sixn_purge_week so the migration plan's tank
-            # availability matches reality).
-            pair = sixn_pair_queue.pop(0)
-
-            # a) Drain pair tanks (release whatever batch was there).
-            for tid in pair:
-                bid_at_tid = tank_to_batch.get(tid)
-                if bid_at_tid is not None:
-                    if tid in batch_tanks.get(bid_at_tid, []):
-                        batch_tanks[bid_at_tid].remove(tid)
-                    tank_to_batch.pop(tid, None)
-                tank_count[tid] = 0.0
-
-            # b) Pick FIFO oldest production batch with mature fish in
-            #    non-6N tanks. (Mirrors _pick_fifo_move_in_batch.)
-            move_in_batch: Optional[str] = None
-            for bid in fifo_order:
-                fact = batch_week_facts.get((bid, week_label))
-                if fact is None or fact.stage != "SW":
-                    continue
-                if (control is not None
-                        and fact.avg_wt_g < control.min_harvest_weight_g):
-                    continue
-                prod_tids = [
-                    t for t in batch_tanks.get(bid, [])
-                    if tank_to_system.get(t) not in sixn_systems
-                    and tank_count.get(t, 0.0) > 0
-                ]
-                if prod_tids:
-                    move_in_batch = bid
-                    break
-
-            # c) Move-in target: Layer 2 demand 2 weeks ahead, clamped
-            #    to [min_h, max_h]. Same rule as the placement walk.
-            if move_in_batch is not None and control is not None:
-                min_h = control.min_harvest_per_week or 0.0
-                max_h = control.max_harvest_per_week or min_h
-                future_idx = week_idx + 2
-                if future_idx < len(horizon_labels):
-                    future_label = horizon_labels[future_idx]
-                    target = demand_count_by_week.get(future_label, min_h)
-                else:
-                    target = min_h
-                target = max(min_h, min(max_h, target))
-
-                # d) Pull from move-in batch's production tanks
-                #    (largest-count first, mirroring Phase D).
-                src_tids = sorted(
-                    [t for t in batch_tanks.get(move_in_batch, [])
-                     if tank_to_system.get(t) not in sixn_systems],
-                    key=lambda t: tank_count.get(t, 0.0),
-                    reverse=True,
-                )
-                main_tid = pair[0]
-                count_moved = 0.0
-                for src_tid in src_tids:
-                    if count_moved >= target:
-                        break
-                    src_cnt = tank_count.get(src_tid, 0.0)
-                    take = min(target - count_moved, src_cnt)
-                    if take <= 0:
-                        continue
-                    tank_count[src_tid] = src_cnt - take
-                    count_moved += take
-                    if tank_count[src_tid] <= 0.5:
-                        if src_tid in batch_tanks[move_in_batch]:
-                            batch_tanks[move_in_batch].remove(src_tid)
-                        tank_to_batch.pop(src_tid, None)
-
-                # e) Stock the pair's main tank with the moved fish.
-                if count_moved > 0:
-                    tank_count[main_tid] = count_moved
-                    tank_to_batch[main_tid] = move_in_batch
-                    batch_tanks.setdefault(move_in_batch, [])
-                    if main_tid not in batch_tanks[move_in_batch]:
-                        batch_tanks[move_in_batch].append(main_tid)
-
-            # f) Push pair back to queue.
-            sixn_pair_queue.append(pair)
-        else:
-            # Production-mode (or pre-purge): apply Layer 2 harvest demands.
-            for (wl, bid), count_to_harvest in list(harvest_by_bw.items()):
-                if wl != week_label:
-                    continue
-                if bid not in batch_tanks or not batch_tanks[bid]:
-                    continue
-                remaining = count_to_harvest
-                cum_harvest[bid] = cum_harvest.get(bid, 0.0) + count_to_harvest
-                # Drain smallest-count tank first to match Phase D's policy.
-                tanks_sorted = sorted(batch_tanks[bid], key=lambda t: tank_count.get(t, 0.0))
-                for tid in tanks_sorted:
-                    if remaining <= 0:
-                        break
-                    t_cnt = tank_count.get(tid, 0.0)
-                    take = min(remaining, t_cnt)
-                    tank_count[tid] = t_cnt - take
-                    remaining -= take
-                    if tank_count[tid] <= 0.5:
-                        if tid in batch_tanks[bid]:
-                            batch_tanks[bid].remove(tid)
-                        tank_to_batch.pop(tid, None)
-
-        # ---- 2. Compute free tanks per OG system ----
-        # OG6N is excluded from allocatable pool — the 6N pipeline owns
-        # those tanks. Migration plan never picks an OG6N tank for a
-        # batch's keep/add list.
-        free_pool: dict[str, list[int]] = {}
+            prev_by_batch.setdefault(tank.batch_id, set()).add(tid)
+    # Per-system free-tank availability per week from the union of
+    # assigned tanks across all batches that week.
+    for wl in horizon_labels:
+        occupied: set[int] = set()
+        for (bid, w), entry in assignment_plan.items():
+            if w == wl:
+                occupied.update(entry.tank_ids)
         for sys, tids in og_tank_ids_by_system.items():
-            free_pool[sys] = [t for t in tids if t not in tank_to_batch]
-            availability[(week_label, sys)] = len(free_pool[sys])
-        for sys in sixn_systems:
-            free_pool[sys] = []
-
-        # ---- 3. Process batches FIFO and build MigrationStep ----
-        # Snapshot per-batch prev tanks (start-of-week state) for the diff.
-        prev_tanks_snapshot: dict[str, list[int]] = {
-            b: list(tids) for b, tids in batch_tanks.items()
-        }
-        # FIFO ordering (oldest batch first). Density-pressure priority
-        # was tested empirically and made density violations WORSE on the
-        # reference workbook: the violations are dominated by pre-existing
-        # PR batches whose tank-set freezes at the OG12_MOVE_LOCK 1 kg
-        # threshold — no allocation ordering can add tanks after freeze,
-        # and the only relief is harvest-scheduler coverage.
-        this_week_facts = [
-            (bid, batch_week_facts[(bid, week_label)])
-            for bid in fifo_order
-            if (bid, week_label) in batch_week_facts
-        ]
-
-        for bid, fact in this_week_facts:
-            if fact.stage != "SW":
-                continue
-            prev = list(prev_tanks_snapshot.get(bid, []))
-            # OG6N tanks are owned by the 6N pipeline (added by move-in,
-            # released by next drain). The migration plan must never add
-            # or drop them — always keep them in the tank set as-is.
-            prev_og6n = [t for t in prev if tank_to_system.get(t) in sixn_systems]
-            prev_og12 = [t for t in prev if tank_to_system.get(t) in og12_systems]
-            prev_og3plus = [t for t in prev if tank_to_system.get(t) is not None
-                            and tank_to_system.get(t) not in og12_systems
-                            and tank_to_system.get(t) not in sixn_systems]
-
-            needed = max(1, fact.tanks_needed_at_density_cap)
-            is_above_1kg = fact.avg_wt_g >= _OG12_MOVE_LOCK_WT_G
-            is_tranog = fact.is_tranog_week
-            eligible = set(fact.eligible_systems)
-
-            # Sticky tank-set floor: total tank count per batch can only
-            # shrink when a harvest reduces the cohort (and the remaining
-            # biomass consolidates into fewer tanks). Outside of harvest
-            # weeks, never drop tanks — per-week density sizing can
-            # under-count tanks during low-biomass phases, and dropping
-            # them creates concentration that becomes a density violation
-            # when biomass grows back. TranOG weeks own their own floor
-            # (max(4, density)) and skip this rule because prev is empty.
-            harvest_this_week = harvest_by_bw.get((week_label, bid), 0.0)
-            if not is_tranog and harvest_this_week <= 0 and len(prev) > 0:
-                needed = max(needed, len(prev))
-
-            keep_tanks: list[int] = []
-            add_tanks: list[int] = []
-            drop_tanks: list[int] = []
-            notes: list[str] = []
-
-            if is_tranog:
-                # TranOG week: allocate `needed` tanks from OG1/2 first;
-                # overflow into OG3+ when OG1/2 is exhausted (density-
-                # preservation — better to spread fish across more tanks
-                # than to cram a whole cohort into 1 OG1/2 tank).
-                pickable = []
-                for sys in ("OG1N", "OG1S", "OG2N", "OG2S"):
-                    pickable.extend(free_pool.get(sys, []))
-                og12_available = len(pickable)
-                if og12_available < needed:
-                    # Add OG3+ tanks (excluding OG6N pipeline-owned).
-                    for sys in ("OG3N", "OG3S", "OG4N", "OG4S",
-                                "OG5N", "OG5S", "OG6S"):
-                        pickable.extend(free_pool.get(sys, []))
-                if len(pickable) < needed:
-                    bottlenecks.append(Bottleneck(
-                        week_label=week_label,
-                        system_id=None,
-                        kind="tranog_unmet",
-                        detail=(f"TranOG {bid} needs {needed} tanks; "
-                                f"only {len(pickable)} free (OG1/2 + OG3+)"),
-                        deficit=needed - len(pickable),
-                    ))
-                elif og12_available < needed:
-                    notes.append(
-                        f"TranOG arrival overflowed to OG3+: only "
-                        f"{og12_available} of {needed} tanks in OG1/2"
-                    )
-                for tid in pickable[:needed]:
-                    add_tanks.append(tid)
-                    free_pool[tank_to_system[tid]].remove(tid)
-                # All prev tanks are released (TranOG is the first OG entry).
-                drop_tanks = list(prev)
-            elif is_above_1kg:
-                # >=1 kg: target tank set is `needed` OG3+ tanks.
-                # Keep prev OG3+ tanks first (sticky). Add new OG3+ as
-                # available. If needed > prev_og3plus + available_og3plus,
-                # keep OG12 prev tanks as transit residual.
-                kept_og3plus = list(prev_og3plus)[:needed]
-                keep_tanks.extend(kept_og3plus)
-                dropped_og3plus = [t for t in prev_og3plus if t not in kept_og3plus]
-                drop_tanks.extend(dropped_og3plus)
-                shortfall = needed - len(kept_og3plus)
-                # Try to add fresh OG3+ tanks from free pool, eligible systems only.
-                for sys in fact.eligible_systems:
-                    if sys in og12_systems:
-                        continue
-                    while shortfall > 0 and free_pool.get(sys):
-                        tid = free_pool[sys].pop(0)
-                        add_tanks.append(tid)
-                        shortfall -= 1
-                # Remaining shortfall: hold prev OG12 as transit residual.
-                transit = 0
-                if shortfall > 0 and prev_og12:
-                    held = prev_og12[:shortfall]
-                    keep_tanks.extend(held)
-                    transit = len(held)
-                    notes.append(
-                        f"transit residual: {transit} OG12 tank(s) "
-                        f"held because OG3+ free pool insufficient"
-                    )
-                # Drop any prev OG12 tanks NOT held as transit (they migrate
-                # to a newly-added OG3+ tank via cross-system Transfer).
-                kept_og12_set = set(prev_og12[:transit])
-                drop_tanks.extend(t for t in prev_og12 if t not in kept_og12_set)
-                # Bottleneck if residual exists.
-                if transit > 0:
-                    bottlenecks.append(Bottleneck(
-                        week_label=week_label,
-                        system_id=None,
-                        kind="og12_residual",
-                        detail=(f"{bid} (avg_wt {fact.avg_wt_g:.0f}g) holds "
-                                f"{transit} OG12 tank(s) as transit residual"),
-                        deficit=transit,
-                    ))
-            else:
-                # < 1 kg, not TranOG week: keep prev (sticky), add to fill needed.
-                kept = list(prev)[:needed]
-                keep_tanks.extend(kept)
-                drop_tanks.extend(t for t in prev if t not in kept)
-                shortfall = needed - len(kept)
-                for sys in fact.eligible_systems:
-                    while shortfall > 0 and free_pool.get(sys):
-                        tid = free_pool[sys].pop(0)
-                        add_tanks.append(tid)
-                        shortfall -= 1
-                if shortfall > 0:
-                    notes.append(
-                        f"under-tanked: needed {needed}, got "
-                        f"{needed - shortfall}; no eligible system has free tanks"
-                    )
-
-            # Always carry forward any OG6N tanks the batch holds (these
-            # are 6N-pipeline-managed; the migration plan must not add or
-            # drop them).
-            keep_tanks.extend(prev_og6n)
-
-            plan[(bid, week_label)] = MigrationStep(
-                batch_id=bid,
-                week_label=week_label,
-                keep_tanks=sorted(set(keep_tanks)),
-                add_tanks=sorted(add_tanks),
-                drop_tanks=sorted(drop_tanks),
-                is_tranog=is_tranog,
-                og12_transit_count=sum(
-                    1 for t in keep_tanks
-                    if tank_to_system.get(t) in og12_systems and not is_tranog
-                ),
-                notes=notes,
+            availability_out[(wl, sys)] = sum(
+                1 for t in tids if t not in occupied
             )
-
-            # Update batch_tanks + tank_to_batch for next iteration.
-            new_set = set(keep_tanks) | set(add_tanks)
-            for t in drop_tanks:
-                if tank_to_batch.get(t) == bid:
-                    tank_to_batch.pop(t, None)
-            for t in new_set:
-                tank_to_batch[t] = bid
-                # Estimate tank count (split evenly across new tanks); rough.
-                tank_count[t] = max(tank_count.get(t, 0.0), fact.count_after_harvest / max(1, len(new_set)))
-            batch_tanks[bid] = sorted(new_set)
-
-    return availability, plan
+    # Emit MigrationStep per (batch, week) from diffs.
+    for (bid, wl), entry in assignment_plan.items():
+        this_set = set(entry.tank_ids)
+        prev_set = prev_by_batch.get(bid, set())
+        fact = batch_week_facts.get((bid, wl))
+        is_tranog = bool(fact and fact.is_tranog_week)
+        keep = sorted(this_set & prev_set)
+        add = sorted(this_set - prev_set)
+        drop = sorted(prev_set - this_set)
+        og12_transit = sum(
+            1 for t in keep
+            if tank_to_system.get(t) in _OG12 and not is_tranog
+        )
+        plan_out[(bid, wl)] = MigrationStep(
+            batch_id=bid,
+            week_label=wl,
+            keep_tanks=keep,
+            add_tanks=add,
+            drop_tanks=drop,
+            is_tranog=is_tranog,
+            og12_transit_count=og12_transit,
+            notes=list(entry.notes),
+        )
+        prev_by_batch[bid] = this_set
+    return availability_out, plan_out
 
 
 def build_precalc_canvas(
@@ -1922,33 +1242,15 @@ def build_precalc_canvas(
     migration: dict[tuple[str, str], MigrationStep] = {}
     assignment_plan: dict[tuple[str, str], TankAssignmentPlan] = {}
     if initial_state is not None:
-        # Assignment coordinator. RESERVATION_PLAN env selects the new
-        # anticipatory reservation-grid scheduler; default is the
-        # incremental event-loop coordinator.
-        import os as _os
-        if _os.environ.get("RESERVATION_PLAN"):
-            assignment_plan = _build_reservation_plan(
-                horizon_labels=horizon_labels,
-                initial_state=initial_state,
-                facility=facility,
-                batch_week_facts=batch_week_facts,
-                batch_lifecycles=batch_lifecycles,
-                harvest_demands=harvest_demands,
-                bottlenecks=bottlenecks,
-                control=control,
-            )
-        else:
-            assignment_plan = _build_facility_assignment_plan(
-                horizon_labels=horizon_labels,
-                initial_state=initial_state,
-                facility=facility,
-                batch_week_facts=batch_week_facts,
-                batch_lifecycles=batch_lifecycles,
-                harvest_demands=harvest_demands,
-                weekly_facility=weekly_facility,
-                bottlenecks=bottlenecks,
-                control=control,
-            )
+        assignment_plan = _build_facility_assignment_plan(
+            horizon_labels=horizon_labels,
+            initial_state=initial_state,
+            facility=facility,
+            batch_week_facts=batch_week_facts,
+            batch_lifecycles=batch_lifecycles,
+            bottlenecks=bottlenecks,
+            control=control,
+        )
         availability, migration = _build_migration_plan(
             horizon_labels=horizon_labels,
             initial_state=initial_state,

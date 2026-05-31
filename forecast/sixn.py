@@ -119,15 +119,3 @@ def pick_initial_purge_pair(state: FacilityState) -> Optional[tuple[int, int]]:
     return q[0] if q else None
 
 
-def round_robin_next(prev_pair: tuple[int, int]) -> tuple[int, int]:
-    """Round-robin successor of `prev_pair` in SIXN_PAIRS order."""
-    try:
-        idx = SIXN_PAIRS.index(prev_pair)
-    except ValueError:
-        idx = -1
-    return SIXN_PAIRS[(idx + 1) % len(SIXN_PAIRS)]
-
-
-def production_mode_unavailable_tanks() -> frozenset[int]:
-    """Tanks not usable when 6N is in production mode (67/69/71)."""
-    return SIXN_SISTER_TANKS
