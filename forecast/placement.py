@@ -1204,17 +1204,19 @@ def _even_out_density(
     og12_sub = [t for t in tanks
                 if t.system_id in OG12_SYSTEMS
                 and t.avg_wt_g < OG12_MOVE_LOCK_WT_G]
+    og12_all = [t for t in tanks if t.system_id in OG12_SYSTEMS]
     og36 = [t for t in tanks
             if t.system_id not in OG12_SYSTEMS and t.system_id != "OG6N"]
 
-    for group in (og12_sub, og36):
+    def _equalize(group):
+        """Move fish between tanks in `group` to equalize counts; emits
+        Transfers for the source → dest pairs needed. Returns nothing."""
         if len(group) < 2:
-            continue
-        # Only act if some tank in the group is over its density cap.
+            return
         if not any(t.max_density_kg_m3 > 0
                    and t.density_kg_m3 > t.max_density_kg_m3
                    for t in group):
-            continue
+            return
         total = sum(t.count for t in group)
         target = total / len(group)
         overs = sorted([[t.tank_id, t.count - target, t]
@@ -1249,6 +1251,58 @@ def _even_out_density(
                 i += 1
             if unders[j][1] < 0.5:
                 j += 1
+
+    # Pass 1: sub-1kg OG1/2 group (legal intra-OG1/2).
+    _equalize(og12_sub)
+    # Pass 2: OG3-6 group (any weight, any-to-any allowed).
+    _equalize(og36)
+    # Pass 3: cross-scope OG1/2 -> OG3-6 for over-cap OG1/2 tanks that
+    # passes 1+2 couldn't fix. INV-4 forbids INTRA-OG1/2 moves at >=1 kg,
+    # but the system-progression law (DESIGN §4) explicitly allows
+    # OG1/2 -> OG3-6 transfer at any weight ("outbound to 3/4/5/6 allowed
+    # any time"). When a batch has an over-cap OG1/2 tank AND an
+    # under-cap OG3-6 tank, equalize across the boundary. Source pool is
+    # restricted to OG1/2-over-cap tanks (so we never push OG3-6 fish
+    # back into OG1/2 — that would be operationally backwards).
+    og12_over = [t for t in og12_all
+                 if t.max_density_kg_m3 > 0
+                 and t.density_kg_m3 > t.max_density_kg_m3]
+    og36_under = [t for t in og36
+                  if t.max_density_kg_m3 > 0
+                  and t.density_kg_m3 < t.max_density_kg_m3]
+    # Headroom: leave the destination at <= 90% of cap so the Phase D
+    # density-trigger Grade (also runs in this week) doesn't fire on the
+    # new destination — that would spawn extra grade events and could
+    # cascade-violate other tanks.
+    HEADROOM_PCT = 0.90
+    for src in og12_over:
+        if src.avg_wt_g <= 0:
+            continue
+        for dst in og36_under:
+            if dst.avg_wt_g <= 0:
+                continue
+            src_cap_fish = (src.max_density_kg_m3 * src.volume_m3
+                            * 1000.0 / src.avg_wt_g)
+            dst_cap_fish = (dst.max_density_kg_m3 * dst.volume_m3
+                            * 1000.0 / dst.avg_wt_g)
+            shed = src.count - src_cap_fish
+            room = dst_cap_fish * HEADROOM_PCT - dst.count
+            take = min(shed, room)
+            if take <= 0.5:
+                continue
+            ev = Transfer(
+                batch_id=batch_id, event_date=event_date,
+                source_tank_id=src.tank_id,
+                destinations=[TankAllocation(
+                    tank_id=dst.tank_id, count=take,
+                    avg_wt_g=src.avg_wt_g, cv_pct=src.cv_pct,
+                )],
+                leaves_source_empty=False,
+            )
+            warnings.extend(ev.apply(state))
+            transfer_events.append(ev)
+            if src.count <= src_cap_fish + 0.5:
+                break
 
 
 def phase_d_emit_events(

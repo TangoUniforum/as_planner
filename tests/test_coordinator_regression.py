@@ -1,10 +1,11 @@
 """End-to-end regression guard for the greenfield coordinator.
 
 Locks the empirical baseline of the incremental assignment coordinator
-(exit-at-1kg + per-week top-up + forward-peak staggering + even-out;
-see docs/GREENFIELD_COORDINATOR_LOCKS.md Q-COORD.A-I):
+(exit-at-1kg + per-week top-up + forward-peak staggering + even-out
+with cross-scope OG1/2 → OG3-6 pass; see
+docs/GREENFIELD_COORDINATOR_LOCKS.md Q-COORD.A-J):
 
-    density violations <= 212,  worst <= 185 kg/m^3,
+    density violations <= 196,  worst <= 170 kg/m^3,
     0 count/biomass drift,  7/7 TranOG arrivals placed.
 
 Runs the real pipeline on a COPY of Forecast.xlsm so the source
@@ -21,10 +22,13 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent  # Python/
 WORKBOOK = ROOT / "Forecast.xlsm"
 
-# Baseline thresholds (2026-05-28). Tests guard against REGRESSION:
-# violations/worst must not exceed these; drift must stay zero.
-MAX_VIOLATIONS = 212
-MAX_WORST_DENSITY = 185.0
+# Baseline thresholds. Tests guard against REGRESSION: violations/worst
+# must not exceed these; drift must stay zero.
+# 2026-05-28: 212 / 185 (Q-COORD.A-I locks).
+# 2026-05-30: 196 / 169.5 (Q-COORD.J cross-scope OG1/2 -> OG3-6 even-out
+#   relieved B46/B48-class hotspots).
+MAX_VIOLATIONS = 196
+MAX_WORST_DENSITY = 170.0
 EXPECTED_TRANOG = 7
 
 pytestmark = pytest.mark.skipif(

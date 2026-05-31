@@ -313,6 +313,49 @@ where needed).
 ~716 (the authorized cost), 0 drift. Combined session total:
 **353 → 212 (−40%), worst 230 → 185 (−20%).**
 
+### Q-COORD.J — Cross-scope even-out OG1/2 → OG3-6 (LOCKED 2026-05-30)
+
+Diagnosis (2026-05-30 polish session): profiling the 162 OG6N-excluded
+residual violations after Q-COORD.I showed **0 pure under-allocation**
+— all 162 were over-concentration / failed redistribution. B46 alone
+accounted for 84 (52%): ~288k fish PR-concentrated in two OG1N tanks
+that the existing `_even_out_density` couldn't relieve because both
+were over cap (no OG1/2 under-tank to spill into) AND it scoped OG1/2
+and OG3-6 as separate pools. B48-class hotspots (e.g. W51 OG2S-22 at
+173 kg/m³ alongside OG4N/OG6S sister tanks at 76) showed the same
+pattern: the over-cap OG1/2 tank was stuck while its OG3-6 sisters had
+plenty of headroom.
+
+**Insight (operational):** the system-progression law (DESIGN §4)
+explicitly permits OG1/2 → OG3-6 transfer at any weight — only
+*intra-OG1/2* moves at ≥1 kg are forbidden by INV-4. So a batch with
+an over-cap OG1/2 tank and an under-cap OG3-6 tank can legally
+re-level across the boundary.
+
+**Fix:** a third pass in `_even_out_density` (after the existing
+sub-1kg-OG1/2 and OG3-6 passes). For each over-cap OG1/2 tank of the
+batch, iterate the batch's under-cap OG3-6 tanks; transfer
+`min(src_excess_to_cap, dst_room_to_90%_of_cap)` fish via cross-system
+Transfer. The 90% headroom on the destination prevents the same-week
+density-trigger Grade from firing on the newly-bumped destination
+(which would otherwise create knock-on violations elsewhere — verified
+empirically: 100% room yielded 215 violations / worst 163.8 vs 90%
+room's 196 / 169.5; the 90% form is the locked configuration).
+
+**Empirical (reference workbook):**
+- Q-COORD.I baseline: 212 violations, worst 185 kg/m³
+- + cross-scope even-out (90% headroom): **196 violations
+  (-16, -7.5%), worst 169.5 (-15.5, -8.4%)**
+- 0 count/biomass drift, 7/7 TranOG placed, harvest output unchanged.
+
+**Why not more?** The remaining 196 are predominantly the early-life
+B46 weeks (W27-W32) where *all* of B46's tanks (both OG1N) are over
+cap and B46 has no OG3-6 tanks yet — there is nowhere to spill. That
+residual is the genuine operator-side PR concentration limit
+(Q-COORD.F) and is bounded by progression-law-mandated incremental
+allocation. Recovering it would require either operator-side PR
+correction or relaxing an operational rule.
+
 ## §3 — Empirical results (reference workbook, 2026-05-28)
 
 | Metric | Pre-coordinator | Coordinator |
