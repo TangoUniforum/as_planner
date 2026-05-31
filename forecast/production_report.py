@@ -122,6 +122,15 @@ def read_production_report(
             m = re.search(r"B\d+", c3)
             if m:
                 current_batch = m.group(0)
+            else:
+                # Unrecognized batch label — any tanks under this group
+                # would be silently dropped. Set current_batch to None
+                # so the data rows below are skipped, and log it so the
+                # operator sees the gap.
+                current_batch = None
+                print(f"  WARN: ProductionReport 'Fish group' row "
+                      f"'{c3.strip()}' has no Bnn identifier; "
+                      f"its tanks will not be hydrated")
             continue
 
         # Unit (per-tank) — col 4.

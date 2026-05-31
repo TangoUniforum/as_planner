@@ -247,22 +247,17 @@ def resolve_system_cap(
     return system_limits.get(week_label, system_id, metric)
 
 
-def apply_system_buffer(
+def system_cap_with_buffer(
     cap_value: float,
     control: ControlParams,
-) -> tuple[float, float]:
-    """Symmetric ± tolerance band around a system cap (Control R29 buffer)."""
-    # ControlParams.target_biomass_pct holds R24 (facility); we want R29
-    # global buffer. Caller passes whichever Control field is correct;
-    # default Control reader puts R29 into a separate field — see run.py
-    # wiring. For now this helper takes the buffer fraction directly via
-    # the control param's value; we expose it as a free function below.
-    raise NotImplementedError(
-        "use apply_buffer_pct(value, buffer_pct) — Control.global_buffer_pct "
-        "is the buffer fraction; reader will be wired in next step"
-    )
+) -> float:
+    """Upper-bound system cap after applying R29 global buffer.
 
-
-def apply_buffer_pct(cap_value: float, buffer_pct: float) -> tuple[float, float]:
-    """Symmetric ± tolerance band, buffer_pct as a fraction (0.05 = 5%)."""
-    return (cap_value * (1.0 - buffer_pct), cap_value * (1.0 + buffer_pct))
+    System caps are one-sided: a cap is a ceiling, so the buffer
+    (Control R29 `Global buffer`, default 5%) gives the planner extra
+    headroom above the raw cap before refusing to place more load.
+    Returns `cap_value * (1 + R29)`. Unlike the symmetric R24 facility
+    biomass band, there is no lower bound — being under a system cap is
+    never a problem.
+    """
+    return cap_value * (1.0 + control.global_buffer_pct)

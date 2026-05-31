@@ -239,6 +239,40 @@ class Grade:
                 continue
             dests_resolved.append((t, dest))
 
+        # INV-4: a grade that MOVES fish between OG1/2 tanks is illegal
+        # once any participant is at >= 1 kg (equipment limit). A "move"
+        # means a destination that is NOT one of the sources — fish kept
+        # in their own source tank are not being rearranged. Grade is
+        # atomic — refuse the whole event rather than partial-apply.
+        src_ids = {s.tank_id for s in srcs}
+        og12_srcs_locked = [
+            s for s in srcs
+            if s.system_id in OG12_SYSTEMS and s.avg_wt_g >= OG12_MOVE_LOCK_WT_G
+        ]
+        og12_external_dests = [
+            t for (t, _d) in dests_resolved
+            if t.system_id in OG12_SYSTEMS and t.tank_id not in src_ids
+        ]
+        if og12_srcs_locked and og12_external_dests:
+            warns.append(
+                f"Grade {self.batch_id}: INV-4 violation — sources "
+                f"{[s.location_id for s in og12_srcs_locked]} >= 1 kg "
+                f"and destinations include external OG1/2 tanks "
+                f"{[t.location_id for t in og12_external_dests]}; refused"
+            )
+            return warns
+
+        # INV-3 (count conservation): destinations must match sources.
+        src_count = sum(s.count for s in srcs)
+        dest_count = sum(d.count for (_t, d) in dests_resolved)
+        if abs(src_count - dest_count) > 0.5:
+            warns.append(
+                f"Grade {self.batch_id}: count not conserved — sources "
+                f"hold {src_count:.0f} fish, destinations sum {dest_count:.0f} "
+                f"(diff {dest_count - src_count:+.0f}); refused"
+            )
+            return warns
+
         # Apply: empty all sources, stock destinations.
         # Stage carried from the first valid source.
         stage = srcs[0].stage if srcs else STAGE_SW

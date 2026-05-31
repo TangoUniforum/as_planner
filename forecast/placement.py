@@ -47,6 +47,7 @@ from .caps import (
     METRIC_FEED_DAY,
     SystemLimits,
     resolve_system_cap,
+    system_cap_with_buffer,
 )
 from .events import Grade, Harvest, OG12_SYSTEMS, OG12_MOVE_LOCK_WT_G, TankAllocation, Transfer, TranOGEntry
 from .harvest_scheduler import HarvestDemand
@@ -70,7 +71,11 @@ from .state import FacilityState, TankState
 from .time_grid import forecast_week_labels, week_range
 
 
-_SIXN_SYSTEMS = frozenset({"OG6N", "OG6S"})
+# Per the lock record §5: all six pipeline tanks (61/63/65 main,
+# 67/69/71 sister) live in system OG6N. OG6S is a regular OG3-6
+# grow-out system, NOT pipeline-owned, so it is a valid move-in source
+# for the 6N purge pipeline (and is allocatable by Phase A/B/C).
+_SIXN_SYSTEMS = frozenset({"OG6N"})
 
 
 # Eligible system sets used by Phase A.
@@ -408,7 +413,6 @@ def phase_b_assign_systems(
             prev = prev_per_system.get(load.batch_id, {})
             per_tank_bio = load.biomass_kg / load.tanks_needed if load.tanks_needed else 0.0
             per_tank_feed = load.feed_kg_day / load.tanks_needed if load.tanks_needed else 0.0
-            buf = control.global_buffer_pct
 
             # ----- Plan-driven path: use migration_plan if present -----
             if migration_plan and (load.batch_id, week_label) in migration_plan:
@@ -445,10 +449,10 @@ def phase_b_assign_systems(
                     if sys_assigned[sys] >= sys_tank_count[sys]:
                         continue
                     cap_feed = resolve_system_cap(METRIC_FEED_DAY, week_label, sys, system_limits)
-                    if cap_feed is not None and sys_load_feed[sys] + per_tank_feed > cap_feed * (1.0 + buf):
+                    if cap_feed is not None and sys_load_feed[sys] + per_tank_feed > system_cap_with_buffer(cap_feed, control):
                         continue
                     cap_bio = resolve_system_cap(METRIC_BIOMASS, week_label, sys, system_limits)
-                    if cap_bio is not None and sys_load_bio[sys] + per_tank_bio > cap_bio * (1.0 + buf):
+                    if cap_bio is not None and sys_load_bio[sys] + per_tank_bio > system_cap_with_buffer(cap_bio, control):
                         continue
                     sticky = 1000 if sys in prev else 0
                     spread = 500 if sys not in per_sys else 0

@@ -49,12 +49,34 @@ def read_control(wb) -> ControlParams:
     def get(key, default=None):
         return L.get(re.sub(r"\s+", " ", key.lower()).rstrip(":"), default)
 
+    def _to_float(label: str, value, default: float) -> float:
+        if value is None or value == "":
+            return default
+        try:
+            return float(value)
+        except (TypeError, ValueError) as e:
+            raise ValueError(
+                f"Control sheet field '{label}' is not numeric "
+                f"(got {value!r}): {e}"
+            ) from None
+
+    def _to_int(label: str, value, default: int) -> int:
+        if value is None or value == "":
+            return default
+        try:
+            return int(value)
+        except (TypeError, ValueError) as e:
+            raise ValueError(
+                f"Control sheet field '{label}' is not an integer "
+                f"(got {value!r}): {e}"
+            ) from None
+
     horizon_raw = get("forecast horizon (weeks)") or get("horizon")
     if isinstance(horizon_raw, str):
         m = re.search(r"\d+", horizon_raw)
         horizon = int(m.group()) if m else 52
     else:
-        horizon = int(horizon_raw or 52)
+        horizon = _to_int("forecast horizon (weeks)", horizon_raw, 52)
 
     sixn_raw = get("6n growth")
     sixn_growth = isinstance(sixn_raw, str) and sixn_raw.strip().lower() in {"yes", "y", "true", "1"}
@@ -63,22 +85,27 @@ def read_control(wb) -> ControlParams:
         forecast_start=get("forecast start date") or get("forecast start"),
         horizon_weeks=horizon,
         scenario_name=str(get("scenario name") or get("scenario") or "Forecast"),
-        max_feed_per_day_kg=float(get("max feed/day (kg)") or 0),
-        max_biomass_kg=float(get("max biomass (kg)") or 0),
-        max_harvest_per_week=float(get("max harvest/week") or 0),
-        min_harvest_weight_g=float(get("min harvest weight (g)") or 0),
-        min_harvest_per_week=float(get("min harvest/week") or 0),
-        min_tank_control=float(get("min tank control") or 0),
-        max_tank_density_kg_m3=float(get("max tank density (kg/m³)") or get("max tank density (kg/m�)") or 85),
-        default_hog_yield=float(get("default hog yield") or 0.81),
-        facility_biomass_deviation_pct=float(get("target biomass deviation") or 0.01),
-        handling_mortality_pct=float(get("handling mortality") or 0.01),
+        max_feed_per_day_kg=_to_float("max feed/day (kg)", get("max feed/day (kg)"), 0),
+        max_biomass_kg=_to_float("max biomass (kg)", get("max biomass (kg)"), 0),
+        max_harvest_per_week=_to_float("max harvest/week", get("max harvest/week"), 0),
+        min_harvest_weight_g=_to_float("min harvest weight (g)", get("min harvest weight (g)"), 0),
+        min_harvest_per_week=_to_float("min harvest/week", get("min harvest/week"), 0),
+        min_tank_control=_to_float("min tank control", get("min tank control"), 0),
+        max_tank_density_kg_m3=_to_float(
+            "max tank density (kg/m³)",
+            get("max tank density (kg/m³)") or get("max tank density (kg/m�)"),
+            85,
+        ),
+        default_hog_yield=_to_float("default hog yield", get("default hog yield"), 0.81),
+        facility_biomass_deviation_pct=_to_float(
+            "target biomass deviation", get("target biomass deviation"), 0.01),
+        handling_mortality_pct=_to_float("handling mortality", get("handling mortality"), 0.01),
         sixn_growth=sixn_growth,
         sixn_production_start=get("6n production start date"),
         sixn_transition_weeks=get("6n transition window (weeks)"),
-        tran_og_default_tanks=int(get("default tanks tranog") or 3),
-        global_buffer_pct=float(get("global buffer") or 0.05),
-        starvation_period_days=int(get("starvation period (days)") or 10),
+        tran_og_default_tanks=_to_int("default tanks tranog", get("default tanks tranog"), 3),
+        global_buffer_pct=_to_float("global buffer", get("global buffer"), 0.05),
+        starvation_period_days=_to_int("starvation period (days)", get("starvation period (days)"), 10),
     )
 
 

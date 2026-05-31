@@ -11,7 +11,6 @@ from .placement import run_placement, summarize_placement
 from .precalc import build_precalc_canvas, print_canvas_summary
 from .sixn import is_purge_mode
 from .caps import (
-    apply_buffer_pct,
     apply_facility_buffer,
     read_facility_limits,
     read_system_limits,
@@ -77,6 +76,16 @@ def main(workbook_path: str | Path | None = None) -> int:
 
     # ----- Hydrate FacilityState from ProductionReport -----
     pr_closing, og_records, fw_records = read_production_report(wb)
+    # DESIGN §1 handoff: PR closing date must be exactly forecast_start - 1.
+    from datetime import timedelta as _td
+    expected_pr_close = control.forecast_start.date() - _td(days=1)
+    if pr_closing is None:
+        print(f"  WARN: ProductionReport closing date missing/unparseable; "
+              f"expected {expected_pr_close} (forecast_start - 1 day)")
+    elif pr_closing != expected_pr_close:
+        print(f"  WARN: ProductionReport closing {pr_closing} != "
+              f"{expected_pr_close} (forecast_start - 1 day); PR state may "
+              f"not align with week-0 opening state")
     state = FacilityState.from_facility_config(facility, today=control.forecast_start.date())
     hydration_warns = hydrate_facility_state(state, og_records, batches)
     summary = summarize_hydration(state)
