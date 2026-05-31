@@ -117,10 +117,12 @@ def main() -> int:
         if ex12 or ex36:
             binding.append((wl, req12, ex12, req36, ex36))
 
+    # Current empirical baseline (locked in tests/test_coordinator_regression).
+    ACTUAL = 196  # 2026-05-30, Q-COORD.J cross-scope even-out
     print(f"THEORETICAL FLOOR (forced over-capacity tank-weeks): "
           f"{floor_total}")
-    print(f"Actual run (incremental coordinator): 212 violations")
-    print(f"=> Addressable-by-scheduling gap: ~{212 - floor_total}\n")
+    print(f"Actual run (incremental coordinator): {ACTUAL} violations")
+    print(f"=> Addressable-by-scheduling gap: ~{ACTUAL - floor_total}\n")
 
     if binding:
         print("Binding weeks (class over physical capacity):")
