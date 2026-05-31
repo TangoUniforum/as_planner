@@ -1370,9 +1370,24 @@ def write_advisory(
     placement_warnings,
     scheduler_warnings,
     bottlenecks,
+    density_violations=None,
+    invariant_warnings=None,
     sheet_name: str = "Advisory",
 ) -> None:
-    """Consolidated diagnostics + warnings from every layer."""
+    """Consolidated diagnostics + warnings from every layer.
+
+    Args:
+        residuals: FW calibration residuals.
+        placement_warnings: strings from the placement walk (INV-x,
+            TranOG, 6N, Phase B/C/D).
+        scheduler_warnings: harvest scheduler warning strings.
+        bottlenecks: precalc-detected supply/demand gaps.
+        density_violations: iterable of tuples
+            (week_label, location_id, batch_id, density, cap_kg_m3) for
+            every BatchLocations row that exceeds its tank's density cap.
+        invariant_warnings: strings from hydration + check_invariants
+            (INV-1/5 + density at snapshot time).
+    """
     if sheet_name in wb.sheetnames:
         del wb[sheet_name]
     ws = wb.create_sheet(sheet_name)
@@ -1393,6 +1408,23 @@ def write_advisory(
         entries.append((f"Bottleneck / {b.kind}", f"{b.week_label}: {b.detail}"))
     for w in scheduler_warnings:
         entries.append(("Harvest Scheduler", w))
+    for w in invariant_warnings or ():
+        if "INV-1" in w:
+            cat = "INV-1 (one-batch-per-tank)"
+        elif "INV-5" in w:
+            cat = "INV-5 (min_tank_control)"
+        elif "Density" in w:
+            cat = "Hydration density"
+        else:
+            cat = "Hydration / Invariants"
+        entries.append((cat, w))
+    for v in density_violations or ():
+        wk, loc, bid, d, cap = v
+        entries.append((
+            "Density violation",
+            f"{wk}: tank {loc} (batch {bid}) at {d:.1f} kg/m³ "
+            f"> cap {cap:.1f}",
+        ))
     for w in placement_warnings:
         if "INV-4" in w:
             cat = "INV-4 (1 kg rule)"
@@ -1414,8 +1446,19 @@ def write_advisory(
             cat = "Placement"
         entries.append((cat, w))
 
-    ws.append([f"{len(entries)} issue(s) found"])
+    # Summary roll-up by category (count + first example).
+    by_cat: dict[str, int] = {}
+    for cat, _ in entries:
+        by_cat[cat] = by_cat.get(cat, 0) + 1
+
+    ws.append([f"{len(entries)} issue(s) found across {len(by_cat)} categories"])
     ws.append([])
+    ws.append(["Summary by category"])
+    ws.append(["Category", "Count"])
+    for cat in sorted(by_cat, key=lambda c: -by_cat[c]):
+        ws.append([cat, by_cat[cat]])
+    ws.append([])
+    ws.append(["Full list"])
     ws.append(["#", "Category", "Detail"])
     for i, (cat, detail) in enumerate(entries, 1):
         ws.append([i, cat, detail])
@@ -1423,6 +1466,149 @@ def write_advisory(
     widths = {1: 6, 2: 30, 3: 110}
     for c, w in widths.items():
         ws.column_dimensions[get_column_letter(c)].width = w
+
+
+# Regex helpers used by both write_advisory categorization and ValidationLog
+# message parsing.
+_RE_WEEK = re.compile(r"\b(\d{4}-W\d{2})\b")
+_RE_BATCH = re.compile(r"\bB\d{2,3}\b")
+_RE_TANK = re.compile(r"\b(OG[1-6][NS])-(\d+)\b")
+
+
+def _vlog_parse(msg: str) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """Best-effort extraction of (week_label, batch_id, location_id) from
+    a free-form warning string."""
+    week = (_RE_WEEK.search(msg).group(1) if _RE_WEEK.search(msg) else None)
+    batch = (_RE_BATCH.search(msg).group(0) if _RE_BATCH.search(msg) else None)
+    tm = _RE_TANK.search(msg)
+    loc = tm.group(0) if tm else None
+    return week, batch, loc
+
+
+def write_validation_log(
+    wb,
+    residuals=None,
+    placement_warnings=None,
+    scheduler_warnings=None,
+    bottlenecks=None,
+    density_violations=None,
+    invariant_warnings=None,
+    sheet_name: str = "ValidationLog",
+) -> None:
+    """Raw per-event audit trail.
+
+    One row per warning/diagnostic, sortable by severity / source / code /
+    week / batch / tank. Companion to Advisory: Advisory is the curated
+    operator-facing summary, ValidationLog is the structured stream for
+    filtering and triage.
+    """
+    if sheet_name in wb.sheetnames:
+        del wb[sheet_name]
+    ws = wb.create_sheet(sheet_name)
+    ws.append([
+        "Severity", "Source", "Code", "Week", "Batch", "Tank", "Message",
+    ])
+
+    def emit(sev, src, code, msg):
+        wk, b, t = _vlog_parse(msg)
+        ws.append([sev, src, code, wk or "", b or "", t or "", msg])
+
+    for r in residuals or ():
+        if abs(r.residual_pct) >= 0.5:
+            sev = "WARN" if abs(r.residual_pct) >= 1.0 else "INFO"
+            sug = (f"; suggested FW_Correction={r.suggested_fw_correction:.3f}"
+                   if r.suggested_fw_correction is not None else "")
+            emit(sev, "FWCalibration", "FW_RESIDUAL",
+                 f"Batch {r.batch_id} TranOG {r.tran_og_date.date()}: "
+                 f"residual {r.residual_pct:+.2f}%{sug}")
+
+    for b in bottlenecks or ():
+        emit("WARN", "Precalc", f"BOTTLE_{b.kind.upper()}",
+             f"{b.week_label}: {b.detail}")
+
+    for w in scheduler_warnings or ():
+        emit("WARN", "HarvestScheduler", "HSCHED", w)
+
+    for w in invariant_warnings or ():
+        if "INV-1" in w:
+            code = "INV1"
+        elif "INV-5" in w:
+            code = "INV5"
+        elif "Density" in w:
+            code = "DENSITY_HYDRATION"
+        else:
+            code = "HYDRATION"
+        emit("WARN", "Hydration", code, w)
+
+    for v in density_violations or ():
+        wk, loc, bid, d, cap = v
+        ws.append([
+            "WARN", "PhaseD", "DENSITY", wk, bid, loc,
+            f"{loc} (batch {bid}) at {d:.1f} kg/m³ > cap {cap:.1f}",
+        ])
+
+    for w in placement_warnings or ():
+        if "INV-4" in w:
+            code = "INV4"
+        elif "INV-5" in w:
+            code = "INV5"
+        elif "INV-1" in w:
+            code = "INV1"
+        elif "TranOG" in w:
+            code = "TRANOG"
+        elif "6N" in w or "purge" in w.lower():
+            code = "SIXN"
+        else:
+            code = "PLACEMENT"
+        # Source tag from Phase B/C/D prefix if present.
+        if w.startswith("[B]"):
+            src = "PhaseB"
+        elif w.startswith("[C]"):
+            src = "PhaseC"
+        elif w.startswith("[D]"):
+            src = "PhaseD"
+        else:
+            src = "Placement"
+        emit("WARN", src, code, w)
+
+    widths = {1: 9, 2: 14, 3: 18, 4: 10, 5: 8, 6: 10, 7: 110}
+    for c, w in widths.items():
+        ws.column_dimensions[get_column_letter(c)].width = w
+    ws.freeze_panes = "A2"
+
+
+def write_control_status(
+    wb,
+    *,
+    status: str,
+    scenario: str,
+    forecast_start,
+    horizon_weeks: int,
+    batches: int,
+    og_tanks: int,
+    elapsed_s: float,
+    warnings: int,
+    sheet_name: str = "Control",
+) -> None:
+    """Overwrite Control R8-R16 column B with the run summary (DESIGN §1).
+
+    Row layout (label in A, value in B) is fixed by the workbook
+    template: R8 Last Run, R9 Timestamp, R10 Scenario, R11 Forecast
+    Start, R12 Horizon, R13 Batches, R14 OG Tanks, R15 Elapsed,
+    R16 Warnings.
+    """
+    if sheet_name not in wb.sheetnames:
+        return
+    ws = wb[sheet_name]
+    ws.cell(row=8, column=2).value = status
+    ws.cell(row=9, column=2).value = datetime.now()
+    ws.cell(row=10, column=2).value = scenario
+    ws.cell(row=11, column=2).value = forecast_start
+    ws.cell(row=12, column=2).value = f"{horizon_weeks} weeks"
+    ws.cell(row=13, column=2).value = batches
+    ws.cell(row=14, column=2).value = og_tanks
+    ws.cell(row=15, column=2).value = f"{elapsed_s:.1f}s"
+    ws.cell(row=16, column=2).value = warnings
 
 
 def write_calibration_diagnostics(

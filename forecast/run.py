@@ -29,6 +29,8 @@ from .excel_io import (
     read_pinned_harvests,
     read_pinned_transfers,
     write_advisory,
+    write_control_status,
+    write_validation_log,
     write_batch_locations,
     write_biology_projection,
     write_calibration_diagnostics,
@@ -307,6 +309,25 @@ def main(workbook_path: str | Path | None = None) -> int:
 
     # Write the plan outputs from Stage 2 placement.
     write_batch_locations(wb, placement.batch_locations)
+    # Density violations enumerated from BatchLocations vs per-tank cap.
+    # OG6N is excluded in purge mode (no biomass cap on depuration tanks).
+    from .sixn import is_purge_mode as _is_purge_mode
+    tank_cap_by_id = {t.tank_id: t.max_density_kg_m3 for t in facility.tanks}
+    tank_sys_by_id = {t.tank_id: t.system_id for t in facility.tanks}
+    density_violations = []
+    for r in placement.batch_locations:
+        cap = tank_cap_by_id.get(r.tank_id, 0.0)
+        if cap <= 0:
+            continue
+        # OG6N skipped when that week is in purge mode (state.check_invariants
+        # mirrors this carve-out at hydration time).
+        if (tank_sys_by_id.get(r.tank_id) == "OG6N"
+                and _is_purge_mode(control, r.week_start)):
+            continue
+        if r.density_kg_m3 > cap:
+            density_violations.append(
+                (r.week_label, r.location_id, r.batch_id, r.density_kg_m3, cap)
+            )
     # Per-week HOG yield overrides from FacilityLimits.
     facility_hog_overrides = {
         wk_label: y
@@ -322,13 +343,16 @@ def main(workbook_path: str | Path | None = None) -> int:
         wb, placement.transfer_events, placement.tranog_events,
         grade_events=placement.grade_events,
     )
-    write_advisory(
-        wb,
+    advisory_kwargs = dict(
         residuals=residuals,
         placement_warnings=placement.warnings,
         scheduler_warnings=sched_warns,
         bottlenecks=canvas.bottlenecks,
+        density_violations=density_violations,
+        invariant_warnings=list(hydration_warns) + list(inv_warns),
     )
+    write_advisory(wb, **advisory_kwargs)
+    write_validation_log(wb, **advisory_kwargs)
     write_daily_harvest_schedule(
         wb, placement.harvest_events, fs_date,
         default_hog_yield=control.default_hog_yield,
@@ -364,9 +388,32 @@ def main(workbook_path: str | Path | None = None) -> int:
     )
     write_facility_map(wb, placement.batch_locations, facility)
 
+    # Run summary back to Control R8-R16 (DESIGN §1) — operator's
+    # in-workbook signal that the run completed + a snapshot of scope.
+    elapsed = time.time() - t0
+    total_warnings = (
+        len(residuals) + len(canvas.bottlenecks)
+        + len(sched_warns) + len(placement.warnings)
+        + len(density_violations) + len(hydration_warns) + len(inv_warns)
+    )
+    status = "ok" if total_warnings == 0 else "warn"
+    og_tank_count = sum(1 for t in facility.tanks if t.type == "OG")
+    write_control_status(
+        wb,
+        status=status,
+        scenario=control.scenario_name,
+        forecast_start=control.forecast_start,
+        horizon_weeks=control.horizon_weeks,
+        batches=len(batches),
+        og_tanks=og_tank_count,
+        elapsed_s=elapsed,
+        warnings=total_warnings,
+    )
+
     wb.save(path)
     wb.close()
-    print(f"\nSaved workbook {path}  ({time.time() - t0:.2f}s)")
+    print(f"\nSaved workbook {path}  ({elapsed:.2f}s, status={status}, "
+          f"warnings={total_warnings})")
     return 0
 
 
