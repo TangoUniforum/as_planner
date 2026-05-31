@@ -805,9 +805,15 @@ def _build_facility_assignment_plan(
     # each OG1/2 tank the batch still holds (claim a free OG3-6 tank,
     # release the OG1/2 tank). Firing every week makes the drain
     # contention-resilient: if OG3-6 is full at the crossing week, the
-    # batch keeps swapping in following weeks as grow-out tanks free up,
-    # instead of being stuck in the nursery. Handler is a no-op once the
-    # batch holds no OG1/2 tanks.
+    # batch keeps swapping in following weeks as grow-out tanks free up.
+    # Handler is a no-op once the batch holds no OG1/2 tanks.
+    #
+    # NOTE 2026-05-30 (Q-COORD.K, lever B investigated): we tried lowering
+    # this threshold to 700-850g to opportunistically claim OG3-6 BEFORE
+    # the 1 kg crossing. On the reference workbook it provided zero
+    # benefit because the plan's OG3-6 free pool is 0 from W20 onward
+    # (older PR batches' EVT_ADDs claim every tank to meet their own 85%
+    # density target). Reverted; see lock record §Q-COORD.K.
     for bid in sorted(timelines.keys()):
         bw = sorted(
             ((wl, batch_week_facts[(bid, wl)]) for (b, wl) in batch_week_facts

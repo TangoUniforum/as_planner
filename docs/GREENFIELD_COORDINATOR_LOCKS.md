@@ -356,6 +356,40 @@ residual is the genuine operator-side PR concentration limit
 allocation. Recovering it would require either operator-side PR
 correction or relaxing an operational rule.
 
+### Q-COORD.K — Pre-emptive MIGRATE trigger (INVESTIGATED, NOT IMPLEMENTED, 2026-05-30)
+
+Hypothesis: lower the EVT_MIGRATE eligibility gate from `avg_wt >= 1.0`
+to e.g. `>= 0.85` (or `>= 0.7`) so cohorts approaching the 1 kg
+threshold opportunistically claim OG3-6 tanks while the pool has free
+slots, before they're consumed by older-FIFO batches' EVT_ADDs in
+later weeks. The system-progression law (DESIGN §4) explicitly permits
+OG1/2 → OG3-6 transfer at any weight, so the trigger is legal.
+
+**Diagnosis**: traced B46's MIGRATE attempts with thresholds at 850g
+and 700g. In both cases, `free_og36` (free OG3-6 tank count in the
+assignment plan) is **0 from forecast week W20 onward** — the plan is
+over-subscribed by older PR batches (B41–B45) whose `EVT_ADD` events
+claim every OG3-6 tank to meet their own per-week 85% density target.
+MIGRATE for B46 has zero destinations to claim regardless of trigger
+weight. The realized state shows 1–2 free OG3-6 tanks per week because
+some plan claims fail to materialize in Phase D (plan-vs-realized
+divergence, e.g. INV-4 refusals), but the *plan* has no slack to
+exploit.
+
+**Empirical**: 196 violations / worst 169.5 kg/m³ at both 850g and
+700g thresholds — identical to the unchanged 1000g baseline. Reverted.
+
+**Implication**: the residual ~147 addressable violations after
+Q-COORD.J are bounded by the Q-COORD.B sticky floor (PR-allocated
+older batches monopolize OG3-6 even when their per-tank density is
+under cap). Recovering them requires either:
+1. An operator-blessed exception to the sticky floor allowing
+   donor-recipient OG3-6 rebalance from less-stressed batches to
+   over-cap batches.
+2. Operator-side correction of B46's PR concentration.
+3. A workbook with staggered input dates that avoids the W20-W34
+   peak-overlap of B41-B46.
+
 ## §3 — Empirical results (reference workbook, 2026-05-28)
 
 | Metric | Pre-coordinator | Coordinator |
