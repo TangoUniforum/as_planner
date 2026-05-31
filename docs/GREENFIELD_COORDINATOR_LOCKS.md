@@ -379,9 +379,36 @@ reference workbook never enters production mode.
 
 ## §6 — Open / deferred
 
-- **Production-mode 6N allocation** — make OG6N exclusion conditional
-  on `is_purge_mode` so OG6N becomes allocatable post-transition.
-  Future work; needs a production-mode workbook to exercise.
+- **Production-mode 6N allocation** — make the OG6N exclusion in
+  `placement._OG_ALL` conditional on `is_purge_mode` so OG6N becomes
+  allocatable post-transition; remove sister tanks 67/69/71 from the
+  free pool in production mode. DELIBERATELY DEFERRED 2026-05-30 (this
+  session) per operator decision: the reference workbook is 52/52 weeks
+  purge mode, so any production-mode implementation cannot be
+  regression-verified. Scope reopens when a production-mode workbook
+  exists. The scaffolding cost is low (~30 lines + a gate), but writing
+  unverifiable code violates the project's precalc-first-and-defendable
+  principle. Track 4 of the 2026-05-30 polish session.
+- **Starvation window (DESIGN §5b)** — `STAGE_STARVE` and
+  `starvation_days_remaining` are defined in `state.py` and respected
+  in `biology.advance_tank_one_day` (zero growth, mortality continues),
+  but no code path ever sets a tank to STARVE. The window is the
+  production-mode equivalent of the §5a 6N purge cycle, so it shares
+  the same deferral rationale as production-mode 6N above.
+- **AccumulatedOutput sheet** — listed in DESIGN §1 layer [4] alongside
+  WeeklyReport / MonthlyReport but never specified. DEFERRED 2026-05-30
+  pending a schema definition (operator-side decision). The other 11
+  DESIGN-required outputs are implemented (see commits 49371bc /
+  63d2daa / 6869e36).
+- **GradedHarvest path (DESIGN §5a)** — IMPLEMENTED 2026-05-30 as a
+  fallback in `placement._try_graded_move_in`. Fires only when the
+  regular FIFO purge cascade finds no batch with avg ≥
+  `min_harvest_weight`. Computes upper-truncated normal conditional
+  means (`biology.upper_truncated_split`) to size the pickup (≥
+  threshold) and retention (< threshold) portions. Unit-tested in
+  `tests/test_units.py`. Does not fire on the reference workbook
+  (production inventory is always sufficient), so no behavioral shift
+  vs the 212 baseline — correct-by-construction.
 - **Merge to master + golden-cell refresh** — left to operator per
   commit cadence. Master remains at pre-coordinator baseline as a
   clean rollback point.

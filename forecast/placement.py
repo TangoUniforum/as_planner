@@ -49,7 +49,8 @@ from .caps import (
     resolve_system_cap,
     system_cap_with_buffer,
 )
-from .events import Grade, Harvest, OG12_SYSTEMS, OG12_MOVE_LOCK_WT_G, TankAllocation, Transfer, TranOGEntry
+from .biology import upper_truncated_split
+from .events import Grade, GradedHarvest, Harvest, OG12_SYSTEMS, OG12_MOVE_LOCK_WT_G, TankAllocation, Transfer, TranOGEntry
 from .harvest_scheduler import HarvestDemand
 from .models import (
     BatchInput,
@@ -701,6 +702,114 @@ def _pick_fifo_move_in_batches(
     return [bid for _, _, bid in out]
 
 
+def _try_graded_move_in(
+    state: FacilityState,
+    batch_meta: dict[str, BatchInput],
+    control: ControlParams,
+    week_label: str,
+    week_start_date: date,
+    pair: tuple[int, int],
+    transfer_events: list,
+    warnings: list[str],
+    min_fraction: float = 0.10,
+) -> float:
+    """Graded harvest fallback (DESIGN §5a) when no batch's avg_wt is
+    above min_harvest_weight.
+
+    Walks FIFO across batches; for each production tank where the
+    average is below threshold but a fraction ≥ `min_fraction` of fish
+    are at or above it, computes the upper/lower conditional means and
+    emits a `GradedHarvest`: the big portion goes to the purge pair
+    main tank (pickup), the small portion to a free OG3+ tank
+    (retention). Returns the count moved into pickup. Fires for one
+    tank max per week (single GradedHarvest event); the pair will be
+    refilled normally on later weeks as biology grows the remaining
+    fish past threshold.
+    """
+    from statistics import NormalDist as _ND
+    min_hv = control.min_harvest_weight_g
+    if min_hv <= 0:
+        return 0.0
+    _std = _ND()
+
+    def frac_above(avg_wt: float, cv_pct: float, t: float) -> float:
+        if avg_wt <= 0 or cv_pct <= 0:
+            return 1.0 if avg_wt >= t else 0.0
+        z = (t - avg_wt) / (avg_wt * cv_pct / 100.0)
+        return max(0.0, min(1.0, 1.0 - _std.cdf(z)))
+
+    fifo = sorted(
+        batch_meta.values(),
+        key=lambda b: b.input_date.date() if hasattr(b.input_date, "date")
+        else (b.input_date or date.max),
+    )
+    chosen = None
+    for b in fifo:
+        cands = [
+            t for t in state.tanks_by_id.values()
+            if t.batch_id == b.batch_id and not t.is_empty
+            and t.system_id not in _SIXN_SYSTEMS
+            and t.avg_wt_g < min_hv  # not eligible for regular move-in
+        ]
+        # Prefer largest avg first (closer to threshold => fatter tail).
+        cands.sort(key=lambda t: t.avg_wt_g, reverse=True)
+        for t in cands:
+            if frac_above(t.avg_wt_g, t.cv_pct or 16.0, min_hv) >= min_fraction:
+                chosen = t
+                break
+        if chosen:
+            break
+
+    if chosen is None:
+        return 0.0
+
+    # Retention: lowest-id free OG3+ tank not in 6N pipeline.
+    retention = next(
+        (t for t in sorted(state.tanks_by_id.values(), key=lambda x: x.tank_id)
+         if t.is_empty and t.type == "OG"
+         and t.system_id not in _SIXN_SYSTEMS
+         and t.system_id not in OG12_SYSTEMS),
+        None,
+    )
+    if retention is None:
+        warnings.append(
+            f"{week_label}: graded move-in for {chosen.batch_id} "
+            f"{chosen.location_id} declined (no free OG3+ retention tank)"
+        )
+        return 0.0
+
+    cv = chosen.cv_pct or 16.0
+    frac = frac_above(chosen.avg_wt_g, cv, min_hv)
+    big_count = chosen.count * frac
+    small_count = chosen.count - big_count
+    big_avg, small_avg = upper_truncated_split(chosen.avg_wt_g, cv, min_hv)
+
+    ev = GradedHarvest(
+        batch_id=chosen.batch_id,
+        event_date=week_start_date,
+        source_tank_id=chosen.tank_id,
+        pickup_tank_id=pair[0],
+        pickup_count=big_count,
+        pickup_avg_wt_g=big_avg,
+        retention_tank_id=retention.tank_id,
+        retention_count=small_count,
+        retention_avg_wt_g=small_avg,
+        cv_pct=cv,
+    )
+    warns = ev.apply(state)
+    warnings.extend(warns)
+    warnings.append(
+        f"{week_label}: graded move-in for {chosen.batch_id} "
+        f"{chosen.location_id} (avg {chosen.avg_wt_g:.0f}g, "
+        f"{frac*100:.0f}% above {min_hv:.0f}g): "
+        f"{big_count:.0f} fish ({big_avg:.0f}g) -> pickup, "
+        f"{small_count:.0f} ({small_avg:.0f}g) -> retention "
+        f"{retention.location_id}"
+    )
+    transfer_events.append(ev)
+    return big_count
+
+
 def _run_sixn_purge_week(
     state: FacilityState,
     pair_queue: list[tuple[int, int]],
@@ -788,11 +897,19 @@ def _run_sixn_purge_week(
     # 2. Pick FIFO move-in source batches (cascade list).
     move_in_batches = _pick_fifo_move_in_batches(state, batch_meta, control)
     if not move_in_batches:
-        warnings.append(
-            f"{week_label}: 6N pair {pair} harvested but no production batch "
-            "above min_harvest_weight available for move-in (pair stays in "
-            "rotation, will be empty next harvest)"
+        # Last-resort: graded move-in (DESIGN §5a) — peel the
+        # above-threshold tail from a tank whose average is below
+        # threshold but has a meaningful upper portion.
+        moved = _try_graded_move_in(
+            state, batch_meta, control, week_label, week_start_date,
+            pair, transfer_events, warnings,
         )
+        if moved <= 0:
+            warnings.append(
+                f"{week_label}: 6N pair {pair} harvested but no production "
+                "batch above min_harvest_weight available for move-in (pair "
+                "stays in rotation, will be empty next harvest)"
+            )
         pair_queue.append(pair)
         return
 

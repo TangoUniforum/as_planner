@@ -157,6 +157,36 @@ def _apply_bottom_cull(
     return new_count, new_avg, culled_count, culled_biomass_kg
 
 
+def upper_truncated_split(
+    avg_wt_g: float, cv_pct: float, threshold_g: float,
+) -> tuple[float, float]:
+    """Split a normal distribution at `threshold_g`, return conditional means.
+
+    For N(mu=avg_wt_g, sigma=avg_wt_g*cv_pct/100), returns
+    (E[X | X >= threshold], E[X | X < threshold]) via the Mills ratio:
+
+      E[X | X >= t] = mu + sigma * phi(z) / (1 - Phi(z))
+      E[X | X <  t] = mu - sigma * phi(z) / Phi(z)
+
+    where z = (t - mu) / sigma. Used by the graded-harvest path (DESIGN
+    §5a) to size the >= harvest-weight portion (pickup) and < harvest-
+    weight portion (retention) when a tank's average is below threshold
+    but its upper tail crosses it.
+    """
+    if avg_wt_g <= 0 or cv_pct <= 0:
+        return (avg_wt_g, avg_wt_g)
+    sigma = avg_wt_g * cv_pct / 100.0
+    z = (threshold_g - avg_wt_g) / sigma
+    Phi_z = NormalDist().cdf(z)
+    if Phi_z <= 1e-9 or Phi_z >= 1 - 1e-9:
+        # Almost all fish on one side — collapse to avg_wt to avoid blow-up.
+        return (avg_wt_g, avg_wt_g)
+    phi_z = math.exp(-0.5 * z * z) / math.sqrt(2 * math.pi)
+    upper_mean = avg_wt_g + sigma * phi_z / (1 - Phi_z)
+    lower_mean = avg_wt_g - sigma * phi_z / Phi_z
+    return (max(0.0, upper_mean), max(0.0, lower_mean))
+
+
 def compute_size_class_split(
     batch_id: str,
     tran_og_date,
