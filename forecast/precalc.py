@@ -843,14 +843,10 @@ def _build_facility_assignment_plan(
                 "peak_fact": peak_fact,
                 "will_violate_cap": will_violate_cap,
             }))
-        # Sort worst-first and emit advisory bottlenecks. We do NOT
-        # emit planner-action events on this workbook — see Q-COORD.L
-        # in the lock record: three attempts at planner-emitted PR
-        # claims (naive, coordinated 1-per-batch, hard-cap-only) all
-        # regressed the workbook because the assignment plan reserves
-        # every OG3-6 tank for older batches' future ADD events.
-        # Any claim STEALS from an older batch that will need it later
-        # and cascades into more violations than it relieves.
+        # Advisory-only: emit a bottleneck per flagged batch. Four
+        # planner-action variants have been tried (see Q-COORD.L in
+        # the lock record); all regressed the over-subscribed workbook.
+        # The honest "address" is upstream operator action.
         candidates.sort(key=lambda c: -c[0])
         for _, bid, _peak_eligibility, meta in candidates:
             bottlenecks.append(Bottleneck(

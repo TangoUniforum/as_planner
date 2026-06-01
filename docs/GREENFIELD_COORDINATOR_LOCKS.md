@@ -398,13 +398,24 @@ operator's W1 to-do list includes a "split this concentrated cohort
 into N tanks" Transfer. The system-progression law permits OG1/2 →
 OG3-6 transfer at any weight, so the claim is legal.
 
-**Three attempts, all regressed the workbook:**
+**Four attempts, all regressed the workbook:**
 
 | Variant | Claims per batch | Eligibility | Result |
 |---|---|---|---|
 | Naive: claim for every flagged batch (≥85% target) | up to N (target − current) | peak-week | 196 → 291 viols, worst 169.5 → 240.9 |
 | Coordinated: worst-first, 1 tank max per batch | 1 | peak-week | 196 → 283 viols, worst 169.5 → 173.1 |
 | Hard-cap gate: only batches projected to exceed 95 kg/m³ | 1 | peak-week | 196 → 243 viols, worst 169.5 → 193.0 |
+| Sub-1kg intra-OG1/2 only (no OG3-6 claims) | 1 | OG1/2 only | 196 → 243 viols, worst 169.5 → 193.0 |
+
+The 4th attempt was the project lead's question: "can we split groups
+inside OG1/2 while they're sub-1kg as a tool to help?" The split IS
+legal per the system-progression law (DESIGN §4). But claiming an
+OG1/2 tank for B47 at W0 means an incoming TranOG arrival (B48 at W28)
+has fewer OG1/2 destinations and overflows to OG3+ via the existing
+EVT_TRANOG overflow logic. That OG3+ tank was being held for an older
+batch's grow-out, which now becomes under-allocated. The OG1/2 claim
+just shifts the contention through a different cascade path; the
+facility constraint is the same.
 
 **Diagnosis (same as Q-COORD.K):** the assignment plan's OG3-6 pool is
 **0-free from W20 onward** — older PR batches' EVT_ADD events claim
