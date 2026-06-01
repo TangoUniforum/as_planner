@@ -57,6 +57,11 @@ from .time_grid import forecast_week_labels, parse_iso_label, week_start
 _OG12_MOVE_LOCK_WT_G = 1000.0
 
 
+# Per-tank density target as a fraction of the cap — 85% leaves 15%
+# growth headroom and matches the Phase D Grade-trigger threshold so
+# precalc and runtime agree on "tank near cap".
+DENSITY_TARGET_PCT = 0.85
+
 _OG12 = frozenset({"OG1N", "OG1S", "OG2N", "OG2S"})
 _OG36 = frozenset({"OG3N", "OG3S", "OG4N", "OG4S",
                    "OG5N", "OG5S", "OG6N", "OG6S"})
@@ -195,8 +200,11 @@ class Bottleneck:
         "facility_biomass",   # projected post-harvest biomass > upper band
         "facility_feed",      # projected feed/day > upper band
         "tranog_unmet",       # TranOG arrival cannot allocate OG1/2 tanks
+        "assignment_tranog_unmet",  # coordinator TranOG arrival short
         "og12_residual",      # >=1 kg batch carries OG12 transit residual
         "biomass_below_band_window",  # natural carrying capacity below lower band
+        "pr_concentration",   # PR-seeded batch projected to exceed cap;
+                               # advisory recommending operator split upstream
     )
 
 
@@ -397,11 +405,9 @@ def _build_batch_week_facts(
     max_kg = _max_kg_per_og_tank(facility)
     min_h_wt = control.min_harvest_weight_g
 
-    # Density-aware sizing: each tank packed to 85% of cap, leaving 15%
-    # growth headroom. Same threshold as runtime Grade-split trigger so
-    # precalc and Phase D agree. Per-week sizing only — the lifetime-max
-    # backward sweep was removed (see NOTE below).
-    DENSITY_TARGET_PCT = 0.85
+    # Density-aware sizing: each tank packed to DENSITY_TARGET_PCT of
+    # cap. Per-week sizing only — the lifetime-max backward sweep was
+    # removed (see NOTE below).
     effective_max_kg = max_kg * DENSITY_TARGET_PCT
 
     out: dict[tuple[str, str], BatchWeekFact] = {}
@@ -765,6 +771,74 @@ def _build_facility_assignment_plan(
                 if surplus > 0:
                     events.append((first_week, EVT_PR_REBALANCE, bid,
                                    surplus, ()))
+
+    # PR_CONCENTRATION_ADVISORY: surface operator-actionable detection
+    # of PR-concentrated batches. For each PR-seeded batch, look ahead
+    # PR_CORRECTION_WEEKS at projected biomass. If the per-tank density
+    # (assuming current tank count stays constant) would exceed
+    # DENSITY_TARGET_PCT of cap at any point, emit a Bottleneck row
+    # advising the operator how many additional tanks to split into
+    # BEFORE the next run.
+    #
+    # We do NOT claim the extra tanks here. The planner-emitted
+    # rebalance variant was tried (EVT_PR_CORRECTION claiming free
+    # tanks at W0) and made things worse on the reference workbook
+    # (196 -> 291 viols): the facility's OG3-6 pool is saturated, so
+    # any claim STEALS from older batches that need those tanks too.
+    # The dominant residual is operator-side per Q-COORD.F — flagging
+    # it lets the operator fix it upstream where it's actually fixable.
+    PR_CORRECTION_WEEKS = 8
+    max_kg = _max_kg_per_og_tank(facility)
+    if first_week is not None and max_kg > 0:
+        for bid, tanks in sorted(current_tanks.items()):
+            pr_count = len(tanks)
+            if pr_count == 0:
+                continue
+            bw_lookahead = sorted(
+                ((wl, batch_week_facts[(bid, wl)])
+                 for (b, wl) in batch_week_facts
+                 if b == bid and batch_week_facts[(b, wl)].stage == "SW"),
+                key=lambda x: x[0],
+            )[:PR_CORRECTION_WEEKS]
+            if not bw_lookahead:
+                continue
+            # Effective post-PR_REBALANCE count: PR_REBALANCE sheds
+            # surplus tanks down to W0's needed_now, so use the smaller
+            # of pr_count and needed_now (when needed_now > 0).
+            first_needed = max(0, bw_lookahead[0][1].tanks_needed_at_density_cap)
+            effective_count = (min(pr_count, max(1, first_needed))
+                               if first_needed > 0 else pr_count)
+            peak_biomass = max(f.biomass_kg_after_harvest
+                               for _, f in bw_lookahead)
+            per_tank_at_peak = peak_biomass / effective_count
+            if per_tank_at_peak <= max_kg * DENSITY_TARGET_PCT:
+                continue
+            target = int(math.ceil(peak_biomass /
+                                    (max_kg * DENSITY_TARGET_PCT)))
+            additional = target - effective_count
+            if additional <= 0:
+                continue
+            peak_idx = max(
+                range(len(bw_lookahead)),
+                key=lambda i: bw_lookahead[i][1].biomass_kg_after_harvest,
+            )
+            peak_wl, peak_fact = bw_lookahead[peak_idx]
+            bottlenecks.append(Bottleneck(
+                week_label=first_week,
+                system_id=None,
+                kind="pr_concentration",
+                detail=(
+                    f"{bid} held in {effective_count} tank(s) after W0 "
+                    f"rebalance; projected to reach "
+                    f"{per_tank_at_peak:,.0f} kg/tank "
+                    f"({per_tank_at_peak / 1720:.0f} kg/m³) at {peak_wl} "
+                    f"(avg_wt {peak_fact.avg_wt_g:.0f}g). Recommend operator "
+                    f"split into {target} tanks ({additional} more) before "
+                    f"next run to keep per-tank density "
+                    f"<= {DENSITY_TARGET_PCT*100:.0f}% of cap"
+                ),
+                deficit=additional,
+            ))
 
     # Per-week TARGET (EVT_ADD) + shrink (EVT_RELEASE) + TranOG events.
     # CONTENTION-RESILIENT: a TARGET event fires EVERY SW week carrying
