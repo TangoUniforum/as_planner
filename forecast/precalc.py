@@ -741,10 +741,11 @@ def _build_facility_assignment_plan(
     # runs BEFORE ADD so freed capacity rejoins the pool the same week.
     EVT_PR_INIT = 0
     EVT_PR_REBALANCE = 1
-    EVT_MIGRATE = 2
-    EVT_TRANOG = 3
-    EVT_RELEASE = 4
-    EVT_ADD = 5
+    EVT_PR_CORRECTION = 2
+    EVT_MIGRATE = 3
+    EVT_TRANOG = 4
+    EVT_RELEASE = 5
+    EVT_ADD = 6
 
     events: list[tuple] = []
     # (week_label, type_priority, batch_id, delta, eligibility_tuple)
@@ -843,11 +844,28 @@ def _build_facility_assignment_plan(
                 "peak_fact": peak_fact,
                 "will_violate_cap": will_violate_cap,
             }))
-        # Advisory-only: emit a bottleneck per flagged batch. Four
-        # planner-action variants have been tried (see Q-COORD.L in
-        # the lock record); all regressed the over-subscribed workbook.
-        # The honest "address" is upstream operator action.
+        # Coordinated PR correction (Q-COORD.L, ACCEPTED 2026-06-01).
+        # Sort worst-first. For each flagged batch, emit an advisory
+        # bottleneck. For batches projected to exceed the HARD cap
+        # (>95 kg/m³, not just the 85% target), also emit
+        # EVT_PR_CORRECTION — the planner reserves 1 free tank in W0
+        # so the operator sees the recommended split as a concrete
+        # Transfer event in week 1. Eligibility per batch's current
+        # status: sub-1kg → OG1/2 (intra-OG1/2 split, legal); ≥1kg →
+        # OG3-6 (cross-system Transfer, legal). Worst-first ordering +
+        # 1 tank cap bound the action.
+        #
+        # ACCEPTED TRADE-OFF: the action regresses the simulation
+        # violation count (196 → 243 baseline) because the simulation
+        # honestly cascades downstream effects (TranOG overflow,
+        # contested OG3-6). But semantic correctness wins: the
+        # operator receives actionable week-1 instructions ("split B47
+        # 1→2 tanks"), and the simulation's cascading view tells them
+        # what to plan around. Advisory-only was passive; this surfaces
+        # the recommendation as part of the operational output.
+        pr_correction_priority: dict[str, int] = {}
         candidates.sort(key=lambda c: -c[0])
+        action_counter = 0
         for _, bid, _peak_eligibility, meta in candidates:
             bottlenecks.append(Bottleneck(
                 week_label=first_week,
@@ -865,6 +883,23 @@ def _build_facility_assignment_plan(
                 ),
                 deficit=meta["additional"],
             ))
+            # Planner-action gate: only emit for hard-cap violators.
+            if not meta["will_violate_cap"]:
+                continue
+            # Eligibility = batch's W0 status. Sub-1kg → intra-OG1/2
+            # split (legal). ≥1kg → cross-system Transfer to OG3-6
+            # (legal per system-progression law).
+            first_fact = batch_week_facts.get((bid, first_week))
+            if first_fact is None:
+                continue
+            if first_fact.avg_wt_g < _OG12_MOVE_LOCK_WT_G:
+                action_eligibility = tuple(sorted(_OG12))
+            else:
+                action_eligibility = tuple(sorted(_OG36))
+            pr_correction_priority[bid] = action_counter
+            action_counter += 1
+            events.append((first_week, EVT_PR_CORRECTION, bid,
+                           1, action_eligibility))
 
     # Per-week TARGET (EVT_ADD) + shrink (EVT_RELEASE) + TranOG events.
     # CONTENTION-RESILIENT: a TARGET event fires EVERY SW week carrying
@@ -948,6 +983,10 @@ def _build_facility_assignment_plan(
         fifo_age[bid] = i
     def _sort_key(e):
         wk, etype, bid, _delta, _elig = e
+        # EVT_PR_CORRECTION fires worst-first (most-stressed PR cohort
+        # gets first pick from the bounded W0 free pool).
+        if etype == EVT_PR_CORRECTION:
+            return (wk, etype, pr_correction_priority.get(bid, 1_000_000), bid)
         return (wk, etype, fifo_age.get(bid, 1_000_000), bid)
     events.sort(key=_sort_key)
 
@@ -1058,6 +1097,33 @@ def _build_facility_assignment_plan(
                 f"PR_REBALANCE: released {delta} surplus tank(s) "
                 f"(PR had {len(candidates)}, precalc needs {len(candidates) - delta})"
             )
+
+        elif etype == EVT_PR_CORRECTION:
+            # Claim 1 free tank for an over-cap-projected PR cohort.
+            # eligible_set chosen by emitter: OG1/2 for sub-1kg
+            # (intra-OG1/2 split); OG3-6 for ≥1kg (cross-system).
+            # Worst-first ordering (via pr_correction_priority) means
+            # the most-stressed cohort claims first; the bounded W0
+            # free pool gives later batches advisory only.
+            claimed = None
+            for sys in sorted(eligible_set):
+                if sys in _SIXN_PIPELINE:
+                    continue
+                for t in og_tank_ids_by_system.get(sys, []):
+                    if tank_owner[t] is None:
+                        claimed = t
+                        break
+                if claimed is not None:
+                    break
+            if claimed is not None:
+                tank_owner[claimed] = bid
+                batch_set.add(claimed)
+                notes.append(
+                    f"PR_CORRECTION: claimed tank #{claimed} "
+                    f"({tank_to_system[claimed]}) to relieve PR over-"
+                    f"concentration; operator: execute the W1 Transfer "
+                    f"to split the cohort"
+                )
 
         elif etype == EVT_MIGRATE:
             # 1:1 swap OG1/2 -> OG3-6 for each OG1/2 tank the batch still

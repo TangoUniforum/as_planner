@@ -118,7 +118,7 @@ def main() -> int:
             binding.append((wl, req12, ex12, req36, ex36))
 
     # Current empirical baseline (locked in tests/test_coordinator_regression).
-    ACTUAL = 196  # 2026-05-30, Q-COORD.J cross-scope even-out
+    ACTUAL = 243  # 2026-06-01, Q-COORD.L EVT_PR_CORRECTION accepted
     print(f"THEORETICAL FLOOR (forced over-capacity tank-weeks): "
           f"{floor_total}")
     print(f"Actual run (incremental coordinator): {ACTUAL} violations")

@@ -2,10 +2,10 @@
 
 Locks the empirical baseline of the incremental assignment coordinator
 (exit-at-1kg + per-week top-up + forward-peak staggering + even-out
-with cross-scope OG1/2 → OG3-6 pass; see
-docs/GREENFIELD_COORDINATOR_LOCKS.md Q-COORD.A-J):
+with cross-scope OG1/2 → OG3-6 pass + EVT_PR_CORRECTION worst-first
+1-tank claim; see docs/GREENFIELD_COORDINATOR_LOCKS.md Q-COORD.A-L):
 
-    density violations <= 196,  worst <= 170 kg/m^3,
+    density violations <= 243,  worst <= 195 kg/m^3,
     0 count/biomass drift,  7/7 TranOG arrivals placed.
 
 Runs the real pipeline on a COPY of Forecast.xlsm so the source
@@ -27,8 +27,12 @@ WORKBOOK = ROOT / "Forecast.xlsm"
 # 2026-05-28: 212 / 185 (Q-COORD.A-I locks).
 # 2026-05-30: 196 / 169.5 (Q-COORD.J cross-scope OG1/2 -> OG3-6 even-out
 #   relieved B46/B48-class hotspots).
-MAX_VIOLATIONS = 196
-MAX_WORST_DENSITY = 170.0
+# 2026-06-01: 243 / 193.0 (Q-COORD.L ACCEPTED: EVT_PR_CORRECTION emits
+#   the recommended PR split as a concrete W1 action. Semantic
+#   correctness over simulation metric — see lock record for the
+#   accepted trade-off rationale).
+MAX_VIOLATIONS = 243
+MAX_WORST_DENSITY = 195.0
 EXPECTED_TRANOG = 7
 
 pytestmark = pytest.mark.skipif(

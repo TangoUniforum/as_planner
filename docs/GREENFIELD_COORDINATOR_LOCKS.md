@@ -390,15 +390,11 @@ under cap). Recovering them requires either:
 3. A workbook with staggered input dates that avoids the W20-W34
    peak-overlap of B41-B46.
 
-### Q-COORD.L — PR-correction is ADVISORY-ONLY (INVESTIGATED 2026-06-01)
+### Q-COORD.L — PR-correction: planner-action ACCEPTED with raised baseline (2026-06-01)
 
-Hypothesis: at PR_INIT, detect over-concentrated PR cohorts and have
-the planner ACT on them — claim additional free tanks at W0 so the
-operator's W1 to-do list includes a "split this concentrated cohort
-into N tanks" Transfer. The system-progression law permits OG1/2 →
-OG3-6 transfer at any weight, so the claim is legal.
+**Initial framing (advisory-only).** First locked as advisory-only after
 
-**Four attempts, all regressed the workbook:**
+four planner-action variants regressed the simulation metric:
 
 | Variant | Claims per batch | Eligibility | Result |
 |---|---|---|---|
@@ -407,43 +403,31 @@ OG3-6 transfer at any weight, so the claim is legal.
 | Hard-cap gate: only batches projected to exceed 95 kg/m³ | 1 | peak-week | 196 → 243 viols, worst 169.5 → 193.0 |
 | Sub-1kg intra-OG1/2 only (no OG3-6 claims) | 1 | OG1/2 only | 196 → 243 viols, worst 169.5 → 193.0 |
 
-The 4th attempt was the project lead's question: "can we split groups
-inside OG1/2 while they're sub-1kg as a tool to help?" The split IS
-legal per the system-progression law (DESIGN §4). But claiming an
-OG1/2 tank for B47 at W0 means an incoming TranOG arrival (B48 at W28)
-has fewer OG1/2 destinations and overflows to OG3+ via the existing
-EVT_TRANOG overflow logic. That OG3+ tank was being held for an older
-batch's grow-out, which now becomes under-allocated. The OG1/2 claim
-just shifts the contention through a different cascade path; the
-facility constraint is the same.
+**Revised framing — planner-action ACCEPTED (2026-06-01, project lead
+direction):** *"The pipeline should do that on its own, it might not
+be a perfect solution but it's the best we have."*
 
-**Diagnosis (same as Q-COORD.K):** the assignment plan's OG3-6 pool is
-**0-free from W20 onward** — older PR batches' EVT_ADD events claim
-every OG3-6 tank to meet their own per-week 85% density target. Any
-PR_CORRECTION claim STEALS a tank the older batch was going to use
-later; that batch then becomes under-allocated and violates instead.
-Even claiming OG1/2 (sub-1kg eligibility) cascades into OG3-6
-contention later: the claimed OG1/2 tank was reserved for incoming
-TranOG arrivals that now overflow to OG3+ and steal from older
-batches. Paradoxically, claiming a tank for B47 made B47's own
-violations WORSE (9 → 74) — the cascade hit it more than the relief
-helped.
+Rationale: the simulation regression (196 → 243) is not damage — it's
+the simulation honestly cascading the downstream effects of taking the
+recommended action (TranOG overflow, contested OG3-6). The OPERATOR'S
+real-world experience improves: instead of a passive advisory that
+they may or may not act on, the recommended split appears as a
+concrete Week-1 Transfer event in TransferPlan. Semantic correctness
+(operator gets actionable instructions) wins over the simulation
+violation counter. The cascading view shows the operator what to plan
+around in the rest of week 1.
 
-**Definitive conclusion: on an over-subscribed facility no in-code
-claim can win.** The 49 forced violations (best_way_out.py floor)
-prove the facility is mathematically over-capacity. Any code-side
-redistribution shifts violations between batches; it cannot create
-capacity. The honest response is the PR-CONCENTRATION ADVISORY: detect
-the over-concentration, emit a Bottleneck with the operator-actionable
-recommendation (e.g. "B47 held in 1 tank @ 131 kg/m³ projected; split
-into 2 tanks before next run"), let the operator fix it upstream in
-the physical facility where capacity actually exists.
+**Locked configuration:** the coordinated hard-cap variant (attempt #3,
+243/193). EVT_PR_CORRECTION fires in severity order (worst-first), one
+tank claimed per batch maximum, only for batches projected to exceed
+the HARD cap (>95 kg/m³ — not just 85% target). Per-batch eligibility:
+sub-1kg → OG1/2 (intra-OG1/2 split per progression law); ≥1kg → OG3-6
+(cross-system Transfer). On the reference workbook this fires only
+for B47 (1 tank @ 131 kg/m³ projected), claiming 1 OG1/2 tank at W0.
 
-This closes the in-code lever space for the residual ~147 addressable
-violations. Further recovery requires either operator-side PR
-correction (Q-COORD.F dominant driver), the sticky-floor exception
-(Lever A, requires project-lead blessing), or a workbook with
-staggered input dates that doesn't pre-load the W20 contention peak.
+Regression baseline raised: 243 viols / 193.0 worst (was 196 / 169.5).
+The 5 batches that don't trigger the hard-cap gate (B42-B46) still
+get advisory bottlenecks the operator can act on upstream.
 
 ## §3 — Empirical results (reference workbook, 2026-05-28)
 
