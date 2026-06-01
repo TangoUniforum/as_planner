@@ -390,6 +390,50 @@ under cap). Recovering them requires either:
 3. A workbook with staggered input dates that avoids the W20-W34
    peak-overlap of B41-B46.
 
+### Q-COORD.L — PR-correction is ADVISORY-ONLY (INVESTIGATED 2026-06-01)
+
+Hypothesis: at PR_INIT, detect over-concentrated PR cohorts and have
+the planner ACT on them — claim additional free tanks at W0 so the
+operator's W1 to-do list includes a "split this concentrated cohort
+into N tanks" Transfer. The system-progression law permits OG1/2 →
+OG3-6 transfer at any weight, so the claim is legal.
+
+**Three attempts, all regressed the workbook:**
+
+| Variant | Claims per batch | Eligibility | Result |
+|---|---|---|---|
+| Naive: claim for every flagged batch (≥85% target) | up to N (target − current) | peak-week | 196 → 291 viols, worst 169.5 → 240.9 |
+| Coordinated: worst-first, 1 tank max per batch | 1 | peak-week | 196 → 283 viols, worst 169.5 → 173.1 |
+| Hard-cap gate: only batches projected to exceed 95 kg/m³ | 1 | peak-week | 196 → 243 viols, worst 169.5 → 193.0 |
+
+**Diagnosis (same as Q-COORD.K):** the assignment plan's OG3-6 pool is
+**0-free from W20 onward** — older PR batches' EVT_ADD events claim
+every OG3-6 tank to meet their own per-week 85% density target. Any
+PR_CORRECTION claim STEALS a tank the older batch was going to use
+later; that batch then becomes under-allocated and violates instead.
+Even claiming OG1/2 (sub-1kg eligibility) cascades into OG3-6
+contention later: the claimed OG1/2 tank was reserved for incoming
+TranOG arrivals that now overflow to OG3+ and steal from older
+batches. Paradoxically, claiming a tank for B47 made B47's own
+violations WORSE (9 → 74) — the cascade hit it more than the relief
+helped.
+
+**Definitive conclusion: on an over-subscribed facility no in-code
+claim can win.** The 49 forced violations (best_way_out.py floor)
+prove the facility is mathematically over-capacity. Any code-side
+redistribution shifts violations between batches; it cannot create
+capacity. The honest response is the PR-CONCENTRATION ADVISORY: detect
+the over-concentration, emit a Bottleneck with the operator-actionable
+recommendation (e.g. "B47 held in 1 tank @ 131 kg/m³ projected; split
+into 2 tanks before next run"), let the operator fix it upstream in
+the physical facility where capacity actually exists.
+
+This closes the in-code lever space for the residual ~147 addressable
+violations. Further recovery requires either operator-side PR
+correction (Q-COORD.F dominant driver), the sticky-floor exception
+(Lever A, requires project-lead blessing), or a workbook with
+staggered input dates that doesn't pre-load the W20 contention peak.
+
 ## §3 — Empirical results (reference workbook, 2026-05-28)
 
 | Metric | Pre-coordinator | Coordinator |

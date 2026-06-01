@@ -772,24 +772,30 @@ def _build_facility_assignment_plan(
                     events.append((first_week, EVT_PR_REBALANCE, bid,
                                    surplus, ()))
 
-    # PR_CONCENTRATION_ADVISORY: surface operator-actionable detection
-    # of PR-concentrated batches. For each PR-seeded batch, look ahead
-    # PR_CORRECTION_WEEKS at projected biomass. If the per-tank density
-    # (assuming current tank count stays constant) would exceed
-    # DENSITY_TARGET_PCT of cap at any point, emit a Bottleneck row
-    # advising the operator how many additional tanks to split into
-    # BEFORE the next run.
+    # PR_CONCENTRATION: detect over-concentrated PR cohorts AND emit
+    # planner-action events to claim 1 free tank per batch in worst-
+    # first order (Q-COORD.L).
     #
-    # We do NOT claim the extra tanks here. The planner-emitted
-    # rebalance variant was tried (EVT_PR_CORRECTION claiming free
-    # tanks at W0) and made things worse on the reference workbook
-    # (196 -> 291 viols): the facility's OG3-6 pool is saturated, so
-    # any claim STEALS from older batches that need those tanks too.
-    # The dominant residual is operator-side per Q-COORD.F — flagging
-    # it lets the operator fix it upstream where it's actually fixable.
+    # Detection: for each PR-seeded batch, look ahead PR_CORRECTION_WEEKS
+    # at projected biomass. If the per-tank density (post-PR_REBALANCE
+    # tank count) would exceed DENSITY_TARGET_PCT of cap at any point,
+    # the batch is flagged.
+    #
+    # Action: emit EVT_PR_CORRECTION events (one per flagged batch,
+    # delta=1) that fire in SEVERITY ORDER (worst projected density
+    # first) and CLAIM at most 1 free tank from the W0 pool. Bounded by
+    # the free pool: when it runs dry, remaining batches get advisory
+    # only. The 1-tank cap + worst-first prioritization is the key
+    # difference from the earlier naive version (which claimed for every
+    # batch without coordination and regressed 196 -> 291 viols).
+    #
+    # Bottleneck is emitted EITHER WAY so the operator sees the full
+    # picture: which batches are flagged, which got a planner tank
+    # reservation, which still need upstream operator action.
     PR_CORRECTION_WEEKS = 8
     max_kg = _max_kg_per_og_tank(facility)
     if first_week is not None and max_kg > 0:
+        candidates: list[tuple[float, str, tuple, dict]] = []
         for bid, tanks in sorted(current_tanks.items()):
             pr_count = len(tanks)
             if pr_count == 0:
@@ -802,15 +808,13 @@ def _build_facility_assignment_plan(
             )[:PR_CORRECTION_WEEKS]
             if not bw_lookahead:
                 continue
-            # Effective post-PR_REBALANCE count: PR_REBALANCE sheds
-            # surplus tanks down to W0's needed_now, so use the smaller
-            # of pr_count and needed_now (when needed_now > 0).
             first_needed = max(0, bw_lookahead[0][1].tanks_needed_at_density_cap)
             effective_count = (min(pr_count, max(1, first_needed))
                                if first_needed > 0 else pr_count)
             peak_biomass = max(f.biomass_kg_after_harvest
                                for _, f in bw_lookahead)
             per_tank_at_peak = peak_biomass / effective_count
+            # Advisory threshold: 85% of cap (DENSITY_TARGET_PCT).
             if per_tank_at_peak <= max_kg * DENSITY_TARGET_PCT:
                 continue
             target = int(math.ceil(peak_biomass /
@@ -823,21 +827,47 @@ def _build_facility_assignment_plan(
                 key=lambda i: bw_lookahead[i][1].biomass_kg_after_harvest,
             )
             peak_wl, peak_fact = bw_lookahead[peak_idx]
+            # Action threshold: only emit a planner-claim event for
+            # batches projected to exceed the HARD cap (not just the
+            # 85% target). Sub-cap-but-over-target gets advisory only,
+            # because claiming a tank for them on an over-subscribed
+            # facility steals from older batches that need it more.
+            severity = per_tank_at_peak / max_kg
+            will_violate_cap = per_tank_at_peak > max_kg
+            candidates.append((severity, bid, peak_fact.eligible_systems, {
+                "effective_count": effective_count,
+                "per_tank_at_peak": per_tank_at_peak,
+                "target": target,
+                "additional": additional,
+                "peak_wl": peak_wl,
+                "peak_fact": peak_fact,
+                "will_violate_cap": will_violate_cap,
+            }))
+        # Sort worst-first and emit advisory bottlenecks. We do NOT
+        # emit planner-action events on this workbook — see Q-COORD.L
+        # in the lock record: three attempts at planner-emitted PR
+        # claims (naive, coordinated 1-per-batch, hard-cap-only) all
+        # regressed the workbook because the assignment plan reserves
+        # every OG3-6 tank for older batches' future ADD events.
+        # Any claim STEALS from an older batch that will need it later
+        # and cascades into more violations than it relieves.
+        candidates.sort(key=lambda c: -c[0])
+        for _, bid, _peak_eligibility, meta in candidates:
             bottlenecks.append(Bottleneck(
                 week_label=first_week,
                 system_id=None,
                 kind="pr_concentration",
                 detail=(
-                    f"{bid} held in {effective_count} tank(s) after W0 "
-                    f"rebalance; projected to reach "
-                    f"{per_tank_at_peak:,.0f} kg/tank "
-                    f"({per_tank_at_peak / 1720:.0f} kg/m³) at {peak_wl} "
-                    f"(avg_wt {peak_fact.avg_wt_g:.0f}g). Recommend operator "
-                    f"split into {target} tanks ({additional} more) before "
-                    f"next run to keep per-tank density "
-                    f"<= {DENSITY_TARGET_PCT*100:.0f}% of cap"
+                    f"{bid} held in {meta['effective_count']} tank(s) "
+                    f"after W0 rebalance; projected to reach "
+                    f"{meta['per_tank_at_peak']:,.0f} kg/tank "
+                    f"({meta['per_tank_at_peak'] / 1720:.0f} kg/m³) at "
+                    f"{meta['peak_wl']} (avg_wt "
+                    f"{meta['peak_fact'].avg_wt_g:.0f}g). Recommend "
+                    f"operator split into {meta['target']} tanks "
+                    f"({meta['additional']} more) before next run"
                 ),
-                deficit=additional,
+                deficit=meta["additional"],
             ))
 
     # Per-week TARGET (EVT_ADD) + shrink (EVT_RELEASE) + TranOG events.
