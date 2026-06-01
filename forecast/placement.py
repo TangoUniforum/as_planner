@@ -403,78 +403,34 @@ def phase_b_assign_systems(
                         f"TranOG arrivals; {need} tank-weeks of demand unmet"
                     )
 
-        # ------ Regular greedy assignment for this week ------
+        # ------ Plan-driven assignment for this week ------
+        # Every (batch, week) is covered by migration_plan (built by the
+        # coordinator). Phase B is now a pure projection of the plan into
+        # per-system tank counts; the WHICH-system decision was made
+        # deterministically upstream (Q-COORD.E: no scoring weights).
         sys_assigned: dict[str, int] = {s: 0 for s in sys_tank_count}
         sys_load_bio: dict[str, float] = {s: 0.0 for s in sys_tank_count}
         sys_load_feed: dict[str, float] = {s: 0.0 for s in sys_tank_count}
 
         for load in loads:
             per_sys: dict[str, int] = {}
-            remaining = load.tanks_needed
-            prev = prev_per_system.get(load.batch_id, {})
             per_tank_bio = load.biomass_kg / load.tanks_needed if load.tanks_needed else 0.0
             per_tank_feed = load.feed_kg_day / load.tanks_needed if load.tanks_needed else 0.0
 
-            # ----- Plan-driven path: use migration_plan if present -----
-            if migration_plan and (load.batch_id, week_label) in migration_plan:
-                step = migration_plan[(load.batch_id, week_label)]
-                for tid in step.keep_tanks + step.add_tanks:
-                    sys = tank_to_system.get(tid)
-                    if sys is None:
-                        continue
-                    per_sys[sys] = per_sys.get(sys, 0) + 1
-                    sys_assigned[sys] = sys_assigned.get(sys, 0) + 1
-                    sys_load_bio[sys] = sys_load_bio.get(sys, 0.0) + per_tank_bio
-                    sys_load_feed[sys] = sys_load_feed.get(sys, 0.0) + per_tank_feed
-                assignments.append(SystemAssignment(
-                    batch_id=load.batch_id,
-                    week_label=week_label,
-                    per_system=per_sys,
-                ))
-                prev_per_system[load.batch_id] = per_sys
-                continue
-            # ----- Else: greedy fallback for batch-weeks not in plan -----
-            # Note: INV-4 (1 kg rule) is enforced at event apply time in
-            # events.Transfer.apply — any intra-OG1/2 move above 1 kg is
-            # refused with a warning. Phase B does NOT pre-block here
-            # because the facility is over-subscribed in purge mode and
-            # forcing OG3-6 routing creates more under-tanking than
-            # accepting the INV-4 refusals. The Advisory surfaces both.
-
-            while remaining > 0:
-                best_sys: Optional[str] = None
-                best_score = -math.inf
-                for sys in load.eligible_systems:
-                    if sys not in sys_tank_count:
-                        continue
-                    if sys_assigned[sys] >= sys_tank_count[sys]:
-                        continue
-                    cap_feed = resolve_system_cap(METRIC_FEED_DAY, week_label, sys, system_limits)
-                    if cap_feed is not None and sys_load_feed[sys] + per_tank_feed > system_cap_with_buffer(cap_feed, control):
-                        continue
-                    cap_bio = resolve_system_cap(METRIC_BIOMASS, week_label, sys, system_limits)
-                    if cap_bio is not None and sys_load_bio[sys] + per_tank_bio > system_cap_with_buffer(cap_bio, control):
-                        continue
-                    sticky = 1000 if sys in prev else 0
-                    spread = 500 if sys not in per_sys else 0
-                    load_penalty = sys_load_bio[sys] / 1000.0
-                    score = sticky + spread - load_penalty
-                    if score > best_score:
-                        best_score = score
-                        best_sys = sys
-                if best_sys is None:
-                    warnings.append(
-                        f"{week_label}: batch {load.batch_id} could not place "
-                        f"{remaining} of {load.tanks_needed} tanks "
-                        f"(no eligible system has free + uncapped tank)"
-                    )
-                    break
-                per_sys[best_sys] = per_sys.get(best_sys, 0) + 1
-                sys_assigned[best_sys] += 1
-                sys_load_bio[best_sys] += per_tank_bio
-                sys_load_feed[best_sys] += per_tank_feed
-                remaining -= 1
-
+            if not (migration_plan and (load.batch_id, week_label) in migration_plan):
+                raise RuntimeError(
+                    f"Phase B: batch {load.batch_id} week {week_label} has no "
+                    f"entry in migration_plan; coordinator coverage is required"
+                )
+            step = migration_plan[(load.batch_id, week_label)]
+            for tid in step.keep_tanks + step.add_tanks:
+                sys = tank_to_system.get(tid)
+                if sys is None:
+                    continue
+                per_sys[sys] = per_sys.get(sys, 0) + 1
+                sys_assigned[sys] = sys_assigned.get(sys, 0) + 1
+                sys_load_bio[sys] = sys_load_bio.get(sys, 0.0) + per_tank_bio
+                sys_load_feed[sys] = sys_load_feed.get(sys, 0.0) + per_tank_feed
             assignments.append(SystemAssignment(
                 batch_id=load.batch_id,
                 week_label=week_label,

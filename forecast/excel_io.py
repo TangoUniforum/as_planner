@@ -336,18 +336,25 @@ def read_pinned_transfers(wb, forecast_start) -> list[PinnedTransfer]:
     """Parse operator-pinned rows from the TransferPlan sheet (left block).
 
     Header row: Week, Batch, From_Tank, To_Tank, Count (fish), Avg_Weight (kg),
-    Grade, CV (%). The right-side 'WEEKLY OPERATIONAL GUIDANCE' overlay is
-    ignored (we only parse the structured rows starting at the canonical
-    header).
+    Type, CV (%), Status, Pinned. Only rows with the `Pinned` column set
+    to TRUE/1/'TRUE'/'YES' are treated as operator pins — auto-generated
+    rows (blank Pinned) are ignored so the output sheet doesn't feed
+    itself across runs. The right-side 'WEEKLY OPERATIONAL GUIDANCE'
+    overlay is ignored.
     """
     if "TransferPlan" not in wb.sheetnames:
         return []
     ws = wb["TransferPlan"]
     rows = list(ws.iter_rows(values_only=True))
     header_idx = None
+    pin_col = None
     for i, row in enumerate(rows):
         if row and isinstance(row[0], str) and row[0].strip().lower() == "week":
             header_idx = i
+            for j, h in enumerate(row):
+                if isinstance(h, str) and h.strip().lower() == "pinned":
+                    pin_col = j
+                    break
             break
     if header_idx is None:
         return []
@@ -357,6 +364,18 @@ def read_pinned_transfers(wb, forecast_start) -> list[PinnedTransfer]:
             continue
         if row[1] is None or row[2] is None or row[3] is None:
             continue
+        if pin_col is not None:
+            pin_val = row[pin_col] if pin_col < len(row) else None
+            if isinstance(pin_val, bool):
+                is_pinned = pin_val
+            elif isinstance(pin_val, (int, float)):
+                is_pinned = bool(pin_val)
+            elif isinstance(pin_val, str):
+                is_pinned = pin_val.strip().lower() in ("true", "yes", "y", "1", "x")
+            else:
+                is_pinned = False
+            if not is_pinned:
+                continue
         wk_label, raw = _parse_week_cell(row[0], forecast_start)
         out.append(PinnedTransfer(
             week_label=wk_label,
@@ -495,11 +514,16 @@ def write_transfer_plan_output(
         del wb[sheet_name]
     ws = wb.create_sheet(sheet_name)
     ws.append(["TRANSFER PLAN"])
-    ws.append(["Per-event: batch, week, from/to tanks, count, avg weight, type, status."])
+    ws.append([
+        "Per-event: batch, week, from/to tanks, count, avg weight, type, status. "
+        "Auto-generated rows are not re-read as pins. To pin a specific row "
+        "across runs, set the 'Pinned' column to TRUE."
+    ])
     ws.append([])
     ws.append([
         "Week", "Batch", "From_Tank", "To_Tank",
         "Count (fish)", "Avg_Weight (kg)", "Type", "CV (%)", "Status",
+        "Pinned",
     ])
 
     rows: list[tuple] = []
@@ -549,8 +573,9 @@ def write_transfer_plan_output(
             r[7],
             round(r[8], 1) if r[8] else None,
             r[9],
+            None,   # Pinned — operator sets TRUE to keep across runs
         ])
-    widths = {1: 11, 2: 8, 3: 10, 4: 8, 5: 13, 6: 14, 7: 9, 8: 8, 9: 10}
+    widths = {1: 11, 2: 8, 3: 10, 4: 8, 5: 13, 6: 14, 7: 9, 8: 8, 9: 10, 10: 8}
     for c, w in widths.items():
         ws.column_dimensions[get_column_letter(c)].width = w
 
