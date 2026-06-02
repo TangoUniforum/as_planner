@@ -633,6 +633,188 @@ def project_in_flight_batch(
     return out
 
 
+def project_in_flight_fw_batch(
+    batch: BatchInput,
+    tables: BiologyTables,
+    control: ControlParams,
+    initial_count: float,
+    initial_avg_wt_g: float,
+    pr_closing_date,
+) -> tuple[list[BatchWeekState], list[CalibrationResidual], list[SizeClassSplit]]:
+    """Project an in-flight FW batch forward from PR closing date.
+
+    For batches the operator measured in FW physical units at PR
+    closing (Postsmolt, Smolt, Parr, etc. — not yet in OG tanks), the
+    starting state is the PR-measured count + biomass, NOT what the
+    biology model would project from input_date. This matches what
+    project_in_flight_batch already does for OG-in-flight batches.
+
+    The biology MODELS (mortality table, SGR/FCR curves) are still
+    referenced via days-since-input (input_date is the anchor for
+    model lookups), so the growth curve is correct for the batch's
+    actual age. Only the STATE (count, biomass, avg_wt) comes from PR.
+
+    Stage transitions during the projection:
+      - FW → SW at batch.tran_og_date: handling mortality + reconciliation
+        cull (sized to land on tran_og_count) + size-class split metadata.
+      - Scheduled bottom culls fire at their DSI thresholds if they fall
+        after pr_closing_date.
+
+    Returns (weekly_states, calibration_residuals, size_class_splits).
+    The residual + split match project_batch's contract for the same
+    TranOG crossing.
+    """
+    if not batch.input_date or initial_count <= 0:
+        return [], [], []
+
+    input_date = _as_date(batch.input_date)
+    forecast_start = _as_date(control.forecast_start)
+    forecast_end = forecast_start + timedelta(weeks=control.horizon_weeks)
+    tran_og_date = _as_date(batch.tran_og_date) if batch.tran_og_date else None
+    pr_close = _as_date(pr_closing_date)
+    handling_frac = control.handling_mortality_pct / 100.0
+    fcr_key = _fcr_model_key(batch.fcr_model)
+    fcr_curve = tables.fcr_by_model.get(fcr_key, [])
+
+    # Scheduled bottom culls that ALREADY fired before PR closing — mark
+    # them so they don't re-fire during the projection. DSI thresholds
+    # ≤ DSI at PR closing have already been applied to the operator's
+    # measured count.
+    cull_thresh_dsi = [(int(d), float(p)) for d, p in tables.culling]
+    dsi_at_close = (pr_close - input_date).days
+    fired_culls = {d for d, _p in cull_thresh_dsi if d <= dsi_at_close}
+
+    # Starting state from PR.
+    cur_count = float(initial_count)
+    cur_weight = float(initial_avg_wt_g)
+    # Batch is in FW at PR closing (caller filtered for FW PR records).
+    # crossed_tran_og = True only if PR closing is already past TranOG
+    # (operator's PR may straddle the date in edge cases).
+    stage = "SW" if (tran_og_date and pr_close >= tran_og_date) else "FW"
+    crossed_tran_og = (stage == "SW")
+
+    residuals: list[CalibrationResidual] = []
+    splits: list[SizeClassSplit] = []
+    days: list[tuple] = []
+    cur_date = forecast_start
+    while cur_date < forecast_end:
+        dsi = (cur_date - input_date).days
+        cull_count_today = 0.0
+        cull_biomass_today = 0.0
+        cull_pct_today = 0.0
+
+        # FW → SW transition (TranOG) during forecast horizon.
+        if not crossed_tran_og and tran_og_date and cur_date >= tran_og_date:
+            _pre = cur_count
+            cur_count *= (1.0 - handling_frac)
+            _hm = _pre - cur_count
+            if _hm > 0:
+                cull_count_today += _hm
+                cull_biomass_today += _hm * cur_weight / 1000.0
+            if batch.tran_og_avg_wt_g and batch.tran_og_avg_wt_g > 0:
+                residuals.append(CalibrationResidual(
+                    batch_id=batch.batch_id,
+                    tran_og_date=batch.tran_og_date,
+                    target_avg_wt_g=batch.tran_og_avg_wt_g,
+                    current_fw_correction=batch.fw_correction,
+                    projected_pre_cull_avg_wt_g=cur_weight,
+                    residual_pct=(cur_weight - batch.tran_og_avg_wt_g)
+                                 / batch.tran_og_avg_wt_g * 100.0,
+                ))
+            target_count = float(batch.tran_og_count or 0)
+            if target_count > 0 and cur_count > target_count:
+                final_cull = 1.0 - target_count / cur_count
+                cur_count, cur_weight, _c_n, _c_b = _apply_bottom_cull(
+                    cur_count, cur_weight, batch.tran_og_cv, final_cull,
+                )
+                cull_count_today += _c_n
+                cull_biomass_today += _c_b
+            splits.append(compute_size_class_split(
+                batch_id=batch.batch_id,
+                tran_og_date=batch.tran_og_date,
+                post_cull_count=cur_count,
+                post_cull_avg_wt_g=cur_weight,
+                cv_pct=batch.tran_og_cv,
+            ))
+            stage = "SW"
+            crossed_tran_og = True
+
+        # Scheduled FW bottom culls — fire if DSI threshold reached AND
+        # not already fired (incl. pre-PR threshold tracking).
+        for thresh_dsi, pct in cull_thresh_dsi:
+            if stage == "FW" and dsi >= thresh_dsi and thresh_dsi not in fired_culls:
+                cur_count, cur_weight, _c_n, _c_b = _apply_bottom_cull(
+                    cur_count, cur_weight, batch.tran_og_cv, pct / 100.0,
+                )
+                fired_culls.add(thresh_dsi)
+                cull_pct_today += pct
+                cull_count_today += _c_n
+                cull_biomass_today += _c_b
+
+        # Daily mortality.
+        wfi = max(0, dsi // 7)
+        m_weekly = _mortality_weekly_pct(tables, wfi)
+        cur_count *= _daily_survival_factor(m_weekly)
+
+        # Daily growth — FW vs SW SGR curve.
+        if stage == "FW":
+            sgr_base = _interp(cur_weight, tables.sgr_size_g, tables.sgr_fw_pct_day)
+            sgr_eff = sgr_base * batch.fw_correction
+        else:
+            sgr_base = _interp(cur_weight, tables.sgr_size_g, tables.sgr_sw_pct_day)
+            sgr_eff = sgr_base * batch.sgr_correction
+        fcr = _interp(cur_weight, tables.fcr_size_g, fcr_curve)
+        cur_weight = cur_weight * (1.0 + sgr_eff / 100.0)
+
+        biomass_kg = cur_count * cur_weight / 1000.0
+        feed_kg_day = biomass_kg * (sgr_eff / 100.0) * fcr
+        feed_type = _feed_type_for_size(tables, cur_weight)
+
+        days.append((
+            cur_date, dsi, stage, cur_count, cur_weight, sgr_eff, fcr,
+            m_weekly, cull_pct_today, feed_kg_day, feed_type, biomass_kg,
+            cull_count_today, cull_biomass_today,
+        ))
+        cur_date = cur_date + timedelta(days=1)
+
+    out: list[BatchWeekState] = []
+    for w in range(control.horizon_weeks):
+        ws, we = week_range(w, forecast_start)
+        days_in_w = [d for d in days if ws <= d[0] < we]
+        if not days_in_w:
+            continue
+        last = days_in_w[-1]
+        mean_count = sum(d[3] for d in days_in_w) / len(days_in_w)
+        mean_wt = sum(d[4] for d in days_in_w) / len(days_in_w)
+        biomass_mean = mean_count * mean_wt / 1000.0
+        feed_kg_week = sum(d[9] for d in days_in_w)
+        feed_kg_day_peak = max((d[9] for d in days_in_w), default=0.0)
+        cull_count_week = sum(d[12] for d in days_in_w)
+        cull_biomass_week = sum(d[13] for d in days_in_w)
+        wfi_end = last[1] // 7
+        out.append(BatchWeekState(
+            batch_id=batch.batch_id,
+            week_label=iso_week_label(ws),
+            week_start=datetime.combine(ws, datetime.min.time()),
+            days_since_input=last[1],
+            week_from_input=wfi_end,
+            count=mean_count,
+            avg_weight_g=mean_wt,
+            biomass_kg=biomass_mean,
+            feed_kg_day=feed_kg_day_peak,
+            feed_kg_week=feed_kg_week,
+            sgr_pct_day=last[5],
+            fcr=last[6],
+            stage=last[2],
+            feed_type=last[10],
+            mortality_pct_weekly=last[7],
+            cull_event_pct=sum(d[8] for d in days_in_w),
+            cull_count_week=cull_count_week,
+            cull_biomass_kg_week=cull_biomass_week,
+        ))
+    return out, residuals, splits
+
+
 # ---------- orchestrator ----------
 
 def project_all_batches(

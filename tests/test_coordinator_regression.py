@@ -3,9 +3,10 @@
 Locks the empirical baseline of the incremental assignment coordinator
 (exit-at-1kg + per-week top-up + forward-peak staggering + even-out
 with cross-scope OG1/2 → OG3-6 pass + EVT_PR_CORRECTION 2-pass
-evaluator; see docs/GREENFIELD_COORDINATOR_LOCKS.md Q-COORD.A-L):
+evaluator + PR-anchored FW in-flight projection; see
+docs/GREENFIELD_COORDINATOR_LOCKS.md Q-COORD.A-L):
 
-    density violations <= 196,  worst <= 170 kg/m^3,
+    density violations <= 209,  worst <= 150 kg/m^3,
     0 count/biomass drift,  7/7 TranOG arrivals placed.
 
 Runs the real pipeline on a COPY of Forecast.xlsm so the source
@@ -33,8 +34,14 @@ WORKBOOK = ROOT / "Forecast.xlsm"
 #   action applied only when strictly net-positive. On this workbook
 #   all candidates regress, so advisory-only is chosen automatically.
 #   Aligns with precalc-first: act when acting is better.)
-MAX_VIOLATIONS = 196
-MAX_WORST_DENSITY = 170.0
+# 2026-06-01 (later): 209 / 148.4 (PR-anchored FW in-flight projection:
+#   FW batches with PR records project from PR-measured state instead
+#   of biology projection from input_date. Worst density dropped 169.5
+#   -> 148.4 (-12%); total count up 196 -> 209 (+7%) — pressure spread
+#   across more tanks. The evaluator now ACCEPTS B46's PR_CORRECTION
+#   (previously all candidates regressed).
+MAX_VIOLATIONS = 209
+MAX_WORST_DENSITY = 150.0
 EXPECTED_TRANOG = 7
 
 pytestmark = pytest.mark.skipif(

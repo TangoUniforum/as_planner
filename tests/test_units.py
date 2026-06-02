@@ -131,3 +131,69 @@ class TestGradedHarvestEvent:
         assert math.isclose(
             s.tanks_by_id[2].count + s.tanks_by_id[3].count, 100000, abs_tol=1e-6,
         )
+
+
+class TestISOWeekConsistency:
+    """Reader-produced labels must equal writer-produced labels for the
+    same date, regardless of whether forecast_start lands on Monday.
+    Locks the property that the audit's R2 (forecast-week vs ISO-week
+    mismatch) is now obsolete — all readers/writers route through ISO.
+    """
+
+    def test_label_for_date_matches_iso_week_label(self):
+        from datetime import date
+        from forecast.time_grid import (
+            iso_week_label, label_for_date, week_label,
+            forecast_week_labels,
+        )
+        # Non-Monday forecast start (Wednesday).
+        fs = date(2026, 5, 13)
+        # An event date inside the horizon.
+        ev = date(2026, 7, 8)  # Wednesday — should be ISO 2026-W28
+        # Writers use iso_week_label(date) directly.
+        write_label = iso_week_label(ev)
+        # Readers convert (date → forecast week index → label).
+        read_label = label_for_date(ev, fs)
+        assert write_label == read_label == "2026-W28"
+
+    def test_forecast_week_labels_match_iso_weeks(self):
+        from datetime import date
+        from forecast.time_grid import (
+            iso_week_label, week_start, forecast_week_labels,
+        )
+        # Non-Monday start: labels[i] must equal iso_week_label of the
+        # ISO Monday of week i.
+        fs = date(2026, 5, 13)  # Wednesday, ISO W20
+        labels = forecast_week_labels(fs, 8)
+        # First label is the ISO week containing fs.
+        assert labels[0] == "2026-W20"
+        # Subsequent labels are consecutive ISO weeks.
+        for i in range(1, len(labels)):
+            assert labels[i] == iso_week_label(week_start(i, fs))
+
+    def test_partial_week_0_distinct_from_week_1(self):
+        from datetime import date
+        from forecast.time_grid import forecast_week_labels
+        # Wednesday start → W0 is a partial Wed-Sun in ISO Wnn;
+        # W1 is full Mon-Sun in ISO W(nn+1). They MUST differ to be
+        # collision-free as dictionary keys for the per-week tables.
+        fs = date(2026, 5, 13)
+        labels = forecast_week_labels(fs, 2)
+        assert labels[0] != labels[1]
+        assert labels[0] == "2026-W20"
+        assert labels[1] == "2026-W21"
+
+    def test_monday_start_no_partial_week(self):
+        from datetime import date
+        from forecast.time_grid import forecast_week_labels
+        fs = date(2026, 5, 11)  # Monday, ISO W20
+        labels = forecast_week_labels(fs, 3)
+        assert labels == ["2026-W20", "2026-W21", "2026-W22"]
+
+    def test_year_end_iso_week(self):
+        from datetime import date
+        from forecast.time_grid import iso_week_label
+        # 2026-12-29 (Tue) is in ISO 2026-W53.
+        assert iso_week_label(date(2026, 12, 29)) == "2026-W53"
+        # 2027-01-04 (Mon) is in ISO 2027-W01.
+        assert iso_week_label(date(2027, 1, 4)) == "2027-W01"

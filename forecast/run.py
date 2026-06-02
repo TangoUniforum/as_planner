@@ -5,7 +5,9 @@ import argparse
 import time
 from pathlib import Path
 
-from .biology import project_all_batches, project_in_flight_batch
+from .biology import (
+    project_all_batches, project_in_flight_batch, project_in_flight_fw_batch,
+)
 from .harvest_scheduler import schedule_harvests, summarize_demands
 from .placement import run_placement, summarize_placement
 from .precalc import build_precalc_canvas, print_canvas_summary
@@ -158,9 +160,26 @@ def main(workbook_path: str | Path | None = None) -> int:
 
     # Batches already represented in PR hydration are tracked via the
     # in-flight projection — exclude them from the incoming-batch
-    # projection to avoid double-counting (the boundary case is a batch
-    # whose TranOG is just after PR closing but before forecast_start).
-    in_flight_ids = {t.batch_id for t in state.tanks_by_id.values() if t.batch_id}
+    # projection to avoid double-counting. Two kinds of in-flight:
+    #   - OG-in-flight: have OG tanks in PR. Projected via
+    #     project_in_flight_batch (SW phase only, anchored to PR
+    #     OG state).
+    #   - FW-in-flight: have FW physical-unit records in PR but no OG
+    #     tanks yet. Projected via project_in_flight_fw_batch (FW phase
+    #     anchored to PR FW state; handles FW→SW transition at TranOG).
+    # Both use input_date for MODEL lookups (mortality, SGR/FCR curves)
+    # but anchor STATE (count, biomass, avg_wt) to PR-measured values.
+    og_in_flight_ids = {t.batch_id for t in state.tanks_by_id.values() if t.batch_id}
+    fw_in_flight_aggregates: dict[str, dict] = {}
+    for r in fw_records:
+        e = fw_in_flight_aggregates.setdefault(r.batch_id, {"count": 0.0, "biomass_kg": 0.0})
+        e["count"] += r.closing_count
+        e["biomass_kg"] += r.closing_biomass_kg
+    fw_in_flight_ids = {
+        bid for bid, agg in fw_in_flight_aggregates.items()
+        if agg["count"] > 0 and bid not in og_in_flight_ids
+    }
+    in_flight_ids = og_in_flight_ids | fw_in_flight_ids
     incoming_batches = [b for b in batches if b.batch_id not in in_flight_ids]
     states, residuals, splits, warnings = project_all_batches(incoming_batches, tables, control)
     print(f"\n  Projected {len(states)} batch-week rows across {len({s.batch_id for s in states})} batches (incoming)")
@@ -171,7 +190,8 @@ def main(workbook_path: str | Path | None = None) -> int:
     # ----- In-flight batches: forward-project per batch using PR-hydrated state -----
     batch_by_id = {b.batch_id: b for b in batches}
     in_flight_states: list = []
-    for batch_id, tank_list in [(bid, state.tanks_for_batch(bid)) for bid in {t.batch_id for t in state.tanks_by_id.values() if t.batch_id}]:
+    # OG-in-flight projection (anchored to PR OG tank state).
+    for batch_id, tank_list in [(bid, state.tanks_for_batch(bid)) for bid in og_in_flight_ids]:
         b_meta = batch_by_id.get(batch_id)
         if b_meta is None:
             continue
@@ -184,9 +204,30 @@ def main(workbook_path: str | Path | None = None) -> int:
         in_flight_states.extend(
             project_in_flight_batch(b_meta, tables, control, total_count, agg_avg_wt, agg_cv)
         )
+    # FW-in-flight projection (anchored to PR FW physical-unit state).
+    fw_in_flight_residuals: list = []
+    fw_in_flight_splits: list = []
+    for batch_id in sorted(fw_in_flight_ids):
+        b_meta = batch_by_id.get(batch_id)
+        if b_meta is None:
+            continue
+        agg = fw_in_flight_aggregates[batch_id]
+        if agg["count"] <= 0:
+            continue
+        avg_wt_g = agg["biomass_kg"] * 1000.0 / agg["count"]
+        fw_states, fw_resids, fw_splits = project_in_flight_fw_batch(
+            b_meta, tables, control, agg["count"], avg_wt_g, pr_closing
+        )
+        in_flight_states.extend(fw_states)
+        fw_in_flight_residuals.extend(fw_resids)
+        fw_in_flight_splits.extend(fw_splits)
+    residuals.extend(fw_in_flight_residuals)
+    splits.extend(fw_in_flight_splits)
     in_flight_batches = sorted({s.batch_id for s in in_flight_states})
     print(f"  In-flight projection: {len(in_flight_states)} batch-week rows across "
           f"{len(in_flight_batches)} batches {in_flight_batches}")
+    if fw_in_flight_ids:
+        print(f"    FW-in-flight (PR-anchored): {sorted(fw_in_flight_ids)}")
 
     # ----- Layer 2: harvest scheduler -----
     states_by_batch: dict[str, list] = {}
