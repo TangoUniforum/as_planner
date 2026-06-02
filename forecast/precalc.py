@@ -57,11 +57,6 @@ from .time_grid import forecast_week_labels, parse_iso_label, week_start
 _OG12_MOVE_LOCK_WT_G = 1000.0
 
 
-# Per-tank density target as a fraction of the cap — 85% leaves 15%
-# growth headroom and matches the Phase D Grade-trigger threshold so
-# precalc and runtime agree on "tank near cap".
-DENSITY_TARGET_PCT = 0.85
-
 _OG12 = frozenset({"OG1N", "OG1S", "OG2N", "OG2S"})
 _OG36 = frozenset({"OG3N", "OG3S", "OG4N", "OG4S",
                    "OG5N", "OG5S", "OG6N", "OG6S"})
@@ -296,6 +291,11 @@ class PrecalcCanvas:
     # The "natural" carrying-capacity curve — the scheduler's target ceiling.
     projected_biomass_by_week: dict[str, float] = field(default_factory=dict)
 
+    # Worst-first list of batch_ids flagged as PR-over-concentrated
+    # (per-tank biomass projected to exceed cap at peak). The 2-pass
+    # evaluator in run.py decides which ones to actually act on.
+    pr_correction_candidates: list[str] = field(default_factory=list)
+
     warnings: list[str] = field(default_factory=list)
 
 
@@ -405,10 +405,11 @@ def _build_batch_week_facts(
     max_kg = _max_kg_per_og_tank(facility)
     min_h_wt = control.min_harvest_weight_g
 
-    # Density-aware sizing: each tank packed to DENSITY_TARGET_PCT of
-    # cap. Per-week sizing only — the lifetime-max backward sweep was
-    # removed (see NOTE below).
-    effective_max_kg = max_kg * DENSITY_TARGET_PCT
+    # Density-aware sizing: each tank packed to `density_target_pct` of
+    # cap (Control R31, default 0.85). Per-week sizing only — the
+    # lifetime-max backward sweep was removed (see NOTE below).
+    density_target_pct = control.density_target_pct if control else 0.85
+    effective_max_kg = max_kg * density_target_pct
 
     out: dict[tuple[str, str], BatchWeekFact] = {}
     for batch_id, states in biology_states_by_batch.items():
@@ -645,7 +646,8 @@ def _build_facility_assignment_plan(
     batch_lifecycles: dict[str, BatchLifecycle],
     bottlenecks: list[Bottleneck],
     control: Optional[ControlParams] = None,
-) -> dict[tuple[str, str], TankAssignmentPlan]:
+    allowed_pr_corrections: Optional[set[str]] = None,
+) -> tuple[dict[tuple[str, str], TankAssignmentPlan], list[str]]:
     """Deterministic event-driven coordinator producing the canonical
     per-(batch, week) tank assignment.
 
@@ -793,80 +795,79 @@ def _build_facility_assignment_plan(
     # Bottleneck is emitted EITHER WAY so the operator sees the full
     # picture: which batches are flagged, which got a planner tank
     # reservation, which still need upstream operator action.
-    PR_CORRECTION_WEEKS = 8
+    # Density target headroom (Control R31, default 0.85).
+    density_target_pct = control.density_target_pct if control else 0.85
     max_kg = _max_kg_per_og_tank(facility)
     if first_week is not None and max_kg > 0:
-        candidates: list[tuple[float, str, tuple, dict]] = []
+        pr_candidates: list[tuple[float, str, tuple, dict]] = []
         for bid, tanks in sorted(current_tanks.items()):
             pr_count = len(tanks)
             if pr_count == 0:
                 continue
-            bw_lookahead = sorted(
+            # Full SW timeline for this batch (no fixed window).
+            bw_full = sorted(
                 ((wl, batch_week_facts[(bid, wl)])
                  for (b, wl) in batch_week_facts
                  if b == bid and batch_week_facts[(b, wl)].stage == "SW"),
                 key=lambda x: x[0],
-            )[:PR_CORRECTION_WEEKS]
-            if not bw_lookahead:
+            )
+            if not bw_full:
                 continue
-            first_needed = max(0, bw_lookahead[0][1].tanks_needed_at_density_cap)
+            first_needed = max(0, bw_full[0][1].tanks_needed_at_density_cap)
             effective_count = (min(pr_count, max(1, first_needed))
                                if first_needed > 0 else pr_count)
-            peak_biomass = max(f.biomass_kg_after_harvest
-                               for _, f in bw_lookahead)
-            per_tank_at_peak = peak_biomass / effective_count
-            # Advisory threshold: 85% of cap (DENSITY_TARGET_PCT).
-            if per_tank_at_peak <= max_kg * DENSITY_TARGET_PCT:
+            # Auto-determined lookahead: walk forward until per-tank
+            # biomass (with current PR count constant) peaks. After
+            # peak, harvest shrinks biomass and density relieves
+            # naturally — looking beyond is irrelevant. Older harvesting
+            # batches get short windows; young growing ones get long.
+            # No global magic number.
+            peak_per_tank = 0.0
+            peak_idx = 0
+            for i, (_, f) in enumerate(bw_full):
+                pt = f.biomass_kg_after_harvest / effective_count
+                if pt > peak_per_tank:
+                    peak_per_tank = pt
+                    peak_idx = i
+            bw_lookahead = bw_full[:peak_idx + 1]
+            # Advisory threshold: density_target_pct of cap.
+            if peak_per_tank <= max_kg * density_target_pct:
                 continue
+            peak_biomass = bw_lookahead[peak_idx][1].biomass_kg_after_harvest
             target = int(math.ceil(peak_biomass /
-                                    (max_kg * DENSITY_TARGET_PCT)))
+                                    (max_kg * density_target_pct)))
             additional = target - effective_count
             if additional <= 0:
                 continue
-            peak_idx = max(
-                range(len(bw_lookahead)),
-                key=lambda i: bw_lookahead[i][1].biomass_kg_after_harvest,
-            )
             peak_wl, peak_fact = bw_lookahead[peak_idx]
             # Action threshold: only emit a planner-claim event for
             # batches projected to exceed the HARD cap (not just the
-            # 85% target). Sub-cap-but-over-target gets advisory only,
+            # target). Sub-cap-but-over-target gets advisory only,
             # because claiming a tank for them on an over-subscribed
             # facility steals from older batches that need it more.
-            severity = per_tank_at_peak / max_kg
-            will_violate_cap = per_tank_at_peak > max_kg
-            candidates.append((severity, bid, peak_fact.eligible_systems, {
+            severity = peak_per_tank / max_kg
+            will_violate_cap = peak_per_tank > max_kg
+            pr_candidates.append((severity, bid, peak_fact.eligible_systems, {
                 "effective_count": effective_count,
-                "per_tank_at_peak": per_tank_at_peak,
+                "per_tank_at_peak": peak_per_tank,
                 "target": target,
                 "additional": additional,
                 "peak_wl": peak_wl,
                 "peak_fact": peak_fact,
                 "will_violate_cap": will_violate_cap,
+                "lookahead_weeks": peak_idx + 1,
             }))
-        # Coordinated PR correction (Q-COORD.L, ACCEPTED 2026-06-01).
-        # Sort worst-first. For each flagged batch, emit an advisory
-        # bottleneck. For batches projected to exceed the HARD cap
-        # (>95 kg/m³, not just the 85% target), also emit
-        # EVT_PR_CORRECTION — the planner reserves 1 free tank in W0
-        # so the operator sees the recommended split as a concrete
-        # Transfer event in week 1. Eligibility per batch's current
-        # status: sub-1kg → OG1/2 (intra-OG1/2 split, legal); ≥1kg →
-        # OG3-6 (cross-system Transfer, legal). Worst-first ordering +
-        # 1 tank cap bound the action.
-        #
-        # ACCEPTED TRADE-OFF: the action regresses the simulation
-        # violation count (196 → 243 baseline) because the simulation
-        # honestly cascades downstream effects (TranOG overflow,
-        # contested OG3-6). But semantic correctness wins: the
-        # operator receives actionable week-1 instructions ("split B47
-        # 1→2 tanks"), and the simulation's cascading view tells them
-        # what to plan around. Advisory-only was passive; this surfaces
-        # the recommendation as part of the operational output.
+        # PR_CORRECTION (Q-COORD.L, 2-pass evaluator). Sort worst-first.
+        # Each flagged batch gets an advisory Bottleneck. EVT_PR_CORRECTION
+        # is emitted ONLY for batches in `allowed_pr_corrections` (decided
+        # by the run.py evaluator after testing each candidate against the
+        # violation count). Aligns with precalc-first: the planner acts
+        # only when acting produces a strictly better plan.
         pr_correction_priority: dict[str, int] = {}
-        candidates.sort(key=lambda c: -c[0])
+        pr_candidates.sort(key=lambda c: -c[0])
+        allowed = allowed_pr_corrections or set()
         action_counter = 0
-        for _, bid, _peak_eligibility, meta in candidates:
+        for _, bid, _peak_eligibility, meta in pr_candidates:
             bottlenecks.append(Bottleneck(
                 week_label=first_week,
                 system_id=None,
@@ -877,14 +878,18 @@ def _build_facility_assignment_plan(
                     f"{meta['per_tank_at_peak']:,.0f} kg/tank "
                     f"({meta['per_tank_at_peak'] / 1720:.0f} kg/m³) at "
                     f"{meta['peak_wl']} (avg_wt "
-                    f"{meta['peak_fact'].avg_wt_g:.0f}g). Recommend "
+                    f"{meta['peak_fact'].avg_wt_g:.0f}g, "
+                    f"peak in {meta['lookahead_weeks']}wk). Recommend "
                     f"operator split into {meta['target']} tanks "
                     f"({meta['additional']} more) before next run"
                 ),
                 deficit=meta["additional"],
             ))
-            # Planner-action gate: only emit for hard-cap violators.
+            # Planner-action gate: only emit for hard-cap violators AND
+            # only if the run.py evaluator has approved this batch.
             if not meta["will_violate_cap"]:
+                continue
+            if bid not in allowed:
                 continue
             # Eligibility = batch's W0 status. Sub-1kg → intra-OG1/2
             # split (legal). ≥1kg → cross-system Transfer to OG3-6
@@ -1294,7 +1299,19 @@ def _build_facility_assignment_plan(
                 notes=notes_per_pair.get(plan_key, []),
             )
 
-    return plan
+    # Candidates list — worst-first bids that COULD receive a planner
+    # action (hard-cap projection). The evaluator picks which subset
+    # to actually act on. Empty if no PR concentration detected.
+    try:
+        pr_candidates  # may not exist if first_week is None
+    except NameError:
+        candidate_bids: list[str] = []
+    else:
+        candidate_bids = [
+            bid for _, bid, _elig, meta in pr_candidates
+            if meta.get("will_violate_cap")
+        ]
+    return plan, candidate_bids
 
 
 def _build_migration_plan(
@@ -1386,6 +1403,7 @@ def build_precalc_canvas(
     pinned_transfers: list[PinnedTransfer],
     initial_state: Optional[FacilityState] = None,
     projected_biomass_by_week: Optional[dict[str, float]] = None,
+    allowed_pr_corrections: Optional[set[str]] = None,
 ) -> PrecalcCanvas:
     """Assemble the full Stage 1 precalc canvas."""
     forecast_start = _as_date(control.forecast_start)
@@ -1413,8 +1431,9 @@ def build_precalc_canvas(
     availability: dict[tuple[str, str], int] = {}
     migration: dict[tuple[str, str], MigrationStep] = {}
     assignment_plan: dict[tuple[str, str], TankAssignmentPlan] = {}
+    pr_correction_candidates: list[str] = []
     if initial_state is not None:
-        assignment_plan = _build_facility_assignment_plan(
+        assignment_plan, pr_correction_candidates = _build_facility_assignment_plan(
             horizon_labels=horizon_labels,
             initial_state=initial_state,
             facility=facility,
@@ -1422,6 +1441,7 @@ def build_precalc_canvas(
             batch_lifecycles=batch_lifecycles,
             bottlenecks=bottlenecks,
             control=control,
+            allowed_pr_corrections=allowed_pr_corrections,
         )
         availability, migration = _build_migration_plan(
             horizon_labels=horizon_labels,
@@ -1506,6 +1526,7 @@ def build_precalc_canvas(
         migration_plan=migration,
         assignment_plan=assignment_plan,
         projected_biomass_by_week=projection,
+        pr_correction_candidates=pr_correction_candidates,
         warnings=[],
     )
 

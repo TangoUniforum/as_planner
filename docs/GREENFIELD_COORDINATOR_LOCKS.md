@@ -403,31 +403,46 @@ four planner-action variants regressed the simulation metric:
 | Hard-cap gate: only batches projected to exceed 95 kg/m³ | 1 | peak-week | 196 → 243 viols, worst 169.5 → 193.0 |
 | Sub-1kg intra-OG1/2 only (no OG3-6 claims) | 1 | OG1/2 only | 196 → 243 viols, worst 169.5 → 193.0 |
 
-**Revised framing — planner-action ACCEPTED (2026-06-01, project lead
-direction):** *"The pipeline should do that on its own, it might not
-be a perfect solution but it's the best we have."*
+**Resolved — 2-pass evaluator (2026-06-01 pm, project lead direction):**
+project lead observed that always-on PR_CORRECTION contradicts the
+precalc-first principle: *"doesn't this go against the idea of
+precalculating tank allocation and trying to meet that in the most
+efficient and optimal way?"*
 
-Rationale: the simulation regression (196 → 243) is not damage — it's
-the simulation honestly cascading the downstream effects of taking the
-recommended action (TranOG overflow, contested OG3-6). The OPERATOR'S
-real-world experience improves: instead of a passive advisory that
-they may or may not act on, the recommended split appears as a
-concrete Week-1 Transfer event in TransferPlan. Semantic correctness
-(operator gets actionable instructions) wins over the simulation
-violation counter. The cascading view shows the operator what to plan
-around in the rest of week 1.
+The resolution aligns the action with the principle: **PR_CORRECTION
+is applied if and only if applying it produces a strictly better
+plan**. This is a deterministic conditional rule, not a scoring
+weight — fully precalc-first.
 
-**Locked configuration:** the coordinated hard-cap variant (attempt #3,
-243/193). EVT_PR_CORRECTION fires in severity order (worst-first), one
-tank claimed per batch maximum, only for batches projected to exceed
-the HARD cap (>95 kg/m³ — not just 85% target). Per-batch eligibility:
-sub-1kg → OG1/2 (intra-OG1/2 split per progression law); ≥1kg → OG3-6
-(cross-system Transfer). On the reference workbook this fires only
-for B47 (1 tank @ 131 kg/m³ projected), claiming 1 OG1/2 tank at W0.
+**Algorithm (run.py 2-pass evaluator):**
+1. Build canvas + run placement with NO corrections → baseline viols.
+2. For each candidate batch in worst-first severity order:
+   - Build canvas + run placement with `allowed | {candidate}`.
+   - If violations strictly decrease, accept; else discard.
+3. Final plan is whichever accepted set minimizes violations.
 
-Regression baseline raised: 243 viols / 193.0 worst (was 196 / 169.5).
-The 5 batches that don't trigger the hard-cap gate (B42-B46) still
-get advisory bottlenecks the operator can act on upstream.
+**Auto-lookahead and density target headroom (R31)** ride alongside:
+PR concentration detection uses the full per-batch peak (no fixed
+window) and the configurable density target. Detection is generous
+(catches the full picture); action is conditional on net improvement.
+
+**Empirical (reference workbook):** the evaluator detects 5 candidates
+(B43-B47, all projected to exceed cap at peak). It tests each — every
+one regresses the violation count due to OG3-6 contention — so all
+are rejected. Final plan: advisory-only, **196 viols / 169.5 worst**,
+identical to the pre-action Q-COORD.J baseline. Evaluator overhead
+~6s on this workbook (6 full canvas + placement runs).
+
+On a slack workbook where claiming a tank does NOT cascade, the
+evaluator would accept the correction and emit the W1 Transfer event.
+The same code self-disables on over-subscribed workbooks and self-
+enables on slack ones. Workbook-agnostic by construction.
+
+The 5 detected candidates still appear as advisory bottlenecks in
+Advisory + ValidationLog so the operator sees the full picture even
+when no planner action is taken.
+
+Regression baseline restored: 196 / 169.5.
 
 ## §3 — Empirical results (reference workbook, 2026-05-28)
 

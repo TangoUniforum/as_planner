@@ -199,9 +199,10 @@ def phase_a_precalc(
         key = (d.batch_id, d.week_label)
         harvest_by_batch_week[key] = harvest_by_batch_week.get(key, 0.0) + d.count
 
-    # Density-aware sizing: 85% of cap (matches precalc.py + Grade trigger).
-    DENSITY_TARGET_PCT = 0.85
-    effective_max_kg = max_kg * DENSITY_TARGET_PCT
+    # Density-aware sizing: Control R31 `density_target_pct` (default
+    # 0.85). Matches the precalc per-week sizing and the Phase D Grade
+    # trigger so all three agree on "tank near cap".
+    effective_max_kg = max_kg * control.density_target_pct
 
     out: list[BatchWeekLoad] = []
     for batch_id, states in biology_states_by_batch.items():
@@ -1620,7 +1621,7 @@ def phase_d_emit_events(
         # TRANOG_RESERVE OG3+ tanks for upcoming TranOG arrivals (which
         # need N=4 tanks for size-class allocation). Grade only fires
         # while OG3+ free pool remains above the reserve threshold.
-        DENSITY_TRIGGER_PCT = 0.85
+        DENSITY_TRIGGER_PCT = control.density_target_pct
         TRANOG_RESERVE = 4
         grade_dest_pool = sorted(
             [t for t in state.tanks_by_id.values()

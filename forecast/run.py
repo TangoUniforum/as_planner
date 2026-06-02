@@ -227,31 +227,98 @@ def main(workbook_path: str | Path | None = None) -> int:
         print(f"  ... ({len(sched_warns) - 10} more scheduler warnings)")
 
     # ----- Stage 1: precalc canvas (deterministic landscape) -----
-    canvas = build_precalc_canvas(
-        control=control,
-        batches=batches,
-        tables=tables,
-        facility=facility,
-        facility_limits=facility_limits,
-        system_limits=system_limits,
-        biology_states_by_batch=states_by_batch,
-        splits=splits,
-        harvest_demands=demands,
-        pinned_harvests=pinned_harvests,
-        pinned_transfers=pinned_transfers,
-        initial_state=state,
-        projected_biomass_by_week=biomass_projection,
+    #
+    # 2-pass PR_CORRECTION evaluator (Q-COORD.L): build the canvas
+    # once to discover PR-over-concentrated candidates, then for each
+    # candidate (worst-first) test whether claiming a tank improves
+    # the violation count. Accept only strict improvements. Final
+    # canvas is built with the accepted set. Aligns with precalc-first:
+    # planner acts when acting produces a better plan, advises otherwise.
+    purge = is_purge_mode(control, fs_date)
+
+    def _build_and_place(allowed):
+        """Build canvas + run placement with `allowed` PR_CORRECTION set."""
+        c = build_precalc_canvas(
+            control=control, batches=batches, tables=tables,
+            facility=facility, facility_limits=facility_limits,
+            system_limits=system_limits,
+            biology_states_by_batch=states_by_batch, splits=splits,
+            harvest_demands=demands, pinned_harvests=pinned_harvests,
+            pinned_transfers=pinned_transfers, initial_state=state,
+            projected_biomass_by_week=biomass_projection,
+            allowed_pr_corrections=allowed,
+        )
+        p, fs = run_placement(
+            state, batch_by_id, states_by_batch, demands, splits,
+            system_limits, control, facility, tables,
+            migration_plan=c.migration_plan,
+        )
+        # Count violations: per-tank density > tank cap, OG6N excluded
+        # in purge mode (depuration pool intentionally uncapped).
+        tank_cap = {t.tank_id: t.max_density_kg_m3 for t in facility.tanks}
+        tank_sys = {t.tank_id: t.system_id for t in facility.tanks}
+        viols = []
+        for r in p.batch_locations:
+            cap = tank_cap.get(r.tank_id, 0.0)
+            if cap <= 0:
+                continue
+            if (tank_sys.get(r.tank_id) == "OG6N"
+                    and is_purge_mode(control, r.week_start)):
+                continue
+            if r.density_kg_m3 > cap:
+                viols.append(r.density_kg_m3)
+        return c, p, fs, len(viols), max(viols, default=0.0)
+
+    # Probe run to discover candidates.
+    canvas_probe, placement_probe, final_state_probe, viols_probe, worst_probe = (
+        _build_and_place(set())
     )
+    candidates = list(canvas_probe.pr_correction_candidates)
+
+    if not candidates:
+        print(f"\n  PR_CORRECTION evaluator: no over-concentrated PR cohorts; "
+              f"advisory-only mode (baseline {viols_probe} viols / "
+              f"{worst_probe:.1f} worst).")
+        canvas = canvas_probe
+        placement = placement_probe
+        final_state = final_state_probe
+        accepted_pr_corrections: set[str] = set()
+    else:
+        print(f"\n  PR_CORRECTION evaluator (Q-COORD.L 2-pass): "
+              f"{len(candidates)} candidate(s)")
+        print(f"    baseline (no actions): {viols_probe} viols / "
+              f"{worst_probe:.1f} worst")
+        accepted_pr_corrections = set()
+        best_canvas = canvas_probe
+        best_placement = placement_probe
+        best_final_state = final_state_probe
+        best_viols = viols_probe
+        best_worst = worst_probe
+        for bid in candidates:
+            trial_allowed = accepted_pr_corrections | {bid}
+            tc, tp, tfs, tv, tw = _build_and_place(trial_allowed)
+            if tv < best_viols:
+                print(f"    +{bid}: {tv} viols / {tw:.1f} worst  ->ACCEPT "
+                      f"(was {best_viols})")
+                accepted_pr_corrections = trial_allowed
+                best_canvas, best_placement, best_final_state = tc, tp, tfs
+                best_viols, best_worst = tv, tw
+            else:
+                print(f"    +{bid}: {tv} viols / {tw:.1f} worst  ->reject "
+                      f"(no improvement over {best_viols})")
+        if accepted_pr_corrections:
+            print(f"    accepted: {sorted(accepted_pr_corrections)}; "
+                  f"final {best_viols} viols / {best_worst:.1f} worst")
+        else:
+            print(f"    no corrections net-positive; advisory-only mode "
+                  f"({best_viols} viols / {best_worst:.1f} worst)")
+        canvas = best_canvas
+        placement = best_placement
+        final_state = best_final_state
     print_canvas_summary(canvas)
 
-    # ----- Stage 2: placement (work-in-progress; consumes canvas in next cut) -----
-    purge = is_purge_mode(control, fs_date)
+    # ----- Stage 2: placement (already run above by the evaluator) -----
     print(f"\n  Placement walk ({'6N=purge' if purge else '6N=production'}) [Stage 2 WIP]:")
-    placement, final_state = run_placement(
-        state, batch_by_id, states_by_batch, demands, splits,
-        system_limits, control, facility, tables,
-        migration_plan=canvas.migration_plan,
-    )
     p_summary = summarize_placement(placement, final_state)
     print(f"    Phase A load rows:      {p_summary['load_rows']:>4}")
     print(f"    Phase B sys assigns:    {p_summary['system_assignments']:>4}")

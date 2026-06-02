@@ -106,6 +106,8 @@ def read_control(wb) -> ControlParams:
         tran_og_default_tanks=_to_int("default tanks tranog", get("default tanks tranog"), 3),
         global_buffer_pct=_to_float("global buffer", get("global buffer"), 0.05),
         starvation_period_days=_to_int("starvation period (days)", get("starvation period (days)"), 10),
+        density_target_pct=_to_float(
+            "density target headroom", get("density target headroom"), 0.85),
     )
 
 
