@@ -58,11 +58,27 @@ from .production_report import (
 from .state import FacilityState
 
 
-def main(workbook_path: str | Path | None = None) -> int:
-    path = Path(workbook_path or Path(__file__).resolve().parent.parent / "Forecast.xlsm")
+def main(
+    input_path: str | Path | None = None,
+    output_path: str | Path | None = None,
+) -> int:
+    """Run the full forecast pipeline.
+
+    Args:
+        input_path: workbook to read. None → default `Forecast.xlsm`
+            in the project root.
+        output_path: workbook to write. None → write back to input
+            (legacy CLI behavior; mutates the source workbook).
+            Pass a separate path (e.g. from a UI) to leave the input
+            untouched and produce a fresh output file.
+    """
+    in_path = Path(
+        input_path or Path(__file__).resolve().parent.parent / "Forecast.xlsm"
+    )
+    out_path = Path(output_path) if output_path is not None else in_path
     t0 = time.time()
-    print(f"Loading {path} ...")
-    wb = load_workbook(path)
+    print(f"Loading {in_path} ...")
+    wb = load_workbook(in_path)
 
     control = read_control(wb)
     batches = read_batches(wb)
@@ -527,18 +543,23 @@ def main(workbook_path: str | Path | None = None) -> int:
         warnings=total_warnings,
     )
 
-    wb.save(path)
+    wb.save(out_path)
     wb.close()
-    print(f"\nSaved workbook {path}  ({elapsed:.2f}s, status={status}, "
+    print(f"\nSaved workbook {out_path}  ({elapsed:.2f}s, status={status}, "
           f"warnings={total_warnings})")
     return 0
 
 
 def _cli():
     p = argparse.ArgumentParser()
-    p.add_argument("--workbook", default=None)
+    p.add_argument("--workbook", default=None,
+                   help="Input workbook path. Output is written back to this "
+                        "file unless --output is given.")
+    p.add_argument("--output", default=None,
+                   help="Output workbook path. If omitted, output is written "
+                        "back to the input file (legacy behavior).")
     a = p.parse_args()
-    return main(a.workbook)
+    return main(a.workbook, a.output)
 
 
 if __name__ == "__main__":

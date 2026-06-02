@@ -1,1 +1,5 @@
 openpyxl>=3.1
+# UI (Streamlit app — see app.py). Optional for CLI-only use.
+streamlit>=1.30
+plotly>=5.18
+pandas>=2.0
