@@ -135,8 +135,15 @@ def main(workbook_path: str | Path | None = None) -> int:
     print(f"\n  Caps + pinned plans:")
     print(f"    FacilityLimits overrides: {len(facility_limits.overrides)}")
     print(f"    SystemLimits caps:        {len(system_limits.caps)}")
-    print(f"    Pinned harvests:          {len(pinned_harvests)}")
-    print(f"    Pinned transfers:         {len(pinned_transfers)}")
+    print(f"    Pinned harvests:          {len(pinned_harvests)} (honored as hard constraints)")
+    print(f"    Pinned transfers:         {len(pinned_transfers)} "
+          f"({'NOT YET HONORED — see warning below' if pinned_transfers else 'none'})")
+    if pinned_transfers:
+        print(f"  WARN: {len(pinned_transfers)} TransferPlan pin(s) detected but "
+              f"placement does not yet honor them as hard constraints. The "
+              f"planner re-decides all transfers from scratch. Pin rows are "
+              f"preserved at the top of TransferPlan for visibility; the "
+              f"planner-emitted rows follow below them.")
     print(f"    Control R24 deviation:    ±{control.facility_biomass_deviation_pct*100:.1f}% (biomass + feed)")
     print(f"    Control R29 global buf:   ±{control.global_buffer_pct*100:.1f}% (system caps)")
     print(f"    Default TranOG tanks:     {control.tran_og_default_tanks}")
@@ -446,10 +453,12 @@ def main(workbook_path: str | Path | None = None) -> int:
         wb, placement.harvest_events,
         default_hog_yield=control.default_hog_yield,
         facility_limits_hog=facility_hog_overrides,
+        pinned_harvests=pinned_harvests,
     )
     write_transfer_plan_output(
         wb, placement.transfer_events, placement.tranog_events,
         grade_events=placement.grade_events,
+        pinned_transfers=pinned_transfers,
     )
     advisory_kwargs = dict(
         residuals=residuals,

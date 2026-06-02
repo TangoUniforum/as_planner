@@ -454,37 +454,110 @@ def write_harvest_plan_output(
     harvest_events,
     default_hog_yield: float,
     facility_limits_hog: dict,
+    pinned_harvests=None,
     sheet_name: str = "HarvestPlan",
 ) -> None:
-    """Per-event harvest plan: tank-level Gross + HOG columns.
+    """Per-event harvest plan, with operator pins clearly separated
+    from planner-generated rows.
 
-    `facility_limits_hog` is a dict `{week_label: hog_yield}` for per-week
-    HOG yield overrides; default falls back to `default_hog_yield`.
+    Layout: two sections separated by a section header.
+      [1] OPERATOR-PINNED — preserved across runs; rows the operator
+          set Pinned=TRUE on. These are HONORED as hard constraints by
+          the harvest scheduler.
+      [2] PLANNER-GENERATED — rewritten every run; the algorithm's
+          additional harvest events to meet facility caps.
+
+    `facility_limits_hog` is a dict `{week_label: hog_yield}` for
+    per-week HOG yield overrides; default falls back to `default_hog_yield`.
     """
+    from openpyxl.styles import Font, PatternFill
     if sheet_name in wb.sheetnames:
         del wb[sheet_name]
     ws = wb.create_sheet(sheet_name)
     ws.append(["HARVEST PLAN"])
     ws.append([
-        "Per-harvest event. Auto-generated rows are not re-read as pins. "
-        "To pin a specific row across runs, set the 'Pinned' column to TRUE."
+        "Two sections: OPERATOR-PINNED rows first (preserved across runs, "
+        "honored as hard constraints), then PLANNER-GENERATED rows "
+        "(rewritten each run). Operator marks Pinned=TRUE in the pin "
+        "section to keep a row across runs."
     ])
     ws.append([])
-    ws.append([
+
+    headers = [
         "Week", "Batch", "Tank", "Count (fish)",
         "Gross_AvgWt (kg)", "Gross_Biomass (kg)",
         "HOG_Yield (ratio)", "HOG_AvgWt (kg)", "HOG_Biomass (kg)",
-        "Pinned",
-    ])
+        "Source", "Pinned",
+    ]
+    bold = Font(bold=True)
+    pin_fill = PatternFill("solid", fgColor="FFF3CD")
+    section_fill = PatternFill("solid", fgColor="D9E2F3")
+
+    # Identify which harvest events match operator pins (by week, batch,
+    # tank). The scheduler honors pins as hard constraints, so each pin
+    # appears as an event; we tag those rows as Source="Pin".
+    pin_keys = {
+        (p.week_label, p.batch_id, p.tank_id)
+        for p in (pinned_harvests or [])
+    }
+
+    # Track current row explicitly (openpyxl's append+max_row dance is
+    # unreliable for empty rows). Row 1=title, 2=description, 3=blank.
+    cur_row = 4
+
+    def _write_row(values: list, fill=None, bold_font: bool = False):
+        nonlocal cur_row
+        for c, v in enumerate(values, start=1):
+            cell = ws.cell(row=cur_row, column=c, value=v)
+            if fill is not None:
+                cell.fill = fill
+            if bold_font:
+                cell.font = bold
+        cur_row += 1
+
+    # ----- Section 1: operator-pinned rows -----
+    _write_row(
+        [f"=== OPERATOR-PINNED ({len(pinned_harvests or [])} row(s) — "
+         f"honored as hard constraints) ==="]
+        + [None] * (len(headers) - 1),
+        fill=section_fill, bold_font=True,
+    )
+    _write_row(headers, bold_font=True)
+    for p in (pinned_harvests or []):
+        _write_row([
+            p.week_label or p.raw_week_cell, p.batch_id, p.tank_id,
+            round(p.count, 0),
+            round(p.gross_avg_wt_kg, 3),
+            round(p.gross_biomass_kg, 0),
+            round(p.hog_yield, 4) if p.hog_yield else None,
+            round(p.hog_avg_wt_kg, 3) if p.hog_avg_wt_kg else None,
+            round(p.hog_biomass_kg, 0) if p.hog_biomass_kg else None,
+            "Pin",
+            True,
+        ], fill=pin_fill)
+
+    # ----- Divider + Section 2 header -----
+    cur_row += 1  # blank divider row
+    _write_row(
+        ["=== PLANNER-GENERATED (rewritten every run) ==="]
+        + [None] * (len(headers) - 1),
+        fill=section_fill, bold_font=True,
+    )
+    _write_row(headers, bold_font=True)
+
     events_sorted = sorted(harvest_events, key=lambda e: (e.event_date, e.source_tank_id))
     for ev in events_sorted:
         wk = iso_week_label(ev.event_date)
+        # Skip events that came from operator pins — they're already in
+        # the pin section above.
+        if (wk, ev.batch_id, ev.source_tank_id) in pin_keys:
+            continue
         gross_avg_kg = ev.avg_wt_g / 1000.0
         gross_biomass = ev.count * gross_avg_kg
         hog_yield = facility_limits_hog.get(wk, default_hog_yield)
         hog_avg = gross_avg_kg * hog_yield
         hog_biomass = gross_biomass * hog_yield
-        ws.append([
+        _write_row([
             wk, ev.batch_id, ev.source_tank_id,
             round(ev.count, 0),
             round(gross_avg_kg, 3),
@@ -492,9 +565,11 @@ def write_harvest_plan_output(
             round(hog_yield, 4),
             round(hog_avg, 3),
             round(hog_biomass, 0),
+            "Planner",
             None,   # Pinned — operator sets TRUE to keep across runs
         ])
-    widths = {1: 11, 2: 8, 3: 6, 4: 13, 5: 16, 6: 17, 7: 17, 8: 14, 9: 16, 10: 8}
+    widths = {1: 11, 2: 8, 3: 6, 4: 13, 5: 16, 6: 17, 7: 17, 8: 14, 9: 16,
+              10: 9, 11: 8}
     for c, w in widths.items():
         ws.column_dimensions[get_column_letter(c)].width = w
 
@@ -504,29 +579,86 @@ def write_transfer_plan_output(
     transfer_events,
     tranog_events,
     grade_events=None,
+    pinned_transfers=None,
     sheet_name: str = "TransferPlan",
 ) -> None:
-    """Per-event transfer + TranOG + Grade plan.
+    """Per-event transfer + TranOG + Grade plan, with operator pins
+    clearly separated from planner-generated rows.
+
+    Layout: two sections separated by a blank row + section header.
+      [1] OPERATOR-PINNED — preserved across runs; rows the operator
+          set Pinned=TRUE on. NOTE: placement does not yet HONOR these
+          as hard constraints (run.py prints a WARN); they're echoed
+          here for visibility so the operator can see what was set.
+      [2] PLANNER-GENERATED — rewritten every run; the algorithm's
+          decisions for transfers / TranOG / Grade events.
 
     Row schema: Week, Batch, From_Tank, To_Tank, Count, Avg_Weight (kg),
-    Type, CV (%), Status. From_Tank is 'FW' for TranOG; multi-tank source
-    for Grade is comma-separated.
+    Type, CV (%), Status, Source, Pinned. From_Tank is 'FW' for TranOG;
+    multi-tank source for Grade is comma-separated. Source is "Pin" or
+    "Planner" for at-a-glance distinction.
     """
+    from openpyxl.styles import Font, PatternFill
     if sheet_name in wb.sheetnames:
         del wb[sheet_name]
     ws = wb.create_sheet(sheet_name)
     ws.append(["TRANSFER PLAN"])
     ws.append([
-        "Per-event: batch, week, from/to tanks, count, avg weight, type, status. "
-        "Auto-generated rows are not re-read as pins. To pin a specific row "
-        "across runs, set the 'Pinned' column to TRUE."
+        "Two sections: OPERATOR-PINNED rows first (preserved across runs), "
+        "then PLANNER-GENERATED rows (rewritten each run). Operator marks a "
+        "Pinned=TRUE row in the pin section to keep it across runs."
     ])
     ws.append([])
-    ws.append([
+
+    headers = [
         "Week", "Batch", "From_Tank", "To_Tank",
         "Count (fish)", "Avg_Weight (kg)", "Type", "CV (%)", "Status",
-        "Pinned",
-    ])
+        "Source", "Pinned",
+    ]
+    bold = Font(bold=True)
+    pin_fill = PatternFill("solid", fgColor="FFF3CD")     # soft yellow
+    section_fill = PatternFill("solid", fgColor="D9E2F3")  # soft blue
+
+    cur_row = 4
+
+    def _write_row(values: list, fill=None, bold_font: bool = False):
+        nonlocal cur_row
+        for c, v in enumerate(values, start=1):
+            cell = ws.cell(row=cur_row, column=c, value=v)
+            if fill is not None:
+                cell.fill = fill
+            if bold_font:
+                cell.font = bold
+        cur_row += 1
+
+    # ----- Section 1: operator-pinned rows -----
+    _write_row(
+        [f"=== OPERATOR-PINNED ({len(pinned_transfers or [])} row(s) — "
+         f"NOT YET HONORED by placement) ==="]
+        + [None] * (len(headers) - 1),
+        fill=section_fill, bold_font=True,
+    )
+    _write_row(headers, bold_font=True)
+    for p in (pinned_transfers or []):
+        _write_row([
+            p.week_label or p.raw_week_cell, p.batch_id, p.from_tank, p.to_tank,
+            round(p.count, 0),
+            round(p.avg_weight_kg, 3),
+            p.grade or "Transfer",
+            round(p.cv_pct, 1) if p.cv_pct else None,
+            "pinned",
+            "Pin",
+            True,
+        ], fill=pin_fill)
+
+    # ----- Divider + Section 2 header -----
+    cur_row += 1  # blank divider row
+    _write_row(
+        ["=== PLANNER-GENERATED (rewritten every run) ==="]
+        + [None] * (len(headers) - 1),
+        fill=section_fill, bold_font=True,
+    )
+    _write_row(headers, bold_font=True)
 
     rows: list[tuple] = []
     for ev in tranog_events:
@@ -568,16 +700,18 @@ def write_transfer_plan_output(
     rows.sort(key=lambda r: (r[0], r[2]))
 
     for r in rows:
-        ws.append([
+        _write_row([
             r[1], r[2], r[3], r[4],
             round(r[5], 0),
             round(r[6], 3),
             r[7],
             round(r[8], 1) if r[8] else None,
             r[9],
+            "Planner",
             None,   # Pinned — operator sets TRUE to keep across runs
         ])
-    widths = {1: 11, 2: 8, 3: 10, 4: 8, 5: 13, 6: 14, 7: 9, 8: 8, 9: 10, 10: 8}
+    widths = {1: 11, 2: 8, 3: 10, 4: 8, 5: 13, 6: 14, 7: 9, 8: 8, 9: 10,
+              10: 9, 11: 8}
     for c, w in widths.items():
         ws.column_dimensions[get_column_letter(c)].width = w
 
