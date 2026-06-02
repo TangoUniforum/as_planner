@@ -49,14 +49,23 @@ INPUTS
         b. spread across systems (minimize peak load + variance)
         c. minimize transfer count
       Output: TransferPlan, BatchLocations.
+      PR_CORRECTION 2-pass evaluator: detect PR-over-concentrated
+      cohorts and conditionally claim free tanks at W0 — accepting the
+      claim only when it strictly improves the violation count
+      (Q-COORD.L). Always emits operator-actionable Advisory.
 
       v
 [4] Reporting + Diagnostics
-      WeeklyReport, MonthlyReport, FeedForecastWeekly/Monthly,
-      HarvestReport, HarvestPlan Report, FacilityMap, AccumulatedOutput.
-      Advisory + ValidationLog consolidate every warning/issue
-      (FW calibration residuals + planner infeasibilities + soft
-      cap excursions + min_tank_control violations).
+      Workbook writes: WeeklyReport, MonthlyReport, FeedForecastWeekly,
+      FeedForecastMonthly, HarvestReport, Daily Harvest Schedule,
+      FacilityMap, BatchLocations, HarvestPlan, TransferPlan,
+      BiologyProjection, Diagnostics (FW calibration),
+      ReconciliationReport, TankContinuityAudit.
+      Advisory consolidates flagged issues by category (FW calibration
+      residuals, bottlenecks, scheduler/placement warnings, density
+      violations, invariant violations, PR concentration).
+      ValidationLog is the raw per-event audit stream
+      (severity/source/code/week/batch/tank/message).
       Control status block (R8-R16) overwritten with run summary.
 ```
 
@@ -231,9 +240,9 @@ Three cap levels:
 
 | Level | Source | Override | Buffer |
 |---|---|---|---|
-| Tank | `FacilityConfig.max_density_kg_m3 × volume_m3` per tank | — | — |
-| System | `SystemLimits[system, week, metric]`; blank = no cap | — | R29 `Global buffer` (5% default) |
-| Facility | `Control` defaults; `FacilityLimits[week, metric]` overrides per (week, field); blank cell = fall back to Control | as listed | R24 `Target Biomass deviation` (±1% default) — **symmetric** tolerance on facility biomass (allows both +1% over and −1% under the target). Feed cap assumed same ± behavior; harvest count caps strict. |
+| Tank | `FacilityConfig.max_density_kg_m3 × volume_m3` per tank | — | R31 `density_target_pct` (0.85 default) is the *planning* headroom — precalc sizing, Phase D Grade trigger, and PR-correction gate all use it. Cap itself is the hard ceiling. |
+| System | `SystemLimits[system, week, metric]`; blank = no cap | — | R29 `Global buffer` (5% default) — upper-bound only; system caps are one-sided ceilings. |
+| Facility | `Control` defaults; `FacilityLimits[week, metric]` overrides per (week, field); blank cell = fall back to Control | as listed | R24 `Target Biomass deviation` (±1% default) — **symmetric** tolerance on facility biomass (allows both +1% over and −1% under the target). Feed cap same ± behavior; harvest count caps strict. |
 
 **Order:** facility caps satisfied first (drives harvest schedule),
 then system caps drive placement. If placement cannot meet system caps
@@ -293,33 +302,58 @@ construction, not by runtime tiebreak.
 
 **Event types** (processed in this priority within a week):
 
-1. `PR_INIT` — pre-existing batch's ProductionReport tank set (locked
-   starting state).
-2. `PR_REBALANCE` — at forecast start only, release any PR tanks beyond
-   the batch's lifetime-max need back to the free pool. PR is the
-   operator's given input; the coordinator normalizes it to the
-   canonical plan at horizon start. This is the **only** week tank
-   counts may drop without harvest; from week 2 on, the sticky floor
-   applies.
-3. `TRANOG_ARRIVAL` — hard placement into OG1/2 (with OG3+ overflow if
-   OG1/2 vacancies are insufficient; bottleneck if still short).
-4. `HARVEST_RELEASE` — batch shrinks; release tanks **before** any adds
-   in the same week so freed capacity rejoins the pool immediately
-   (models "as larger tanks empty, smaller tanks fill").
-5. `GROWTH_ADD` — batch grows; claim newly-freed + free-pool tanks.
+1. `EVT_PR_INIT` — pre-existing batch's ProductionReport tank set
+   (locked starting state).
+2. `EVT_PR_REBALANCE` — at forecast start only, release any PR tanks
+   beyond the batch's W0 per-week density need back to the free pool.
+   PR is the operator's given input; the coordinator normalizes it to
+   the canonical plan at horizon start. This is one of two weeks tank
+   counts may drop without harvest (the other being PR_CORRECTION
+   accepted by the evaluator); from week 2 on, the sticky floor applies.
+3. `EVT_PR_CORRECTION` — at forecast start only, conditional planner
+   action for over-concentrated PR cohorts. Claims 1 free tank for the
+   batch if and only if the 2-pass evaluator (in `run.py`) has
+   confirmed the claim strictly improves the violation count
+   (Q-COORD.L). Otherwise the cohort gets advisory only.
+4. `EVT_MIGRATE` — for each OG1/2 tank a batch still holds at avg ≥
+   1 kg, claim one free OG3-6 tank and release the OG1/2 tank (1:1
+   swap; exit-at-1 kg per the system-progression law). Fires every SW
+   week the batch is ≥ 1 kg; contention-resilient (no-op when OG3-6
+   pool empty, retries next week as harvest frees capacity).
+5. `EVT_TRANOG` — hard placement of TranOG arrival into OG1/2 (with
+   OG3+ overflow if OG1/2 vacancies are insufficient; bottleneck if
+   still short).
+6. `EVT_RELEASE` — batch shrinks (harvest-driven); release tanks
+   **before** any adds in the same week so freed capacity rejoins the
+   pool immediately ("as larger tanks empty, smaller tanks fill").
+7. `EVT_ADD` — per-week TARGET top-up: top the batch up TOWARD the
+   absolute per-week tank count needed at the density target. Counts
+   only batch tanks in eligible systems toward the target — a cohort
+   still holding OG1/2 tanks while eligible is OG3-6 keeps acquiring
+   grow-out tanks until target met.
 
 **Deterministic rules — no scoring weights.** Every assignment traces
 to a stated rule, never a tuned weight:
 
 - **Batch order within a (week, type):** FIFO by `input_date` ascending
   (operational fact — the operator stocked older batches first).
-- **Tank pick for GROWTH_ADD:** (1) prefer systems the batch already
-  occupies (no Transfer needed); (2) otherwise eligible systems in
-  alphabetical `system_id` order; (3) within a system, lowest-numbered
-  free tank.
-- **Tank pick for RELEASE / REBALANCE:** OG3+ before OG1/2 (OG1/2 is
-  the constrained resource for TranOG); within that, highest tank_id
-  (newest additions shed first).
+  Exception: `EVT_PR_CORRECTION` fires in severity order (worst
+  projected density first) so the most-stressed cohort claims first
+  from the bounded W0 free pool.
+- **Tank pick for EVT_ADD / EVT_MIGRATE / EVT_PR_CORRECTION:**
+  (1) prefer systems the batch already occupies (no Transfer needed);
+  (2) otherwise eligible systems ordered by **forward-peak system
+  biomass** (Q-COORD.H — minimize the resulting peak per-system load
+  curve, so cohorts with overlapping peaks interleave naturally);
+  (3) within a system, lowest-numbered free tank.
+- **Tank pick for EVT_RELEASE / EVT_PR_REBALANCE:** OG3+ before OG1/2
+  (OG1/2 is the constrained resource for TranOG); within that,
+  highest tank_id (newest additions shed first).
+
+**Eligibility flips at 1 kg.** `_build_batch_week_facts` sets a
+batch's eligible system set per-week based on `avg_wt_g`: sub-1 kg →
+OG1/2 (nursery, intra-OG1/2 splits legal); ≥1 kg → OG3-6 (grow-out
+only). EVT_MIGRATE handles the swap.
 
 **Sticky floor.** Total tank count per batch never decreases except via
 a `HARVEST_RELEASE` event (harvest reduced the cohort). Outside harvest
@@ -380,9 +414,24 @@ Walk the assignment table week by week; diff successive weeks:
 - Tank reassigned across batches → harvest (old) + TranOG / transfer
   (new), sequenced within the week
 - Grade events fired when needed (target harvest avg wt, density-driven
-  splits above 1 kg in OG1/2 that require routing through 3/4/5/6)
-- **INV-4 repair**: any proposed within-OG1/2 transfer above 1 kg is
-  re-routed through 3/4/5/6 instead
+  splits above 85% of cap — `density_target_pct`)
+- **INV-4 enforcement**: `events.Transfer` and `events.Grade` refuse
+  intra-OG1/2 moves at avg ≥ 1 kg, leaving fish in source with a
+  warning. The migration plan also re-routes such moves through
+  OG3-6 where possible.
+
+**Per-batch even-out density pass** (Q-COORD.I + Q-COORD.J). For every
+active batch, every week, level fish across the batch's tanks so any
+tank over its density cap is relieved by under-cap sister tanks.
+Three passes:
+
+1. Sub-1 kg OG1/2: intra-OG1/2 leveling (legal per progression law).
+2. OG3-6: any-to-any leveling (legal, no lock).
+3. **Cross-scope OG1/2 → OG3-6** (Q-COORD.J): when a batch has an
+   over-cap OG1/2 tank and an under-cap OG3-6 sister tank, move fish
+   across the boundary (legal at any weight; only intra-OG1/2 ≥ 1 kg
+   is forbidden). Destination capped at 90% of its cap so the same-
+   week Grade trigger doesn't fire on the new destination and cascade.
 
 Emit: `TransferPlan` rows, `HarvestPlan` rows (mostly already from
 scheduler), `BatchLocations` table.
@@ -412,18 +461,22 @@ LP / MILP is a future wrapper only if forward precalc proves
 insufficient. The coordinator (§7.1a) deliberately avoids it: a
 deterministic interval-layout pass keeps the plan defendable.
 
-**Status (2026-05-29, `feature/reservation-scheduler`).** Coordinator
-locked through Q-COORD.A–I (exit-at-1 kg + EVT_MIGRATE 1:1 swap +
-forward-peak system routing + even-out density pass). The reservation-
-grid alternative was built behind a flag and shelved after failing to
-beat the incremental coordinator. Empirical on reference workbook:
+**Status (2026-06-01, `feature/reservation-scheduler`).** Coordinator
+locked through Q-COORD.A–L: exit-at-1 kg + per-week TARGET top-up +
+forward-peak system routing + even-out density pass (within-scope +
+cross-scope OG1/2→OG3-6) + PR-concentration advisory + 2-pass
+PR_CORRECTION evaluator. Empirical on reference workbook:
 0 count/biomass drift, all 7 TranOG arrivals placed,
-**212 density violations** (worst 185 kg/m³). Of those, the
+**196 density violations** (worst 169.5 kg/m³). Of those, the
 best-way-out floor analysis (`scripts/best_way_out.py`) shows 49 are
-physically forced (OG3-6 grow-out 1-3 tanks over capacity at peak) and
-~163 are scheduling-addressable but bounded by the system-progression
-law. See `docs/GREENFIELD_COORDINATOR_LOCKS.md` for the full lock
-record.
+physically forced (OG3-6 grow-out 1-3 tanks over capacity at peak)
+and ~147 are scheduling-addressable but bounded by the system-
+progression law + Q-COORD.B sticky-floor (over-subscription cannot be
+relieved by code-side redistribution; recovery requires operator-side
+PR correction or a workbook with staggered input dates). The
+reservation-grid alternative was built behind a flag and shelved
+after failing to beat the incremental coordinator. See
+`docs/GREENFIELD_COORDINATOR_LOCKS.md` for the full lock record.
 
 ---
 
@@ -455,62 +508,56 @@ and forces consolidation toward fully utilized facility.
 
 ## 9. Module breakdown
 
-Existing code (`forecast/`):
+Current modules (`forecast/`):
 
-- `models.py` — dataclasses. Needs additions: `TankState`, `BatchTankState`,
-  `TransferEvent`, `HarvestEvent`, expanded `ControlParams`. Drop
-  `TankConfig.capacity_kg`.
-- `excel_io.py` — readers + writers. Needs:
-  - new readers: `FacilityLimits`, `SystemLimits`, `ProductionReport`,
-    `HarvestPlan` (input mode)
-  - new writers: `TransferPlan`, `HarvestPlan`, `BatchLocations`,
-    `HarvestReport`, `WeeklyReport`, `MonthlyReport`,
-    `FeedForecastWeekly`, `FeedForecastMonthly`, `Daily Harvest Schedule`,
-    `Advisory`, consolidated `ValidationLog`, Control status block
-    overwrite
-- `biology.py` — restructure: date-driven internally, per-(batch, tank)
-  state in OG. FW + Egg stay single-stream. Mortality and SGR/FCR
-  interp re-used. TranOG split logic extended to N tanks × 2 size
-  classes.
+| Module | Role |
+|---|---|
+| `models.py` | Dataclasses (`ControlParams`, `BatchInput`, `TankConfig`, `SizeClassSplit`, `BatchWeekState`, etc.) |
+| `time_grid.py` | Date arithmetic, forecast-week labels, weekly aggregation helpers |
+| `caps.py` | Cap resolution (Control / FacilityLimits / SystemLimits) + buffer helpers |
+| `state.py` | `(batch, tank)` state container, daily mortality/growth, continuity invariant checks |
+| `events.py` | The 5 logged event types (`TranOGEntry`, `Transfer`, `Grade`, `Harvest`, `GradedHarvest`) with `.apply(state)` methods that enforce INV-3, INV-4, INV-5 at event time |
+| `biology.py` | Daily Egg→FW→SW projection, SGR/FCR interp, mortality, FW back-solve, `upper_truncated_split` for graded harvest, `compute_size_class_split` for TranOG |
+| `harvest_scheduler.py` | Layer [2]. FIFO 3-state controller; facility-cap-driven; pin-aware |
+| `precalc.py` | The coordinator. `_build_batch_week_facts`, `_build_facility_assignment_plan` (event-driven interval layout with PR_CORRECTION 2-pass evaluator hook), `_build_migration_plan` (thin diff layer), `_even_out_density` |
+| `placement.py` | Phases A-D execution. Plan-driven Phase B (no greedy fallback), sticky Phase C, Phase D event emission + per-batch even-out + density-trigger Grade + purge cascade + `_try_graded_move_in` |
+| `sixn.py` | 6N purge round-robin sequencing + pair queue initialization |
+| `production_report.py` | PR sheet reader + OG hydration into `FacilityState` |
+| `excel_io.py` | All readers + all writers (folded the planned `advisory.py`/`reports.py` here for simpler module layout). Outputs: BatchLocations, HarvestPlan, TransferPlan, HarvestReport, WeeklyReport, MonthlyReport, FeedForecastWeekly/Monthly, Daily Harvest Schedule, FacilityMap, BiologyProjection, Diagnostics, ReconciliationReport, TankContinuityAudit, **Advisory**, **ValidationLog**, **Control status block**. `Pinned` column on HarvestPlan + TransferPlan distinguishes operator pins from planner-emitted rows (no IO bleed across runs). |
+| `run.py` | Pipeline orchestrator + PR_CORRECTION 2-pass evaluator + density-violation counting + Control status writeback |
 
-New modules to add:
-
-- `time_grid.py` — date arithmetic, forecast week index, weekly
-  aggregation helpers.
-- `state.py` — `(batch, tank)` state container, event application,
-  continuity invariant checks.
-- `harvest_scheduler.py` — layer [2] from §1. FIFO walk, facility-cap
-  driven, pin-aware.
-- `placement.py` — layer [3]. Tank allocation, system-cap binding,
-  spread + minimize-transfers objectives, system-progression law
-  enforcement, 6N twin-mode dispatcher.
-- `sixn.py` — 6N-specific logic (purge round-robin, production
-  starvation, transition window).
-- `events.py` — 5 event types and their effect on tank state.
-- `caps.py` — cap resolution (Control / FacilityLimits / SystemLimits
-  + buffers).
-- `advisory.py` — consolidated diagnostic output writer.
-- `reports.py` — weekly/monthly/feed/harvest rollup writers.
-
-Build order:
-1. `time_grid.py` + restructure `biology.py` to date-driven
-2. `state.py` + `events.py` (continuity foundation)
-3. ProductionReport reader + biology hydration for in-flight batches
-4. `caps.py` + remaining readers
-5. `harvest_scheduler.py` (layer 2)
-6. `placement.py` + `sixn.py` (layer 3)
-7. `reports.py` + `advisory.py` (layer 4)
-8. Validation against v8 reference outputs
+`scripts/` holds standalone diagnostics: `best_way_out.py` (theoretical
+density-violation floor), `compare_plans.py` (assignment vs migration
+plan diff), `verify_biology.py` (per-batch lifecycle dump),
+`experiment_pr_deconcentrate.py` (PR concentration ablation study).
 
 ---
 
-## 10. Open / to-confirm
+## 10. Open / deferred
 
-- `capacity_kg` column physical deletion from FacilityConfig sheet
-  pending. Code already ignores it.
+See `docs/GREENFIELD_COORDINATOR_LOCKS.md §6` for the full open list
+with rationale. Headlines:
+
+- **Production-mode 6N + starvation window** — deferred until a
+  production-mode workbook exists (current reference is 52/52 weeks
+  purge). Scaffolding in place; no behavior change against this
+  workbook.
+- **AccumulatedOutput sheet** — listed in §1 layer [4] historically
+  but never specified; deferred pending a schema definition.
+- **Lever A (sticky-floor exception)** — operator-blessed donor-
+  recipient OG3-6 rebalance. The one remaining in-code lever that
+  could meaningfully recover the ~147 addressable violations on
+  over-subscribed workbooks. Requires project-lead authorization to
+  violate Q-COORD.B.
+- **Operator-side PR correction** — the dominant residual driver per
+  Q-COORD.F. The PR-concentration advisory (Q-COORD.L) tells the
+  operator exactly what to fix upstream.
 
 Resolved during framework:
 
 - Facility feed cap buffer = ± symmetric (same as R24 biomass behavior).
 - v8 reference outputs not available. Validation = operator-eyeball
   against intuition + known cases.
+- `capacity_kg` column on `TankConfig` removed from the dataclass;
+  Excel column physical deletion still pending (code already ignores
+  it).
