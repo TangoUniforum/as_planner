@@ -177,6 +177,44 @@ def _parse_output_workbook(path: Path) -> dict:
             if isinstance(density, (int, float)) and density > 95:
                 violations.append(density)
 
+    # BiologyProjection — per (batch, week) explicit mortality % + cull
+    # events. BatchLocations only shows END-OF-WEEK count (mortality
+    # implicitly applied); this sheet has the per-week mortality fraction
+    # and cull counts/biomass so we can chart "weekly losses" at scale.
+    bio_rows = []
+    if "BiologyProjection" in wb.sheetnames:
+        ws = wb["BiologyProjection"]
+        header = None
+        for i, row in enumerate(ws.iter_rows(values_only=True), 1):
+            if header is None and row and row[0] == "Batch":
+                header = list(row)
+                idx = {h: j for j, h in enumerate(header)}
+                continue
+            if header is None or not row or row[0] is None:
+                continue
+            def g(name, default=None):
+                j = idx.get(name)
+                if j is None or j >= len(row):
+                    return default
+                return row[j]
+            bid = g("Batch")
+            wk = g("Week")
+            stage = g("Stage")
+            count = g("Count")
+            mort_pct_wk = g("Mortality_pct_wk", 0) or 0
+            cull_count = g("Cull_Count", 0) or 0
+            if not isinstance(count, (int, float)):
+                continue
+            # Weekly mortality count = current count * mort_pct/100
+            # (approximation; the geometric daily compound is close).
+            mort_count = float(count) * float(mort_pct_wk) / 100.0
+            bio_rows.append({
+                "Batch": bid, "Week": wk, "Stage": stage,
+                "Count": float(count),
+                "Mortality_count_wk": mort_count,
+                "Cull_count_wk": float(cull_count),
+            })
+
     # Harvest events from HarvestPlan (skip section headers).
     harvest_kg = 0.0
     harvest_count = 0
@@ -251,6 +289,7 @@ def _parse_output_workbook(path: Path) -> dict:
         "harvest_count": harvest_count,
         "batch_locations": bl_rows,
         "harvest_events": harvest_events,
+        "biology_projection": bio_rows,
         "advisory_summary": advisory_summary,
         "advisory_entries": advisory_entries,
         "control_status": status,
@@ -320,6 +359,7 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
     bl = r["batch_locations"]
     bl_df = pd.DataFrame(bl) if bl else pd.DataFrame()
     he_df = pd.DataFrame(r["harvest_events"]) if r["harvest_events"] else pd.DataFrame()
+    bio_df = pd.DataFrame(r.get("biology_projection", []))
 
     tab_over, tab_batch, tab_period, tab_harvest = st.tabs([
         "Overview",
@@ -418,7 +458,7 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
         if bl_df.empty:
             st.info("No batch data to display.")
         else:
-            # Aggregate per (Batch, Week): sum count + biomass; weighted-mean avg_wt + density
+            # Aggregate per (Batch, Week): sum count + biomass.
             df = bl_df.copy()
             df["Biomass_kg"] = df["Biomass_kg"].fillna(0)
             df["Count"] = df["Count"].fillna(0)
@@ -432,28 +472,45 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
             agg["AvgWt_kg"] = (agg["Biomass_kg"] / agg["Count"]).where(agg["Count"] > 0, 0)
             batches = sorted(agg["Batch"].dropna().unique())
             default = ["B46", "B47"] if all(b in batches for b in ("B46", "B47")) else batches[:2]
-            picked = st.multiselect(
-                "Batches", batches, default=default,
-                help="Pick one or more batches to compare their trajectories.",
-            )
+
+            ctrl_l, ctrl_r = st.columns([2, 3])
+            with ctrl_l:
+                picked = st.multiselect(
+                    "Batches", batches, default=default,
+                    help="Pick one or more batches to compare trajectories.",
+                )
+            with ctrl_r:
+                all_weeks = sorted(agg["Week"].dropna().unique())
+                if len(all_weeks) >= 2:
+                    wk_lo, wk_hi = st.select_slider(
+                        "Period",
+                        options=all_weeks,
+                        value=(all_weeks[0], all_weeks[-1]),
+                        help="Slide endpoints to zoom in on a specific window.",
+                    )
+                else:
+                    wk_lo, wk_hi = all_weeks[0], all_weeks[-1] if all_weeks else (None, None)
+
             if not picked:
                 st.info("Select at least one batch.")
             else:
-                view = agg[agg["Batch"].isin(picked)].sort_values(["Batch", "Week"])
+                view = agg[
+                    (agg["Batch"].isin(picked))
+                    & (agg["Week"] >= wk_lo)
+                    & (agg["Week"] <= wk_hi)
+                ].sort_values(["Batch", "Week"])
                 c1, c2 = st.columns(2)
                 with c1:
                     fig = px.line(
                         view, x="Week", y="AvgWt_kg", color="Batch",
-                        markers=True,
-                        title="Average weight per fish (kg)",
+                        markers=True, title="Average weight per fish (kg)",
                     )
                     fig.update_layout(height=350, yaxis_title="kg/fish")
                     st.plotly_chart(fig, use_container_width=True)
                 with c2:
                     fig = px.line(
                         view, x="Week", y="Biomass_kg", color="Batch",
-                        markers=True,
-                        title="Total batch biomass (kg)",
+                        markers=True, title="Total batch biomass (kg)",
                     )
                     fig.update_layout(height=350, yaxis_title="kg")
                     st.plotly_chart(fig, use_container_width=True)
@@ -461,8 +518,7 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
                 with c3:
                     fig = px.line(
                         view, x="Week", y="MaxDensity", color="Batch",
-                        markers=True,
-                        title="Max per-tank density (kg/m³)",
+                        markers=True, title="Max per-tank density (kg/m³)",
                     )
                     fig.add_hline(y=95, line_dash="dash", line_color="red",
                                   annotation_text="cap")
@@ -473,11 +529,38 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
                 with c4:
                     fig = px.line(
                         view, x="Week", y="Count", color="Batch",
-                        markers=True,
-                        title="Fish count",
+                        markers=True, title="Fish count (end of week)",
                     )
                     fig.update_layout(height=350, yaxis_title="fish")
                     st.plotly_chart(fig, use_container_width=True)
+
+                # Explicit weekly losses: mortality + cull events per
+                # week, plotted at their own scale so they don't disappear
+                # next to the much larger total fish count.
+                if not bio_df.empty:
+                    bv = bio_df[
+                        (bio_df["Batch"].isin(picked))
+                        & (bio_df["Week"] >= wk_lo)
+                        & (bio_df["Week"] <= wk_hi)
+                    ].copy()
+                    bv["Mortality + Cull (fish)"] = (
+                        bv["Mortality_count_wk"] + bv["Cull_count_wk"]
+                    )
+                    fig = px.line(
+                        bv, x="Week", y="Mortality + Cull (fish)",
+                        color="Batch", markers=True,
+                        title="Weekly losses (mortality + scheduled culls)",
+                    )
+                    fig.update_layout(height=300, yaxis_title="fish lost / week")
+                    st.plotly_chart(fig, use_container_width=True)
+                    st.caption(
+                        "Mortality from the per-week mortality table, plus "
+                        "any cull events at scheduled DSI thresholds. Plotted "
+                        "separately because per-week losses (~50–200 fish) "
+                        "are tiny next to the 200k+ batch total — they "
+                        "disappear in the Count chart above."
+                    )
+
                 with st.expander("Raw weekly table"):
                     st.dataframe(view, hide_index=True, use_container_width=True)
 
