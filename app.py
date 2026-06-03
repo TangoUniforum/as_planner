@@ -69,17 +69,33 @@ with st.sidebar:
         use_container_width=True,
     )
 
-    if "result" in st.session_state:
+    if "result" in st.session_state and st.session_state.result.get("ok"):
+        r = st.session_state.result
         st.success(
-            f"Last run: {st.session_state.result['elapsed']:.1f}s, "
-            f"{st.session_state.result['violations']} viols"
+            f"Last run: {r['elapsed']:.1f}s, {r['violations']} viols"
         )
         st.download_button(
             label="⬇ Download output workbook",
-            data=st.session_state.result["output_bytes"],
-            file_name=st.session_state.result["output_name"],
+            data=r["output_bytes"],
+            file_name=r["output_name"],
             mime="application/vnd.ms-excel.sheet.macroenabled.12",
             use_container_width=True,
+        )
+        # Fallback: show where the file lives on disk in case the
+        # download button doesn't work (browser quirks, file size, etc.)
+        if r.get("output_path"):
+            st.caption(f"Also saved at:\n`{r['output_path']}`")
+    elif "result" in st.session_state and not st.session_state.result.get("ok"):
+        st.error("Last run failed — see error in main panel.")
+        if st.session_state.result.get("output_path"):
+            st.caption(
+                f"Partial output (if any):\n"
+                f"`{st.session_state.result['output_path']}`"
+            )
+    else:
+        st.caption(
+            "Upload a workbook, click ▶ Run forecast. The download "
+            "button appears here after the run completes."
         )
 
 
@@ -123,6 +139,7 @@ def _run_with_workbook_bytes(input_bytes: bytes, input_name: str) -> dict:
             "error": f"Pipeline returned rc={rc} or no output produced",
             "stdout": captured.getvalue(),
             "elapsed": elapsed,
+            "output_path": str(out_path) if out_path.exists() else None,
         }
 
     # Read parsed outputs for visualization.
@@ -134,6 +151,7 @@ def _run_with_workbook_bytes(input_bytes: bytes, input_name: str) -> dict:
         "stdout": captured.getvalue(),
         "output_bytes": output_bytes,
         "output_name": out_name,
+        "output_path": str(out_path),
     })
     return parsed
 
@@ -247,7 +265,12 @@ if run_clicked and uploaded is not None:
             st.error(f"Pipeline failed: {result.get('error', 'unknown')}")
             if result.get("traceback"):
                 st.code(result["traceback"])
+            if result.get("stdout"):
+                with st.expander("Console output (stdout)", expanded=False):
+                    st.code(result["stdout"], language="text")
             status.update(label="✗ Pipeline failed", state="error")
+            # Store the failure result so the sidebar can show diagnostics.
+            st.session_state.result = result
 
 
 # ============================================================
@@ -257,15 +280,29 @@ if run_clicked and uploaded is not None:
 if "result" in st.session_state and st.session_state.result.get("ok"):
     r = st.session_state.result
 
-    # ---- KPIs ----
-    st.subheader("Summary")
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Violations", r["violations"], help="Tanks where density > 95 kg/m³")
-    k2.metric("Worst density", f"{r['worst_density']:.1f} kg/m³",
-              help="Highest per-tank density across the horizon")
-    k3.metric("Total harvest", f"{r['harvest_kg']/1000:,.1f} t",
-              help="Sum of all harvest events across the horizon")
-    k4.metric("Run time", f"{r['elapsed']:.1f}s")
+    # ---- KPIs + prominent download button ----
+    top_kpi, top_dl = st.columns([3, 1])
+    with top_kpi:
+        st.subheader("Summary")
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("Violations", r["violations"], help="Tanks where density > 95 kg/m³")
+        k2.metric("Worst density", f"{r['worst_density']:.1f} kg/m³",
+                  help="Highest per-tank density across the horizon")
+        k3.metric("Total harvest", f"{r['harvest_kg']/1000:,.1f} t",
+                  help="Sum of all harvest events across the horizon")
+        k4.metric("Run time", f"{r['elapsed']:.1f}s")
+    with top_dl:
+        st.subheader("Output")
+        st.download_button(
+            label="⬇ Download workbook",
+            data=r["output_bytes"],
+            file_name=r["output_name"],
+            mime="application/vnd.ms-excel.sheet.macroenabled.12",
+            use_container_width=True,
+            type="primary",
+        )
+        if r.get("output_path"):
+            st.caption(f"Saved to:\n`{r['output_path']}`")
 
     # ---- Advisory grouped by category ----
     st.subheader("Advisory")
