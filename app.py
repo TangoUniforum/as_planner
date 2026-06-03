@@ -177,9 +177,10 @@ def _parse_output_workbook(path: Path) -> dict:
             if isinstance(density, (int, float)) and density > 95:
                 violations.append(density)
 
-    # Harvest totals from HarvestPlan (skip Section headers).
+    # Harvest events from HarvestPlan (skip section headers).
     harvest_kg = 0.0
     harvest_count = 0
+    harvest_events = []
     if "HarvestPlan" in wb.sheetnames:
         ws = wb["HarvestPlan"]
         for row in ws.iter_rows(values_only=True):
@@ -187,9 +188,19 @@ def _parse_output_workbook(path: Path) -> dict:
                 continue
             # Planner rows have Source="Planner" (col 10), Pin rows have "Pin"
             if len(row) >= 10 and row[9] in ("Pin", "Planner"):
-                if isinstance(row[3], (int, float)) and isinstance(row[5], (int, float)):
-                    harvest_count += row[3]
-                    harvest_kg += row[5]
+                wk = row[0]
+                bid = row[1]
+                cnt = row[3]
+                gross_kg = row[5]
+                gross_avg_kg = row[4]
+                if isinstance(cnt, (int, float)) and isinstance(gross_kg, (int, float)):
+                    harvest_count += cnt
+                    harvest_kg += gross_kg
+                    harvest_events.append({
+                        "Week": wk, "Batch": bid, "Source": row[9],
+                        "Count": cnt, "Gross_kg": gross_kg,
+                        "Avg_wt_kg": gross_avg_kg,
+                    })
 
     # Advisory entries (skip the summary section).
     advisory_entries = []
@@ -239,6 +250,7 @@ def _parse_output_workbook(path: Path) -> dict:
         "harvest_kg": harvest_kg,
         "harvest_count": harvest_count,
         "batch_locations": bl_rows,
+        "harvest_events": harvest_events,
         "advisory_summary": advisory_summary,
         "advisory_entries": advisory_entries,
         "control_status": status,
@@ -304,97 +316,296 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
         if r.get("output_path"):
             st.caption(f"Saved to:\n`{r['output_path']}`")
 
-    # ---- Advisory grouped by category ----
-    st.subheader("Advisory")
-    if r["advisory_summary"]:
-        col_table, col_detail = st.columns([1, 2])
-        with col_table:
-            st.caption("Issues by category")
-            st.dataframe(
-                pd.DataFrame(r["advisory_summary"]),
-                hide_index=True,
-                use_container_width=True,
-            )
-        with col_detail:
-            st.caption("Details (expand each category)")
-            entries = r["advisory_entries"]
-            by_cat: dict[str, list] = defaultdict(list)
-            for e in entries:
-                by_cat[e["Category"]].append(e["Detail"])
-            # Sort categories by count desc.
-            for cat in sorted(by_cat, key=lambda c: -len(by_cat[c])):
-                with st.expander(f"{cat} ({len(by_cat[cat])})"):
-                    for d in by_cat[cat][:50]:
-                        st.text(d)
-                    if len(by_cat[cat]) > 50:
-                        st.caption(f"… and {len(by_cat[cat]) - 50} more")
-    else:
-        st.info("No advisory entries — clean run.")
-
-    # ---- Tank occupancy heatmap ----
-    st.subheader("Tank occupancy over time")
+    # ---- Tabs ----
     bl = r["batch_locations"]
-    if bl:
-        df = pd.DataFrame(bl)
-        # Pivot: rows=Tank, cols=Week, cell=Batch (text). Density as a
-        # secondary color via a second pivot used for hover info.
-        df["TankLabel"] = df.apply(lambda r: f"{r['System']}-{r['Tank']}", axis=1)
-        # Sort tanks by system then tank id.
-        tank_order = sorted(
-            df["TankLabel"].unique(),
-            key=lambda t: (t.split("-")[0], int(t.split("-")[1]) if t.split("-")[1].isdigit() else 0),
-        )
-        weeks = sorted(df["Week"].dropna().unique())
-        # Build density matrix; color by density. Hover shows batch + density.
-        density_pivot = df.pivot_table(
-            index="TankLabel", columns="Week",
-            values="Density_kg_m3", aggfunc="first",
-        ).reindex(index=tank_order, columns=weeks)
-        batch_pivot = df.pivot_table(
-            index="TankLabel", columns="Week",
-            values="Batch", aggfunc="first",
-        ).reindex(index=tank_order, columns=weeks)
-        # Plotly heatmap colored by density.
-        fig = px.imshow(
-            density_pivot.values,
-            x=weeks, y=tank_order,
-            color_continuous_scale=[
-                (0.0, "#f0f0f0"),
-                (0.50, "#a8d5a8"),   # under 85% target — light green
-                (0.85, "#f5d49a"),   # 80-95 — amber
-                (1.0, "#e8615e"),    # over cap — red
-            ],
-            range_color=[0, 130],
-            labels=dict(x="Week", y="Tank", color="Density (kg/m³)"),
-            aspect="auto",
-        )
-        # Custom hover: tank, week, batch, density.
-        customdata = []
-        for tl in tank_order:
-            row_cd = []
-            for wk in weeks:
-                bid = batch_pivot.loc[tl, wk] if wk in batch_pivot.columns else None
-                d = density_pivot.loc[tl, wk] if wk in density_pivot.columns else None
-                row_cd.append([str(bid) if bid else "—", f"{d:.1f}" if isinstance(d, (int, float)) else "—"])
-            customdata.append(row_cd)
-        fig.update_traces(
-            customdata=customdata,
-            hovertemplate=(
-                "Tank: %{y}<br>Week: %{x}<br>Batch: %{customdata[0]}"
-                "<br>Density: %{customdata[1]} kg/m³<extra></extra>"
-            ),
-        )
-        fig.update_layout(height=600, margin=dict(l=80, r=20, t=20, b=40))
-        st.plotly_chart(fig, use_container_width=True)
-        st.caption(
-            "Color = per-tank density (light green = under 85% target, "
-            "amber = approaching cap, red = over 95 kg/m³ cap). Hover "
-            "any cell for the batch and exact density."
-        )
-    else:
-        st.info("No BatchLocations data — pipeline may have failed silently.")
+    bl_df = pd.DataFrame(bl) if bl else pd.DataFrame()
+    he_df = pd.DataFrame(r["harvest_events"]) if r["harvest_events"] else pd.DataFrame()
 
-    # ---- Run log (collapsed by default) ----
+    tab_over, tab_batch, tab_period, tab_harvest = st.tabs([
+        "Overview",
+        "Per-Batch",
+        "Period Summary",
+        "Harvest",
+    ])
+
+    # ============================================================
+    # Tab 1: Overview — Advisory + occupancy heatmap
+    # ============================================================
+    with tab_over:
+        st.subheader("Advisory")
+        if r["advisory_summary"]:
+            col_table, col_detail = st.columns([1, 2])
+            with col_table:
+                st.caption("Issues by category")
+                st.dataframe(
+                    pd.DataFrame(r["advisory_summary"]),
+                    hide_index=True, use_container_width=True,
+                )
+            with col_detail:
+                st.caption("Details (expand each category)")
+                entries = r["advisory_entries"]
+                by_cat: dict[str, list] = defaultdict(list)
+                for e in entries:
+                    by_cat[e["Category"]].append(e["Detail"])
+                for cat in sorted(by_cat, key=lambda c: -len(by_cat[c])):
+                    with st.expander(f"{cat} ({len(by_cat[cat])})"):
+                        for d in by_cat[cat][:50]:
+                            st.text(d)
+                        if len(by_cat[cat]) > 50:
+                            st.caption(f"… and {len(by_cat[cat]) - 50} more")
+        else:
+            st.info("No advisory entries — clean run.")
+
+        st.subheader("Tank occupancy over time")
+        if not bl_df.empty:
+            df = bl_df.copy()
+            df["TankLabel"] = df.apply(lambda r: f"{r['System']}-{r['Tank']}", axis=1)
+            tank_order = sorted(
+                df["TankLabel"].unique(),
+                key=lambda t: (t.split("-")[0], int(t.split("-")[1]) if t.split("-")[1].isdigit() else 0),
+            )
+            weeks = sorted(df["Week"].dropna().unique())
+            density_pivot = df.pivot_table(
+                index="TankLabel", columns="Week",
+                values="Density_kg_m3", aggfunc="first",
+            ).reindex(index=tank_order, columns=weeks)
+            batch_pivot = df.pivot_table(
+                index="TankLabel", columns="Week",
+                values="Batch", aggfunc="first",
+            ).reindex(index=tank_order, columns=weeks)
+            fig = px.imshow(
+                density_pivot.values,
+                x=weeks, y=tank_order,
+                color_continuous_scale=[
+                    (0.0, "#f0f0f0"),
+                    (0.50, "#a8d5a8"),
+                    (0.85, "#f5d49a"),
+                    (1.0, "#e8615e"),
+                ],
+                range_color=[0, 130],
+                labels=dict(x="Week", y="Tank", color="Density (kg/m³)"),
+                aspect="auto",
+            )
+            customdata = []
+            for tl in tank_order:
+                row_cd = []
+                for wk in weeks:
+                    bid = batch_pivot.loc[tl, wk] if wk in batch_pivot.columns else None
+                    d = density_pivot.loc[tl, wk] if wk in density_pivot.columns else None
+                    row_cd.append([str(bid) if bid else "—",
+                                   f"{d:.1f}" if isinstance(d, (int, float)) else "—"])
+                customdata.append(row_cd)
+            fig.update_traces(
+                customdata=customdata,
+                hovertemplate=(
+                    "Tank: %{y}<br>Week: %{x}<br>Batch: %{customdata[0]}"
+                    "<br>Density: %{customdata[1]} kg/m³<extra></extra>"
+                ),
+            )
+            fig.update_layout(height=600, margin=dict(l=80, r=20, t=20, b=40))
+            st.plotly_chart(fig, use_container_width=True)
+            st.caption(
+                "Color = per-tank density (light green = under 85% target, "
+                "amber = approaching cap, red = over 95 kg/m³ cap). Hover "
+                "any cell for the batch and exact density."
+            )
+
+    # ============================================================
+    # Tab 2: Per-Batch lifecycle
+    # ============================================================
+    with tab_batch:
+        st.subheader("Per-batch trajectories")
+        if bl_df.empty:
+            st.info("No batch data to display.")
+        else:
+            # Aggregate per (Batch, Week): sum count + biomass; weighted-mean avg_wt + density
+            df = bl_df.copy()
+            df["Biomass_kg"] = df["Biomass_kg"].fillna(0)
+            df["Count"] = df["Count"].fillna(0)
+            agg = df.groupby(["Batch", "Week"]).agg(
+                Count=("Count", "sum"),
+                Biomass_kg=("Biomass_kg", "sum"),
+                MaxDensity=("Density_kg_m3", "max"),
+                MeanDensity=("Density_kg_m3", "mean"),
+                Tanks=("Tank", "nunique"),
+            ).reset_index()
+            agg["AvgWt_kg"] = (agg["Biomass_kg"] / agg["Count"]).where(agg["Count"] > 0, 0)
+            batches = sorted(agg["Batch"].dropna().unique())
+            default = ["B46", "B47"] if all(b in batches for b in ("B46", "B47")) else batches[:2]
+            picked = st.multiselect(
+                "Batches", batches, default=default,
+                help="Pick one or more batches to compare their trajectories.",
+            )
+            if not picked:
+                st.info("Select at least one batch.")
+            else:
+                view = agg[agg["Batch"].isin(picked)].sort_values(["Batch", "Week"])
+                c1, c2 = st.columns(2)
+                with c1:
+                    fig = px.line(
+                        view, x="Week", y="AvgWt_kg", color="Batch",
+                        markers=True,
+                        title="Average weight per fish (kg)",
+                    )
+                    fig.update_layout(height=350, yaxis_title="kg/fish")
+                    st.plotly_chart(fig, use_container_width=True)
+                with c2:
+                    fig = px.line(
+                        view, x="Week", y="Biomass_kg", color="Batch",
+                        markers=True,
+                        title="Total batch biomass (kg)",
+                    )
+                    fig.update_layout(height=350, yaxis_title="kg")
+                    st.plotly_chart(fig, use_container_width=True)
+                c3, c4 = st.columns(2)
+                with c3:
+                    fig = px.line(
+                        view, x="Week", y="MaxDensity", color="Batch",
+                        markers=True,
+                        title="Max per-tank density (kg/m³)",
+                    )
+                    fig.add_hline(y=95, line_dash="dash", line_color="red",
+                                  annotation_text="cap")
+                    fig.add_hline(y=95*0.85, line_dash="dot", line_color="orange",
+                                  annotation_text="85% target")
+                    fig.update_layout(height=350, yaxis_title="kg/m³")
+                    st.plotly_chart(fig, use_container_width=True)
+                with c4:
+                    fig = px.line(
+                        view, x="Week", y="Count", color="Batch",
+                        markers=True,
+                        title="Fish count",
+                    )
+                    fig.update_layout(height=350, yaxis_title="fish")
+                    st.plotly_chart(fig, use_container_width=True)
+                with st.expander("Raw weekly table"):
+                    st.dataframe(view, hide_index=True, use_container_width=True)
+
+    # ============================================================
+    # Tab 3: Period Summary — facility-wide weekly metrics
+    # ============================================================
+    with tab_period:
+        st.subheader("Facility-wide weekly summary")
+        if bl_df.empty:
+            st.info("No batch data to display.")
+        else:
+            df = bl_df.copy()
+            df["Biomass_kg"] = df["Biomass_kg"].fillna(0)
+            wk_facility = df.groupby("Week").agg(
+                FacilityBiomass_kg=("Biomass_kg", "sum"),
+                ActiveTanks=("Tank", "nunique"),
+                ActiveBatches=("Batch", "nunique"),
+                MeanDensity=("Density_kg_m3", "mean"),
+            ).reset_index().sort_values("Week")
+
+            # Merge harvest per week (kg + count)
+            if not he_df.empty:
+                hw = he_df.groupby("Week").agg(
+                    HarvestKg=("Gross_kg", "sum"),
+                    HarvestCount=("Count", "sum"),
+                ).reset_index()
+                wk_facility = wk_facility.merge(hw, on="Week", how="left")
+                wk_facility[["HarvestKg", "HarvestCount"]] = (
+                    wk_facility[["HarvestKg", "HarvestCount"]].fillna(0)
+                )
+
+            c1, c2 = st.columns(2)
+            with c1:
+                fig = px.line(
+                    wk_facility, x="Week", y="FacilityBiomass_kg",
+                    markers=True, title="Facility biomass (kg)",
+                )
+                fig.add_hline(y=3_900_000, line_dash="dash", line_color="red",
+                              annotation_text="Max Biomass cap (3,900 t)")
+                fig.update_layout(height=350, yaxis_title="kg")
+                st.plotly_chart(fig, use_container_width=True)
+            with c2:
+                if "HarvestKg" in wk_facility.columns:
+                    fig = px.bar(
+                        wk_facility, x="Week", y="HarvestKg",
+                        title="Weekly harvest (kg, gross)",
+                    )
+                    fig.update_layout(height=350, yaxis_title="kg")
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.info("No harvest events.")
+
+            c3, c4 = st.columns(2)
+            with c3:
+                fig = px.line(
+                    wk_facility, x="Week", y="ActiveBatches",
+                    markers=True, title="Active batches per week",
+                )
+                fig.update_layout(height=300, yaxis_title="count")
+                st.plotly_chart(fig, use_container_width=True)
+            with c4:
+                fig = px.line(
+                    wk_facility, x="Week", y="MeanDensity",
+                    markers=True,
+                    title="Mean per-tank density across facility (kg/m³)",
+                )
+                fig.add_hline(y=95, line_dash="dash", line_color="red",
+                              annotation_text="cap")
+                fig.update_layout(height=300, yaxis_title="kg/m³")
+                st.plotly_chart(fig, use_container_width=True)
+
+            with st.expander("Raw weekly table"):
+                st.dataframe(wk_facility, hide_index=True, use_container_width=True)
+
+    # ============================================================
+    # Tab 4: Harvest Overview
+    # ============================================================
+    with tab_harvest:
+        st.subheader("Harvest plan overview")
+        if he_df.empty:
+            st.info("No harvest events.")
+        else:
+            tot_kg = he_df["Gross_kg"].sum()
+            tot_count = he_df["Count"].sum()
+            avg_kg = tot_kg / tot_count if tot_count else 0
+            n_pin = (he_df["Source"] == "Pin").sum()
+            n_plan = (he_df["Source"] == "Planner").sum()
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric("Total harvest", f"{tot_kg/1000:,.1f} t")
+            k2.metric("Total fish", f"{tot_count:,.0f}")
+            k3.metric("Avg weight at harvest", f"{avg_kg:.2f} kg")
+            k4.metric("Operator pins / Planner", f"{n_pin} / {n_plan}")
+
+            c1, c2 = st.columns(2)
+            with c1:
+                fig = px.bar(
+                    he_df, x="Week", y="Gross_kg", color="Batch",
+                    title="Harvest kg per week, stacked by batch",
+                )
+                fig.update_layout(height=400, yaxis_title="kg")
+                st.plotly_chart(fig, use_container_width=True)
+            with c2:
+                fig = px.bar(
+                    he_df, x="Week", y="Count", color="Batch",
+                    title="Harvest count per week, stacked by batch",
+                )
+                fig.update_layout(height=400, yaxis_title="fish")
+                st.plotly_chart(fig, use_container_width=True)
+
+            # Avg harvest weight per week (weighted)
+            hw = he_df.groupby("Week").agg(
+                Count=("Count", "sum"),
+                Gross_kg=("Gross_kg", "sum"),
+            ).reset_index()
+            hw["AvgWt_kg"] = (hw["Gross_kg"] / hw["Count"]).where(hw["Count"] > 0, 0)
+            fig = px.line(
+                hw, x="Week", y="AvgWt_kg", markers=True,
+                title="Average harvest weight per week (kg/fish)",
+            )
+            fig.add_hline(y=3.5, line_dash="dot", line_color="orange",
+                          annotation_text="Min harvest weight (3.5 kg)")
+            fig.update_layout(height=300, yaxis_title="kg/fish")
+            st.plotly_chart(fig, use_container_width=True)
+
+            with st.expander("Raw harvest events"):
+                st.dataframe(he_df, hide_index=True, use_container_width=True)
+
+    # ---- Run log (collapsed) ----
     with st.expander("Run log (console output)"):
         st.code(r["stdout"], language="text")
 else:
