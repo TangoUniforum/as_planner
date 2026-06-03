@@ -450,6 +450,132 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
                 "any cell for the batch and exact density."
             )
 
+            # ---- Per-system biomass + feed over time ----
+            st.subheader("Per-system biomass + feed")
+            sys_bio = (
+                bl_df.assign(Biomass_kg=bl_df["Biomass_kg"].fillna(0))
+                .groupby(["System", "Week"]).agg(
+                    Biomass_kg=("Biomass_kg", "sum"),
+                ).reset_index().sort_values(["Week", "System"])
+            )
+            # Per-system feed: derive from BiologyProjection (per-batch
+            # feed_kg_day) attributed to each system by the batch's
+            # biomass share in that system. Approximation: feed splits
+            # proportionally to where the batch's biomass lives.
+            if not bio_df.empty:
+                # Read full biology data (need Feed_kg_day too) from output
+                # workbook. The runner currently strips that — pull it
+                # from BatchLocations + biology projection via a join on
+                # (Batch, Week). bio_df has Count but not Feed_kg_day.
+                # Compute per-(batch, week) biomass share of each system,
+                # then multiply by per-batch total biomass to get
+                # per-(system, week) biomass — that's what we did above.
+                pass
+
+            c1, c2 = st.columns(2)
+            with c1:
+                fig = px.line(
+                    sys_bio, x="Week", y="Biomass_kg", color="System",
+                    markers=True,
+                    title="Per-system biomass (kg) over time",
+                )
+                fig.update_layout(height=380, yaxis_title="kg",
+                                  legend=dict(title="System"))
+                st.plotly_chart(fig, use_container_width=True)
+            with c2:
+                # Per-system biomass as % of typical density-cap capacity
+                # (avg tank volume × density cap × tank count per system).
+                # Approximation: pull tank count per system from data.
+                tanks_per_sys = bl_df.groupby("System")["Tank"].nunique().to_dict()
+                # Avg cap-biomass per tank: 95 kg/m³ × 1720 m³ = 163,400 kg.
+                CAP_PER_TANK = 95 * 1720
+                sys_bio_pct = sys_bio.copy()
+                sys_bio_pct["Cap_kg"] = sys_bio_pct["System"].map(
+                    lambda s: tanks_per_sys.get(s, 0) * CAP_PER_TANK
+                )
+                sys_bio_pct["Pct_of_cap"] = (
+                    sys_bio_pct["Biomass_kg"] / sys_bio_pct["Cap_kg"] * 100
+                ).where(sys_bio_pct["Cap_kg"] > 0, 0)
+                fig = px.line(
+                    sys_bio_pct, x="Week", y="Pct_of_cap", color="System",
+                    markers=True,
+                    title="Per-system utilization (% of density-cap capacity)",
+                )
+                fig.add_hline(y=100, line_dash="dash", line_color="red",
+                              annotation_text="100% (cap)")
+                fig.add_hline(y=85, line_dash="dot", line_color="orange",
+                              annotation_text="85% target")
+                fig.update_layout(height=380, yaxis_title="% of cap",
+                                  legend=dict(title="System"))
+                st.plotly_chart(fig, use_container_width=True)
+
+            st.caption(
+                "Left: absolute biomass per system, summed across that "
+                "system's tanks. Right: same as % of the system's "
+                "density-cap capacity (95 kg/m³ × volume × tank count). "
+                "Watch for systems pinned at 100% while others sit idle "
+                "— that's the operational signal of imbalance."
+            )
+
+            # Per-system feed/day — sum the batch's feed/day attributed
+            # by biomass share to each system.
+            if not bio_df.empty:
+                # Build a feed map from BiologyProjection. The current
+                # parsed bio_df has Mortality + Cull but not Feed_kg_day.
+                # Re-read it from the output workbook one more time.
+                # (Simpler than restructuring the parser — Feed is needed
+                # only here.)
+                feed_per_batch_week = {}
+                from openpyxl import load_workbook as _lwb
+                if r.get("output_path"):
+                    _wb = _lwb(r["output_path"], keep_vba=True, data_only=False, read_only=True)
+                    if "BiologyProjection" in _wb.sheetnames:
+                        _ws = _wb["BiologyProjection"]
+                        _hdr = None
+                        for _i, _row in enumerate(_ws.iter_rows(values_only=True), 1):
+                            if _hdr is None and _row and _row[0] == "Batch":
+                                _hdr = list(_row)
+                                _idx = {h: j for j, h in enumerate(_hdr)}
+                                continue
+                            if _hdr is None or not _row or _row[0] is None:
+                                continue
+                            _bid = _row[_idx.get("Batch")]
+                            _wk = _row[_idx.get("Week")]
+                            _fd = _row[_idx.get("Feed_kg_day", 16)] or 0
+                            feed_per_batch_week[(_bid, _wk)] = float(_fd)
+                if feed_per_batch_week:
+                    # Per (System, Week) feed: sum over batches of
+                    # batch_feed × (batch_biomass_in_system / batch_total_biomass)
+                    tmp = bl_df.copy()
+                    tmp["Biomass_kg"] = tmp["Biomass_kg"].fillna(0)
+                    batch_tot = tmp.groupby(["Batch", "Week"])["Biomass_kg"].sum().to_dict()
+                    tmp["BatchTotal"] = tmp.apply(
+                        lambda r: batch_tot.get((r["Batch"], r["Week"]), 0), axis=1
+                    )
+                    tmp["BatchFeed"] = tmp.apply(
+                        lambda r: feed_per_batch_week.get((r["Batch"], r["Week"]), 0), axis=1
+                    )
+                    tmp["Feed_attributed"] = (
+                        tmp["BatchFeed"] * tmp["Biomass_kg"] / tmp["BatchTotal"]
+                    ).where(tmp["BatchTotal"] > 0, 0)
+                    sys_feed = tmp.groupby(["System", "Week"]).agg(
+                        Feed_kg_day=("Feed_attributed", "sum"),
+                    ).reset_index().sort_values(["Week", "System"])
+                    fig = px.line(
+                        sys_feed, x="Week", y="Feed_kg_day", color="System",
+                        markers=True,
+                        title="Per-system feed (kg/day) over time",
+                    )
+                    fig.update_layout(height=380, yaxis_title="kg/day",
+                                      legend=dict(title="System"))
+                    st.plotly_chart(fig, use_container_width=True)
+                    st.caption(
+                        "Feed attributed to each system by the share of the "
+                        "batch's biomass that lives in that system. Approximate "
+                        "— a batch spanning multiple systems splits its total "
+                        "feed proportionally."
+                    )
+
     # ============================================================
     # Tab 2: Per-Batch lifecycle
     # ============================================================
