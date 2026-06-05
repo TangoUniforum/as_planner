@@ -76,6 +76,234 @@ def _seed_config_scenario_from_bytes(input_bytes: bytes, input_name: str) -> Non
 
 
 # ============================================================
+# Mother ship — in-app config + scenario editor
+# ============================================================
+# Edit the app's stable config (biology/facility/control) and scenario
+# (forward batches + limits) directly, saved back to the YAML the engine
+# runs from. This is what makes the models + control points live in the
+# app instead of a workbook. Round-trip converters are kept pure (no
+# Streamlit) so they can be unit-tested.
+
+def _records(df):
+    """DataFrame -> list[dict] with NATIVE python types (data_editor returns
+    numpy scalars / NaN which yaml.safe_dump can't serialize). JSON round-trip
+    coerces numpy->native and NaN->None."""
+    import json
+    return json.loads(df.to_json(orient="records"))
+
+
+def _biology_to_frames(tables):
+    """BiologyTables -> (growth_df, mort_df, feed_df, cull_df, model_keys)."""
+    n = len(tables.sgr_size_g)
+    models = sorted(tables.fcr_by_model.keys())
+    growth = []
+    for i in range(n):
+        row = {"size_g": tables.sgr_size_g[i],
+               "SGR_FW": tables.sgr_fw_pct_day[i],
+               "SGR_SW": tables.sgr_sw_pct_day[i]}
+        for m in models:
+            col = tables.fcr_by_model.get(m, [])
+            row[f"FCR_{m}"] = col[i] if i < len(col) else None
+        growth.append(row)
+    growth_df = pd.DataFrame(growth)
+    mort_df = pd.DataFrame({"week_from_input": tables.mortality_week_from_input,
+                            "mortality_pct": tables.mortality_pct_weekly})
+    feed_df = pd.DataFrame([{"max_size_g": mx, "feed_name": nm}
+                            for mx, nm in tables.feed_types])
+    cull_df = pd.DataFrame([{"days_since_input": d, "cull_pct": p}
+                            for d, p in tables.culling])
+    return growth_df, mort_df, feed_df, cull_df, models
+
+
+def _frames_to_biology(growth_df, mort_df, feed_df, cull_df, models):
+    """Inverse of _biology_to_frames -> BiologyTables."""
+    from forecast.models import BiologyTables
+    g = growth_df.dropna(subset=["size_g"])
+    sizes = [float(x) for x in g["size_g"]]
+
+    def _col(df, name):
+        return [None if pd.isna(x) else float(x) for x in df[name]]
+
+    md = mort_df.dropna(subset=["week_from_input"])
+    fd = feed_df.dropna(subset=["max_size_g"]) if len(feed_df) else feed_df
+    cd = cull_df.dropna(subset=["days_since_input"]) if len(cull_df) else cull_df
+    return BiologyTables(
+        sgr_size_g=sizes,
+        sgr_fw_pct_day=_col(g, "SGR_FW"),
+        sgr_sw_pct_day=_col(g, "SGR_SW"),
+        fcr_size_g=list(sizes),
+        fcr_by_model={
+            m: [float("nan") if pd.isna(x) else float(x)
+                for x in g[f"FCR_{m}"]]
+            for m in models if f"FCR_{m}" in g.columns
+        },
+        mortality_week_from_input=[int(x) for x in md["week_from_input"]],
+        mortality_pct_weekly=[0.0 if pd.isna(x) else float(x)
+                              for x in md["mortality_pct"]],
+        feed_types=[(float(mx), str(nm))
+                    for mx, nm in zip(fd["max_size_g"], fd["feed_name"])],
+        culling=[(int(d), float(p))
+                 for d, p in zip(cd["days_since_input"], cd["cull_pct"])],
+    )
+
+
+def _edit_control():
+    from forecast.config_io import (
+        load_control, load_biology_tables, load_facility_config,
+        control_to_dict, control_from_dict, dump_config,
+    )
+    st.caption("Caps defaults, horizon, and planner knobs. "
+               "`forecast_start` is derived from the ProductionReport at "
+               "run time — editing it here has no effect.")
+    d = control_to_dict(load_control(CONFIG_DIR))
+    with st.form("control_form"):
+        new = {}
+        for k, v in d.items():
+            if k == "forecast_start":
+                st.text_input(f"{k} (derived from PR — read-only)",
+                              value="" if v is None else str(v), disabled=True)
+                new[k] = v
+            elif isinstance(v, bool):
+                new[k] = st.checkbox(k, value=v)
+            elif isinstance(v, int):
+                new[k] = int(st.number_input(k, value=int(v), step=1))
+            elif isinstance(v, float):
+                new[k] = float(st.number_input(k, value=float(v), format="%.5f"))
+            else:
+                new[k] = st.text_input(k, value="" if v is None else str(v)) or None
+        if st.form_submit_button("💾 Save Control"):
+            dump_config(CONFIG_DIR, control=control_from_dict(new),
+                        tables=load_biology_tables(CONFIG_DIR),
+                        facility=load_facility_config(CONFIG_DIR))
+            st.success("Saved config/control.yaml")
+
+
+def _edit_biology():
+    from forecast.config_io import (
+        load_control, load_biology_tables, load_facility_config, dump_config,
+    )
+    st.caption("Growth (SGR FW/SW), FCR curves, mortality, feed types, and "
+               "culling. Add rows with the ➕ at the bottom of each table.")
+    tables = load_biology_tables(CONFIG_DIR)
+    g, m, f, c, models = _biology_to_frames(tables)
+    st.markdown("**Growth + FCR** (by fish size, grams)")
+    g2 = st.data_editor(g, num_rows="dynamic", hide_index=True,
+                        use_container_width=True, key="bio_growth")
+    cols = st.columns(3)
+    with cols[0]:
+        st.markdown("**Mortality** (% / week by week-from-input)")
+        m2 = st.data_editor(m, num_rows="dynamic", hide_index=True, key="bio_mort")
+    with cols[1]:
+        st.markdown("**Feed types** (max size → name)")
+        f2 = st.data_editor(f, num_rows="dynamic", hide_index=True, key="bio_feed")
+    with cols[2]:
+        st.markdown("**Culling** (days since input → %)")
+        c2 = st.data_editor(c, num_rows="dynamic", hide_index=True, key="bio_cull")
+    if st.button("💾 Save Biology models", key="save_bio"):
+        try:
+            tables2 = _frames_to_biology(g2, m2, f2, c2, models)
+            dump_config(CONFIG_DIR, control=load_control(CONFIG_DIR),
+                        tables=tables2, facility=load_facility_config(CONFIG_DIR))
+            st.success("Saved config/biology.yaml")
+        except Exception as e:  # noqa: BLE001
+            st.error(f"Save failed: {e}")
+
+
+def _edit_facility():
+    from forecast.config_io import (
+        load_control, load_biology_tables, load_facility_config,
+        facility_to_dict, facility_from_dict, dump_config,
+    )
+    st.caption("Tank definitions: system, stage, volume, density/feed caps, type.")
+    rows = facility_to_dict(load_facility_config(CONFIG_DIR))["tanks"]
+    df = pd.DataFrame(rows)
+    edited = st.data_editor(df, num_rows="dynamic", hide_index=True,
+                            use_container_width=True, key="fac_ed")
+    if st.button("💾 Save Facility", key="save_fac"):
+        try:
+            fac2 = facility_from_dict({"tanks": _records(edited)})
+            dump_config(CONFIG_DIR, control=load_control(CONFIG_DIR),
+                        tables=load_biology_tables(CONFIG_DIR), facility=fac2)
+            st.success("Saved config/facility.yaml")
+        except Exception as e:  # noqa: BLE001
+            st.error(f"Save failed: {e}")
+
+
+def _edit_batches():
+    from forecast.scenario_io import (
+        load_batches, load_limits, batches_to_list, batches_from_list,
+        dump_scenario,
+    )
+    st.caption("Forward batch schedule + metadata. In-flight state comes from "
+               "the ProductionReport; this is the planning/metadata layer.")
+    df = pd.DataFrame(batches_to_list(load_batches(SCENARIO_DIR)))
+    edited = st.data_editor(df, num_rows="dynamic", hide_index=True,
+                            use_container_width=True, key="batch_ed")
+    if st.button("💾 Save Batches", key="save_batch"):
+        try:
+            batches2 = batches_from_list(_records(edited))
+            fl, sl = load_limits(SCENARIO_DIR)
+            dump_scenario(SCENARIO_DIR, batches=batches2,
+                          facility_limits=fl, system_limits=sl)
+            st.success("Saved scenario/batches.yaml")
+        except Exception as e:  # noqa: BLE001
+            st.error(f"Save failed: {e}")
+
+
+def _edit_limits():
+    from forecast.scenario_io import (
+        load_batches, load_limits, facility_limits_to_list,
+        system_limits_to_list, facility_limits_from_list,
+        system_limits_from_list, dump_scenario,
+    )
+    st.caption("Per-week caps. Weeks are absolute ISO labels (e.g. 2026-W23). "
+               "Blank facility row = use the Control default.")
+    fl, sl = load_limits(SCENARIO_DIR)
+    fdf = pd.DataFrame(facility_limits_to_list(fl))
+    sdf = pd.DataFrame(system_limits_to_list(sl))
+    st.markdown("**Facility limits** (week, metric, value)")
+    fdf2 = st.data_editor(fdf, num_rows="dynamic", hide_index=True,
+                          use_container_width=True, key="flim_ed")
+    st.markdown(f"**System limits** ({len(sdf)} rows — week, system, metric, value)")
+    sdf2 = st.data_editor(sdf, num_rows="dynamic", hide_index=True,
+                          use_container_width=True, key="slim_ed", height=300)
+    if st.button("💾 Save Limits", key="save_lim"):
+        try:
+            fl2 = facility_limits_from_list(_records(fdf2))
+            sl2 = system_limits_from_list(_records(sdf2))
+            dump_scenario(SCENARIO_DIR, batches=load_batches(SCENARIO_DIR),
+                          facility_limits=fl2, system_limits=sl2)
+            st.success("Saved scenario/limits.yaml")
+        except Exception as e:  # noqa: BLE001
+            st.error(f"Save failed: {e}")
+
+
+def _config_editor():
+    st.header("⚙️ Configure — models & control")
+    if not (_config_ready() and _scenario_ready()):
+        st.warning(
+            "No config/scenario yet. Go to **Run forecast** mode, upload a "
+            "workbook, and click *Seed config + scenario from upload* first."
+        )
+        return
+    st.caption("Edits save to the app's `config/` and `scenario/` YAML — the "
+               "single source of truth the engine runs from. A PR-only run "
+               "uses these, not the workbook.")
+    tabs = st.tabs(["Control", "Biology models", "Facility (tanks)",
+                    "Batches", "Limits"])
+    with tabs[0]:
+        _edit_control()
+    with tabs[1]:
+        _edit_biology()
+    with tabs[2]:
+        _edit_facility()
+    with tabs[3]:
+        _edit_batches()
+    with tabs[4]:
+        _edit_limits()
+
+
+# ============================================================
 # Page setup
 # ============================================================
 
@@ -99,6 +327,14 @@ st.caption(
 # ============================================================
 
 with st.sidebar:
+    app_mode = st.radio(
+        "Mode",
+        ["Run forecast", "Configure (models & control)"],
+        help="Run forecast: upload a PR and run. Configure: edit the app's "
+             "biology models, facility, control, batches, and limits.",
+    )
+    st.divider()
+
     st.header("Input")
     uploaded = st.file_uploader(
         "Workbook (.xlsm)",
@@ -384,6 +620,15 @@ def _parse_output_workbook(path: Path) -> dict:
         "advisory_entries": advisory_entries,
         "control_status": status,
     }
+
+
+# ============================================================
+# Configure mode — render the editor and stop
+# ============================================================
+
+if app_mode.startswith("Configure"):
+    _config_editor()
+    st.stop()
 
 
 # ============================================================
