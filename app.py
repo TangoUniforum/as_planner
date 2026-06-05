@@ -303,7 +303,7 @@ def _edit_limits():
         st.rerun()
 
 
-def _config_template_bytes() -> bytes:
+def _config_template_bytes(horizon_weeks=None, forecast_start=None) -> bytes:
     from forecast.config_template import write_config_template
     wd = Path(tempfile.mkdtemp(prefix="as_tmpl_"))
     out = wd / "config_template.xlsx"
@@ -311,24 +311,50 @@ def _config_template_bytes() -> bytes:
         out,
         config_dir=CONFIG_DIR if _config_ready() else None,
         scenario_dir=SCENARIO_DIR if _scenario_ready() else None,
+        horizon_weeks=horizon_weeks, forecast_start=forecast_start,
     )
     return out.read_bytes()
+
+
+def _current_horizon_start():
+    """Default horizon + start for the template, from current control if any."""
+    from datetime import date
+    h, s = 52, date.today()
+    if _config_ready():
+        try:
+            from forecast.config_io import load_control
+            c = load_control(CONFIG_DIR)
+            h = int(c.horizon_weeks)
+            fs = c.forecast_start
+            s = fs.date() if hasattr(fs, "date") else (fs or s)
+        except Exception:  # noqa: BLE001
+            pass
+    return h, s
 
 
 def _config_io_section():
     c1, c2 = st.columns(2)
     with c1:
         st.markdown("**Template — build config offline**")
-        st.caption("Download a template (current values, or blank headers if "
-                   "none yet), fill it in Excel, and import on the right. "
-                   "Separate from the ProductionReport.")
-        st.download_button(
-            "⬇ Download config template (.xlsx)",
-            data=_config_template_bytes(),
-            file_name="config_template.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
-        )
+        st.caption("Pick a horizon + start; the template comes with EVERY "
+                   "per-week limit slot laid out (facility metrics + each system "
+                   "× week) plus all current config, so nothing's overlooked. "
+                   "Fill it in Excel and import on the right.")
+        _h, _s = _current_horizon_start()
+        horizon = st.number_input("Forecast horizon (weeks)", min_value=1,
+                                  max_value=300, value=_h, step=1)
+        start = st.date_input("Forecast start (week labels — match your PR cycle)",
+                              value=_s)
+        if st.button("Build template", use_container_width=True):
+            st.session_state["_tmpl_bytes"] = _config_template_bytes(int(horizon), start)
+        if "_tmpl_bytes" in st.session_state:
+            st.download_button(
+                "⬇ Download config template (.xlsx)",
+                data=st.session_state["_tmpl_bytes"],
+                file_name="config_template.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
     with c2:
         st.markdown("**Import — load config from a file**")
         st.caption("A filled config template, or a saved forecast workbook "

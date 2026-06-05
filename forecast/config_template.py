@@ -58,12 +58,31 @@ def _write_table(ws, header, rows):
         ws.column_dimensions[openpyxl.utils.get_column_letter(i)].width = 16
 
 
-def write_config_template(out_path, config_dir=None, scenario_dir=None) -> Path:
+_DEFAULT_OG_SYSTEMS = ["OG1N", "OG1S", "OG2N", "OG2S", "OG3N", "OG3S",
+                       "OG4N", "OG4S", "OG5N", "OG5S", "OG6N", "OG6S"]
+
+
+def _og_systems(config_dir):
+    """OG system ids from facility config, or the standard 12 as a default."""
+    if config_dir and (Path(config_dir) / "facility.yaml").exists():
+        fac = load_facility_config(config_dir)
+        systems = sorted({t.system_id for t in fac.tanks
+                          if t.type == "OG" and t.system_id})
+        if systems:
+            return systems
+    return list(_DEFAULT_OG_SYSTEMS)
+
+
+def write_config_template(out_path, config_dir=None, scenario_dir=None,
+                          horizon_weeks=None, forecast_start=None) -> Path:
     """Write a config-template workbook to out_path.
 
-    If config_dir/scenario_dir are given and populated, the template is
-    pre-filled with the current config (edit-from-current). Otherwise it's a
-    blank template with just the column headers.
+    Pre-filled with the current config where available (edit-from-current),
+    else blank headers. When `horizon_weeks` + `forecast_start` are given, the
+    FacilityLimits/SystemLimits sheets are generated as a FULL grid — a row for
+    every (week, metric) and (week, system, metric) over the horizon, value
+    pre-filled where the current config has one and blank otherwise — so every
+    cap slot the engine can use is laid out ready to populate.
     """
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
@@ -124,13 +143,30 @@ def write_config_template(out_path, config_dir=None, scenario_dir=None) -> Path:
         brows = []
     _write_table(wb.create_sheet(S_BATCH), _BATCH_COLS, brows)
 
-    # ---- Limits ----
+    # ---- Limits (full grid when a horizon is given) ----
+    from .caps import (METRIC_BIOMASS, METRIC_FEED_DAY, METRIC_MAX_HARVEST,
+                       METRIC_MIN_HARVEST, METRIC_HOG_YIELD)
+    from .time_grid import forecast_week_labels
+    fl_metrics = [METRIC_BIOMASS, METRIC_FEED_DAY, METRIC_MAX_HARVEST,
+                  METRIC_MIN_HARVEST, METRIC_HOG_YIELD]
+    sl_metrics = [METRIC_BIOMASS, METRIC_FEED_DAY]
+    fl_cur, sl_cur = {}, {}
     if scenario_dir and (Path(scenario_dir) / "limits.yaml").exists():
         fl, sl = load_limits(scenario_dir)
-        flrows = [[r["week"], r["metric"], r["value"]] for r in facility_limits_to_list(fl)]
-        slrows = [[r["week"], r["system"], r["metric"], r["value"]] for r in system_limits_to_list(sl)]
+        fl_cur = {(r["week"], r["metric"]): r["value"]
+                  for r in facility_limits_to_list(fl)}
+        sl_cur = {(r["week"], r["system"], r["metric"]): r["value"]
+                  for r in system_limits_to_list(sl)}
+    if horizon_weeks and forecast_start is not None:
+        weeks = forecast_week_labels(forecast_start, int(horizon_weeks))
+        systems = _og_systems(config_dir)
+        flrows = [[wk, m, fl_cur.get((wk, m))]
+                  for wk in weeks for m in fl_metrics]
+        slrows = [[wk, s, m, sl_cur.get((wk, s, m))]
+                  for wk in weeks for s in systems for m in sl_metrics]
     else:
-        flrows, slrows = [], []
+        flrows = [[k[0], k[1], v] for k, v in fl_cur.items()]
+        slrows = [[k[0], k[1], k[2], v] for k, v in sl_cur.items()]
     _write_table(wb.create_sheet(S_FLIM), _FLIM_COLS, flrows)
     _write_table(wb.create_sheet(S_SLIM), _SLIM_COLS, slrows)
 
@@ -232,12 +268,15 @@ def import_config_template(wb, config_dir, scenario_dir) -> list[str]:
                    else (load_batches(scenario_dir)
                          if (Path(scenario_dir) / "batches.yaml").exists() else []))
         if flim or slim:
+            # Skip blank-value rows (the full grid leaves most cells empty;
+            # a blank value = no cap for that week/metric).
             fl = facility_limits_from_list(
                 [{"week": r["week"], "metric": r["metric"], "value": r["value"]}
-                 for r in flim if r.get("week")])
+                 for r in flim if r.get("week") and r.get("value") not in (None, "")])
             sl = system_limits_from_list(
                 [{"week": r["week"], "system": r["system"], "metric": r["metric"],
-                  "value": r["value"]} for r in slim if r.get("week")])
+                  "value": r["value"]} for r in slim
+                 if r.get("week") and r.get("value") not in (None, "")])
         else:
             fl, sl = load_limits(scenario_dir)
         dump_scenario(scenario_dir, batches=batches, facility_limits=fl, system_limits=sl)
