@@ -205,14 +205,23 @@ def _edit_control():
     )
     st.caption("Caps defaults, horizon, and planner knobs. "
                "`forecast_start` is derived from the ProductionReport at "
-               "run time — editing it here has no effect.")
+               "run time — the stored value is an ignored seed.")
+    _pr = _ingest_pr(uploaded) if uploaded is not None else None
+    _derived = (_pr["forecast_start"].date()
+                if (_pr and _pr["ok"] and _pr["forecast_start"]) else None)
     d = control_to_dict(load_control(CONFIG_DIR))
     with st.form("control_form"):
         new = {}
         for k, v in d.items():
             if k == "forecast_start":
-                st.text_input(f"{k} (derived from PR — read-only)",
-                              value="" if v is None else str(v), disabled=True)
+                if _derived is not None:
+                    st.success(f"forecast_start = **{_derived}** — derived from "
+                               f"the uploaded ProductionReport (the stored seed "
+                               f"is ignored).")
+                else:
+                    st.info("forecast_start is derived from the ProductionReport "
+                            "at run time — upload a PR to see it. The stored "
+                            "value is an ignored seed.")
                 new[k] = v
             elif isinstance(v, bool):
                 new[k] = st.checkbox(k, value=v)
@@ -393,6 +402,20 @@ def _current_horizon_start():
     return h, s
 
 
+def _config_fingerprint() -> str:
+    """Hash of config/ + scenario/ file names + mtimes — changes whenever any
+    config is saved, so a cached template can be invalidated."""
+    import hashlib
+    h = hashlib.md5()
+    for d in (CONFIG_DIR, SCENARIO_DIR):
+        if d.exists():
+            for p in sorted(d.iterdir()):
+                if p.is_file():
+                    h.update(p.name.encode())
+                    h.update(str(p.stat().st_mtime_ns).encode())
+    return h.hexdigest()
+
+
 def _config_io_section():
     c1, c2 = st.columns(2)
     with c1:
@@ -405,12 +428,18 @@ def _config_io_section():
         else:
             h = _current_horizon_start()[0]
             fs = pr["forecast_start"]
+            # Invalidate a cached template if config changed since it was built,
+            # so Download always reflects the latest saved config.
+            _fp = _config_fingerprint()
+            if st.session_state.get("_tmpl_fp") != _fp:
+                st.session_state.pop("_tmpl_bytes", None)
             st.caption(f"Template covers **{h} weeks from {fs.date()}** — start "
                        f"derived from the PR, horizon from Control (edit on the "
                        f"Control tab). Every per-week limit slot is laid out to "
                        f"fill in; current values pre-filled.")
             if st.button("Build template", use_container_width=True):
                 st.session_state["_tmpl_bytes"] = _config_template_bytes(int(h), fs)
+                st.session_state["_tmpl_fp"] = _fp
             if "_tmpl_bytes" in st.session_state:
                 st.download_button(
                     "⬇ Download config template (.xlsx)",
@@ -419,6 +448,9 @@ def _config_io_section():
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True,
                 )
+            else:
+                st.caption("↑ Click **Build template** to (re)generate from the "
+                           "current saved config.")
     with c2:
         st.markdown("**Import — load config from a file**")
         st.caption("A filled config template, or a saved forecast workbook "
