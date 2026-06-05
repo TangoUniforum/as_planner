@@ -36,7 +36,7 @@ S_FLIM = "FacilityLimits"
 S_SLIM = "SystemLimits"
 
 # Headers for the empty-template / fixed-schema sheets.
-_FAC_COLS = ["location_id", "department", "stage", "system_id", "tank_id",
+_FAC_COLS = ["location_id", "system_id", "tank_id",
              "volume_m3", "max_density_kg_m3", "max_feed_kg_day", "type"]
 _BATCH_COLS = ["batch_id", "input_date", "input_count", "tran_sf_date",
                "tran_og_date", "tran_og_count", "tran_og_avg_wt_g", "tran_og_cv",

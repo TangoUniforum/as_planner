@@ -10,7 +10,6 @@ max_harvest_per_week: 55000.0
 min_harvest_weight_g: 3500.0
 min_harvest_per_week: 30000.0
 min_tank_control: 7000.0
-max_tank_density_kg_m3: 95.0
 default_hog_yield: 0.81
 facility_biomass_deviation_pct: 0.01
 handling_mortality_pct: 0.01

@@ -17,7 +17,6 @@ class ControlParams:
     min_harvest_weight_g: float
     min_harvest_per_week: float
     min_tank_control: float
-    max_tank_density_kg_m3: float
     default_hog_yield: float
     # R24: symmetric ± deviation around facility biomass + feed caps.
     # 0.01 means the planner accepts being within 1% above or below target.
@@ -149,8 +148,6 @@ class BiologyTables:
 @dataclass
 class TankConfig:
     location_id: str
-    department: str
-    stage: str               # "FW" or "SW"
     system_id: str
     tank_id: int
     volume_m3: float

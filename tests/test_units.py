@@ -91,13 +91,13 @@ class TestGradedHarvestEvent:
         from forecast.models import FacilityConfig, TankConfig
         from forecast.state import FacilityState
         cfg = FacilityConfig(tanks=[
-            TankConfig(location_id="OG3N-1", department="OG", stage="SW",
+            TankConfig(location_id="OG3N-1",
                        system_id="OG3N", tank_id=1, volume_m3=1720,
                        max_density_kg_m3=95, max_feed_kg_day=500, type="OG"),
-            TankConfig(location_id="OG6N-61", department="OG", stage="SW",
+            TankConfig(location_id="OG6N-61",
                        system_id="OG6N", tank_id=2, volume_m3=1720,
                        max_density_kg_m3=95, max_feed_kg_day=500, type="OG"),
-            TankConfig(location_id="OG3S-1", department="OG", stage="SW",
+            TankConfig(location_id="OG3S-1",
                        system_id="OG3S", tank_id=3, volume_m3=1720,
                        max_density_kg_m3=95, max_feed_kg_day=500, type="OG"),
         ])
