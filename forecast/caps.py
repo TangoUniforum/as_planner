@@ -36,36 +36,6 @@ METRIC_MIN_HARVEST = "min_harvest_per_week"
 METRIC_HOG_YIELD = "hog_yield"
 
 
-_FACILITY_METRIC_ALIASES = {
-    "biomass (kg)": METRIC_BIOMASS,
-    "biomass": METRIC_BIOMASS,
-    "feed/day (kg/day)": METRIC_FEED_DAY,
-    "feed/day": METRIC_FEED_DAY,
-    "max harvest/week": METRIC_MAX_HARVEST,
-    "min harvest/week": METRIC_MIN_HARVEST,
-    "hog yield": METRIC_HOG_YIELD,
-    "hog loss": METRIC_HOG_YIELD,
-}
-
-_SYSTEM_METRIC_ALIASES = {
-    "biomass": METRIC_BIOMASS,
-    "feed/day": METRIC_FEED_DAY,
-}
-
-
-def normalize_system(label: str) -> str:
-    """SystemLimits-sheet label → FacilityConfig system_id.
-
-    'OG1N' stays 'OG1N'; '1N' becomes 'OG1N'; '6N' becomes 'OG6N'.
-    """
-    s = (label or "").strip()
-    if not s:
-        return ""
-    if s.upper().startswith("OG"):
-        return s
-    return f"OG{s}"
-
-
 # ============================================================
 # Data containers
 # ============================================================
@@ -95,101 +65,6 @@ class SystemLimits:
 
     def get(self, week_label: str, system_id: str, metric: str) -> Optional[float]:
         return self.caps.get((week_label, system_id, metric))
-
-
-# ============================================================
-# Sheet readers
-# ============================================================
-
-def _find_date_header_row(rows) -> Optional[int]:
-    """Find the first row containing date/datetime cells from col 3 onward."""
-    for i, row in enumerate(rows):
-        if not row:
-            continue
-        for v in row[2:]:
-            if isinstance(v, (date, datetime)):
-                return i
-    return None
-
-
-def _build_col_to_label(date_row, forecast_start) -> dict[int, str]:
-    """Map each date-cell column index → ISO week label.
-
-    Uses `label_for_date` so the column's date is resolved against the
-    forecast grid (so the first column dated at forecast_start gets the
-    ISO label of forecast_start's containing week).
-    """
-    out: dict[int, str] = {}
-    for c, v in enumerate(date_row):
-        if c < 2:
-            continue
-        if isinstance(v, (date, datetime)):
-            out[c] = label_for_date(v, forecast_start)
-    return out
-
-
-def read_facility_limits(wb, forecast_start) -> FacilityLimits:
-    """Parse the FacilityLimits sheet."""
-    if "FacilityLimits" not in wb.sheetnames:
-        return FacilityLimits()
-    ws = wb["FacilityLimits"]
-    rows = list(ws.iter_rows(values_only=True))
-    dr = _find_date_header_row(rows)
-    if dr is None:
-        return FacilityLimits()
-    col_week = _build_col_to_label(rows[dr], forecast_start)
-
-    overrides: dict[tuple[str, str], float] = {}
-    for row in rows[dr + 1:]:
-        if not row or len(row) < 2:
-            continue
-        metric_cell = row[1]
-        if not isinstance(metric_cell, str):
-            continue
-        metric = _FACILITY_METRIC_ALIASES.get(metric_cell.strip().lower())
-        if metric is None:
-            continue
-        for c, label in col_week.items():
-            if c >= len(row):
-                continue
-            v = row[c]
-            if isinstance(v, (int, float)) and v != 0:
-                overrides[(label, metric)] = float(v)
-    return FacilityLimits(overrides=overrides)
-
-
-def read_system_limits(wb, forecast_start) -> SystemLimits:
-    """Parse the SystemLimits sheet."""
-    if "SystemLimits" not in wb.sheetnames:
-        return SystemLimits()
-    ws = wb["SystemLimits"]
-    rows = list(ws.iter_rows(values_only=True))
-    dr = _find_date_header_row(rows)
-    if dr is None:
-        return SystemLimits()
-    col_week = _build_col_to_label(rows[dr], forecast_start)
-
-    caps: dict[tuple[str, str, str], float] = {}
-    for row in rows[dr + 1:]:
-        if not row or len(row) < 2:
-            continue
-        system_cell = row[0]
-        metric_cell = row[1]
-        if not isinstance(system_cell, str) or not isinstance(metric_cell, str):
-            continue
-        sys_id = normalize_system(system_cell)
-        if not sys_id:
-            continue
-        metric = _SYSTEM_METRIC_ALIASES.get(metric_cell.strip().lower())
-        if metric is None:
-            continue
-        for c, label in col_week.items():
-            if c >= len(row):
-                continue
-            v = row[c]
-            if isinstance(v, (int, float)) and v != 0:
-                caps[(label, sys_id, metric)] = float(v)
-    return SystemLimits(caps=caps)
 
 
 # ============================================================

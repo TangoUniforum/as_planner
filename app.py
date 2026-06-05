@@ -45,36 +45,6 @@ def _scenario_ready() -> bool:
     return (SCENARIO_DIR / "batches.yaml").exists()
 
 
-def _seed_config_scenario_from_bytes(input_bytes: bytes, input_name: str) -> None:
-    """Seed config/ + scenario/ from an uploaded workbook (first-time setup
-    or refresh). Mirrors scripts/export_*_to_yaml.py."""
-    from datetime import datetime as _dt, timedelta as _td
-    from forecast.excel_io import (
-        load_workbook, read_control, read_biology_tables, read_facility_config,
-        read_batches,
-    )
-    from forecast.caps import read_facility_limits, read_system_limits
-    from forecast.production_report import read_production_report
-    from forecast.config_io import dump_config
-    from forecast.scenario_io import dump_scenario
-
-    wd = Path(tempfile.mkdtemp(prefix="as_seed_"))
-    p = wd / input_name
-    p.write_bytes(input_bytes)
-    wb = load_workbook(p)
-    dump_config(CONFIG_DIR, control=read_control(wb),
-                tables=read_biology_tables(wb), facility=read_facility_config(wb))
-    pr_closing, _og, _fw = read_production_report(wb)
-    if pr_closing is not None:
-        fs = _dt(pr_closing.year, pr_closing.month, pr_closing.day) + _td(days=1)
-    else:
-        fs = read_control(wb).forecast_start
-    dump_scenario(SCENARIO_DIR, batches=read_batches(wb),
-                  facility_limits=read_facility_limits(wb, fs.date()),
-                  system_limits=read_system_limits(wb, fs.date()))
-    wb.close()
-
-
 # ============================================================
 # Mother ship — in-app config + scenario editor
 # ============================================================
@@ -457,55 +427,25 @@ with st.sidebar:
     )
     st.divider()
 
-    st.header("Input")
+    st.header("ProductionReport")
     uploaded = st.file_uploader(
-        "Workbook (.xlsm)",
+        "ProductionReport workbook (.xlsx / .xlsm)",
         type=["xlsm", "xlsx"],
-        help="In PR-only mode only the ProductionReport sheet is read. "
-             "In legacy mode the whole workbook is the input. Never modified.",
+        help="Only the ProductionReport sheet is read. Models, facility, "
+             "control, batches, and limits all come from the app config "
+             "(edit them in Configure). The file is never modified.",
     )
 
-    st.header("Data source")
-    mode = st.radio(
-        "Inputs",
-        ["App config + scenario (PR-only)", "Full workbook (legacy)"],
-        help="PR-only: stable config (biology/facility/control) and the "
-             "scenario (forward batches + limits) come from the app's "
-             "config/ and scenario/ YAML; the upload supplies only the "
-             "ProductionReport. Legacy: everything from the upload.",
-    )
-    pr_only = mode.startswith("App config")
-
-    if pr_only:
-        cfg_ok, scn_ok = _config_ready(), _scenario_ready()
-        st.caption(
-            f"config/ {'✓' if cfg_ok else '⚠ missing'} · "
-            f"scenario/ {'✓' if scn_ok else '⚠ missing'}"
-        )
-        if st.button("⟳ Seed config + scenario from upload",
-                     disabled=uploaded is None, use_container_width=True,
-                     help="Generate config/ + scenario/ YAML from the uploaded "
-                          "workbook (first-time setup or refresh)."):
-            try:
-                _seed_config_scenario_from_bytes(uploaded.getvalue(), uploaded.name)
-                st.success("Seeded config/ + scenario/ from the workbook.")
-                st.rerun()
-            except Exception as e:  # noqa: BLE001
-                st.error(f"Seeding failed: {e}")
-        if not (cfg_ok and scn_ok):
-            st.warning(
-                "config/ or scenario/ missing — seed them from a workbook "
-                "above, or switch to Full workbook mode."
-            )
+    _cfg_ok = _config_ready() and _scenario_ready()
+    if not _cfg_ok:
+        st.warning("No config yet — go to **Configure** to set it up "
+                   "(download/fill the template, or import).")
 
     st.header("Run")
-    _run_blocked = uploaded is None or (
-        pr_only and not (_config_ready() and _scenario_ready())
-    )
     run_clicked = st.button(
         "▶ Run forecast",
         type="primary",
-        disabled=_run_blocked,
+        disabled=(uploaded is None or not _cfg_ok),
         use_container_width=True,
     )
 
@@ -759,15 +699,10 @@ if app_mode.startswith("Configure"):
 
 if run_clicked and uploaded is not None:
     with st.status("Running forecast pipeline...", expanded=True) as status:
-        if pr_only:
-            st.write("PR-only mode: config + scenario from YAML, "
-                     "ProductionReport from upload...")
-        else:
-            st.write("Loading workbook + projecting biology...")
+        st.write("Config + scenario from the app; ProductionReport from upload...")
         result = _run_with_workbook_bytes(
             uploaded.getvalue(), uploaded.name,
-            config_dir=str(CONFIG_DIR) if pr_only else None,
-            scenario_dir=str(SCENARIO_DIR) if pr_only else None,
+            config_dir=str(CONFIG_DIR), scenario_dir=str(SCENARIO_DIR),
         )
         if result["ok"]:
             st.write(

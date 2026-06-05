@@ -14,8 +14,6 @@ from .precalc import build_precalc_canvas, print_canvas_summary
 from .sixn import is_purge_mode
 from .caps import (
     apply_facility_buffer,
-    read_facility_limits,
-    read_system_limits,
     resolve_facility_cap,
     METRIC_BIOMASS,
     METRIC_FEED_DAY,
@@ -24,12 +22,6 @@ from .caps import (
 )
 from .excel_io import (
     load_workbook,
-    read_batches,
-    read_biology_tables,
-    read_control,
-    read_facility_config,
-    read_pinned_harvests,
-    read_pinned_transfers,
     write_advisory,
     write_control_status,
     write_forecast_start,
@@ -74,45 +66,36 @@ def main(
             (legacy CLI behavior; mutates the source workbook).
             Pass a separate path (e.g. from a UI) to leave the input
             untouched and produce a fresh output file.
-        scenario_dir: optional path to the scenario YAML directory
-            (batches.yaml / limits.yaml). When set, the forward batch
-            schedule and the facility/system limits load from YAML, and
-            pins (HarvestPlan/TransferPlan) are NOT read from the workbook
-            (planning is an in-app concern) — so the uploaded workbook
-            needs only the ProductionReport. None → read batches, limits,
-            and pins from the workbook (legacy/full-workbook mode).
-        config_dir: optional path to the stable-config YAML directory
-            (control.yaml / biology.yaml / facility.yaml). When set, the
-            Control params, biology models, and facility definition are
-            loaded from YAML instead of the workbook (Phase 1 of the
-            data-path inversion; see docs/DATA_PATH_REDESIGN.md). The
-            workbook still supplies the per-cycle inputs (ProductionReport,
-            BatchRegistry, limits, pins). None → read everything from the
-            workbook (legacy behavior).
+        config_dir: stable-config YAML directory (control/biology/facility).
+            Defaults to the repo's config/. The source of truth for models +
+            control.
+        scenario_dir: scenario YAML directory (batches/limits). Defaults to
+            the repo's scenario/. The forward batch schedule + caps.
+
+    The workbook supplies ONLY the ProductionReport (current state, and the
+    forecast_start derived from its closing date). Everything else comes from
+    config_dir + scenario_dir.
     """
     in_path = Path(
         input_path or Path(__file__).resolve().parent.parent / "Forecast.xlsm"
     )
     out_path = Path(output_path) if output_path is not None else in_path
+    # Config + scenario YAML are the tracked source of truth; the workbook
+    # supplies only the ProductionReport. Default to the repo's config/ +
+    # scenario/ when not given.
+    _root = Path(__file__).resolve().parent.parent
+    config_dir = Path(config_dir) if config_dir is not None else _root / "config"
+    scenario_dir = Path(scenario_dir) if scenario_dir is not None else _root / "scenario"
     t0 = time.time()
     print(f"Loading {in_path} ...")
     wb = load_workbook(in_path)
 
-    if scenario_dir is not None:
-        from .scenario_io import load_batches as _load_scenario_batches
-        batches = _load_scenario_batches(scenario_dir)
-        print(f"  Scenario: loaded {len(batches)} batches from YAML at {scenario_dir}")
-    else:
-        batches = read_batches(wb)
-    if config_dir is not None:
-        from .config_io import load_config
-        control, tables, facility = load_config(config_dir)
-        print(f"  Stable config: loaded Control + biology + facility from "
-              f"YAML at {config_dir}")
-    else:
-        control = read_control(wb)
-        tables = read_biology_tables(wb)
-        facility = read_facility_config(wb)
+    from .config_io import load_config
+    from .scenario_io import load_batches as _load_scenario_batches
+    control, tables, facility = load_config(config_dir)
+    batches = _load_scenario_batches(scenario_dir)
+    print(f"  Config:   Control + biology + facility from {config_dir}")
+    print(f"  Scenario: {len(batches)} batches from {scenario_dir}")
 
     # ----- Derive forecast_start from ProductionReport (DESIGN §1) -----
     # Mirrors the VBA DetectForecastStart(): the ProductionReport
@@ -203,27 +186,11 @@ def main(
 
     # ----- Caps + pinned plans -----
     fs_date = control.forecast_start.date() if hasattr(control.forecast_start, "date") else control.forecast_start
-    if scenario_dir is not None:
-        from .scenario_io import load_limits
-        facility_limits, system_limits = load_limits(scenario_dir)
-        print(f"  Scenario: loaded {len(facility_limits.overrides)} facility + "
-              f"{len(system_limits.caps)} system limits from YAML")
-    else:
-        facility_limits = read_facility_limits(wb, fs_date)
-        system_limits = read_system_limits(wb, fs_date)
-    # Pins (HarvestPlan/TransferPlan) are eliminated in app-managed mode:
-    # planning is an in-app concern, so the workbook's pin sheets are NOT
-    # read when running from a scenario. The uploaded workbook then needs
-    # only the ProductionReport. (Legacy/full-workbook mode still reads
-    # operator pins from the sheets.)
-    if scenario_dir is not None:
-        pinned_harvests = []
-        pinned_transfers = []
-        print("  Pins: app-managed mode — HarvestPlan/TransferPlan NOT read "
-              "from workbook (planning is in-app)")
-    else:
-        pinned_harvests = read_pinned_harvests(wb, fs_date)
-        pinned_transfers = read_pinned_transfers(wb, fs_date)
+    from .scenario_io import load_limits
+    facility_limits, system_limits = load_limits(scenario_dir)
+    # Pins are an in-app planning concern; the workbook is the PR only.
+    pinned_harvests = []
+    pinned_transfers = []
     print(f"\n  Caps + pinned plans:")
     print(f"    FacilityLimits overrides: {len(facility_limits.overrides)}")
     print(f"    SystemLimits caps:        {len(system_limits.caps)}")
@@ -600,10 +567,9 @@ def main(
     # Config snapshot: embed the exact app-managed config + scenario this
     # run used into the output workbook, so the saved file is a complete,
     # re-importable record. Only when running from app config (YAML).
-    if config_dir is not None or scenario_dir is not None:
-        from .config_snapshot import write_config_snapshot
-        write_config_snapshot(wb, config_dir=config_dir, scenario_dir=scenario_dir)
-        print(f"  Wrote RunConfig snapshot (config + scenario embedded in output)")
+    from .config_snapshot import write_config_snapshot
+    write_config_snapshot(wb, config_dir=config_dir, scenario_dir=scenario_dir)
+    print(f"  Wrote RunConfig snapshot (config + scenario embedded in output)")
 
     # Run summary back to Control R8-R16 (DESIGN §1) — operator's
     # in-workbook signal that the run completed + a snapshot of scope.
