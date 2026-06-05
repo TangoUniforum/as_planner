@@ -40,9 +40,20 @@ WORKBOOK = ROOT / "Forecast.xlsm"
 #   -> 148.4 (-12%); total count up 196 -> 209 (+7%) — pressure spread
 #   across more tanks. The evaluator now ACCEPTS B46's PR_CORRECTION
 #   (previously all candidates regressed).
-MAX_VIOLATIONS = 209
-MAX_WORST_DENSITY = 150.0
-EXPECTED_TRANOG = 7
+# 2026-06-04: 245 / 216.5, TranOG 6 (forecast_start now DERIVED from the
+#   ProductionReport closing date, = closing + 1 day, mirroring VBA
+#   DetectForecastStart; previously trusted a stale Control B3). On the
+#   refreshed workbook this moved the start 2026-05-15 -> 2026-06-01, so
+#   week-0 hydrates from the heavier 5/31 snapshot instead of replaying
+#   ~2.3 weeks of already-elapsed biology. The prior 148.4 worst was
+#   OPTIMISTIC — it understated the late-2026 B48/OG2N (tank 25) hotspot,
+#   which now climbs 149 -> 216.5 kg/m^3 across W46-W53 unharvested.
+#   This is an accurate advisory, not a regression (0 drift preserved);
+#   relieving B48/tank-25 is a future planner improvement, not a baseline
+#   bug. TranOG 7 -> 6 is a different FW->OG set inside the shifted window.
+MAX_VIOLATIONS = 245
+MAX_WORST_DENSITY = 216.5
+EXPECTED_TRANOG = 6
 
 pytestmark = pytest.mark.skipif(
     not WORKBOOK.exists(),

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -25,6 +25,41 @@ from .time_grid import (
     label_for_date as _label_for_date,
     parse_iso_label as _parse_iso_label,
 )
+
+
+# ---------- Date coercion ----------
+
+# Accepted text-date formats, US-first (the workbook is authored in a
+# US locale, so "2/6/2024" is Feb 6). Mirrors the VBA, whose Date-typed
+# batch fields implicitly coerce text dates via CDate — the Python port
+# must be equally tolerant or a single text Input_Date cell crashes the
+# whole pipeline downstream (precalc lifecycle build).
+_DATE_FORMATS = (
+    "%m/%d/%Y", "%m/%d/%y", "%Y-%m-%d", "%Y/%m/%d", "%m-%d-%Y", "%d-%b-%Y",
+)
+
+
+def _coerce_cell_date(v):
+    """Best-effort: turn a date-ish cell into a datetime.
+
+    datetime/date pass through (date is widened to datetime). Text dates
+    in a known format are parsed. Blank → None. Anything unparseable is
+    returned unchanged so callers' existing guards still apply.
+    """
+    if v is None or isinstance(v, datetime):
+        return v
+    if isinstance(v, date):
+        return datetime(v.year, v.month, v.day)
+    if isinstance(v, str):
+        s = v.strip()
+        if not s:
+            return None
+        for fmt in _DATE_FORMATS:
+            try:
+                return datetime.strptime(s, fmt)
+            except ValueError:
+                continue
+    return v
 
 
 # ---------- Control ----------
@@ -143,10 +178,10 @@ def read_batches(wb) -> list[BatchInput]:
             continue
         out.append(BatchInput(
             batch_id=str(bid),
-            input_date=cell(row, "Input_Date"),
+            input_date=_coerce_cell_date(cell(row, "Input_Date")),
             input_count=int(cell(row, "Input_Count") or 0),
-            tran_sf_date=cell(row, "TranSF_date"),
-            tran_og_date=cell(row, "TranOG_Date"),
+            tran_sf_date=_coerce_cell_date(cell(row, "TranSF_date")),
+            tran_og_date=_coerce_cell_date(cell(row, "TranOG_Date")),
             tran_og_count=int(cell(row, "TranOG_Count") or 0) or None,
             tran_og_avg_wt_g=float(cell(row, "TranOG_AvgWt") or 0) or None,
             tran_og_cv=float(cell(row, "TranOG_CV") or 16.0),

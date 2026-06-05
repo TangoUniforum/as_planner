@@ -85,6 +85,44 @@ def main(
     tables = read_biology_tables(wb)
     facility = read_facility_config(wb)
 
+    # ----- Derive forecast_start from ProductionReport (DESIGN §1) -----
+    # Mirrors the VBA DetectForecastStart(): the ProductionReport
+    # "Closing Month" is the single source of truth for the forecast
+    # start (= closing + 1 day), and the VBA writes that value back into
+    # Control B3 on every run. The Python port must do the same
+    # derivation rather than trust a possibly-stale Control value —
+    # otherwise refreshing only the ProductionReport leaves forecast_start
+    # pointing at the prior cycle, and week-0 opening state (hydrated from
+    # the new PR snapshot) no longer aligns with the start week. Falls
+    # back to the Control sheet value only when PR has no closing date.
+    from datetime import datetime as _dt, timedelta as _td
+    pr_closing, og_records, fw_records = read_production_report(wb)
+    _control_start = control.forecast_start
+    _ctrl_date = (_control_start.date() if hasattr(_control_start, "date")
+                  else _control_start)
+    if pr_closing is not None:
+        derived_start = _dt(pr_closing.year, pr_closing.month,
+                            pr_closing.day) + _td(days=1)
+        control.forecast_start = derived_start
+        if _ctrl_date != derived_start.date():
+            print(f"  ForecastStart: derived {derived_start.date()} from "
+                  f"ProductionReport closing {pr_closing} (+1 day); "
+                  f"Control sheet had {_ctrl_date} — using derived value "
+                  f"(Control value ignored, mirrors VBA DetectForecastStart)")
+        else:
+            print(f"  ForecastStart: {derived_start.date()} "
+                  f"(ProductionReport closing {pr_closing} + 1 day; "
+                  f"matches Control)")
+    elif _control_start is not None:
+        print(f"  WARN - ForecastStart: ProductionReport closing date "
+              f"missing/unparseable; falling back to Control value {_ctrl_date}")
+    else:
+        raise ValueError(
+            "No forecast start date found: ProductionReport has no parseable "
+            "'Closing Month' header and the Control sheet has no valid "
+            "forecast start date. Set one or the other before running."
+        )
+
     print(f"  Control: scenario={control.scenario_name}, start={control.forecast_start.date()}, "
           f"horizon={control.horizon_weeks}w, 6N growth={control.sixn_growth}")
     print(f"           handling mortality per transfer = {control.handling_mortality_pct}% "
@@ -95,17 +133,9 @@ def main(
     print(f"  Tanks  : {len(facility.tanks)}")
 
     # ----- Hydrate FacilityState from ProductionReport -----
-    pr_closing, og_records, fw_records = read_production_report(wb)
-    # DESIGN §1 handoff: PR closing date must be exactly forecast_start - 1.
-    from datetime import timedelta as _td
-    expected_pr_close = control.forecast_start.date() - _td(days=1)
-    if pr_closing is None:
-        print(f"  WARN: ProductionReport closing date missing/unparseable; "
-              f"expected {expected_pr_close} (forecast_start - 1 day)")
-    elif pr_closing != expected_pr_close:
-        print(f"  WARN: ProductionReport closing {pr_closing} != "
-              f"{expected_pr_close} (forecast_start - 1 day); PR state may "
-              f"not align with week-0 opening state")
+    # pr_closing / og_records / fw_records were read above, where
+    # forecast_start was derived from the PR closing date. By construction
+    # pr_closing == forecast_start - 1, so no alignment warning is needed.
     state = FacilityState.from_facility_config(facility, today=control.forecast_start.date())
     hydration_warns = hydrate_facility_state(state, og_records, batches)
     summary = summarize_hydration(state)
