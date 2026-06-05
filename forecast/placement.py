@@ -1446,9 +1446,15 @@ def phase_d_emit_events(
                 p = len(prev_by_batch.get(bid, set()))
                 n = len(this_by_batch.get(bid, set()))
                 return n - p
+            # Tiebreak by batch_id: a set of batch_id STRINGS iterates in
+            # hash-randomized order, so sorting by net_change alone left
+            # equal-net-change batches (e.g. two batches each gaining one
+            # tank and competing for the same free tanks) in a
+            # PYTHONHASHSEED-dependent order — making the whole forecast
+            # nondeterministic across runs. The batch_id tiebreak pins it.
             batches_in_order = sorted(
                 set(prev_by_batch) | set(this_by_batch),
-                key=_net_change,
+                key=lambda bid: (_net_change(bid), bid),
             )
             for b in batches_in_order:
                 p = prev_by_batch.get(b, set())
@@ -1462,7 +1468,7 @@ def phase_d_emit_events(
             # leveling fish across each batch's tanks where a tank is
             # over density cap and the moves are legal. Runs for ALL
             # active batches (including unchanged sets the diff skipped).
-            for b in set(prev_by_batch) | set(this_by_batch):
+            for b in sorted(set(prev_by_batch) | set(this_by_batch)):
                 _even_out_density(
                     state, b, transfer_date, transfer_events, warnings,
                 )

@@ -45,14 +45,18 @@ WORKBOOK = ROOT / "Forecast.xlsm"
 #   DetectForecastStart; previously trusted a stale Control B3). On the
 #   refreshed workbook this moved the start 2026-05-15 -> 2026-06-01, so
 #   week-0 hydrates from the heavier 5/31 snapshot instead of replaying
-#   ~2.3 weeks of already-elapsed biology. The prior 148.4 worst was
-#   OPTIMISTIC — it understated the late-2026 B48/OG2N (tank 25) hotspot,
-#   which now climbs 149 -> 216.5 kg/m^3 across W46-W53 unharvested.
-#   This is an accurate advisory, not a regression (0 drift preserved);
-#   relieving B48/tank-25 is a future planner improvement, not a baseline
-#   bug. TranOG 7 -> 6 is a different FW->OG set inside the shifted window.
-MAX_VIOLATIONS = 245
-MAX_WORST_DENSITY = 216.5
+#   ~2.3 weeks of already-elapsed biology.
+# 2026-06-05: 228 / 168.3, TranOG 6 (placement determinism fix). The
+#   prior 245/216.5 was only the COMMON outcome of a nondeterministic
+#   engine: phase_d sorted the per-week transfer-diff batch order by
+#   net-tank-change with NO tiebreak, so equal-net-change batches were
+#   ordered by hash-randomized set-of-strings iteration -> the forecast
+#   changed run-to-run (245/216.5 vs 228/168.3 on the same workbook,
+#   PYTHONHASHSEED-dependent). Adding a batch_id tiebreak pinned it; the
+#   stable result is the BETTER plan (worst 216.5 -> 168.3). Now identical
+#   across all hash seeds. See placement.py phase_d_emit_events.
+MAX_VIOLATIONS = 228
+MAX_WORST_DENSITY = 168.3
 EXPECTED_TRANOG = 6
 
 pytestmark = pytest.mark.skipif(
@@ -240,3 +244,52 @@ def test_full_yaml_path_reproduces_baseline(run_outputs_full_yaml):
         if i >= 5 and row and (row[14] == "TANK_DRIFT" or row[27] == "BIO_DRIFT")
     )
     assert drift == 0, f"full-YAML: {drift} drift rows"
+
+
+# ---- Determinism guard (2026-06-05) ----
+# The forecast must be identical regardless of PYTHONHASHSEED. A
+# set-of-strings iteration in phase_d without a deterministic tiebreak
+# made it vary run-to-run (245/216.5 vs 228/168.3 on the same workbook).
+# Runs the pipeline in two subprocesses with different hash seeds and
+# asserts the BatchLocations density signature matches.
+
+def test_engine_deterministic_across_hash_seeds():
+    import os
+    import subprocess
+    import sys
+    import textwrap
+
+    code = textwrap.dedent(
+        """
+        import shutil, tempfile, os, io, contextlib, openpyxl
+        import forecast.run as r
+        td = tempfile.gettempdir()
+        t = os.path.join(td, "det%d.xlsm" % os.getpid())
+        o = os.path.join(td, "deto%d.xlsm" % os.getpid())
+        shutil.copy(os.environ["WB"], t)
+        with contextlib.redirect_stdout(io.StringIO()):
+            r.main(t, o)
+        wb = openpyxl.load_workbook(o, data_only=True)
+        ws = wb["BatchLocations"]
+        v = []
+        for i, row in enumerate(ws.iter_rows(values_only=True), 1):
+            if i < 5 or not row:
+                continue
+            d = row[8]
+            if isinstance(d, (int, float)) and d > 95:
+                v.append(round(d, 2))
+        print("%d|%.2f|%.2f" % (len(v), max(v, default=0.0), round(sum(v), 2)))
+        """
+    )
+
+    def _run(seed):
+        env = dict(os.environ, WB=str(WORKBOOK), PYTHONHASHSEED=str(seed))
+        out = subprocess.run([sys.executable, "-c", code], cwd=str(ROOT),
+                             capture_output=True, text=True, env=env)
+        assert out.returncode == 0, f"seed {seed} failed: {out.stderr[-500:]}"
+        return out.stdout.strip().splitlines()[-1]
+
+    sig0 = _run(0)
+    sig1 = _run(1)
+    assert sig0 == sig1, (
+        f"non-deterministic across hash seeds: seed0={sig0} seed1={sig1}")
