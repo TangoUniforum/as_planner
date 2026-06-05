@@ -65,14 +65,29 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+CONFIG_DIR = ROOT / "config"
+SCENARIO_DIR = ROOT / "scenario"
+
+
 @pytest.fixture(scope="module")
 def run_outputs(tmp_path_factory):
-    """Run the full pipeline once on a temp copy; return its workbook path."""
-    import forecast.run as run_mod
+    """Run the SUPPORTED path and return the output workbook path.
 
+    PR-only: the live config/ + scenario/ YAML (the single source of truth
+    the app uses) plus the ProductionReport from the workbook. This is
+    robust to Forecast.xlsm being a trimmed PR-only artifact — the limits +
+    batches live in scenario/, not the workbook. Skips if config/scenario
+    haven't been seeded (a clean checkout: run scripts/export_*_to_yaml.py).
+    """
+    import forecast.run as run_mod
+    if not ((CONFIG_DIR / "control.yaml").exists()
+            and (SCENARIO_DIR / "limits.yaml").exists()):
+        pytest.skip("config/ + scenario/ not seeded "
+                    "(run scripts/export_config_to_yaml.py + export_scenario_to_yaml.py)")
     tmp = tmp_path_factory.mktemp("wb") / "Forecast.xlsm"
     shutil.copy(WORKBOOK, tmp)
-    rc = run_mod.main(str(tmp))
+    rc = run_mod.main(str(tmp), config_dir=str(CONFIG_DIR),
+                      scenario_dir=str(SCENARIO_DIR))
     assert rc == 0, f"pipeline exited non-zero ({rc})"
     return tmp
 
@@ -131,119 +146,11 @@ def test_all_tranog_placed(run_outputs):
         f"expected >= {EXPECTED_TRANOG}")
 
 
-# ---- YAML stable-config path (Phase 1 data-path inversion) ----
-# The stable config (Control + biology + facility) can be loaded from YAML
-# instead of the workbook. That path must reproduce the SAME forecast as the
-# Excel path — otherwise the decoupling silently changed behavior.
-
-@pytest.fixture(scope="module")
-def run_outputs_yaml(tmp_path_factory):
-    """Export stable config to YAML, then run the pipeline from it."""
-    import forecast.run as run_mod
-    from forecast.config_io import dump_config
-    from forecast.excel_io import (
-        load_workbook, read_control, read_biology_tables, read_facility_config,
-    )
-
-    cfg = tmp_path_factory.mktemp("cfg")
-    wb = load_workbook(WORKBOOK)
-    dump_config(cfg, control=read_control(wb), tables=read_biology_tables(wb),
-                facility=read_facility_config(wb))
-    wb.close()
-
-    tmp = tmp_path_factory.mktemp("wb_yaml") / "Forecast.xlsm"
-    shutil.copy(WORKBOOK, tmp)
-    rc = run_mod.main(str(tmp), config_dir=str(cfg))
-    assert rc == 0, f"YAML-config pipeline exited non-zero ({rc})"
-    return tmp
-
-
-def test_yaml_config_reproduces_baseline(run_outputs_yaml):
-    """YAML stable-config run must match the Excel baseline (density + drift)."""
-    wb = _load(run_outputs_yaml)
-    ws = wb["BatchLocations"]
-    viols = []
-    for i, row in enumerate(ws.iter_rows(values_only=True), 1):
-        if i < 5 or not row:
-            continue
-        d = row[8]
-        if isinstance(d, (int, float)) and d > 95:
-            viols.append(d)
-    assert len(viols) <= MAX_VIOLATIONS, (
-        f"YAML path: {len(viols)} viols > baseline {MAX_VIOLATIONS}")
-    assert max(viols, default=0.0) <= MAX_WORST_DENSITY + 0.5, (
-        f"YAML path: worst {max(viols, default=0.0):.1f} > {MAX_WORST_DENSITY}")
-
-    wa = wb["TankContinuityAudit"]
-    drift = 0
-    for i, row in enumerate(wa.iter_rows(values_only=True), 1):
-        if i < 5 or not row:
-            continue
-        if row[14] == "TANK_DRIFT" or row[27] == "BIO_DRIFT":
-            drift += 1
-    assert drift == 0, f"YAML path: {drift} drift rows"
-
-
-# ---- Full app-managed path: config + scenario YAML (Phase 2) ----
-# With both stable config AND the scenario (batches + limits) loaded from
-# YAML, the workbook is read only for the ProductionReport. This full path
-# must still reproduce the Excel baseline.
-
-@pytest.fixture(scope="module")
-def run_outputs_full_yaml(tmp_path_factory):
-    """Export config + scenario to YAML, run from both."""
-    import forecast.run as run_mod
-    from forecast.config_io import dump_config
-    from forecast.scenario_io import dump_scenario
-    from forecast.caps import read_facility_limits, read_system_limits
-    from forecast.production_report import read_production_report
-    from forecast.excel_io import (
-        load_workbook, read_control, read_biology_tables, read_facility_config,
-        read_batches,
-    )
-    from datetime import datetime as _dt, timedelta as _td
-
-    cfg = tmp_path_factory.mktemp("cfg2")
-    scn = tmp_path_factory.mktemp("scn")
-    wb = load_workbook(WORKBOOK)
-    dump_config(cfg, control=read_control(wb), tables=read_biology_tables(wb),
-                facility=read_facility_config(wb))
-    pr_closing, _og, _fw = read_production_report(wb)
-    fs = _dt(pr_closing.year, pr_closing.month, pr_closing.day) + _td(days=1)
-    dump_scenario(scn, batches=read_batches(wb),
-                  facility_limits=read_facility_limits(wb, fs.date()),
-                  system_limits=read_system_limits(wb, fs.date()))
-    wb.close()
-
-    tmp = tmp_path_factory.mktemp("wb_full") / "Forecast.xlsm"
-    shutil.copy(WORKBOOK, tmp)
-    rc = run_mod.main(str(tmp), config_dir=str(cfg), scenario_dir=str(scn))
-    assert rc == 0, f"full-YAML pipeline exited non-zero ({rc})"
-    return tmp
-
-
-def test_full_yaml_path_reproduces_baseline(run_outputs_full_yaml):
-    """Config + scenario YAML (PR-only workbook read) must match the baseline."""
-    wb = _load(run_outputs_full_yaml)
-    ws = wb["BatchLocations"]
-    viols = []
-    for i, row in enumerate(ws.iter_rows(values_only=True), 1):
-        if i < 5 or not row:
-            continue
-        d = row[8]
-        if isinstance(d, (int, float)) and d > 95:
-            viols.append(d)
-    assert len(viols) <= MAX_VIOLATIONS, (
-        f"full-YAML: {len(viols)} viols > baseline {MAX_VIOLATIONS}")
-    assert max(viols, default=0.0) <= MAX_WORST_DENSITY + 0.5, (
-        f"full-YAML: worst {max(viols, default=0.0):.1f} > {MAX_WORST_DENSITY}")
-
-    wa = wb["TankContinuityAudit"]
-    drift = sum(
-        1 for i, row in enumerate(wa.iter_rows(values_only=True), 1)
-        if i >= 5 and row and (row[14] == "TANK_DRIFT" or row[27] == "BIO_DRIFT")
-    )
-    assert drift == 0, f"full-YAML: {drift} drift rows"
+# (The separate config-only and re-seed-from-workbook fixtures were removed
+# 2026-06-05: now that Forecast.xlsm is a trimmed PR-only artifact, re-seeding
+# config from it loses the limits sheets. The run_outputs fixture above runs
+# the real supported path from the live config/ + scenario/ — the three
+# invariant tests assert the baseline against that.)
 
 
 # ---- Determinism guard (2026-06-05) ----
@@ -259,6 +166,10 @@ def test_engine_deterministic_across_hash_seeds():
     import sys
     import textwrap
 
+    if not ((CONFIG_DIR / "control.yaml").exists()
+            and (SCENARIO_DIR / "limits.yaml").exists()):
+        pytest.skip("config/ + scenario/ not seeded")
+
     code = textwrap.dedent(
         """
         import shutil, tempfile, os, io, contextlib, openpyxl
@@ -268,7 +179,7 @@ def test_engine_deterministic_across_hash_seeds():
         o = os.path.join(td, "deto%d.xlsm" % os.getpid())
         shutil.copy(os.environ["WB"], t)
         with contextlib.redirect_stdout(io.StringIO()):
-            r.main(t, o)
+            r.main(t, o, config_dir=os.environ["CFG"], scenario_dir=os.environ["SCN"])
         wb = openpyxl.load_workbook(o, data_only=True)
         ws = wb["BatchLocations"]
         v = []
@@ -283,7 +194,8 @@ def test_engine_deterministic_across_hash_seeds():
     )
 
     def _run(seed):
-        env = dict(os.environ, WB=str(WORKBOOK), PYTHONHASHSEED=str(seed))
+        env = dict(os.environ, WB=str(WORKBOOK), CFG=str(CONFIG_DIR),
+                   SCN=str(SCENARIO_DIR), PYTHONHASHSEED=str(seed))
         out = subprocess.run([sys.executable, "-c", code], cwd=str(ROOT),
                              capture_output=True, text=True, env=env)
         assert out.returncode == 0, f"seed {seed} failed: {out.stderr[-500:]}"
