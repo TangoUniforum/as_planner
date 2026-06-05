@@ -1,0 +1,416 @@
+# Facility definition: tanks (system, stage, volume, caps, type).
+tanks:
+- location_id: Hatchery1
+  department: Hatchery 1
+  stage: FW
+  system_id: HA1
+  tank_id: 1
+  volume_m3: 5.5
+  max_density_kg_m3: 30.0
+  max_feed_kg_day: 10.0
+  type: FW
+- location_id: Hatchery2
+  department: Hatchery 2
+  stage: FW
+  system_id: HA2
+  tank_id: 1
+  volume_m3: 5.5
+  max_density_kg_m3: 30.0
+  max_feed_kg_day: 10.0
+  type: FW
+- location_id: Startfeed
+  department: Startfeed
+  stage: FW
+  system_id: SF
+  tank_id: 1
+  volume_m3: 50.9
+  max_density_kg_m3: 30.0
+  max_feed_kg_day: 30.0
+  type: FW
+- location_id: Parr
+  department: Parr
+  stage: FW
+  system_id: Par
+  tank_id: 1
+  volume_m3: 128.2
+  max_density_kg_m3: 35.0
+  max_feed_kg_day: 100.0
+  type: FW
+- location_id: Presmolt
+  department: Presmolt
+  stage: FW
+  system_id: PS
+  tank_id: 1
+  volume_m3: 324.0
+  max_density_kg_m3: 40.0
+  max_feed_kg_day: 300.0
+  type: FW
+- location_id: Smolt
+  department: Smolt
+  stage: FW
+  system_id: SM
+  tank_id: 1
+  volume_m3: 585.0
+  max_density_kg_m3: 50.0
+  max_feed_kg_day: 450.0
+  type: FW
+- location_id: Postsmolt
+  department: Postsmolt
+  stage: FW
+  system_id: PSM
+  tank_id: 1
+  volume_m3: 2670.0
+  max_density_kg_m3: 65.0
+  max_feed_kg_day: 2000.0
+  type: FW
+- location_id: OG1N-11
+  department: OG1 North
+  stage: SW
+  system_id: OG1N
+  tank_id: 11
+  volume_m3: 1720.0
+  max_density_kg_m3: 95.0
+  max_feed_kg_day: 1000.0
+  type: OG
+- location_id: OG1N-13
+  department: OG1 North
+  stage: SW
+  system_id: OG1N
+  tank_id: 13
+  volume_m3: 1720.0
+  max_density_kg_m3: 95.0
+  max_feed_kg_day: 1000.0
+  type: OG
+- location_id: OG1N-15
+  department: OG1 North
+  stage: SW
+  system_id: OG1N
+  tank_id: 15
+  volume_m3: 1720.0
+  max_density_kg_m3: 95.0
+  max_feed_kg_day: 1000.0
+  type: OG
+- location_id: OG1S-12
+  department: OG1 South
+  stage: SW
+  system_id: OG1S
+  tank_id: 12
+  volume_m3: 1720.0
+  max_density_kg_m3: 95.0
+  max_feed_kg_day: 1000.0
+  type: OG
+- location_id: OG1S-14
+  department: OG1 South
+  stage: SW
+  system_id: OG1S
+  tank_id: 14
+  volume_m3: 1720.0
+  max_density_kg_m3: 95.0
+  max_feed_kg_day: 1000.0
+  type: OG
+- location_id: OG1S-16
+  department: OG1 South
+  stage: SW
+  system_id: OG1S
+  tank_id: 16
+  volume_m3: 1720.0
+  max_density_kg_m3: 95.0
+  max_feed_kg_day: 1000.0
+  type: OG
+- location_id: OG2N-21
+  department: OG2 North
+  stage: SW
+  system_id: OG2N
+  tank_id: 21
+  volume_m3: 1720.0
+  max_density_kg_m3: 95.0
+  max_feed_kg_day: 1000.0
+  type: OG
+- location_id: OG2N-23
+  department: OG2 North
+  stage: SW
+  system_id: OG2N
+  tank_id: 23
+  volume_m3: 1720.0
+  max_density_kg_m3: 95.0
+  max_feed_kg_day: 1000.0
+  type: OG
+- location_id: OG2N-25
+  department: OG2 North
+  stage: SW
+  system_id: OG2N
+  tank_id: 25
+  volume_m3: 1720.0
+  max_density_kg_m3: 95.0
+  max_feed_kg_day: 1000.0
+  type: OG
+- location_id: OG2S-22
+  department: OG2 South
+  stage: SW
+  system_id: OG2S
+  tank_id: 22
+  volume_m3: 1720.0
+  max_density_kg_m3: 95.0
+  max_feed_kg_day: 1000.0
+  type: OG
+- location_id: OG2S-24
+  department: OG2 South
+  stage: SW
+  system_id: OG2S
+  tank_id: 24
+  volume_m3: 1720.0
+  max_density_kg_m3: 95.0
+  max_feed_kg_day: 1000.0
+  type: OG
+- location_id: OG2S-26
+  department: OG2 South
+  stage: SW
+  system_id: OG2S
+  tank_id: 26
+  volume_m3: 1720.0
+  max_density_kg_m3: 95.0
+  max_feed_kg_day: 1000.0
+  type: OG
+- location_id: OG3N-31
+  department: OG3 North
+  stage: SW
+  system_id: OG3N
+  tank_id: 31
+  volume_m3: 1720.0
+  max_density_kg_m3: 95.0
+  max_feed_kg_day: 1000.0
+  type: OG
+- location_id: OG3N-33
+  department: OG3 North
+  stage: SW
+  system_id: OG3N
+  tank_id: 33
+  volume_m3: 1720.0
+  max_density_kg_m3: 95.0
+  max_feed_kg_day: 1000.0
+  type: OG
+- location_id: OG3N-35
+  department: OG3 North
+  stage: SW
+  system_id: OG3N
+  tank_id: 35
+  volume_m3: 1720.0
+  max_density_kg_m3: 95.0
+  max_feed_kg_day: 1000.0
+  type: OG
+- location_id: OG3S-32
+  department: OG3 South
+  stage: SW
+  system_id: OG3S
+  tank_id: 32
+  volume_m3: 1720.0
+  max_density_kg_m3: 95.0
+  max_feed_kg_day: 1000.0
+  type: OG
+- location_id: OG3S-34
+  department: OG3 South
+  stage: SW
+  system_id: OG3S
+  tank_id: 34
+  volume_m3: 1720.0
+  max_density_kg_m3: 95.0
+  max_feed_kg_day: 1000.0
+  type: OG
+- location_id: OG3S-36
+  department: OG3 South
+  stage: SW
+  system_id: OG3S
+  tank_id: 36
+  volume_m3: 1720.0
+  max_density_kg_m3: 95.0
+  max_feed_kg_day: 1000.0
+  type: OG
+- location_id: OG4N-41
+  department: OG4 North
+  stage: SW
+  system_id: OG4N
+  tank_id: 41
+  volume_m3: 1720.0
+  max_density_kg_m3: 95.0
+  max_feed_kg_day: 1000.0
+  type: OG
+- location_id: OG4N-43
+  department: OG4 North
+  stage: SW
+  system_id: OG4N
+  tank_id: 43
+  volume_m3: 1720.0
+  max_density_kg_m3: 95.0
+  max_feed_kg_day: 1000.0
+  type: OG
+- location_id: OG4N-45
+  department: OG4 North
+  stage: SW
+  system_id: OG4N
+  tank_id: 45
+  volume_m3: 1720.0
+  max_density_kg_m3: 95.0
+  max_feed_kg_day: 1000.0
+  type: OG
+- location_id: OG4S-42
+  department: OG4 South
+  stage: SW
+  system_id: OG4S
+  tank_id: 42
+  volume_m3: 1720.0
+  max_density_kg_m3: 95.0
+  max_feed_kg_day: 1000.0
+  type: OG
+- location_id: OG4S-44
+  department: OG4 South
+  stage: SW
+  system_id: OG4S
+  tank_id: 44
+  volume_m3: 1720.0
+  max_density_kg_m3: 95.0
+  max_feed_kg_day: 1000.0
+  type: OG
+- location_id: OG4S-46
+  department: OG4 South
+  stage: SW
+  system_id: OG4S
+  tank_id: 46
+  volume_m3: 1720.0
+  max_density_kg_m3: 95.0
+  max_feed_kg_day: 1000.0
+  type: OG
+- location_id: OG5N-51
+  department: OG5 North
+  stage: SW
+  system_id: OG5N
+  tank_id: 51
+  volume_m3: 1720.0
+  max_density_kg_m3: 95.0
+  max_feed_kg_day: 1000.0
+  type: OG
+- location_id: OG5N-53
+  department: OG5 North
+  stage: SW
+  system_id: OG5N
+  tank_id: 53
+  volume_m3: 1720.0
+  max_density_kg_m3: 95.0
+  max_feed_kg_day: 1000.0
+  type: OG
+- location_id: OG5N-55
+  department: OG5 North
+  stage: SW
+  system_id: OG5N
+  tank_id: 55
+  volume_m3: 1720.0
+  max_density_kg_m3: 95.0
+  max_feed_kg_day: 1000.0
+  type: OG
+- location_id: OG5S-52
+  department: OG5 South
+  stage: SW
+  system_id: OG5S
+  tank_id: 52
+  volume_m3: 1720.0
+  max_density_kg_m3: 95.0
+  max_feed_kg_day: 1000.0
+  type: OG
+- location_id: OG5S-54
+  department: OG5 South
+  stage: SW
+  system_id: OG5S
+  tank_id: 54
+  volume_m3: 1720.0
+  max_density_kg_m3: 95.0
+  max_feed_kg_day: 1000.0
+  type: OG
+- location_id: OG5S-56
+  department: OG5 South
+  stage: SW
+  system_id: OG5S
+  tank_id: 56
+  volume_m3: 1720.0
+  max_density_kg_m3: 95.0
+  max_feed_kg_day: 1000.0
+  type: OG
+- location_id: OG6N-61
+  department: OG6 North
+  stage: SW
+  system_id: OG6N
+  tank_id: 61
+  volume_m3: 1720.0
+  max_density_kg_m3: 95.0
+  max_feed_kg_day: 1000.0
+  type: OG
+- location_id: OG6N-63
+  department: OG6 North
+  stage: SW
+  system_id: OG6N
+  tank_id: 63
+  volume_m3: 1720.0
+  max_density_kg_m3: 95.0
+  max_feed_kg_day: 1000.0
+  type: OG
+- location_id: OG6N-65
+  department: OG6 North
+  stage: SW
+  system_id: OG6N
+  tank_id: 65
+  volume_m3: 1720.0
+  max_density_kg_m3: 95.0
+  max_feed_kg_day: 1000.0
+  type: OG
+- location_id: OG6N-67
+  department: OG6 North
+  stage: SW
+  system_id: OG6N
+  tank_id: 67
+  volume_m3: 1720.0
+  max_density_kg_m3: 95.0
+  max_feed_kg_day: 1000.0
+  type: OG
+- location_id: OG6N-69
+  department: OG6 North
+  stage: SW
+  system_id: OG6N
+  tank_id: 69
+  volume_m3: 1720.0
+  max_density_kg_m3: 95.0
+  max_feed_kg_day: 1000.0
+  type: OG
+- location_id: OG6N-71
+  department: OG6 North
+  stage: SW
+  system_id: OG6N
+  tank_id: 71
+  volume_m3: 1720.0
+  max_density_kg_m3: 95.0
+  max_feed_kg_day: 1000.0
+  type: OG
+- location_id: OG6S-62
+  department: OG6 South
+  stage: SW
+  system_id: OG6S
+  tank_id: 62
+  volume_m3: 1720.0
+  max_density_kg_m3: 95.0
+  max_feed_kg_day: 1000.0
+  type: OG
+- location_id: OG6S-64
+  department: OG6 South
+  stage: SW
+  system_id: OG6S
+  tank_id: 64
+  volume_m3: 1720.0
+  max_density_kg_m3: 95.0
+  max_feed_kg_day: 1000.0
+  type: OG
+- location_id: OG6S-66
+  department: OG6 South
+  stage: SW
+  system_id: OG6S
+  tank_id: 66
+  volume_m3: 1720.0
+  max_density_kg_m3: 95.0
+  max_feed_kg_day: 1000.0
+  type: OG

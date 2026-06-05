@@ -1,0 +1,23 @@
+# Control parameters (caps defaults, horizon, planner knobs).
+# forecast_start is derived from the ProductionReport at run time;
+# the value here is only a seed.
+forecast_start: '2026-05-15'
+horizon_weeks: 52
+scenario_name: Forecast
+max_feed_per_day_kg: 34000.0
+max_biomass_kg: 3900000.0
+max_harvest_per_week: 55000.0
+min_harvest_weight_g: 3500.0
+min_harvest_per_week: 30000.0
+min_tank_control: 7000.0
+max_tank_density_kg_m3: 95.0
+default_hog_yield: 0.81
+facility_biomass_deviation_pct: 0.01
+handling_mortality_pct: 0.01
+sixn_growth: false
+sixn_production_start: null
+sixn_transition_weeks: 2
+tran_og_default_tanks: 3
+global_buffer_pct: 0.05
+starvation_period_days: 10
+density_target_pct: 0.85

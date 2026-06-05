@@ -16,14 +16,9 @@ __pycache__/
 .vscode/
 .idea/
 
-# Stable-config YAML, auto-seeded from the workbook by
-# scripts/export_config_to_yaml.py (Phase 1 data-path inversion). Ignored
-# for now because it's a derived artifact of the gitignored workbook;
-# promote to tracked source-of-truth when config becomes app-authored.
-config/
-# Scenario YAML (batches + limits), auto-seeded from the workbook by
-# scripts/export_scenario_to_yaml.py (Phase 2). Same rationale as config/.
-scenario/
+# config/ + scenario/ (biology/facility/control + batches/limits YAML) are now
+# the TRACKED source of truth the engine runs from — the workbook is just a PR
+# carrier. Committed 2026-06-05 (they are the only complete copy of the limits).
 
 # Transient diagnostic outputs (scripts write these)
 scripts/*_output.txt
