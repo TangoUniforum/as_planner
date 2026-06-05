@@ -45,6 +45,67 @@ def _scenario_ready() -> bool:
     return (SCENARIO_DIR / "batches.yaml").exists()
 
 
+def _ingest_pr(uploaded):
+    """Parse + validate the uploaded ProductionReport (cached by file identity).
+
+    The PR is the anchor: forecast_start is DERIVED from its closing date
+    (+1 day). Returns dict(ok, forecast_start, closing, n_og, n_fw, errors,
+    warnings). `ok` is False (locks downstream actions) on any hard error.
+    """
+    key = (uploaded.name, uploaded.size)
+    if st.session_state.get("_pr_key") == key:
+        return st.session_state["_pr"]
+    from datetime import datetime as _dt, timedelta as _td
+    from forecast.excel_io import load_workbook
+    from forecast.production_report import read_production_report
+    res = {"ok": False, "forecast_start": None, "closing": None,
+           "n_og": 0, "n_fw": 0, "errors": [], "warnings": []}
+    try:
+        wd = Path(tempfile.mkdtemp(prefix="as_pr_"))
+        p = wd / uploaded.name
+        p.write_bytes(uploaded.getvalue())
+        wb = load_workbook(p)
+        if "ProductionReport" not in wb.sheetnames:
+            res["errors"].append("No 'ProductionReport' sheet in the workbook.")
+        else:
+            closing, og, fw = read_production_report(wb)
+            res["closing"], res["n_og"], res["n_fw"] = closing, len(og), len(fw)
+            if closing is None:
+                res["errors"].append(
+                    "ProductionReport has no parseable 'Closing Month' date.")
+            else:
+                res["forecast_start"] = _dt(closing.year, closing.month,
+                                            closing.day) + _td(days=1)
+            if not og and not fw:
+                res["errors"].append(
+                    "ProductionReport has no tank rows (no OG/FW records).")
+            if (og or fw) and _config_ready() and _scenario_ready():
+                try:
+                    from forecast.config_io import load_facility_config
+                    from forecast.scenario_io import load_batches
+                    fac_ids = {t.tank_id for t in load_facility_config(CONFIG_DIR).tanks}
+                    batch_ids = {b.batch_id for b in load_batches(SCENARIO_DIR)}
+                    pr_b = {r.batch_id for r in og} | {r.batch_id for r in fw}
+                    miss_b = sorted(pr_b - batch_ids)
+                    if miss_b:
+                        res["warnings"].append(
+                            f"PR batches not in config Batches {miss_b} — "
+                            f"their fish would be dropped.")
+                    unk_t = sorted({r.tank_id for r in og} - fac_ids)
+                    if unk_t:
+                        res["warnings"].append(
+                            f"PR tank ids not in Facility config: {unk_t}.")
+                except Exception:  # noqa: BLE001
+                    pass
+        wb.close()
+        res["ok"] = not res["errors"]
+    except Exception as e:  # noqa: BLE001
+        res["errors"].append(f"Failed to read the workbook: {e}")
+    st.session_state["_pr_key"] = key
+    st.session_state["_pr"] = res
+    return res
+
+
 # ============================================================
 # Mother ship — in-app config + scenario editor
 # ============================================================
@@ -336,25 +397,28 @@ def _config_io_section():
     c1, c2 = st.columns(2)
     with c1:
         st.markdown("**Template — build config offline**")
-        st.caption("Pick a horizon + start; the template comes with EVERY "
-                   "per-week limit slot laid out (facility metrics + each system "
-                   "× week) plus all current config, so nothing's overlooked. "
-                   "Fill it in Excel and import on the right.")
-        _h, _s = _current_horizon_start()
-        horizon = st.number_input("Forecast horizon (weeks)", min_value=1,
-                                  max_value=300, value=_h, step=1)
-        start = st.date_input("Forecast start (week labels — match your PR cycle)",
-                              value=_s)
-        if st.button("Build template", use_container_width=True):
-            st.session_state["_tmpl_bytes"] = _config_template_bytes(int(horizon), start)
-        if "_tmpl_bytes" in st.session_state:
-            st.download_button(
-                "⬇ Download config template (.xlsx)",
-                data=st.session_state["_tmpl_bytes"],
-                file_name="config_template.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
-            )
+        pr = _ingest_pr(uploaded) if uploaded is not None else None
+        if not (pr and pr["ok"]):
+            st.info("⬆ Upload a valid **ProductionReport** (sidebar) to enable "
+                    "the template — its week labels come from the PR's closing "
+                    "date. The forecast length comes from Control → horizon.")
+        else:
+            h = _current_horizon_start()[0]
+            fs = pr["forecast_start"]
+            st.caption(f"Template covers **{h} weeks from {fs.date()}** — start "
+                       f"derived from the PR, horizon from Control (edit on the "
+                       f"Control tab). Every per-week limit slot is laid out to "
+                       f"fill in; current values pre-filled.")
+            if st.button("Build template", use_container_width=True):
+                st.session_state["_tmpl_bytes"] = _config_template_bytes(int(h), fs)
+            if "_tmpl_bytes" in st.session_state:
+                st.download_button(
+                    "⬇ Download config template (.xlsx)",
+                    data=st.session_state["_tmpl_bytes"],
+                    file_name="config_template.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                )
     with c2:
         st.markdown("**Import — load config from a file**")
         st.caption("A filled config template, or a saved forecast workbook "
@@ -457,22 +521,36 @@ with st.sidebar:
     uploaded = st.file_uploader(
         "ProductionReport workbook (.xlsx / .xlsm)",
         type=["xlsm", "xlsx"],
-        help="Only the ProductionReport sheet is read. Models, facility, "
-             "control, batches, and limits all come from the app config "
-             "(edit them in Configure). The file is never modified.",
+        help="Only the ProductionReport sheet is read. The forecast start is "
+             "derived from its closing date. Models/limits come from config.",
     )
 
+    pr = _ingest_pr(uploaded) if uploaded is not None else None
+    if pr is not None:
+        if pr["ok"]:
+            st.success(
+                f"PR ✓ — forecast start **{pr['forecast_start'].date()}** "
+                f"(closing {pr['closing']}) · {pr['n_og']} OG + {pr['n_fw']} FW rows"
+            )
+        else:
+            for e in pr["errors"]:
+                st.error(e)
+        for w in pr.get("warnings", []):
+            st.warning(w)
+
     _cfg_ok = _config_ready() and _scenario_ready()
+    _pr_ok = pr is not None and pr["ok"]
     if not _cfg_ok:
-        st.warning("No config yet — go to **Configure** to set it up "
-                   "(download/fill the template, or import).")
+        st.info("No config yet — set it up in **Configure**.")
 
     st.header("Run")
     run_clicked = st.button(
         "▶ Run forecast",
         type="primary",
-        disabled=(uploaded is None or not _cfg_ok),
+        disabled=(not _pr_ok or not _cfg_ok),
         use_container_width=True,
+        help=None if (_pr_ok and _cfg_ok)
+        else "Upload a valid ProductionReport and set up config first.",
     )
 
     if "result" in st.session_state and st.session_state.result.get("ok"):
