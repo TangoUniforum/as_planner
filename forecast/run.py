@@ -76,10 +76,11 @@ def main(
             untouched and produce a fresh output file.
         scenario_dir: optional path to the scenario YAML directory
             (batches.yaml / limits.yaml). When set, the forward batch
-            schedule and the facility/system limits load from YAML instead
-            of the workbook (Phase 2 of the data-path inversion). The
-            workbook still supplies the ProductionReport (and pins, until
-            those move in-app). None → read them from the workbook.
+            schedule and the facility/system limits load from YAML, and
+            pins (HarvestPlan/TransferPlan) are NOT read from the workbook
+            (planning is an in-app concern) — so the uploaded workbook
+            needs only the ProductionReport. None → read batches, limits,
+            and pins from the workbook (legacy/full-workbook mode).
         config_dir: optional path to the stable-config YAML directory
             (control.yaml / biology.yaml / facility.yaml). When set, the
             Control params, biology models, and facility definition are
@@ -210,8 +211,19 @@ def main(
     else:
         facility_limits = read_facility_limits(wb, fs_date)
         system_limits = read_system_limits(wb, fs_date)
-    pinned_harvests = read_pinned_harvests(wb, fs_date)
-    pinned_transfers = read_pinned_transfers(wb, fs_date)
+    # Pins (HarvestPlan/TransferPlan) are eliminated in app-managed mode:
+    # planning is an in-app concern, so the workbook's pin sheets are NOT
+    # read when running from a scenario. The uploaded workbook then needs
+    # only the ProductionReport. (Legacy/full-workbook mode still reads
+    # operator pins from the sheets.)
+    if scenario_dir is not None:
+        pinned_harvests = []
+        pinned_transfers = []
+        print("  Pins: app-managed mode — HarvestPlan/TransferPlan NOT read "
+              "from workbook (planning is in-app)")
+    else:
+        pinned_harvests = read_pinned_harvests(wb, fs_date)
+        pinned_transfers = read_pinned_transfers(wb, fs_date)
     print(f"\n  Caps + pinned plans:")
     print(f"    FacilityLimits overrides: {len(facility_limits.overrides)}")
     print(f"    SystemLimits caps:        {len(system_limits.caps)}")
