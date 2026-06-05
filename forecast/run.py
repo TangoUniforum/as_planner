@@ -32,6 +32,7 @@ from .excel_io import (
     read_pinned_transfers,
     write_advisory,
     write_control_status,
+    write_forecast_start,
     write_validation_log,
     write_batch_locations,
     write_biology_projection,
@@ -572,6 +573,10 @@ def main(
         elapsed_s=elapsed,
         warnings=total_warnings,
     )
+    # Sync the Control INPUT cell (B3) to the derived start, mirroring the
+    # VBA. After a run, Control B3 == ProductionReport closing + 1, so a
+    # stale B3 unambiguously means "not yet run against the current PR".
+    write_forecast_start(wb, control.forecast_start)
 
     wb.save(out_path)
     wb.close()

@@ -1773,6 +1773,37 @@ def write_validation_log(
     ws.freeze_panes = "A2"
 
 
+def write_forecast_start(wb, forecast_start, sheet_name: str = "Control") -> None:
+    """Write the derived forecast start back into the Control INPUT cell.
+
+    Mirrors the VBA DetectForecastStart(), which writes the derived start
+    (= ProductionReport closing + 1 day) into Control B3 on every run so
+    the input cell never drifts from the ProductionReport. This closes the
+    gap between a stale, un-reconciled input sheet and a post-run sheet:
+    after a run, `B3 == PR closing + 1` is an invariant that means
+    "reconciled". The status-echo row (R11, written by
+    write_control_status) is informational only — this writer keeps the
+    actual INPUT cell honest.
+
+    Finds the 'Forecast Start Date' label in column A (the same label
+    read_control matches), falling back to the VBA's B3 convention.
+    """
+    if sheet_name not in wb.sheetnames:
+        return
+    ws = wb[sheet_name]
+    target_row = None
+    for r in range(1, 30):
+        a = ws.cell(row=r, column=1).value
+        if (isinstance(a, str)
+                and re.sub(r"\s+", " ", a.strip().lower()).rstrip(":")
+                == "forecast start date"):
+            target_row = r
+            break
+    if target_row is None:
+        target_row = 3  # VBA convention: Control!B3
+    ws.cell(row=target_row, column=2).value = forecast_start
+
+
 def write_control_status(
     wb,
     *,
