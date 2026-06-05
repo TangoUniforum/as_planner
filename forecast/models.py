@@ -135,7 +135,8 @@ class BiologyTables:
     sgr_fw_pct_day: list[Optional[float]] = field(default_factory=list)
     sgr_sw_pct_day: list[Optional[float]] = field(default_factory=list)
     fcr_size_g: list[float] = field(default_factory=list)
-    # Three FCR models keyed by their numeric tag "1.21", "1.18", "1.16".
+    # FCR models keyed by their numeric tag, e.g. "1.21", "1.18", "1.16",
+    # "1.15". Open-ended so new models are data, not code.
     fcr_by_model: dict[str, list[float]] = field(default_factory=dict)
     mortality_week_from_input: list[int] = field(default_factory=list)
     mortality_pct_weekly: list[float] = field(default_factory=list)

@@ -62,6 +62,7 @@ from .state import FacilityState
 def main(
     input_path: str | Path | None = None,
     output_path: str | Path | None = None,
+    config_dir: str | Path | None = None,
 ) -> int:
     """Run the full forecast pipeline.
 
@@ -72,6 +73,14 @@ def main(
             (legacy CLI behavior; mutates the source workbook).
             Pass a separate path (e.g. from a UI) to leave the input
             untouched and produce a fresh output file.
+        config_dir: optional path to the stable-config YAML directory
+            (control.yaml / biology.yaml / facility.yaml). When set, the
+            Control params, biology models, and facility definition are
+            loaded from YAML instead of the workbook (Phase 1 of the
+            data-path inversion; see docs/DATA_PATH_REDESIGN.md). The
+            workbook still supplies the per-cycle inputs (ProductionReport,
+            BatchRegistry, limits, pins). None → read everything from the
+            workbook (legacy behavior).
     """
     in_path = Path(
         input_path or Path(__file__).resolve().parent.parent / "Forecast.xlsm"
@@ -81,10 +90,16 @@ def main(
     print(f"Loading {in_path} ...")
     wb = load_workbook(in_path)
 
-    control = read_control(wb)
     batches = read_batches(wb)
-    tables = read_biology_tables(wb)
-    facility = read_facility_config(wb)
+    if config_dir is not None:
+        from .config_io import load_config
+        control, tables, facility = load_config(config_dir)
+        print(f"  Stable config: loaded Control + biology + facility from "
+              f"YAML at {config_dir}")
+    else:
+        control = read_control(wb)
+        tables = read_biology_tables(wb)
+        facility = read_facility_config(wb)
 
     # ----- Derive forecast_start from ProductionReport (DESIGN §1) -----
     # Mirrors the VBA DetectForecastStart(): the ProductionReport
@@ -593,8 +608,12 @@ def _cli():
     p.add_argument("--output", default=None,
                    help="Output workbook path. If omitted, output is written "
                         "back to the input file (legacy behavior).")
+    p.add_argument("--config-dir", default=None,
+                   help="Stable-config YAML directory (control/biology/facility). "
+                        "When set, those inputs load from YAML instead of the "
+                        "workbook; the workbook still supplies PR/batches/limits.")
     a = p.parse_args()
-    return main(a.workbook, a.output)
+    return main(a.workbook, a.output, a.config_dir)
 
 
 if __name__ == "__main__":

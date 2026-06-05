@@ -125,3 +125,56 @@ def test_all_tranog_placed(run_outputs):
     assert len(tranog_batches) >= EXPECTED_TRANOG, (
         f"only {len(tranog_batches)} batches with applied TranOG, "
         f"expected >= {EXPECTED_TRANOG}")
+
+
+# ---- YAML stable-config path (Phase 1 data-path inversion) ----
+# The stable config (Control + biology + facility) can be loaded from YAML
+# instead of the workbook. That path must reproduce the SAME forecast as the
+# Excel path — otherwise the decoupling silently changed behavior.
+
+@pytest.fixture(scope="module")
+def run_outputs_yaml(tmp_path_factory):
+    """Export stable config to YAML, then run the pipeline from it."""
+    import forecast.run as run_mod
+    from forecast.config_io import dump_config
+    from forecast.excel_io import (
+        load_workbook, read_control, read_biology_tables, read_facility_config,
+    )
+
+    cfg = tmp_path_factory.mktemp("cfg")
+    wb = load_workbook(WORKBOOK)
+    dump_config(cfg, control=read_control(wb), tables=read_biology_tables(wb),
+                facility=read_facility_config(wb))
+    wb.close()
+
+    tmp = tmp_path_factory.mktemp("wb_yaml") / "Forecast.xlsm"
+    shutil.copy(WORKBOOK, tmp)
+    rc = run_mod.main(str(tmp), config_dir=str(cfg))
+    assert rc == 0, f"YAML-config pipeline exited non-zero ({rc})"
+    return tmp
+
+
+def test_yaml_config_reproduces_baseline(run_outputs_yaml):
+    """YAML stable-config run must match the Excel baseline (density + drift)."""
+    wb = _load(run_outputs_yaml)
+    ws = wb["BatchLocations"]
+    viols = []
+    for i, row in enumerate(ws.iter_rows(values_only=True), 1):
+        if i < 5 or not row:
+            continue
+        d = row[8]
+        if isinstance(d, (int, float)) and d > 95:
+            viols.append(d)
+    assert len(viols) <= MAX_VIOLATIONS, (
+        f"YAML path: {len(viols)} viols > baseline {MAX_VIOLATIONS}")
+    assert max(viols, default=0.0) <= MAX_WORST_DENSITY + 0.5, (
+        f"YAML path: worst {max(viols, default=0.0):.1f} > {MAX_WORST_DENSITY}")
+
+    wa = wb["TankContinuityAudit"]
+    drift = 0
+    for i, row in enumerate(wa.iter_rows(values_only=True), 1):
+        if i < 5 or not row:
+            continue
+        if row[14] == "TANK_DRIFT" or row[27] == "BIO_DRIFT":
+            drift += 1
+    assert drift == 0, f"YAML path: {drift} drift rows"

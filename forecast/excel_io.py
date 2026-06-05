@@ -200,9 +200,13 @@ def read_biology_tables(wb) -> BiologyTables:
     rows = list(ws.iter_rows(values_only=True))
     # Header is at row 3 (index 2). Layout (cols 1-indexed):
     # 1=Size, 2=SGR_FW, 3=SGR_SW, 4=FCR_1.21, 5=FCR_1.18, 6=FCR_1.16,
-    # 8=Week_From_Input, 9=Mortality_%, 11=Feed Type, 12=Max Size,
+    # 7=FCR_1.15, 8=Week_From_Input, 9=Mortality_%, 11=Feed Type, 12=Max Size,
     # 15=Days Since Input, 16=Culling %
-    tables = BiologyTables(fcr_by_model={"1.21": [], "1.18": [], "1.16": []})
+    # NOTE: the VBA LoadModels reads four FCR curves (1.21/1.18/1.16/1.15);
+    # earlier the port dropped 1.15 (col 7). Carry all four so a batch on
+    # FCR_115/1.15 resolves to a real curve instead of an empty one.
+    tables = BiologyTables(
+        fcr_by_model={"1.21": [], "1.18": [], "1.16": [], "1.15": []})
     for row in rows[3:]:  # data starts row 4 (index 3)
         size = row[0] if len(row) > 0 else None
         sgr_fw = row[1] if len(row) > 1 else None
@@ -210,6 +214,7 @@ def read_biology_tables(wb) -> BiologyTables:
         fcr_121 = row[3] if len(row) > 3 else None
         fcr_118 = row[4] if len(row) > 4 else None
         fcr_116 = row[5] if len(row) > 5 else None
+        fcr_115 = row[6] if len(row) > 6 else None
         if isinstance(size, (int, float)):
             tables.sgr_size_g.append(float(size))
             tables.sgr_fw_pct_day.append(float(sgr_fw) if isinstance(sgr_fw, (int, float)) else None)
@@ -218,6 +223,7 @@ def read_biology_tables(wb) -> BiologyTables:
             tables.fcr_by_model["1.21"].append(float(fcr_121) if isinstance(fcr_121, (int, float)) else float("nan"))
             tables.fcr_by_model["1.18"].append(float(fcr_118) if isinstance(fcr_118, (int, float)) else float("nan"))
             tables.fcr_by_model["1.16"].append(float(fcr_116) if isinstance(fcr_116, (int, float)) else float("nan"))
+            tables.fcr_by_model["1.15"].append(float(fcr_115) if isinstance(fcr_115, (int, float)) else float("nan"))
 
         wfi = row[7] if len(row) > 7 else None
         mort = row[8] if len(row) > 8 else None
