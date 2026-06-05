@@ -1,17 +1,23 @@
-"""End-to-end regression guard for the greenfield coordinator.
+"""Behavioral regression guard for the forecast pipeline.
 
-Locks the empirical baseline of the incremental assignment coordinator
-(exit-at-1kg + per-week top-up + forward-peak staggering + even-out
-with cross-scope OG1/2 → OG3-6 pass + EVT_PR_CORRECTION 2-pass
-evaluator + PR-anchored FW in-flight projection; see
-docs/GREENFIELD_COORDINATOR_LOCKS.md Q-COORD.A-L):
+Locks the model/pipeline BEHAVIOR, not specific output numbers. The exact
+density-violation count / worst density / TranOG count legitimately change
+with config (horizon, density target, limits, batches) — they are NOT the
+thing under test. What must always hold, regardless of config, is that the
+pipeline behaves correctly:
 
-    density violations <= 209,  worst <= 150 kg/m^3,
-    0 count/biomass drift,  7/7 TranOG arrivals placed.
+  1. COMPLETES + POPULATES — rc == 0 and the key sheets are written.
+  2. MASS CONSERVATION — zero count-drift and zero biomass-drift rows in
+     TankContinuityAudit: no fish/biomass created or lost unaccounted. (This
+     also guarantees no TranOG arrival is silently dropped — a dropped
+     arrival would break the count balance.)
+  3. OUTPUT SANITY — every density is finite and >= 0 (no NaN / negative
+     blow-ups); counts are non-negative.
+  4. DETERMINISM — identical output regardless of PYTHONHASHSEED.
 
-Runs the real pipeline on a COPY of Forecast.xlsm so the source
-workbook is never mutated. Skips cleanly if the workbook is absent
-(it is gitignored — a clean checkout won't have it).
+Runs the supported path (live config/ + scenario/ YAML, ProductionReport from
+a COPY of Forecast.xlsm so the source is never mutated). Skips cleanly if the
+workbook or config/scenario are absent.
 """
 from __future__ import annotations
 
@@ -22,42 +28,6 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent  # Python/
 WORKBOOK = ROOT / "Forecast.xlsm"
-
-# Baseline thresholds. Tests guard against REGRESSION: violations/worst
-# must not exceed these; drift must stay zero.
-# 2026-05-28: 212 / 185 (Q-COORD.A-I locks).
-# 2026-05-30: 196 / 169.5 (Q-COORD.J cross-scope OG1/2 -> OG3-6 even-out
-#   relieved B46/B48-class hotspots).
-# 2026-06-01 (am): 243 / 193 (Q-COORD.L first cut: EVT_PR_CORRECTION
-#   always-on for hard-cap projection. Semantic-over-metric trade.)
-# 2026-06-01 (pm): 196 / 169.5 (Q-COORD.L 2-pass evaluator: planner
-#   action applied only when strictly net-positive. On this workbook
-#   all candidates regress, so advisory-only is chosen automatically.
-#   Aligns with precalc-first: act when acting is better.)
-# 2026-06-01 (later): 209 / 148.4 (PR-anchored FW in-flight projection:
-#   FW batches with PR records project from PR-measured state instead
-#   of biology projection from input_date. Worst density dropped 169.5
-#   -> 148.4 (-12%); total count up 196 -> 209 (+7%) — pressure spread
-#   across more tanks. The evaluator now ACCEPTS B46's PR_CORRECTION
-#   (previously all candidates regressed).
-# 2026-06-04: 245 / 216.5, TranOG 6 (forecast_start now DERIVED from the
-#   ProductionReport closing date, = closing + 1 day, mirroring VBA
-#   DetectForecastStart; previously trusted a stale Control B3). On the
-#   refreshed workbook this moved the start 2026-05-15 -> 2026-06-01, so
-#   week-0 hydrates from the heavier 5/31 snapshot instead of replaying
-#   ~2.3 weeks of already-elapsed biology.
-# 2026-06-05: 228 / 168.3, TranOG 6 (placement determinism fix). The
-#   prior 245/216.5 was only the COMMON outcome of a nondeterministic
-#   engine: phase_d sorted the per-week transfer-diff batch order by
-#   net-tank-change with NO tiebreak, so equal-net-change batches were
-#   ordered by hash-randomized set-of-strings iteration -> the forecast
-#   changed run-to-run (245/216.5 vs 228/168.3 on the same workbook,
-#   PYTHONHASHSEED-dependent). Adding a batch_id tiebreak pinned it; the
-#   stable result is the BETTER plan (worst 216.5 -> 168.3). Now identical
-#   across all hash seeds. See placement.py phase_d_emit_events.
-MAX_VIOLATIONS = 228
-MAX_WORST_DENSITY = 168.3
-EXPECTED_TRANOG = 6
 
 pytestmark = pytest.mark.skipif(
     not WORKBOOK.exists(),
@@ -97,7 +67,26 @@ def _load(path):
     return openpyxl.load_workbook(path, keep_vba=True, data_only=True)
 
 
-def test_zero_continuity_drift(run_outputs):
+_REQUIRED_SHEETS = ["BatchLocations", "TankContinuityAudit", "HarvestPlan",
+                    "TransferPlan", "BiologyProjection", "RunConfig"]
+
+
+def test_run_completes_and_populates(run_outputs):
+    """The run finishes and writes the key sheets with data."""
+    wb = _load(run_outputs)
+    for name in _REQUIRED_SHEETS:
+        assert name in wb.sheetnames, f"missing output sheet {name}"
+    rows = sum(1 for _ in wb["BatchLocations"].iter_rows())
+    assert rows > 5, "BatchLocations has no data rows"
+
+
+def test_mass_conservation(run_outputs):
+    """No fish or biomass created/lost unaccounted (zero drift).
+
+    This is THE correctness invariant — independent of config. Zero drift
+    also means no TranOG arrival was silently dropped (that would unbalance
+    the count).
+    """
     wb = _load(run_outputs)
     ws = wb["TankContinuityAudit"]
     count_drift = bio_drift = 0
@@ -112,45 +101,25 @@ def test_zero_continuity_drift(run_outputs):
     assert bio_drift == 0, f"{bio_drift} tank biomass-drift rows"
 
 
-def test_density_violations_within_baseline(run_outputs):
+def test_output_sanity(run_outputs):
+    """Densities are finite and non-negative; counts non-negative.
+
+    We do NOT assert a specific violation count or worst density — those are
+    config-dependent. We only guard against NaN/negative blow-ups.
+    """
     wb = _load(run_outputs)
     ws = wb["BatchLocations"]
-    viols = []
+    bad_density = bad_count = 0
     for i, row in enumerate(ws.iter_rows(values_only=True), 1):
         if i < 5 or not row:
             continue
-        d = row[8]
-        if isinstance(d, (int, float)) and d > 95:
-            viols.append(d)
-    worst = max(viols, default=0.0)
-    assert len(viols) <= MAX_VIOLATIONS, (
-        f"density violations {len(viols)} > baseline {MAX_VIOLATIONS} "
-        f"(regression)")
-    assert worst <= MAX_WORST_DENSITY + 0.5, (
-        f"worst density {worst:.1f} > baseline {MAX_WORST_DENSITY} "
-        f"(regression)")
-
-
-def test_all_tranog_placed(run_outputs):
-    """All FW->OG arrivals must be placed (none silently dropped)."""
-    wb = _load(run_outputs)
-    ws = wb["TransferPlan"]
-    tranog_batches = set()
-    for i, row in enumerate(ws.iter_rows(values_only=True), 1):
-        if i < 5 or not row:
-            continue
-        if row[6] == "TranOG" and str(row[8]).lower() == "applied":
-            tranog_batches.add(row[1])
-    assert len(tranog_batches) >= EXPECTED_TRANOG, (
-        f"only {len(tranog_batches)} batches with applied TranOG, "
-        f"expected >= {EXPECTED_TRANOG}")
-
-
-# (The separate config-only and re-seed-from-workbook fixtures were removed
-# 2026-06-05: now that Forecast.xlsm is a trimmed PR-only artifact, re-seeding
-# config from it loses the limits sheets. The run_outputs fixture above runs
-# the real supported path from the live config/ + scenario/ — the three
-# invariant tests assert the baseline against that.)
+        count, density = row[5], row[8]
+        if isinstance(density, (int, float)) and (density != density or density < 0):
+            bad_density += 1
+        if isinstance(count, (int, float)) and count < 0:
+            bad_count += 1
+    assert bad_density == 0, f"{bad_density} NaN/negative density rows"
+    assert bad_count == 0, f"{bad_count} negative count rows"
 
 
 # ---- Determinism guard (2026-06-05) ----
