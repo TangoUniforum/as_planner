@@ -21,6 +21,9 @@ __pycache__/
 # for now because it's a derived artifact of the gitignored workbook;
 # promote to tracked source-of-truth when config becomes app-authored.
 config/
+# Scenario YAML (batches + limits), auto-seeded from the workbook by
+# scripts/export_scenario_to_yaml.py (Phase 2). Same rationale as config/.
+scenario/
 
 # Transient diagnostic outputs (scripts write these)
 scripts/*_output.txt

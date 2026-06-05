@@ -63,6 +63,7 @@ def main(
     input_path: str | Path | None = None,
     output_path: str | Path | None = None,
     config_dir: str | Path | None = None,
+    scenario_dir: str | Path | None = None,
 ) -> int:
     """Run the full forecast pipeline.
 
@@ -73,6 +74,12 @@ def main(
             (legacy CLI behavior; mutates the source workbook).
             Pass a separate path (e.g. from a UI) to leave the input
             untouched and produce a fresh output file.
+        scenario_dir: optional path to the scenario YAML directory
+            (batches.yaml / limits.yaml). When set, the forward batch
+            schedule and the facility/system limits load from YAML instead
+            of the workbook (Phase 2 of the data-path inversion). The
+            workbook still supplies the ProductionReport (and pins, until
+            those move in-app). None → read them from the workbook.
         config_dir: optional path to the stable-config YAML directory
             (control.yaml / biology.yaml / facility.yaml). When set, the
             Control params, biology models, and facility definition are
@@ -90,7 +97,12 @@ def main(
     print(f"Loading {in_path} ...")
     wb = load_workbook(in_path)
 
-    batches = read_batches(wb)
+    if scenario_dir is not None:
+        from .scenario_io import load_batches as _load_scenario_batches
+        batches = _load_scenario_batches(scenario_dir)
+        print(f"  Scenario: loaded {len(batches)} batches from YAML at {scenario_dir}")
+    else:
+        batches = read_batches(wb)
     if config_dir is not None:
         from .config_io import load_config
         control, tables, facility = load_config(config_dir)
@@ -190,8 +202,14 @@ def main(
 
     # ----- Caps + pinned plans -----
     fs_date = control.forecast_start.date() if hasattr(control.forecast_start, "date") else control.forecast_start
-    facility_limits = read_facility_limits(wb, fs_date)
-    system_limits = read_system_limits(wb, fs_date)
+    if scenario_dir is not None:
+        from .scenario_io import load_limits
+        facility_limits, system_limits = load_limits(scenario_dir)
+        print(f"  Scenario: loaded {len(facility_limits.overrides)} facility + "
+              f"{len(system_limits.caps)} system limits from YAML")
+    else:
+        facility_limits = read_facility_limits(wb, fs_date)
+        system_limits = read_system_limits(wb, fs_date)
     pinned_harvests = read_pinned_harvests(wb, fs_date)
     pinned_transfers = read_pinned_transfers(wb, fs_date)
     print(f"\n  Caps + pinned plans:")
@@ -612,8 +630,12 @@ def _cli():
                    help="Stable-config YAML directory (control/biology/facility). "
                         "When set, those inputs load from YAML instead of the "
                         "workbook; the workbook still supplies PR/batches/limits.")
+    p.add_argument("--scenario-dir", default=None,
+                   help="Scenario YAML directory (batches/limits). When set, the "
+                        "forward batch schedule and facility/system limits load "
+                        "from YAML instead of the workbook.")
     a = p.parse_args()
-    return main(a.workbook, a.output, a.config_dir)
+    return main(a.workbook, a.output, a.config_dir, a.scenario_dir)
 
 
 if __name__ == "__main__":

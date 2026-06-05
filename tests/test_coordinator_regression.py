@@ -178,3 +178,65 @@ def test_yaml_config_reproduces_baseline(run_outputs_yaml):
         if row[14] == "TANK_DRIFT" or row[27] == "BIO_DRIFT":
             drift += 1
     assert drift == 0, f"YAML path: {drift} drift rows"
+
+
+# ---- Full app-managed path: config + scenario YAML (Phase 2) ----
+# With both stable config AND the scenario (batches + limits) loaded from
+# YAML, the workbook is read only for the ProductionReport. This full path
+# must still reproduce the Excel baseline.
+
+@pytest.fixture(scope="module")
+def run_outputs_full_yaml(tmp_path_factory):
+    """Export config + scenario to YAML, run from both."""
+    import forecast.run as run_mod
+    from forecast.config_io import dump_config
+    from forecast.scenario_io import dump_scenario
+    from forecast.caps import read_facility_limits, read_system_limits
+    from forecast.production_report import read_production_report
+    from forecast.excel_io import (
+        load_workbook, read_control, read_biology_tables, read_facility_config,
+        read_batches,
+    )
+    from datetime import datetime as _dt, timedelta as _td
+
+    cfg = tmp_path_factory.mktemp("cfg2")
+    scn = tmp_path_factory.mktemp("scn")
+    wb = load_workbook(WORKBOOK)
+    dump_config(cfg, control=read_control(wb), tables=read_biology_tables(wb),
+                facility=read_facility_config(wb))
+    pr_closing, _og, _fw = read_production_report(wb)
+    fs = _dt(pr_closing.year, pr_closing.month, pr_closing.day) + _td(days=1)
+    dump_scenario(scn, batches=read_batches(wb),
+                  facility_limits=read_facility_limits(wb, fs.date()),
+                  system_limits=read_system_limits(wb, fs.date()))
+    wb.close()
+
+    tmp = tmp_path_factory.mktemp("wb_full") / "Forecast.xlsm"
+    shutil.copy(WORKBOOK, tmp)
+    rc = run_mod.main(str(tmp), config_dir=str(cfg), scenario_dir=str(scn))
+    assert rc == 0, f"full-YAML pipeline exited non-zero ({rc})"
+    return tmp
+
+
+def test_full_yaml_path_reproduces_baseline(run_outputs_full_yaml):
+    """Config + scenario YAML (PR-only workbook read) must match the baseline."""
+    wb = _load(run_outputs_full_yaml)
+    ws = wb["BatchLocations"]
+    viols = []
+    for i, row in enumerate(ws.iter_rows(values_only=True), 1):
+        if i < 5 or not row:
+            continue
+        d = row[8]
+        if isinstance(d, (int, float)) and d > 95:
+            viols.append(d)
+    assert len(viols) <= MAX_VIOLATIONS, (
+        f"full-YAML: {len(viols)} viols > baseline {MAX_VIOLATIONS}")
+    assert max(viols, default=0.0) <= MAX_WORST_DENSITY + 0.5, (
+        f"full-YAML: worst {max(viols, default=0.0):.1f} > {MAX_WORST_DENSITY}")
+
+    wa = wb["TankContinuityAudit"]
+    drift = sum(
+        1 for i, row in enumerate(wa.iter_rows(values_only=True), 1)
+        if i >= 5 and row and (row[14] == "TANK_DRIFT" or row[27] == "BIO_DRIFT")
+    )
+    assert drift == 0, f"full-YAML: {drift} drift rows"
