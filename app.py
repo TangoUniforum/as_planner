@@ -289,6 +289,33 @@ def _config_editor():
     st.caption("Edits save to the app's `config/` and `scenario/` YAML — the "
                "single source of truth the engine runs from. A PR-only run "
                "uses these, not the workbook.")
+
+    with st.expander("📥 Import config from a saved workbook"):
+        st.caption("Restore config + scenario from a workbook that has a "
+                   "RunConfig snapshot (any forecast exported in PR-only mode). "
+                   "Overwrites the current config/ + scenario/.")
+        imp = st.file_uploader("Workbook with a RunConfig sheet",
+                               type=["xlsm", "xlsx"], key="cfg_import")
+        if st.button("Import config", disabled=imp is None, key="do_import"):
+            try:
+                from forecast.config_snapshot import (
+                    import_config_snapshot, read_config_snapshot,
+                )
+                wd = Path(tempfile.mkdtemp(prefix="as_import_"))
+                p = wd / imp.name
+                p.write_bytes(imp.getvalue())
+                wb = load_workbook(p, keep_vba=True)
+                if not read_config_snapshot(wb):
+                    st.error("No RunConfig snapshot found in that workbook.")
+                else:
+                    restored = import_config_snapshot(wb, CONFIG_DIR, SCENARIO_DIR)
+                    wb.close()
+                    st.success(f"Imported {len(restored)} file(s): "
+                               f"{', '.join(restored)}")
+                    st.rerun()
+            except Exception as e:  # noqa: BLE001
+                st.error(f"Import failed: {e}")
+
     tabs = st.tabs(["Control", "Biology models", "Facility (tanks)",
                     "Batches", "Limits"])
     with tabs[0]:

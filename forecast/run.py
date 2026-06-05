@@ -597,6 +597,14 @@ def main(
     )
     write_facility_map(wb, placement.batch_locations, facility)
 
+    # Config snapshot: embed the exact app-managed config + scenario this
+    # run used into the output workbook, so the saved file is a complete,
+    # re-importable record. Only when running from app config (YAML).
+    if config_dir is not None or scenario_dir is not None:
+        from .config_snapshot import write_config_snapshot
+        write_config_snapshot(wb, config_dir=config_dir, scenario_dir=scenario_dir)
+        print(f"  Wrote RunConfig snapshot (config + scenario embedded in output)")
+
     # Run summary back to Control R8-R16 (DESIGN §1) — operator's
     # in-workbook signal that the run completed + a snapshot of scope.
     elapsed = time.time() - t0
