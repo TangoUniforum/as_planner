@@ -92,6 +92,26 @@ def _records(df):
     return json.loads(df.to_json(orient="records"))
 
 
+def _persist(key, loader):
+    """Load a DataFrame into session_state ONCE and return it.
+
+    Streamlit reruns the whole script on every click; loading from YAML each
+    rerun would discard in-progress edits. Holding the base in session_state
+    (constant) + a keyed data_editor (key=`<key>_w`) keeps edits across reruns
+    and Run/Configure mode switches until the user explicitly Saves or Reloads.
+    """
+    if key not in st.session_state:
+        st.session_state[key] = loader()
+    return st.session_state[key]
+
+
+def _reset_keys(*keys):
+    """Drop a working df + its data_editor widget state so it reloads fresh."""
+    for k in keys:
+        st.session_state.pop(k, None)
+        st.session_state.pop(k + "_w", None)
+
+
 def _biology_to_frames(tables):
     """BiologyTables -> (growth_df, mort_df, feed_df, cull_df, model_keys)."""
     n = len(tables.sgr_size_g)
@@ -183,30 +203,44 @@ def _edit_biology():
         load_control, load_biology_tables, load_facility_config, dump_config,
     )
     st.caption("Growth (SGR FW/SW), FCR curves, mortality, feed types, and "
-               "culling. Add rows with the ➕ at the bottom of each table.")
-    tables = load_biology_tables(CONFIG_DIR)
-    g, m, f, c, models = _biology_to_frames(tables)
+               "culling. Edits persist until you Save or Reload.")
+    if "bio_models" not in st.session_state:
+        g, m, f, c, models = _biology_to_frames(load_biology_tables(CONFIG_DIR))
+        st.session_state.update({"bio_growth": g, "bio_mort": m, "bio_feed": f,
+                                 "bio_cull": c, "bio_models": models})
+    models = st.session_state["bio_models"]
     st.markdown("**Growth + FCR** (by fish size, grams)")
-    g2 = st.data_editor(g, num_rows="dynamic", hide_index=True,
-                        use_container_width=True, key="bio_growth")
+    g2 = st.data_editor(st.session_state["bio_growth"], num_rows="dynamic",
+                        hide_index=True, use_container_width=True, key="bio_growth_w")
     cols = st.columns(3)
     with cols[0]:
-        st.markdown("**Mortality** (% / week by week-from-input)")
-        m2 = st.data_editor(m, num_rows="dynamic", hide_index=True, key="bio_mort")
+        st.markdown("**Mortality** (% / wk)")
+        m2 = st.data_editor(st.session_state["bio_mort"], num_rows="dynamic",
+                            hide_index=True, key="bio_mort_w")
     with cols[1]:
-        st.markdown("**Feed types** (max size → name)")
-        f2 = st.data_editor(f, num_rows="dynamic", hide_index=True, key="bio_feed")
+        st.markdown("**Feed types**")
+        f2 = st.data_editor(st.session_state["bio_feed"], num_rows="dynamic",
+                            hide_index=True, key="bio_feed_w")
     with cols[2]:
-        st.markdown("**Culling** (days since input → %)")
-        c2 = st.data_editor(c, num_rows="dynamic", hide_index=True, key="bio_cull")
-    if st.button("💾 Save Biology models", key="save_bio"):
+        st.markdown("**Culling**")
+        c2 = st.data_editor(st.session_state["bio_cull"], num_rows="dynamic",
+                            hide_index=True, key="bio_cull_w")
+    b1, b2, _ = st.columns([1, 1, 3])
+    if b1.button("💾 Save Biology", key="save_bio"):
         try:
             tables2 = _frames_to_biology(g2, m2, f2, c2, models)
             dump_config(CONFIG_DIR, control=load_control(CONFIG_DIR),
                         tables=tables2, facility=load_facility_config(CONFIG_DIR))
+            _reset_keys("bio_growth", "bio_mort", "bio_feed", "bio_cull")
+            st.session_state.pop("bio_models", None)
             st.success("Saved config/biology.yaml")
+            st.rerun()
         except Exception as e:  # noqa: BLE001
             st.error(f"Save failed: {e}")
+    if b2.button("↻ Reload", key="reload_bio"):
+        _reset_keys("bio_growth", "bio_mort", "bio_feed", "bio_cull")
+        st.session_state.pop("bio_models", None)
+        st.rerun()
 
 
 def _edit_facility():
@@ -215,18 +249,24 @@ def _edit_facility():
         facility_to_dict, facility_from_dict, dump_config,
     )
     st.caption("Tank definitions: system, stage, volume, density/feed caps, type.")
-    rows = facility_to_dict(load_facility_config(CONFIG_DIR))["tanks"]
-    df = pd.DataFrame(rows)
-    edited = st.data_editor(df, num_rows="dynamic", hide_index=True,
-                            use_container_width=True, key="fac_ed")
-    if st.button("💾 Save Facility", key="save_fac"):
+    base = _persist("fac_df", lambda: pd.DataFrame(
+        facility_to_dict(load_facility_config(CONFIG_DIR))["tanks"]))
+    edited = st.data_editor(base, num_rows="dynamic", hide_index=True,
+                            use_container_width=True, key="fac_df_w")
+    b1, b2, _ = st.columns([1, 1, 3])
+    if b1.button("💾 Save Facility", key="save_fac"):
         try:
             fac2 = facility_from_dict({"tanks": _records(edited)})
             dump_config(CONFIG_DIR, control=load_control(CONFIG_DIR),
                         tables=load_biology_tables(CONFIG_DIR), facility=fac2)
+            _reset_keys("fac_df")
             st.success("Saved config/facility.yaml")
+            st.rerun()
         except Exception as e:  # noqa: BLE001
             st.error(f"Save failed: {e}")
+    if b2.button("↻ Reload", key="reload_fac"):
+        _reset_keys("fac_df")
+        st.rerun()
 
 
 def _edit_batches():
@@ -236,18 +276,25 @@ def _edit_batches():
     )
     st.caption("Forward batch schedule + metadata. In-flight state comes from "
                "the ProductionReport; this is the planning/metadata layer.")
-    df = pd.DataFrame(batches_to_list(load_batches(SCENARIO_DIR)))
-    edited = st.data_editor(df, num_rows="dynamic", hide_index=True,
-                            use_container_width=True, key="batch_ed")
-    if st.button("💾 Save Batches", key="save_batch"):
+    base = _persist("batch_df", lambda: pd.DataFrame(
+        batches_to_list(load_batches(SCENARIO_DIR))))
+    edited = st.data_editor(base, num_rows="dynamic", hide_index=True,
+                            use_container_width=True, key="batch_df_w")
+    b1, b2, _ = st.columns([1, 1, 3])
+    if b1.button("💾 Save Batches", key="save_batch"):
         try:
             batches2 = batches_from_list(_records(edited))
             fl, sl = load_limits(SCENARIO_DIR)
             dump_scenario(SCENARIO_DIR, batches=batches2,
                           facility_limits=fl, system_limits=sl)
+            _reset_keys("batch_df")
             st.success("Saved scenario/batches.yaml")
+            st.rerun()
         except Exception as e:  # noqa: BLE001
             st.error(f"Save failed: {e}")
+    if b2.button("↻ Reload", key="reload_batch"):
+        _reset_keys("batch_df")
+        st.rerun()
 
 
 def _edit_limits():
@@ -258,63 +305,111 @@ def _edit_limits():
     )
     st.caption("Per-week caps. Weeks are absolute ISO labels (e.g. 2026-W23). "
                "Blank facility row = use the Control default.")
-    fl, sl = load_limits(SCENARIO_DIR)
-    fdf = pd.DataFrame(facility_limits_to_list(fl))
-    sdf = pd.DataFrame(system_limits_to_list(sl))
+    if "flim_df" not in st.session_state:
+        fl, sl = load_limits(SCENARIO_DIR)
+        st.session_state["flim_df"] = pd.DataFrame(facility_limits_to_list(fl))
+        st.session_state["slim_df"] = pd.DataFrame(system_limits_to_list(sl))
     st.markdown("**Facility limits** (week, metric, value)")
-    fdf2 = st.data_editor(fdf, num_rows="dynamic", hide_index=True,
-                          use_container_width=True, key="flim_ed")
-    st.markdown(f"**System limits** ({len(sdf)} rows — week, system, metric, value)")
-    sdf2 = st.data_editor(sdf, num_rows="dynamic", hide_index=True,
-                          use_container_width=True, key="slim_ed", height=300)
-    if st.button("💾 Save Limits", key="save_lim"):
+    fdf2 = st.data_editor(st.session_state["flim_df"], num_rows="dynamic",
+                          hide_index=True, use_container_width=True, key="flim_df_w")
+    st.markdown(f"**System limits** ({len(st.session_state['slim_df'])} rows)")
+    sdf2 = st.data_editor(st.session_state["slim_df"], num_rows="dynamic",
+                          hide_index=True, use_container_width=True,
+                          key="slim_df_w", height=300)
+    b1, b2, _ = st.columns([1, 1, 3])
+    if b1.button("💾 Save Limits", key="save_lim"):
         try:
             fl2 = facility_limits_from_list(_records(fdf2))
             sl2 = system_limits_from_list(_records(sdf2))
             dump_scenario(SCENARIO_DIR, batches=load_batches(SCENARIO_DIR),
                           facility_limits=fl2, system_limits=sl2)
+            _reset_keys("flim_df", "slim_df")
             st.success("Saved scenario/limits.yaml")
+            st.rerun()
         except Exception as e:  # noqa: BLE001
             st.error(f"Save failed: {e}")
+    if b2.button("↻ Reload", key="reload_lim"):
+        _reset_keys("flim_df", "slim_df")
+        st.rerun()
 
 
-def _config_editor():
-    st.header("⚙️ Configure — models & control")
-    if not (_config_ready() and _scenario_ready()):
-        st.warning(
-            "No config/scenario yet. Go to **Run forecast** mode, upload a "
-            "workbook, and click *Seed config + scenario from upload* first."
+def _config_template_bytes() -> bytes:
+    from forecast.config_template import write_config_template
+    wd = Path(tempfile.mkdtemp(prefix="as_tmpl_"))
+    out = wd / "config_template.xlsx"
+    write_config_template(
+        out,
+        config_dir=CONFIG_DIR if _config_ready() else None,
+        scenario_dir=SCENARIO_DIR if _scenario_ready() else None,
+    )
+    return out.read_bytes()
+
+
+def _config_io_section():
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("**Template — build config offline**")
+        st.caption("Download a template (current values, or blank headers if "
+                   "none yet), fill it in Excel, and import on the right. "
+                   "Separate from the ProductionReport.")
+        st.download_button(
+            "⬇ Download config template (.xlsx)",
+            data=_config_template_bytes(),
+            file_name="config_template.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
         )
-        return
-    st.caption("Edits save to the app's `config/` and `scenario/` YAML — the "
-               "single source of truth the engine runs from. A PR-only run "
-               "uses these, not the workbook.")
-
-    with st.expander("📥 Import config from a saved workbook"):
-        st.caption("Restore config + scenario from a workbook that has a "
-                   "RunConfig snapshot (any forecast exported in PR-only mode). "
-                   "Overwrites the current config/ + scenario/.")
-        imp = st.file_uploader("Workbook with a RunConfig sheet",
-                               type=["xlsm", "xlsx"], key="cfg_import")
-        if st.button("Import config", disabled=imp is None, key="do_import"):
+    with c2:
+        st.markdown("**Import — load config from a file**")
+        st.caption("A filled config template, or a saved forecast workbook "
+                   "(RunConfig snapshot). Overwrites current config/ + scenario/.")
+        imp = st.file_uploader("Config template or saved workbook",
+                               type=["xlsx", "xlsm"], key="cfg_import")
+        if st.button("📥 Import config", disabled=imp is None, key="do_import",
+                     use_container_width=True):
             try:
+                from forecast.config_template import (
+                    import_config_template, is_config_template,
+                )
                 from forecast.config_snapshot import (
                     import_config_snapshot, read_config_snapshot,
                 )
                 wd = Path(tempfile.mkdtemp(prefix="as_import_"))
                 p = wd / imp.name
                 p.write_bytes(imp.getvalue())
-                wb = load_workbook(p, keep_vba=True)
-                if not read_config_snapshot(wb):
-                    st.error("No RunConfig snapshot found in that workbook.")
-                else:
+                wb = load_workbook(p, keep_vba=(p.suffix.lower() == ".xlsm"))
+                if is_config_template(wb):
+                    restored = import_config_template(wb, CONFIG_DIR, SCENARIO_DIR)
+                    src = "config template"
+                elif read_config_snapshot(wb):
                     restored = import_config_snapshot(wb, CONFIG_DIR, SCENARIO_DIR)
-                    wb.close()
-                    st.success(f"Imported {len(restored)} file(s): "
+                    src = "RunConfig snapshot"
+                else:
+                    restored, src = [], None
+                wb.close()
+                if not restored:
+                    st.error("No config template or RunConfig snapshot found "
+                             "in that file.")
+                else:
+                    st.success(f"Imported {len(restored)} file(s) from {src}: "
                                f"{', '.join(restored)}")
                     st.rerun()
             except Exception as e:  # noqa: BLE001
                 st.error(f"Import failed: {e}")
+
+
+def _config_editor():
+    st.header("⚙️ Configure — models & control")
+    st.caption("Build the forecast config here — saved to `config/` + `scenario/` "
+               "YAML (the source of truth). Or populate it offline via the "
+               "template/import below, separately from the PR.")
+    ready = _config_ready() and _scenario_ready()
+    with st.expander("📦 Template & import", expanded=not ready):
+        _config_io_section()
+    if not ready:
+        st.warning("No config yet — download the template above, fill it in, and "
+                   "import; or seed from a workbook in Run mode.")
+        return
 
     tabs = st.tabs(["Control", "Biology models", "Facility (tanks)",
                     "Batches", "Limits"])
