@@ -159,16 +159,20 @@ def write_config_template(out_path, config_dir=None, scenario_dir=None,
                   for r in system_limits_to_list(sl)}
     if horizon_weeks and forecast_start is not None:
         weeks = forecast_week_labels(forecast_start, int(horizon_weeks))
-        systems = _og_systems(config_dir)
-        flrows = [[wk, m, fl_cur.get((wk, m))]
-                  for wk in weeks for m in fl_metrics]
-        slrows = [[wk, s, m, sl_cur.get((wk, s, m))]
-                  for wk in weeks for s in systems for m in sl_metrics]
     else:
-        flrows = [[k[0], k[1], v] for k, v in fl_cur.items()]
-        slrows = [[k[0], k[1], k[2], v] for k, v in sl_cur.items()]
-    _write_table(wb.create_sheet(S_FLIM), _FLIM_COLS, flrows)
-    _write_table(wb.create_sheet(S_SLIM), _SLIM_COLS, slrows)
+        weeks = sorted({k[0] for k in fl_cur} | {k[0] for k in sl_cur})
+    systems = _og_systems(config_dir)
+    # WIDE layout: weeks as columns, one row per parameter (matches the VBA
+    # FacilityLimits/SystemLimits sheets). Easy to fill across weeks in Excel.
+    _write_table(
+        wb.create_sheet(S_FLIM), ["metric"] + weeks,
+        [[m] + [fl_cur.get((wk, m)) for wk in weeks] for m in fl_metrics],
+    )
+    _write_table(
+        wb.create_sheet(S_SLIM), ["system", "metric"] + weeks,
+        [[s, m] + [sl_cur.get((wk, s, m)) for wk in weeks]
+         for s in systems for m in sl_metrics],
+    )
 
     out = Path(out_path)
     wb.save(out)
@@ -190,6 +194,55 @@ def _read_table(wb, name) -> tuple[list[str], list[dict]]:
         out.append({header[i]: (r[i] if i < len(r) else None)
                     for i in range(len(header))})
     return header, out
+
+
+def _facility_limits_records(wb) -> list[dict]:
+    """Read FacilityLimits (WIDE: metric rows × week columns), or old LONG
+    (week, metric, value). Returns long {week, metric, value} records,
+    blank values skipped."""
+    header, rows = _read_table(wb, S_FLIM)
+    if not rows:
+        return []
+    lower = [h.lower() for h in header]
+    if "value" in lower:  # legacy long format
+        return [{"week": r["week"], "metric": r["metric"], "value": r["value"]}
+                for r in rows
+                if r.get("week") and r.get("value") not in (None, "")]
+    weekcols = [h for h in header if h.lower() != "metric"]
+    out = []
+    for r in rows:
+        m = r.get("metric")
+        if not m:
+            continue
+        for wk in weekcols:
+            v = r.get(wk)
+            if v not in (None, ""):
+                out.append({"week": wk, "metric": m, "value": v})
+    return out
+
+
+def _system_limits_records(wb) -> list[dict]:
+    """Read SystemLimits (WIDE: system+metric rows × week columns), or old
+    LONG. Returns long {week, system, metric, value} records."""
+    header, rows = _read_table(wb, S_SLIM)
+    if not rows:
+        return []
+    lower = [h.lower() for h in header]
+    if "value" in lower:  # legacy long format
+        return [{"week": r["week"], "system": r["system"], "metric": r["metric"],
+                 "value": r["value"]} for r in rows
+                if r.get("week") and r.get("value") not in (None, "")]
+    weekcols = [h for h in header if h.lower() not in ("system", "metric")]
+    out = []
+    for r in rows:
+        s, m = r.get("system"), r.get("metric")
+        if not s or not m:
+            continue
+        for wk in weekcols:
+            v = r.get(wk)
+            if v not in (None, ""):
+                out.append({"week": wk, "system": s, "metric": m, "value": v})
+    return out
 
 
 def import_config_template(wb, config_dir, scenario_dir) -> list[str]:
@@ -261,22 +314,15 @@ def import_config_template(wb, config_dir, scenario_dir) -> list[str]:
 
     # ---- Scenario: batches + limits ----
     _, batch = _read_table(wb, S_BATCH)
-    _, flim = _read_table(wb, S_FLIM)
-    _, slim = _read_table(wb, S_SLIM)
+    flim = _facility_limits_records(wb)   # long records, blanks already skipped
+    slim = _system_limits_records(wb)
     if batch or flim or slim:
         batches = (batches_from_list(batch) if batch
                    else (load_batches(scenario_dir)
                          if (Path(scenario_dir) / "batches.yaml").exists() else []))
         if flim or slim:
-            # Skip blank-value rows (the full grid leaves most cells empty;
-            # a blank value = no cap for that week/metric).
-            fl = facility_limits_from_list(
-                [{"week": r["week"], "metric": r["metric"], "value": r["value"]}
-                 for r in flim if r.get("week") and r.get("value") not in (None, "")])
-            sl = system_limits_from_list(
-                [{"week": r["week"], "system": r["system"], "metric": r["metric"],
-                  "value": r["value"]} for r in slim
-                 if r.get("week") and r.get("value") not in (None, "")])
+            fl = facility_limits_from_list(flim)
+            sl = system_limits_from_list(slim)
         else:
             fl, sl = load_limits(scenario_dir)
         dump_scenario(scenario_dir, batches=batches, facility_limits=fl, system_limits=sl)
