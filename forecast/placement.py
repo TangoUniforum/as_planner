@@ -49,7 +49,7 @@ from .caps import (
     METRIC_MIN_HARVEST,
     FacilityLimits,
     SystemLimits,
-    decide_week_harvest_count,
+    predictive_move_in_count,
     resolve_facility_cap,
     resolve_system_cap,
     system_cap_with_buffer,
@@ -82,6 +82,16 @@ from .time_grid import forecast_week_labels, week_range
 # grow-out system, NOT pipeline-owned, so it is a valid move-in source
 # for the 6N purge pipeline (and is allocatable by Phase A/B/C).
 _SIXN_SYSTEMS = frozenset({"OG6N"})
+
+# Closed-loop harvest controller tuning (placement #2).
+#   _SETPOINT_FRACTION — biomass setpoint as a fraction of the facility cap.
+#     The predictive move-in + reactive supplement drive biomass toward this
+#     level. 1.0 sits ON the cap (max utilisation, peaks ~+3%, over cap ~half
+#     the weeks); 0.995 centres just under it (near-identical in-band count,
+#     peaks held ~+2.6%, under cap a majority of weeks). Tuned empirically
+#     against the live config; weekly growth (~136t) exceeds the ±1% band
+#     width (~78t), so ~±2.6% swings are the physical floor.
+_SETPOINT_FRACTION = 0.995
 
 
 # Eligible system sets used by Phase A.
@@ -1429,38 +1439,70 @@ def phase_d_emit_events(
         week_start_date = ws_we[0] if ws_we else _as_date(control.forecast_start)
         purge_this_week = is_purge_mode(control, week_start_date)
 
-        # Closed-loop harvest target (DESIGN: "close the loop"). Decide the
-        # facility-wide harvest count for THIS week against the REALIZED state
-        # — not the scheduler's decoupled projection — so biomass is held in
-        # the R24 ± band. Same 3-state controller the scheduler uses, but fed
-        # live biomass/feed/growth from `state`.
+        # Closed-loop harvest control (DESIGN: "close the loop" + forward-
+        # looking #2). Decide harvest against the REALIZED state — not the
+        # scheduler's decoupled projection — via TWO levers:
+        #
+        #   * move_in_target — PRIMARY, depuration-respecting. Fish moved into
+        #     6N now drain after the purge lead time (the pair rotation), so we
+        #     PROJECT biomass to that harvest week and pre-size the move-in to
+        #     land on the setpoint, pre-empting the growth spike instead of
+        #     chasing it (predictive_move_in_count).
+        #   * harvest_target — the immediate supplemental harvest from
+        #     production tanks (no lag, but bypasses purge). Held at the
+        #     operational floor; raised to full capacity only when biomass is
+        #     already over the upper band, as a safety net for an acute spike
+        #     (e.g. an unmodelled TranOG arrival) the lagged channel can't catch.
         fac_bio, fac_growth_kg, fac_feed_kg_day, oldest_wt = (
             _realized_facility_metrics(
                 state, batch_meta, tables, control.min_harvest_weight_g)
         )
         bio_cap = resolve_facility_cap(METRIC_BIOMASS, week_label, facility_limits, control)
-        feed_cap = resolve_facility_cap(METRIC_FEED_DAY, week_label, facility_limits, control)
         max_hv = resolve_facility_cap(METRIC_MAX_HARVEST, week_label, facility_limits, control)
         min_hv = resolve_facility_cap(METRIC_MIN_HARVEST, week_label, facility_limits, control)
-        ctrl_target = decide_week_harvest_count(
-            fac_biomass=fac_bio,
-            fac_growth_kg=fac_growth_kg,
-            fac_feed_kg_day=fac_feed_kg_day,
-            bio_cap=bio_cap,
-            feed_cap=feed_cap,
-            dev=control.facility_biomass_deviation_pct or 0.0,
+        dev = control.facility_biomass_deviation_pct or 0.0
+        weekly_max = max_hv if max_hv else float("inf")
+        setpoint = bio_cap * _SETPOINT_FRACTION if bio_cap is not None else None
+
+        # Committed harvest already locked into the purge pipeline: the pairs
+        # in the queue drain over the next `lead` weeks, each at least the
+        # operational floor (the supplemental top-up).
+        lead = max(1, len(sixn_pair_queue))
+        floor_mass_kg = (min_hv or 0.0) * oldest_wt / 1000.0
+        committed_kg = 0.0
+        for pair in sixn_pair_queue:
+            pair_bio = sum(
+                state.tanks_by_id[tid].biomass_kg
+                for tid in pair
+                if tid in state.tanks_by_id and not state.tanks_by_id[tid].is_empty
+            )
+            committed_kg += max(pair_bio, floor_mass_kg)
+
+        move_in_target = predictive_move_in_count(
+            total_biomass=fac_bio,
+            growth_kg_week=fac_growth_kg,
+            committed_harvest_kg=committed_kg,
+            setpoint=setpoint,
+            lead_weeks=lead,
+            harvest_avg_wt_g=oldest_wt,
             weekly_min=min_hv or 0.0,
-            weekly_max=max_hv if max_hv else float("inf"),
-            oldest_mature_avg_wt=oldest_wt,
+            weekly_max=weekly_max,
         )
+        # Immediate supplement (reactive deadbeat): harvest this week's growth
+        # plus the CURRENT deviation from setpoint, realised now with no lag.
+        # The predictive move-in pre-positions the steady harvest; this catches
+        # what prediction misses (rate-limited move-in, unmodelled TranOG
+        # arrivals, growth/weight estimate error) so biomass doesn't spike
+        # while the lagged channel catches up. Floor when at/under setpoint.
+        if oldest_wt > 0 and setpoint is not None:
+            shed_kg = fac_growth_kg + (fac_bio - setpoint)
+            harvest_target = max(min_hv or 0.0,
+                                 min(weekly_max, shed_kg * 1000.0 / oldest_wt))
+        else:
+            harvest_target = min_hv or 0.0
 
         # Harvest engine — 6N purge pipeline when in purge mode, else Layer-2 FIFO.
         if purge_this_week:
-            # Closed loop: `harvest_target` drives the IMMEDIATE harvest (pair
-            # drain + supplement) to react to realized biomass with no lag;
-            # `move_in_target` primes the pipeline 2 weeks out with the same
-            # realized-biomass decision (it is re-corrected by next-cycle's
-            # supplement). Both replace the old projection-fed proxy.
             _run_sixn_purge_week(
                 state=state,
                 pair_queue=sixn_pair_queue,
@@ -1471,8 +1513,8 @@ def phase_d_emit_events(
                 harvest_events=harvest_events,
                 transfer_events=transfer_events,
                 warnings=warnings,
-                move_in_target=ctrl_target,
-                harvest_target=ctrl_target,
+                move_in_target=move_in_target,
+                harvest_target=harvest_target,
             )
         else:
             # Production mode: fall back to Layer-2 demand application.

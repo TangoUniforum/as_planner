@@ -112,59 +112,56 @@ def apply_facility_buffer(
     return (cap_value, cap_value)
 
 
-def decide_week_harvest_count(
-    fac_biomass: float,
-    fac_growth_kg: float,
-    fac_feed_kg_day: float,
-    bio_cap: Optional[float],
-    feed_cap: Optional[float],
-    dev: float,
+def predictive_move_in_count(
+    total_biomass: float,
+    growth_kg_week: float,
+    committed_harvest_kg: float,
+    setpoint: Optional[float],
+    lead_weeks: int,
+    harvest_avg_wt_g: float,
     weekly_min: float,
     weekly_max: float,
-    oldest_mature_avg_wt: float,
 ) -> float:
-    """Reactive 3-state facility maintenance controller.
+    """Forward-looking 6N purge move-in sizing (the operator's #2 design).
 
-    Given facility biomass + daily feed and this week's projected growth,
-    return the facility-wide harvest *count* that keeps biomass inside the
-    R24 ± band:
+    Fish moved into the 6N purge this week are not harvested until they finish
+    the starvation/depuration period and rotate to the front of the pair
+    queue — ``lead_weeks`` from now. Because that lead time is KNOWN, we can
+    project facility biomass forward to that harvest week and size the move-in
+    to land biomass on the setpoint THEN — pre-empting the growth-driven spike
+    instead of reacting after biomass has already crossed the band.
 
-      * above the upper band            -> harvest at full capacity (pull down)
-      * below BOTH biomass + feed bands -> operational floor only (let it build)
-      * in band                         -> harvest exactly this week's growth
-                                           (hold position)
+    Projection (harvest runs before growth each week, so the move-in's own
+    drain at week ``t+L`` follows ``L+1`` weeks of growth and the ``L`` pair
+    drains already committed ahead of it)::
 
-    Result is hard-clipped to ``[weekly_min, weekly_max]``.
+        B_future     = total_biomass
+                       + (lead_weeks + 1) * growth_kg_week   # growth to the drain
+                       - committed_harvest_kg                # pairs already purging
+        move_in_mass = B_future - setpoint                   # harvest at t+L
+        count        = move_in_mass * 1000 / harvest_avg_wt_g
 
-    This is the *pure* decision shared by two callers:
+    clipped to ``[weekly_min, weekly_max]``. Re-evaluated every week from the
+    REALIZED state, so it is predictive *feedback*: model/estimate error (the
+    linearised growth, purge mortality, unmodelled TranOG arrivals) self-
+    corrects within the lead time rather than accumulating.
 
-    - the open-loop scheduler (`harvest_scheduler.schedule_harvests`), fed a
-      biology *projection*, and
-    - the closed-loop placement pipeline (`placement.phase_d_emit_events`),
-      fed the REALIZED facility state each week.
-
-    The closed-loop caller passes realized biomass/feed/growth so the decision
-    tracks what actually happened in the tanks rather than a decoupled forecast
-    — that is what keeps facility biomass in band (the "close the loop" fix).
+    `committed_harvest_kg` is the biomass that will drain from the pairs
+    already in the queue over the next `lead_weeks` weeks (each at least the
+    operational floor) — the harvest that is *already locked in* ahead of this
+    move-in. `harvest_avg_wt_g` converts the target mass to a fish count
+    (purged fish do not grow, so their harvest weight ≈ their weight now).
     """
-    bio_band_lo = bio_cap * (1.0 - dev) if bio_cap else None
-    bio_band_hi = bio_cap * (1.0 + dev) if bio_cap else None
-    feed_band_lo = feed_cap * (1.0 - dev) if feed_cap else None
+    if harvest_avg_wt_g <= 0 or setpoint is None:
+        # No biomass setpoint / no harvestable weight → operational floor.
+        return weekly_min
 
-    below_bio = bio_band_lo is None or fac_biomass < bio_band_lo
-    below_feed = feed_band_lo is None or fac_feed_kg_day < feed_band_lo
-    overflow_pressure = bio_band_hi is not None and fac_biomass > bio_band_hi
-
-    if overflow_pressure:
-        target = weekly_max
-    elif below_bio and below_feed:
-        target = weekly_min
-    elif oldest_mature_avg_wt > 0:
-        target = fac_growth_kg * 1000.0 / oldest_mature_avg_wt
-    else:
-        target = weekly_min
-
-    return max(weekly_min, min(weekly_max, target))
+    b_future = (total_biomass
+                + (lead_weeks + 1) * max(0.0, growth_kg_week)
+                - committed_harvest_kg)
+    move_in_mass = b_future - setpoint
+    count = move_in_mass * 1000.0 / harvest_avg_wt_g
+    return max(weekly_min, min(weekly_max, count))
 
 
 def resolve_system_cap(

@@ -133,68 +133,79 @@ class TestGradedHarvestEvent:
         )
 
 
-class TestHarvestController:
-    """`caps.decide_week_harvest_count`: the reactive 3-state maintenance
-    controller shared by the scheduler (projection-fed) and the closed-loop
-    placement pipeline (realized-state-fed). Locks the band-holding policy."""
+class TestPredictiveMoveIn:
+    """`caps.predictive_move_in_count`: forward-looking 6N move-in sizing.
 
-    CAP = 3_900_000.0
-    DEV = 0.01           # band [3,861,000, 3,939,000]
+    Projects facility biomass to the harvest week (purge lead time) and sizes
+    the move-in to land biomass on the setpoint, pre-empting the growth spike.
+        B_future     = biomass + (lead+1)*growth - committed_harvest
+        move_in_mass = B_future - setpoint
+        count        = move_in_mass * 1000 / harvest_avg_wt
+    clipped to [min, max]."""
+
+    SP = 3_900_000.0
     MIN_HV = 30_000.0
     MAX_HV = 55_000.0
-    WT = 5_000.0         # 5 kg harvest weight
-    GROWTH = 100_000.0   # 100 t/week growth
+    WT = 5_000.0          # 5 kg; kg = count*wt/1000
+    GROWTH = 100_000.0    # 100 t/week production growth
+    LEAD = 3
 
-    def _decide(self, bio, growth=None):
-        from forecast.caps import decide_week_harvest_count
-        return decide_week_harvest_count(
-            fac_biomass=bio,
-            fac_growth_kg=self.GROWTH if growth is None else growth,
-            fac_feed_kg_day=0.0,        # feed not binding (feed_cap=None below)
-            bio_cap=self.CAP,
-            feed_cap=None,
-            dev=self.DEV,
+    def _decide(self, biomass, committed, growth=None, setpoint=None, wt=None):
+        from forecast.caps import predictive_move_in_count
+        return predictive_move_in_count(
+            total_biomass=biomass,
+            growth_kg_week=self.GROWTH if growth is None else growth,
+            committed_harvest_kg=committed,
+            setpoint=self.SP if setpoint is None else setpoint,
+            lead_weeks=self.LEAD,
+            harvest_avg_wt_g=self.WT if wt is None else wt,
             weekly_min=self.MIN_HV,
             weekly_max=self.MAX_HV,
-            oldest_mature_avg_wt=self.WT,
         )
 
-    def test_over_band_harvests_max(self):
-        # Biomass above the upper band → pull down at full capacity.
-        assert self._decide(self.CAP * (1 + self.DEV) + 1) == self.MAX_HV
+    def test_steady_state_replaces_growth(self):
+        # At setpoint with committed harvest == the (lead) future drains that
+        # exactly hold biomass (lead*growth), the move-in must replace ONE
+        # week's growth so the t+L drain holds position:
+        #   B_future = SP + (3+1)*100t - 3*100t = SP + 100t
+        #   move_in_mass = 100t -> 100_000*1000/5_000 = 20_000 fish,
+        #   clipped up to the floor (30_000).
+        out = self._decide(self.SP, committed=3 * self.GROWTH)
+        # 20_000 < floor → floor.
+        assert out == self.MIN_HV
 
-    def test_below_band_harvests_floor(self):
-        # Below the lower band (and feed not binding) → operational floor,
-        # letting biomass build back up.
-        assert self._decide(self.CAP * (1 - self.DEV) - 1) == self.MIN_HV
+    def test_steady_state_above_floor(self):
+        # Same balance but a larger fish → growth replacement exceeds floor.
+        # B_future-SP = 1*growth = 100t; at 2 kg, 100_000*1000/2_000 = 50_000.
+        out = self._decide(self.SP, committed=3 * self.GROWTH, wt=2_000.0)
+        assert math.isclose(out, 50_000.0, rel_tol=1e-9)
 
-    def test_in_band_harvests_growth_rate(self):
-        # In band → harvest exactly this week's growth to hold position.
-        # count = growth_kg * 1000 / avg_wt_g = 100_000*1000/5000 = 20_000,
-        # but clipped up to the operational floor (min_hv = 30_000).
-        bio = (self.CAP * (1 - self.DEV) + self.CAP * (1 + self.DEV)) / 2
-        # growth large enough to exceed the floor so we see the growth branch.
-        out = self._decide(bio, growth=200_000.0)  # 200t -> 40_000 fish
-        assert math.isclose(out, 40_000.0, rel_tol=1e-9)
+    def test_projected_over_setpoint_harvests_more(self):
+        # Less committed ahead → projected biomass higher → bigger move-in.
+        # B_future = SP + 4*100t - 1*100t = SP + 300t; mass 300t /2kg = 150_000
+        # → clipped to max.
+        out = self._decide(self.SP, committed=1 * self.GROWTH, wt=2_000.0)
+        assert out == self.MAX_HV
 
-    def test_result_clipped_to_bounds(self):
-        bio = self.CAP  # in band
-        # Huge growth would exceed max_hv → clipped to max.
-        assert self._decide(bio, growth=10_000_000.0) == self.MAX_HV
-        # Zero growth in band with no mature weight info would fall to floor.
-        assert self._decide(bio, growth=0.0) == self.MIN_HV
+    def test_projected_under_setpoint_clips_to_floor(self):
+        # Biomass well below setpoint and lots committed ahead → projection
+        # lands under setpoint → negative move-in mass → floor (let it build).
+        out = self._decide(self.SP - 800_000.0, committed=5 * self.GROWTH)
+        assert out == self.MIN_HV
 
-    def test_no_cap_is_unbounded_floor(self):
-        from forecast.caps import decide_week_harvest_count
-        # bio_cap None (cap disabled) → no upper band (never overflow) and
-        # below_bio defaults True; with feed_cap None too, the
-        # below-both branch yields the operational floor.
-        out = decide_week_harvest_count(
-            fac_biomass=9_9999_999.0, fac_growth_kg=0.0, fac_feed_kg_day=0.0,
-            bio_cap=None, feed_cap=None, dev=self.DEV,
-            weekly_min=self.MIN_HV, weekly_max=self.MAX_HV,
-            oldest_mature_avg_wt=self.WT,
+    def test_no_setpoint_is_floor(self):
+        out = self._decide(self.SP, committed=0.0, setpoint=None)
+        # setpoint=None param path:
+        from forecast.caps import predictive_move_in_count
+        out = predictive_move_in_count(
+            total_biomass=self.SP, growth_kg_week=self.GROWTH,
+            committed_harvest_kg=0.0, setpoint=None, lead_weeks=self.LEAD,
+            harvest_avg_wt_g=self.WT, weekly_min=self.MIN_HV, weekly_max=self.MAX_HV,
         )
+        assert out == self.MIN_HV
+
+    def test_no_harvest_weight_is_floor(self):
+        out = self._decide(self.SP, committed=0.0, wt=0.0)
         assert out == self.MIN_HV
 
 
