@@ -359,6 +359,7 @@ def main(
             state, batch_by_id, states_by_batch, demands, splits,
             system_limits, control, facility, tables,
             migration_plan=c.migration_plan,
+            facility_limits=facility_limits,
         )
         # Count violations: per-tank density > tank cap, OG6N excluded
         # in purge mode (depuration pool intentionally uncapped).

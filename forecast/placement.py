@@ -45,11 +45,16 @@ from .biology import advance_tank_one_day
 from .caps import (
     METRIC_BIOMASS,
     METRIC_FEED_DAY,
+    METRIC_MAX_HARVEST,
+    METRIC_MIN_HARVEST,
+    FacilityLimits,
     SystemLimits,
+    decide_week_harvest_count,
+    resolve_facility_cap,
     resolve_system_cap,
     system_cap_with_buffer,
 )
-from .biology import upper_truncated_split
+from .biology import _fcr_model_key, _interp, upper_truncated_split
 from .events import Grade, GradedHarvest, Harvest, OG12_SYSTEMS, OG12_MOVE_LOCK_WT_G, TankAllocation, Transfer, TranOGEntry
 from .harvest_scheduler import HarvestDemand
 from .models import (
@@ -778,6 +783,7 @@ def _run_sixn_purge_week(
     transfer_events: list,
     warnings: list[str],
     move_in_target: Optional[float] = None,
+    harvest_target: Optional[float] = None,
 ) -> None:
     """Run one week of the 6N purge pipeline.
 
@@ -811,12 +817,18 @@ def _run_sixn_purge_week(
         warnings.extend(ev.apply(state))
         harvest_events.append(ev)
 
-    # 1b. Supplemental harvest from FIFO production tanks to ensure the
-    # weekly total reaches min_harvest_per_week. The 6N pair drain may
-    # fall short (e.g., pair was thin from a small earlier move-in);
-    # the operational floor is satisfied by harvesting directly from the
-    # oldest mature production batch's largest tank.
-    min_h = control.min_harvest_per_week or 0
+    # 1b. Supplemental harvest from FIFO production tanks to top the weekly
+    # total up to the CLOSED-LOOP target. `harvest_target` is the realized-
+    # biomass controller's decision for this week (clamped to
+    # [min_hv, max_hv]); when biomass is over band it equals max_hv, so the
+    # supplement pulls biomass down immediately rather than waiting two purge
+    # cycles for the move-in to flow through. Falls back to the operational
+    # floor (min_harvest_per_week) when no target is supplied. The 6N pair
+    # drain may fall short (e.g. pair was thin from a small earlier move-in);
+    # the deficit is harvested directly from the oldest mature production
+    # batch's largest tank.
+    floor = harvest_target if (harvest_target and harvest_target > 0) else 0.0
+    min_h = max(control.min_harvest_per_week or 0, floor)
     if min_h > 0 and pair_drain_count < min_h:
         deficit = min_h - pair_drain_count
         supp_batches = _pick_fifo_move_in_batches(state, batch_meta, control)
@@ -1262,6 +1274,55 @@ def _even_out_density(
                 break
 
 
+def _realized_facility_metrics(
+    state: FacilityState,
+    batch_meta: dict[str, BatchInput],
+    tables: BiologyTables,
+    min_harvest_weight_g: float,
+) -> tuple[float, float, float, float]:
+    """Realized facility totals from the LIVE state, for the closed-loop
+    harvest controller.
+
+    Returns ``(biomass_kg, growth_kg_this_week, feed_kg_day, oldest_mature_avg_wt_g)``.
+
+    - ``biomass_kg`` = ``state.total_biomass()`` (matches the reported
+      facility biomass the operator sees).
+    - growth + feed mirror ``biology.project_in_flight_batch``'s per-day
+      formulas (SGR/FCR interpolation, ×7 weekly) so the realized decision is
+      consistent with the projection it replaces. Only SW-stage fish grow/feed.
+    - ``oldest_mature_avg_wt`` = avg weight of the FIFO-oldest batch whose
+      fish are at/above harvest weight — the weight used to convert a growth
+      *mass* into a harvest *count* (same convention as the scheduler).
+    """
+    fac_bio = 0.0
+    fac_growth_kg = 0.0
+    fac_feed_kg_day = 0.0
+    mature: list[tuple[date, float]] = []  # (input_date, avg_wt_g)
+    for t in state.tanks_by_id.values():
+        if t.is_empty:
+            continue
+        bio = t.biomass_kg
+        fac_bio += bio
+        batch = batch_meta.get(t.batch_id)
+        if t.stage == "SW":
+            sgr_base = _interp(t.avg_wt_g, tables.sgr_size_g, tables.sgr_sw_pct_day)
+            sgr_eff = sgr_base * (batch.sgr_correction if batch else 1.0)
+            fac_growth_kg += bio * (sgr_eff / 100.0) * 7.0
+            fcr_curve = tables.fcr_by_model.get(
+                _fcr_model_key(batch.fcr_model) if batch else "", [])
+            if fcr_curve:
+                fcr = _interp(t.avg_wt_g, tables.fcr_size_g, fcr_curve)
+                fac_feed_kg_day += bio * (sgr_eff / 100.0) * fcr
+        if t.avg_wt_g >= min_harvest_weight_g and batch is not None:
+            mature.append((_as_date(batch.input_date), t.avg_wt_g))
+
+    oldest_mature_avg_wt = 0.0
+    if mature:
+        mature.sort(key=lambda m: m[0])
+        oldest_mature_avg_wt = mature[0][1]
+    return fac_bio, fac_growth_kg, fac_feed_kg_day, oldest_mature_avg_wt
+
+
 def phase_d_emit_events(
     load_table: list[BatchWeekLoad],
     tank_assignments: list[TankAssignment],
@@ -1272,6 +1333,7 @@ def phase_d_emit_events(
     control: ControlParams,
     batch_meta: dict[str, BatchInput],
     tables: BiologyTables,
+    facility_limits: Optional[FacilityLimits] = None,
 ) -> tuple[FacilityState, list[TranOGEntry], list[Transfer], list[Harvest],
            list[BatchLocationRow], list[str]]:
     """Walk the plan week by week; emit events from assignment diff +
@@ -1284,6 +1346,8 @@ def phase_d_emit_events(
     harvest_events: list[Harvest] = []
     grade_events: list[Grade] = []
     locations: list[BatchLocationRow] = []
+    if facility_limits is None:
+        facility_limits = FacilityLimits()
 
     # Quick lookups.
     load_by_bw: dict[tuple[str, str], BatchWeekLoad] = {
@@ -1365,19 +1429,38 @@ def phase_d_emit_events(
         week_start_date = ws_we[0] if ws_we else _as_date(control.forecast_start)
         purge_this_week = is_purge_mode(control, week_start_date)
 
+        # Closed-loop harvest target (DESIGN: "close the loop"). Decide the
+        # facility-wide harvest count for THIS week against the REALIZED state
+        # — not the scheduler's decoupled projection — so biomass is held in
+        # the R24 ± band. Same 3-state controller the scheduler uses, but fed
+        # live biomass/feed/growth from `state`.
+        fac_bio, fac_growth_kg, fac_feed_kg_day, oldest_wt = (
+            _realized_facility_metrics(
+                state, batch_meta, tables, control.min_harvest_weight_g)
+        )
+        bio_cap = resolve_facility_cap(METRIC_BIOMASS, week_label, facility_limits, control)
+        feed_cap = resolve_facility_cap(METRIC_FEED_DAY, week_label, facility_limits, control)
+        max_hv = resolve_facility_cap(METRIC_MAX_HARVEST, week_label, facility_limits, control)
+        min_hv = resolve_facility_cap(METRIC_MIN_HARVEST, week_label, facility_limits, control)
+        ctrl_target = decide_week_harvest_count(
+            fac_biomass=fac_bio,
+            fac_growth_kg=fac_growth_kg,
+            fac_feed_kg_day=fac_feed_kg_day,
+            bio_cap=bio_cap,
+            feed_cap=feed_cap,
+            dev=control.facility_biomass_deviation_pct or 0.0,
+            weekly_min=min_hv or 0.0,
+            weekly_max=max_hv if max_hv else float("inf"),
+            oldest_mature_avg_wt=oldest_wt,
+        )
+
         # Harvest engine — 6N purge pipeline when in purge mode, else Layer-2 FIFO.
         if purge_this_week:
-            # Look ahead 2 weeks (purge cycle length) to use Layer 2's
-            # demand at the future harvest week as this week's move-in
-            # target. Falls back to None (= min_harvest_per_week) if no
-            # demand projected that far out.
-            current_idx = sorted_weeks.index(week_label)
-            harvest_week_idx = current_idx + 2
-            if harvest_week_idx < len(sorted_weeks):
-                future_label = sorted_weeks[harvest_week_idx]
-                move_in_target = weekly_demand_count.get(future_label, None)
-            else:
-                move_in_target = None
+            # Closed loop: `harvest_target` drives the IMMEDIATE harvest (pair
+            # drain + supplement) to react to realized biomass with no lag;
+            # `move_in_target` primes the pipeline 2 weeks out with the same
+            # realized-biomass decision (it is re-corrected by next-cycle's
+            # supplement). Both replace the old projection-fed proxy.
             _run_sixn_purge_week(
                 state=state,
                 pair_queue=sixn_pair_queue,
@@ -1388,7 +1471,8 @@ def phase_d_emit_events(
                 harvest_events=harvest_events,
                 transfer_events=transfer_events,
                 warnings=warnings,
-                move_in_target=move_in_target,
+                move_in_target=ctrl_target,
+                harvest_target=ctrl_target,
             )
         else:
             # Production mode: fall back to Layer-2 demand application.
@@ -1729,6 +1813,7 @@ def run_placement(
     facility: FacilityConfig,
     tables: BiologyTables,
     migration_plan: Optional[dict] = None,
+    facility_limits: Optional[FacilityLimits] = None,
 ) -> tuple[PlacementResult, FacilityState]:
     """End-to-end Phase A → B → C → D.
 
@@ -1760,6 +1845,7 @@ def run_placement(
     final_state, tranog, transfers, harvests, grades, locs, d_warns = phase_d_emit_events(
         result.load_table, result.tank_assignments, harvest_demands,
         splits, initial_state, facility, control, batch_meta, tables,
+        facility_limits=facility_limits,
     )
     result.tranog_events = tranog
     result.transfer_events = transfers

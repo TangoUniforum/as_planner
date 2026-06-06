@@ -112,6 +112,61 @@ def apply_facility_buffer(
     return (cap_value, cap_value)
 
 
+def decide_week_harvest_count(
+    fac_biomass: float,
+    fac_growth_kg: float,
+    fac_feed_kg_day: float,
+    bio_cap: Optional[float],
+    feed_cap: Optional[float],
+    dev: float,
+    weekly_min: float,
+    weekly_max: float,
+    oldest_mature_avg_wt: float,
+) -> float:
+    """Reactive 3-state facility maintenance controller.
+
+    Given facility biomass + daily feed and this week's projected growth,
+    return the facility-wide harvest *count* that keeps biomass inside the
+    R24 ± band:
+
+      * above the upper band            -> harvest at full capacity (pull down)
+      * below BOTH biomass + feed bands -> operational floor only (let it build)
+      * in band                         -> harvest exactly this week's growth
+                                           (hold position)
+
+    Result is hard-clipped to ``[weekly_min, weekly_max]``.
+
+    This is the *pure* decision shared by two callers:
+
+    - the open-loop scheduler (`harvest_scheduler.schedule_harvests`), fed a
+      biology *projection*, and
+    - the closed-loop placement pipeline (`placement.phase_d_emit_events`),
+      fed the REALIZED facility state each week.
+
+    The closed-loop caller passes realized biomass/feed/growth so the decision
+    tracks what actually happened in the tanks rather than a decoupled forecast
+    — that is what keeps facility biomass in band (the "close the loop" fix).
+    """
+    bio_band_lo = bio_cap * (1.0 - dev) if bio_cap else None
+    bio_band_hi = bio_cap * (1.0 + dev) if bio_cap else None
+    feed_band_lo = feed_cap * (1.0 - dev) if feed_cap else None
+
+    below_bio = bio_band_lo is None or fac_biomass < bio_band_lo
+    below_feed = feed_band_lo is None or fac_feed_kg_day < feed_band_lo
+    overflow_pressure = bio_band_hi is not None and fac_biomass > bio_band_hi
+
+    if overflow_pressure:
+        target = weekly_max
+    elif below_bio and below_feed:
+        target = weekly_min
+    elif oldest_mature_avg_wt > 0:
+        target = fac_growth_kg * 1000.0 / oldest_mature_avg_wt
+    else:
+        target = weekly_min
+
+    return max(weekly_min, min(weekly_max, target))
+
+
 def resolve_system_cap(
     metric: str,
     week_label: str,

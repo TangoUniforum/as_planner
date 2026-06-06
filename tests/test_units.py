@@ -133,6 +133,71 @@ class TestGradedHarvestEvent:
         )
 
 
+class TestHarvestController:
+    """`caps.decide_week_harvest_count`: the reactive 3-state maintenance
+    controller shared by the scheduler (projection-fed) and the closed-loop
+    placement pipeline (realized-state-fed). Locks the band-holding policy."""
+
+    CAP = 3_900_000.0
+    DEV = 0.01           # band [3,861,000, 3,939,000]
+    MIN_HV = 30_000.0
+    MAX_HV = 55_000.0
+    WT = 5_000.0         # 5 kg harvest weight
+    GROWTH = 100_000.0   # 100 t/week growth
+
+    def _decide(self, bio, growth=None):
+        from forecast.caps import decide_week_harvest_count
+        return decide_week_harvest_count(
+            fac_biomass=bio,
+            fac_growth_kg=self.GROWTH if growth is None else growth,
+            fac_feed_kg_day=0.0,        # feed not binding (feed_cap=None below)
+            bio_cap=self.CAP,
+            feed_cap=None,
+            dev=self.DEV,
+            weekly_min=self.MIN_HV,
+            weekly_max=self.MAX_HV,
+            oldest_mature_avg_wt=self.WT,
+        )
+
+    def test_over_band_harvests_max(self):
+        # Biomass above the upper band → pull down at full capacity.
+        assert self._decide(self.CAP * (1 + self.DEV) + 1) == self.MAX_HV
+
+    def test_below_band_harvests_floor(self):
+        # Below the lower band (and feed not binding) → operational floor,
+        # letting biomass build back up.
+        assert self._decide(self.CAP * (1 - self.DEV) - 1) == self.MIN_HV
+
+    def test_in_band_harvests_growth_rate(self):
+        # In band → harvest exactly this week's growth to hold position.
+        # count = growth_kg * 1000 / avg_wt_g = 100_000*1000/5000 = 20_000,
+        # but clipped up to the operational floor (min_hv = 30_000).
+        bio = (self.CAP * (1 - self.DEV) + self.CAP * (1 + self.DEV)) / 2
+        # growth large enough to exceed the floor so we see the growth branch.
+        out = self._decide(bio, growth=200_000.0)  # 200t -> 40_000 fish
+        assert math.isclose(out, 40_000.0, rel_tol=1e-9)
+
+    def test_result_clipped_to_bounds(self):
+        bio = self.CAP  # in band
+        # Huge growth would exceed max_hv → clipped to max.
+        assert self._decide(bio, growth=10_000_000.0) == self.MAX_HV
+        # Zero growth in band with no mature weight info would fall to floor.
+        assert self._decide(bio, growth=0.0) == self.MIN_HV
+
+    def test_no_cap_is_unbounded_floor(self):
+        from forecast.caps import decide_week_harvest_count
+        # bio_cap None (cap disabled) → no upper band (never overflow) and
+        # below_bio defaults True; with feed_cap None too, the
+        # below-both branch yields the operational floor.
+        out = decide_week_harvest_count(
+            fac_biomass=9_9999_999.0, fac_growth_kg=0.0, fac_feed_kg_day=0.0,
+            bio_cap=None, feed_cap=None, dev=self.DEV,
+            weekly_min=self.MIN_HV, weekly_max=self.MAX_HV,
+            oldest_mature_avg_wt=self.WT,
+        )
+        assert out == self.MIN_HV
+
+
 class TestISOWeekConsistency:
     """Reader-produced labels must equal writer-produced labels for the
     same date, regardless of whether forecast_start lands on Monday.
