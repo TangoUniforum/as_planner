@@ -143,6 +143,19 @@ def _reset_keys(*keys):
         st.session_state.pop(k + "_w", None)
 
 
+def _clear_all_editor_state():
+    """Drop every editor's cached working copy so they reload from disk.
+
+    Used after an import (which rewrites the YAML out from under the open
+    editors) so the tabs reflect the freshly-imported config, not stale
+    session_state from before the import.
+    """
+    _reset_keys("bio_growth", "bio_mort", "bio_feed", "bio_cull",
+                "fac_df", "batch_df", "flim_df", "slim_df")
+    for k in ("bio_models", "_tmpl_bytes", "_tmpl_fp"):
+        st.session_state.pop(k, None)
+
+
 def _biology_to_frames(tables):
     """BiologyTables -> (growth_df, mort_df, feed_df, cull_df, model_keys)."""
     n = len(tables.sgr_size_g)
@@ -483,6 +496,7 @@ def _config_io_section():
                     st.error("No config template or RunConfig snapshot found "
                              "in that file.")
                 else:
+                    _clear_all_editor_state()  # refresh open editors from disk
                     st.success(f"Imported {len(restored)} file(s) from {src}: "
                                f"{', '.join(restored)}")
                     st.rerun()
