@@ -151,8 +151,8 @@ def _clear_all_editor_state():
     session_state from before the import.
     """
     _reset_keys("bio_growth", "bio_mort", "bio_feed", "bio_cull",
-                "fac_df", "batch_df", "flim_df", "slim_df")
-    for k in ("bio_models", "_tmpl_bytes", "_tmpl_fp"):
+                "fac_df", "batch_df", "flim_wide", "slim_wide")
+    for k in ("bio_models", "_lim_weeks", "_tmpl_bytes", "_tmpl_fp"):
         st.session_state.pop(k, None)
 
 
@@ -350,39 +350,102 @@ def _edit_batches():
         st.rerun()
 
 
+def _og_systems_app():
+    """OG system ids from facility config, or the standard 12 default."""
+    try:
+        from forecast.config_io import load_facility_config
+        s = sorted({t.system_id for t in load_facility_config(CONFIG_DIR).tanks
+                    if t.type == "OG" and t.system_id})
+        if s:
+            return s
+    except Exception:  # noqa: BLE001
+        pass
+    return ["OG1N", "OG1S", "OG2N", "OG2S", "OG3N", "OG3S",
+            "OG4N", "OG4S", "OG5N", "OG5S", "OG6N", "OG6S"]
+
+
+def _limit_week_cols(fl_cur, sl_cur):
+    """Week columns for the limits grid: the forecast horizon (PR start +
+    Control horizon) when a PR is uploaded, else the weeks already present."""
+    pr = _ingest_pr(uploaded) if uploaded is not None else None
+    if pr and pr["ok"] and _config_ready():
+        try:
+            from forecast.config_io import load_control
+            from forecast.time_grid import forecast_week_labels
+            return forecast_week_labels(pr["forecast_start"],
+                                        int(load_control(CONFIG_DIR).horizon_weeks))
+        except Exception:  # noqa: BLE001
+            pass
+    return sorted({k[0] for k in fl_cur} | {k[0] for k in sl_cur})
+
+
 def _edit_limits():
     from forecast.scenario_io import (
         load_batches, load_limits, facility_limits_to_list,
         system_limits_to_list, facility_limits_from_list,
         system_limits_from_list, dump_scenario,
     )
-    st.caption("Per-week caps. Weeks are absolute ISO labels (e.g. 2026-W23). "
-               "Blank facility row = use the Control default.")
-    if "flim_df" not in st.session_state:
-        fl, sl = load_limits(SCENARIO_DIR)
-        st.session_state["flim_df"] = pd.DataFrame(facility_limits_to_list(fl))
-        st.session_state["slim_df"] = pd.DataFrame(system_limits_to_list(sl))
-    st.markdown("**Facility limits** (week, metric, value)")
-    fdf2 = st.data_editor(st.session_state["flim_df"], num_rows="dynamic",
-                          hide_index=True, use_container_width=True, key="flim_df_w")
-    st.markdown(f"**System limits** ({len(st.session_state['slim_df'])} rows)")
-    sdf2 = st.data_editor(st.session_state["slim_df"], num_rows="dynamic",
-                          hide_index=True, use_container_width=True,
-                          key="slim_df_w", height=300)
+    from forecast.caps import (METRIC_BIOMASS, METRIC_FEED_DAY, METRIC_MAX_HARVEST,
+                               METRIC_MIN_HARVEST, METRIC_HOG_YIELD)
+    st.caption("Per-week caps — weeks across the top, one row per parameter. "
+               "Label columns + header stay frozen as you scroll. Blank = no "
+               "cap (facility blank = use the Control default).")
+    fl, sl = load_limits(SCENARIO_DIR)
+    fl_cur = {(r["week"], r["metric"]): r["value"] for r in facility_limits_to_list(fl)}
+    sl_cur = {(r["week"], r["system"], r["metric"]): r["value"]
+              for r in system_limits_to_list(sl)}
+    weeks = _limit_week_cols(fl_cur, sl_cur)
+    if not weeks:
+        st.info("No weeks yet — upload a ProductionReport (sets the horizon) or "
+                "import a template with limits.")
+        return
+    fl_metrics = [METRIC_BIOMASS, METRIC_FEED_DAY, METRIC_MAX_HARVEST,
+                  METRIC_MIN_HARVEST, METRIC_HOG_YIELD]
+    sl_metrics = [METRIC_BIOMASS, METRIC_FEED_DAY]
+    systems = _og_systems_app()
+    if "flim_wide" not in st.session_state:
+        fac = pd.DataFrame([{"metric": m, **{wk: fl_cur.get((wk, m)) for wk in weeks}}
+                            for m in fl_metrics]).astype({wk: "float64" for wk in weeks})
+        sysd = pd.DataFrame([{"system": s, "metric": m,
+                              **{wk: sl_cur.get((wk, s, m)) for wk in weeks}}
+                             for s in systems for m in sl_metrics]
+                            ).astype({wk: "float64" for wk in weeks})
+        st.session_state["flim_wide"] = fac
+        st.session_state["slim_wide"] = sysd
+        st.session_state["_lim_weeks"] = weeks
+    weeks = st.session_state["_lim_weeks"]
+    wk_cfg = {wk: st.column_config.NumberColumn(width="small") for wk in weeks}
+    fac_cfg = {"metric": st.column_config.Column(pinned=True, disabled=True), **wk_cfg}
+    sys_cfg = {"system": st.column_config.Column(pinned=True, disabled=True),
+               "metric": st.column_config.Column(pinned=True, disabled=True), **wk_cfg}
+    st.markdown("**Facility limits**")
+    fdf = st.data_editor(st.session_state["flim_wide"], hide_index=True,
+                         column_config=fac_cfg, key="flim_wide_w")
+    st.markdown("**System limits**")
+    sdf = st.data_editor(st.session_state["slim_wide"], hide_index=True,
+                         column_config=sys_cfg, key="slim_wide_w", height=400)
     b1, b2, _ = st.columns([1, 1, 3])
     if b1.button("💾 Save Limits", key="save_lim"):
         try:
-            fl2 = facility_limits_from_list(_records(fdf2))
-            sl2 = system_limits_from_list(_records(sdf2))
+            fl_recs = [{"week": wk, "metric": r["metric"], "value": float(r[wk])}
+                       for r in _records(fdf) for wk in weeks
+                       if r.get(wk) not in (None, "")]
+            sl_recs = [{"week": wk, "system": r["system"], "metric": r["metric"],
+                        "value": float(r[wk])}
+                       for r in _records(sdf) for wk in weeks
+                       if r.get(wk) not in (None, "")]
             dump_scenario(SCENARIO_DIR, batches=load_batches(SCENARIO_DIR),
-                          facility_limits=fl2, system_limits=sl2)
-            _reset_keys("flim_df", "slim_df")
+                          facility_limits=facility_limits_from_list(fl_recs),
+                          system_limits=system_limits_from_list(sl_recs))
+            _reset_keys("flim_wide", "slim_wide")
+            st.session_state.pop("_lim_weeks", None)
             st.success("Saved scenario/limits.yaml")
             st.rerun()
         except Exception as e:  # noqa: BLE001
             st.error(f"Save failed: {e}")
     if b2.button("↻ Reload", key="reload_lim"):
-        _reset_keys("flim_df", "slim_df")
+        _reset_keys("flim_wide", "slim_wide")
+        st.session_state.pop("_lim_weeks", None)
         st.rerun()
 
 
