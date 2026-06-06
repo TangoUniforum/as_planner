@@ -1453,14 +1453,13 @@ def phase_d_emit_events(
         #     operational floor; raised to full capacity only when biomass is
         #     already over the upper band, as a safety net for an acute spike
         #     (e.g. an unmodelled TranOG arrival) the lagged channel can't catch.
-        fac_bio, fac_growth_kg, fac_feed_kg_day, oldest_wt = (
+        fac_bio, fac_growth_kg, _fac_feed_kg_day, oldest_wt = (
             _realized_facility_metrics(
                 state, batch_meta, tables, control.min_harvest_weight_g)
         )
         bio_cap = resolve_facility_cap(METRIC_BIOMASS, week_label, facility_limits, control)
         max_hv = resolve_facility_cap(METRIC_MAX_HARVEST, week_label, facility_limits, control)
         min_hv = resolve_facility_cap(METRIC_MIN_HARVEST, week_label, facility_limits, control)
-        dev = control.facility_biomass_deviation_pct or 0.0
         weekly_max = max_hv if max_hv else float("inf")
         setpoint = bio_cap * _SETPOINT_FRACTION if bio_cap is not None else None
 
