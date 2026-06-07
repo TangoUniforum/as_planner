@@ -115,58 +115,50 @@ def apply_facility_buffer(
 def predictive_move_in_count(
     total_biomass: float,
     growth_kg_week: float,
-    committed_harvest_kg: float,
     setpoint: Optional[float],
-    lead_weeks: int,
     harvest_avg_wt_g: float,
     weekly_min: float,
     weekly_max: float,
+    gain: float = 0.5,
     arrivals_kg: float = 0.0,
 ) -> float:
-    """Forward-looking 6N purge move-in sizing (the operator's #2 design).
+    """Forward-looking 6N purge move-in sizing (smooth proportional form).
 
-    Fish moved into the 6N purge this week are not harvested until they finish
-    the starvation/depuration period and rotate to the front of the pair
-    queue — ``lead_weeks`` from now. Because that lead time is KNOWN, we can
-    project facility biomass forward to that harvest week and size the move-in
-    to land biomass on the setpoint THEN — pre-empting the growth-driven spike
-    instead of reacting after biomass has already crossed the band.
+    Fish moved into the 6N purge now are harvested after the purge lead time
+    (the pair rotation). The move-in must keep biomass at the setpoint. In
+    steady state that means replacing exactly one week's growth (which drains
+    `lead` weeks later); deviations from setpoint are corrected by a *damped*
+    proportional term::
 
-    Projection (harvest runs before growth each week, so the move-in's own
-    drain at week ``t+L`` follows ``L+1`` weeks of growth and the ``L`` pair
-    drains already committed ahead of it)::
-
-        B_future     = total_biomass
-                       + (lead_weeks + 1) * growth_kg_week   # growth to the drain
-                       - committed_harvest_kg                # pairs already purging
-                       + arrivals_kg                         # TranOG entries en route
-        move_in_mass = B_future - setpoint                   # harvest at t+L
+        move_in_mass = growth_kg_week           # steady-state feed-forward
+                       + gain * (biomass - setpoint)   # damped correction
+                       + arrivals_kg            # known TranOG disturbance
         count        = move_in_mass * 1000 / harvest_avg_wt_g
 
-    clipped to ``[weekly_min, weekly_max]``. Re-evaluated every week from the
-    REALIZED state, so it is predictive *feedback*: model/estimate error (the
-    linearised growth, purge mortality) self-corrects within the lead time
-    rather than accumulating.
+    clipped to ``[weekly_min, weekly_max]``.
 
-    `committed_harvest_kg` is the biomass that will drain from the pairs
-    already in the queue over the next `lead_weeks` weeks (each at least the
-    operational floor) — the harvest that is *already locked in* ahead of this
-    move-in. `arrivals_kg` is the biomass scheduled to enter OG via TranOG
-    over the lead window — a KNOWN disturbance, fed forward so the move-in
-    pre-draws biomass down *before* the batch lands instead of spiking over
-    the band and chasing it afterwards (the dominant source of fluctuation).
-    `harvest_avg_wt_g` converts the target mass to a fish count (purged fish
-    do not grow, so their harvest weight ≈ their weight now).
+    Why `gain < 1` and NOT the instantaneous pipeline contents: an earlier
+    form sized the move-in by subtracting the *current* pair biomass (a
+    deadbeat projection to the drain week). Because the pipeline IS the thing
+    being sized, that created a feedback loop — lumpy pairs → lumpy
+    `committed` → lumpy move-in → lumpy pairs — that self-amplified into a
+    30k↔55k bang-bang and cratered facility biomass on the big-drain weeks.
+    Replacing the instantaneous pipeline term with its smooth steady-state
+    expectation (one week's growth) and damping the correction breaks that
+    loop, so the pipeline runs at a steady ~growth-replacement rate.
+
+    `arrivals_kg` is the biomass scheduled to enter OG via TranOG at the drain
+    week — a KNOWN disturbance fed forward so the move-in pre-draws biomass
+    down before the batch lands. `harvest_avg_wt_g` converts the target mass
+    to a fish count (purged fish do not grow, so their harvest weight ≈ now).
     """
     if harvest_avg_wt_g <= 0 or setpoint is None:
         # No biomass setpoint / no harvestable weight → operational floor.
         return weekly_min
 
-    b_future = (total_biomass
-                + (lead_weeks + 1) * max(0.0, growth_kg_week)
-                - committed_harvest_kg
-                + max(0.0, arrivals_kg))
-    move_in_mass = b_future - setpoint
+    move_in_mass = (max(0.0, growth_kg_week)
+                    + gain * (total_biomass - setpoint)
+                    + max(0.0, arrivals_kg))
     count = move_in_mass * 1000.0 / harvest_avg_wt_g
     return max(weekly_min, min(weekly_max, count))
 

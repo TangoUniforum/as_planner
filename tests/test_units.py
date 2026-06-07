@@ -134,93 +134,70 @@ class TestGradedHarvestEvent:
 
 
 class TestPredictiveMoveIn:
-    """`caps.predictive_move_in_count`: forward-looking 6N move-in sizing.
+    """`caps.predictive_move_in_count`: smooth proportional 6N move-in sizing.
 
-    Projects facility biomass to the harvest week (purge lead time) and sizes
-    the move-in to land biomass on the setpoint, pre-empting the growth spike.
-        B_future     = biomass + (lead+1)*growth - committed_harvest
-        move_in_mass = B_future - setpoint
+        move_in_mass = growth + gain*(biomass - setpoint) + arrivals_kg
         count        = move_in_mass * 1000 / harvest_avg_wt
-    clipped to [min, max]."""
+    clipped to [min, max]. The damped (gain<1) deviation term + steady-state
+    growth feed-forward break the pipeline-feedback lumpiness."""
 
     SP = 3_900_000.0
     MIN_HV = 30_000.0
     MAX_HV = 55_000.0
     WT = 5_000.0          # 5 kg; kg = count*wt/1000
-    GROWTH = 100_000.0    # 100 t/week production growth
-    LEAD = 3
+    GROWTH = 200_000.0    # 200 t/week -> 40k fish at 5 kg
 
-    def _decide(self, biomass, committed, growth=None, setpoint=None, wt=None):
+    def _mi(self, biomass, growth=None, setpoint=None, wt=None, gain=0.5,
+            arrivals=0.0):
         from forecast.caps import predictive_move_in_count
         return predictive_move_in_count(
             total_biomass=biomass,
             growth_kg_week=self.GROWTH if growth is None else growth,
-            committed_harvest_kg=committed,
             setpoint=self.SP if setpoint is None else setpoint,
-            lead_weeks=self.LEAD,
             harvest_avg_wt_g=self.WT if wt is None else wt,
-            weekly_min=self.MIN_HV,
-            weekly_max=self.MAX_HV,
+            weekly_min=self.MIN_HV, weekly_max=self.MAX_HV,
+            gain=gain, arrivals_kg=arrivals,
         )
 
-    def test_steady_state_replaces_growth(self):
-        # At setpoint with committed harvest == the (lead) future drains that
-        # exactly hold biomass (lead*growth), the move-in must replace ONE
-        # week's growth so the t+L drain holds position:
-        #   B_future = SP + (3+1)*100t - 3*100t = SP + 100t
-        #   move_in_mass = 100t -> 100_000*1000/5_000 = 20_000 fish,
-        #   clipped up to the floor (30_000).
-        out = self._decide(self.SP, committed=3 * self.GROWTH)
-        # 20_000 < floor → floor.
-        assert out == self.MIN_HV
+    def test_at_setpoint_replaces_growth(self):
+        # biomass == setpoint → move-in replaces exactly one week's growth.
+        # 200_000 kg * 1000 / 5_000 g = 40_000 fish.
+        assert math.isclose(self._mi(self.SP), 40_000.0, rel_tol=1e-9)
 
-    def test_steady_state_above_floor(self):
-        # Same balance but a larger fish → growth replacement exceeds floor.
-        # B_future-SP = 1*growth = 100t; at 2 kg, 100_000*1000/2_000 = 50_000.
-        out = self._decide(self.SP, committed=3 * self.GROWTH, wt=2_000.0)
-        assert math.isclose(out, 50_000.0, rel_tol=1e-9)
+    def test_above_setpoint_raises_move_in_by_gain(self):
+        # +100t over setpoint, gain 0.5 → growth + 50t = 250t → 50_000.
+        assert math.isclose(self._mi(self.SP + 100_000.0, gain=0.5),
+                            50_000.0, rel_tol=1e-9)
 
-    def test_projected_over_setpoint_harvests_more(self):
-        # Less committed ahead → projected biomass higher → bigger move-in.
-        # B_future = SP + 4*100t - 1*100t = SP + 300t; mass 300t /2kg = 150_000
-        # → clipped to max.
-        out = self._decide(self.SP, committed=1 * self.GROWTH, wt=2_000.0)
-        assert out == self.MAX_HV
+    def test_gain_damps_the_correction(self):
+        # Deadbeat gain 1.0 on the same +100t → growth + 100t = 300t -> 60_000,
+        # clipped to max. A lower gain keeps it in range — that's the point.
+        assert self._mi(self.SP + 100_000.0, gain=1.0) == self.MAX_HV
+        assert math.isclose(self._mi(self.SP + 100_000.0, gain=0.3),
+                            (200_000 + 0.3 * 100_000) * 1000 / 5_000, rel_tol=1e-9)
 
-    def test_projected_under_setpoint_clips_to_floor(self):
-        # Biomass well below setpoint and lots committed ahead → projection
-        # lands under setpoint → negative move-in mass → floor (let it build).
-        out = self._decide(self.SP - 800_000.0, committed=5 * self.GROWTH)
-        assert out == self.MIN_HV
+    def test_below_setpoint_clips_to_floor(self):
+        # Far below setpoint → move-in asks for < growth (here negative) →
+        # floor, letting biomass build back.
+        assert self._mi(self.SP - 800_000.0) == self.MIN_HV
+
+    def test_arrival_feedforward_raises_move_in(self):
+        # A scheduled arrival pre-draws: +50t / 5kg = +10_000 fish.
+        base = self._mi(self.SP, arrivals=0.0)
+        with_arr = self._mi(self.SP, arrivals=50_000.0)
+        assert math.isclose(base, 40_000.0, rel_tol=1e-9)
+        assert math.isclose(with_arr - base, 10_000.0, rel_tol=1e-9)
 
     def test_no_setpoint_is_floor(self):
-        out = self._decide(self.SP, committed=0.0, setpoint=None)
-        # setpoint=None param path:
         from forecast.caps import predictive_move_in_count
         out = predictive_move_in_count(
-            total_biomass=self.SP, growth_kg_week=self.GROWTH,
-            committed_harvest_kg=0.0, setpoint=None, lead_weeks=self.LEAD,
-            harvest_avg_wt_g=self.WT, weekly_min=self.MIN_HV, weekly_max=self.MAX_HV,
-        )
+            total_biomass=self.SP, growth_kg_week=self.GROWTH, setpoint=None,
+            harvest_avg_wt_g=self.WT, weekly_min=self.MIN_HV,
+            weekly_max=self.MAX_HV, gain=0.5, arrivals_kg=0.0)
         assert out == self.MIN_HV
 
     def test_no_harvest_weight_is_floor(self):
-        out = self._decide(self.SP, committed=0.0, wt=0.0)
-        assert out == self.MIN_HV
-
-    def test_arrival_feedforward_raises_move_in(self):
-        # A scheduled TranOG arrival in the projection window raises the
-        # move-in (pre-draw) by exactly arrivals_kg converted to fish.
-        from forecast.caps import predictive_move_in_count
-        base = dict(total_biomass=self.SP, growth_kg_week=self.GROWTH,
-                    committed_harvest_kg=2 * self.GROWTH, setpoint=self.SP,
-                    lead_weeks=self.LEAD, harvest_avg_wt_g=self.WT,
-                    weekly_min=self.MIN_HV, weekly_max=self.MAX_HV)
-        without = predictive_move_in_count(**base, arrivals_kg=0.0)   # 200t->40k
-        with_arr = predictive_move_in_count(**base, arrivals_kg=50_000.0)  # +50t
-        assert math.isclose(without, 40_000.0, rel_tol=1e-9)
-        # +50t / 5kg = +10_000 fish.
-        assert math.isclose(with_arr - without, 10_000.0, rel_tol=1e-9)
+        assert self._mi(self.SP, wt=0.0) == self.MIN_HV
 
 
 class TestISOWeekConsistency:

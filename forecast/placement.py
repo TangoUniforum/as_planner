@@ -101,6 +101,13 @@ _SETPOINT_FRACTION = 0.995
 # cadences.
 _ARRIVAL_SMOOTH_WEEKS = 1
 
+# Damping gain on the move-in's proportional biomass-deviation correction. The
+# move-in is a lagged actuator (drains ~lead weeks later), so a full deadbeat
+# (1.0) correction through it oscillates; a fraction spreads the correction
+# across the delay and keeps the purge pipeline running at a steady rate
+# instead of bang-banging floor↔cap. Tuned empirically.
+_MOVE_IN_GAIN = 0.5
+
 
 # Eligible system sets used by Phase A.
 _OG_ALL_WITH_6N = ["OG1N", "OG1S", "OG2N", "OG2S", "OG3N", "OG3S",
@@ -1485,19 +1492,7 @@ def phase_d_emit_events(
         weekly_max = max_hv if max_hv else float("inf")
         setpoint = bio_cap * _SETPOINT_FRACTION if bio_cap is not None else None
 
-        # Committed harvest already locked into the purge pipeline: the pairs
-        # in the queue drain over the next `lead` weeks, each at least the
-        # operational floor (the supplemental top-up).
         lead = max(1, len(sixn_pair_queue))
-        floor_mass_kg = (min_hv or 0.0) * oldest_wt / 1000.0
-        committed_kg = 0.0
-        for pair in sixn_pair_queue:
-            pair_bio = sum(
-                state.tanks_by_id[tid].biomass_kg
-                for tid in pair
-                if tid in state.tanks_by_id and not state.tanks_by_id[tid].is_empty
-            )
-            committed_kg += max(pair_bio, floor_mass_kg)
 
         # Feed-forward known TranOG arrivals, AMORTISED so each arrival is
         # pre-drawn gradually over the `_ARRIVAL_SMOOTH_WEEKS` harvest weeks
@@ -1518,12 +1513,11 @@ def phase_d_emit_events(
         move_in_target = predictive_move_in_count(
             total_biomass=fac_bio,
             growth_kg_week=fac_growth_kg,
-            committed_harvest_kg=committed_kg,
             setpoint=setpoint,
-            lead_weeks=lead,
             harvest_avg_wt_g=oldest_wt,
             weekly_min=min_hv or 0.0,
             weekly_max=weekly_max,
+            gain=_MOVE_IN_GAIN,
             arrivals_kg=arrivals_kg,
         )
         # Immediate supplement (reactive deadbeat): harvest this week's growth
