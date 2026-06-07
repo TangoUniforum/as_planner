@@ -38,6 +38,7 @@ from .excel_io import (
     write_monthly_report,
     write_reconciliation_report,
     write_tank_continuity_audit,
+    write_system_limits_audit,
     write_transfer_plan_output,
     write_weekly_report,
 )
@@ -586,6 +587,16 @@ def main(
         placement.tranog_events,
         state,
     )
+    # Realized per-system biomass + feed vs the SystemLimits caps. The engine
+    # checks tank density but never checked the SYSTEM caps against the realized
+    # plan — this surfaces over-cap systems (esp. feed, the tighter constraint).
+    n_bio_over, n_feed_over, worst_bio, worst_feed = write_system_limits_audit(
+        wb, placement.batch_locations, batch_by_id, tables, system_limits, control,
+    )
+    print(f"  SystemLimits:  biomass over-cap {n_bio_over} (worst "
+          f"{worst_bio:.2f}x), feed over-cap {n_feed_over} (worst {worst_feed:.2f}x) "
+          f"-> SystemLimitsAudit sheet")
+
     write_facility_map(wb, placement.batch_locations, facility)
 
     # Config snapshot: embed the exact app-managed config + scenario this

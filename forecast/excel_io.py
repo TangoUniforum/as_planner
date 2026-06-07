@@ -1457,3 +1457,99 @@ def load_workbook(path: Path):
 def iso_week_label(d: datetime) -> str:
     y, w, _ = d.isocalendar()
     return f"{y}-W{w:02d}"
+
+
+def write_system_limits_audit(
+    wb,
+    batch_locations,
+    batch_by_id,
+    tables,
+    system_limits,
+    control,
+    sheet_name: str = "SystemLimitsAudit",
+):
+    """Per-(week, system) REALIZED biomass + feed vs the system caps.
+
+    The engine checks tank density but never checked per-system biomass/feed
+    against the SystemLimits caps — so over-cap systems went unsurfaced. This
+    audit closes that gap, mirroring TankContinuityAudit. Feed is the realized
+    tank feed (biomass × SGR × FCR at the tank's actual weight), NOT the raw
+    projection (which over-counts un-harvested fish). Caps are carried forward
+    past the data's last week and buffered by Control R29. OG6N (depuration)
+    has no biomass/feed caps in purge mode, so it's reported but unflagged.
+
+    Returns (n_biomass_over, n_feed_over, worst_biomass_ratio, worst_feed_ratio).
+    """
+    from collections import defaultdict
+    from .biology import realized_feed_kg_day
+
+    buf = 1.0 + (getattr(control, "global_buffer_pct", 0.0) or 0.0)
+
+    # Carry-forward cap lookup per (system, metric).
+    smw: dict = defaultdict(list)
+    for (wk, sysid, metric), val in system_limits.caps.items():
+        smw[(sysid, metric)].append((wk, val))
+    for k in smw:
+        smw[k].sort()
+
+    def _cap(wk, sysid, metric):
+        lst = smw.get((sysid, metric))
+        if not lst:
+            return None
+        best = lst[0][1]
+        for w, v in lst:
+            if w <= wk:
+                best = v
+            else:
+                break
+        return best
+
+    sb: dict = defaultdict(float)
+    sf: dict = defaultdict(float)
+    for r in batch_locations:
+        if r.count <= 0:
+            continue
+        b = batch_by_id.get(r.batch_id)
+        sb[(r.week_label, r.system_id)] += r.biomass_kg
+        sf[(r.week_label, r.system_id)] += realized_feed_kg_day(
+            r.avg_wt_g, r.biomass_kg, b, tables)
+
+    if sheet_name in wb.sheetnames:
+        del wb[sheet_name]
+    ws = wb.create_sheet(sheet_name)
+    ws.append(["SYSTEM LIMITS AUDIT"])
+    ws.append(["Realized per-system biomass + feed vs caps "
+               "(carry-forward, +R29 buffer). OG6N = depuration (no caps)."])
+    ws.append([])
+    ws.append(["Week", "System", "Biomass_kg", "Biomass_cap", "Bio_flag",
+               "Feed_kg_day", "Feed_cap", "Feed_flag"])
+
+    nb = nf = 0
+    worst_b = worst_f = 0.0
+    for (wk, sysid) in sorted(sb.keys()):
+        bio = sb[(wk, sysid)]
+        feed = sf[(wk, sysid)]
+        bcap = _cap(wk, sysid, "biomass")
+        fcap = _cap(wk, sysid, "feed_per_day")
+        bflag = fflag = ""
+        # OG6N is the depuration pool (purge mode): fish starve (no feed) and
+        # the system is intentionally uncapped. Report its rows but never flag.
+        flaggable = sysid != "OG6N"
+        if bcap and flaggable:
+            worst_b = max(worst_b, bio / bcap)
+            if bio > bcap * buf:
+                bflag = "BIOMASS_OVER"
+                nb += 1
+        if fcap and flaggable:
+            worst_f = max(worst_f, feed / fcap)
+            if feed > fcap * buf:
+                fflag = "FEED_OVER"
+                nf += 1
+        ws.append([wk, sysid, round(bio, 0),
+                   round(bcap, 0) if bcap else None, bflag,
+                   round(feed, 1), round(fcap, 0) if fcap else None, fflag])
+
+    widths = {1: 10, 2: 8, 3: 12, 4: 12, 5: 13, 6: 12, 7: 10, 8: 11}
+    for c, w in widths.items():
+        ws.column_dimensions[get_column_letter(c)].width = w
+    return nb, nf, worst_b, worst_f

@@ -128,6 +128,28 @@ def _fcr_model_key(fcr_model_str: str) -> str:
     return digits
 
 
+def realized_feed_kg_day(
+    avg_wt_g: float, biomass_kg: float, batch: Optional[BatchInput],
+    tables: BiologyTables,
+) -> float:
+    """Daily feed for a REALIZED tank state: biomass × SGR(weight)/100 × FCR.
+
+    Mirrors the projection's feed model (`biomass × sgr_eff/100 × fcr`) but is
+    evaluated at the tank's ACTUAL avg weight + the batch's SW SGR correction /
+    FCR model — so per-system feed totals reflect what fish in the tanks really
+    eat (no un-harvested 100kg projection fish; see the feed-projection fix).
+    Returns 0 for empty / sub-feeding states.
+    """
+    if biomass_kg <= 0 or avg_wt_g <= 0:
+        return 0.0
+    corr = batch.sgr_correction if batch else 1.0
+    sgr_eff = _interp(avg_wt_g, tables.sgr_size_g, tables.sgr_sw_pct_day) * corr
+    fcr_curve = tables.fcr_by_model.get(
+        _fcr_model_key(batch.fcr_model) if batch else "", [])
+    fcr = _interp(avg_wt_g, tables.fcr_size_g, fcr_curve) if fcr_curve else 1.2
+    return biomass_kg * (sgr_eff / 100.0) * fcr
+
+
 # ---------- cull math ----------
 
 def _apply_bottom_cull(
