@@ -56,6 +56,15 @@ from .time_grid import forecast_week_labels, parse_iso_label, week_start
 # Constant mirrored from events.py to avoid a circular import.
 _OG12_MOVE_LOCK_WT_G = 1000.0
 
+# Forward-looking tank footprint (weeks). Each SW week's `tanks_needed` is
+# sized for the PEAK biomass over the next N weeks, so a growing batch reserves
+# grow-out tanks a few weeks EARLY — before it crosses the 1 kg nursery lock
+# and before grow-out gets contended — rather than getting boxed into too few
+# tanks and running density to 2x cap. BOUNDED on purpose: the full lifetime-
+# max sweep was removed because it over-subscribed OG3-6 at once (see NOTE in
+# _build_batch_week_facts); a short lookahead claims ahead without hoarding.
+_FOOTPRINT_LOOKAHEAD_WEEKS = 6
+
 
 _OG12 = frozenset({"OG1N", "OG1S", "OG2N", "OG2S"})
 _OG36 = frozenset({"OG3N", "OG3S", "OG4N", "OG4S",
@@ -482,6 +491,23 @@ def _build_batch_week_facts(
                 is_tranog_week=is_tranog,
                 fraction_above_min_harvest_weight=frac_above,
             )
+
+        # Forward-looking footprint (BOUNDED): raise each SW week's tank need
+        # to the peak over the next _FOOTPRINT_LOOKAHEAD_WEEKS, so a growing
+        # batch claims grow-out tanks a few weeks early instead of being boxed
+        # into too few and tipping density. Reads from a snapshot so increases
+        # don't cascade; only raises, never lowers (preserves harvest-shrink).
+        if _FOOTPRINT_LOOKAHEAD_WEEKS > 0:
+            bw_labels = sorted(wl for (b, wl) in out if b == batch_id)
+            seq = [out[(batch_id, wl)] for wl in bw_labels]
+            base = [f.tanks_needed_at_density_cap for f in seq]
+            for i, f in enumerate(seq):
+                if f.stage != "SW":
+                    continue
+                hi = min(len(seq), i + _FOOTPRINT_LOOKAHEAD_WEEKS + 1)
+                peak = max(base[i:hi])
+                if peak > f.tanks_needed_at_density_cap:
+                    f.tanks_needed_at_density_cap = peak
 
         # NOTE: lifetime-max backward sweep REMOVED 2026-05-28. It was
         # added to claim OG1/2 tanks before the 1 kg lock engaged, but
