@@ -36,6 +36,7 @@ through OG3/4/5/6.
 """
 from __future__ import annotations
 
+import collections
 import math
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
@@ -54,7 +55,9 @@ from .caps import (
     resolve_system_cap,
     system_cap_with_buffer,
 )
-from .biology import _fcr_model_key, _interp, upper_truncated_split
+from .biology import (
+    _fcr_model_key, _interp, realized_feed_kg_day, upper_truncated_split,
+)
 from .events import Grade, GradedHarvest, Harvest, OG12_SYSTEMS, OG12_MOVE_LOCK_WT_G, TankAllocation, Transfer, TranOGEntry
 from .harvest_scheduler import HarvestDemand
 from .models import (
@@ -1348,6 +1351,145 @@ def _realized_facility_metrics(
     return fac_bio, fac_growth_kg, fac_feed_kg_day, oldest_mature_avg_wt
 
 
+def _tank_to_system_of(tid, og_tanks_by_system):
+    for s, ids in og_tanks_by_system.items():
+        if tid in ids:
+            return s
+    return None
+
+
+def _persist_system_move(b, src, y, wl, sorted_weeks, week_index, ta_index,
+                         week_tank_owner):
+    """Replace tank src -> y in batch b's tank_assignments from week wl forward,
+    while b still holds src and y is free in the canvas plan (so the move
+    persists as ONE transfer, not one per week)."""
+    start = week_index.get(wl)
+    if start is None:
+        return
+    for w in sorted_weeks[start:]:
+        ta = ta_index.get((b, w))
+        if ta is None or src not in ta.tank_ids:
+            break
+        owner_w = week_tank_owner.setdefault(w, {})
+        if y in owner_w and owner_w[y] != b:
+            break
+        ta.tank_ids = sorted(y if x == src else x for x in ta.tank_ids)
+        owner_w.pop(src, None)
+        owner_w[y] = b
+
+
+def _rebalance_systems_realized(
+    state, this_assignment, ta_index, week_tank_owner, wl, sorted_weeks,
+    week_index, cap_lookup, buf, batch_meta, tables,
+    og_systems, growout_systems, og_tanks_by_system,
+):
+    """Move batches off systems over their REALIZED biomass/feed cap onto
+    eligible systems with headroom.
+
+    Detection uses the realized end-of-last-week `state` (actual load, not the
+    canvas projection). The move is an edit of `this_assignment` (swap one
+    over-cap-system tank for an empty tank in the target) plus a forward edit
+    of `tank_assignments` (via `ta_index`/`week_tank_owner`) so it persists —
+    Phase D's diff machinery then emits the CONSERVED Transfer AND evens the
+    batch across its new tank set (continuity-safe + de-concentrating). Targets
+    keep the destination under BOTH caps; over-cap systems vacate their OLDEST
+    batch first. Returns moves made.
+    """
+    planned: dict[str, list[int]] = {}
+    for tid, b in this_assignment.items():
+        planned.setdefault(b, []).append(tid)
+    sb = collections.defaultdict(float)
+    sf = collections.defaultdict(float)
+    occ = collections.defaultdict(int)
+    bbio: dict[str, float] = collections.defaultdict(float)
+    bfeed: dict[str, float] = collections.defaultdict(float)
+    bwt: dict[str, float] = {}
+    for t in state.tanks_by_id.values():
+        if t.is_empty or t.system_id not in og_systems:
+            continue
+        feed = realized_feed_kg_day(
+            t.avg_wt_g, t.biomass_kg, batch_meta.get(t.batch_id), tables)
+        sb[t.system_id] += t.biomass_kg
+        sf[t.system_id] += feed
+        occ[t.system_id] += 1
+        bbio[t.batch_id] += t.biomass_kg
+        bfeed[t.batch_id] += feed
+        bwt[t.batch_id] = max(bwt.get(t.batch_id, 0.0), t.avg_wt_g)
+
+    moves = 0
+    for _guard in range(40):
+        over = []
+        for s in og_systems:
+            bc, fc = cap_lookup(wl, s)
+            if (bc and sb[s] > bc * buf) or (fc and sf[s] > fc * buf):
+                over.append((max((sb[s] / bc) if bc else 0.0,
+                                 (sf[s] / fc) if fc else 0.0), s))
+        if not over:
+            break
+        over.sort(key=lambda x: (-x[0], x[1]))
+        big_s = over[0][1]
+        s_batches = sorted(
+            {b for tid, b in this_assignment.items()
+             if _tank_to_system_of(tid, og_tanks_by_system) == big_s},
+            key=lambda b: (
+                (batch_meta[b].input_date if b in batch_meta
+                 and batch_meta[b].input_date else date.max), b),
+        )
+        moved = False
+        for b in s_batches:
+            ntanks = len(planned.get(b, []))
+            if ntanks == 0:
+                continue
+            pb = bbio.get(b, 0.0) / ntanks
+            pf = bfeed.get(b, 0.0) / ntanks
+            elig = (growout_systems if bwt.get(b, 0.0) >= OG12_MOVE_LOCK_WT_G
+                    else (og_systems - growout_systems))
+            best = None
+            for tgt in sorted(elig):
+                if tgt == big_s or tgt not in og_systems:
+                    continue
+                if occ[tgt] >= len(og_tanks_by_system.get(tgt, [])):
+                    continue
+                bc, fc = cap_lookup(wl, tgt)
+                if bc and sb[tgt] + pb > bc * buf:
+                    continue
+                if fc and sf[tgt] + pf > fc * buf:
+                    continue
+                head = min((bc * buf - sb[tgt] - pb) / bc if bc else 9.0,
+                           (fc * buf - sf[tgt] - pf) / fc if fc else 9.0)
+                if best is None or head > best[0]:
+                    best = (head, tgt)
+            if best is None:
+                continue
+            tgt = best[1]
+            src = min((tid for tid in planned[b]
+                       if _tank_to_system_of(tid, og_tanks_by_system) == big_s),
+                      default=None)
+            if src is None:
+                continue
+            y = None
+            for cand in og_tanks_by_system.get(tgt, []):
+                tk = state.tanks_by_id.get(cand)
+                if tk is not None and tk.is_empty and cand not in this_assignment:
+                    y = cand
+                    break
+            if y is None:
+                continue
+            del this_assignment[src]
+            this_assignment[y] = b
+            planned[b] = [y if x == src else x for x in planned[b]]
+            _persist_system_move(b, src, y, wl, sorted_weeks, week_index,
+                                 ta_index, week_tank_owner)
+            sb[big_s] -= pb; sf[big_s] -= pf; occ[big_s] -= 1
+            sb[tgt] += pb; sf[tgt] += pf; occ[tgt] += 1
+            moves += 1
+            moved = True
+            break
+        if not moved:
+            break
+    return moves
+
+
 def phase_d_emit_events(
     load_table: list[BatchWeekLoad],
     tank_assignments: list[TankAssignment],
@@ -1359,6 +1501,7 @@ def phase_d_emit_events(
     batch_meta: dict[str, BatchInput],
     tables: BiologyTables,
     facility_limits: Optional[FacilityLimits] = None,
+    system_limits: Optional[SystemLimits] = None,
 ) -> tuple[FacilityState, list[TranOGEntry], list[Transfer], list[Harvest],
            list[BatchLocationRow], list[str]]:
     """Walk the plan week by week; emit events from assignment diff +
@@ -1437,6 +1580,50 @@ def phase_d_emit_events(
         tid: t.batch_id for tid, t in state.tanks_by_id.items() if t.batch_id
     }
 
+    # ---- System rebalancer setup (realized; runs per week if caps given) ----
+    _rebal_on = system_limits is not None
+    og_systems_set: set[str] = set()
+    growout_systems: set[str] = set()
+    og_tanks_by_system_r: dict[str, list[int]] = {}
+    for tcfg in facility.tanks:
+        if tcfg.type == "OG" and tcfg.system_id != "OG6N":
+            og_systems_set.add(tcfg.system_id)
+            og_tanks_by_system_r.setdefault(tcfg.system_id, []).append(tcfg.tank_id)
+            if tcfg.system_id not in OG12_SYSTEMS:
+                growout_systems.add(tcfg.system_id)
+    for _s in og_tanks_by_system_r:
+        og_tanks_by_system_r[_s].sort()
+    ta_index: dict[tuple[str, str], TankAssignment] = {
+        (a.batch_id, a.week_label): a for a in tank_assignments
+    }
+    week_tank_owner: dict[str, dict[int, str]] = {}
+    for a in tank_assignments:
+        d = week_tank_owner.setdefault(a.week_label, {})
+        for tid in a.tank_ids:
+            d[tid] = a.batch_id
+    week_index_r = {wl: i for i, wl in enumerate(sorted_weeks)}
+    _rebal_buf = 1.0 + (control.global_buffer_pct or 0.0)
+    _cap_weeks: dict[tuple[str, str], list] = {}
+    if system_limits is not None:
+        for (wk, sysid, metric), val in system_limits.caps.items():
+            _cap_weeks.setdefault((sysid, metric), []).append((wk, val))
+        for _k in _cap_weeks:
+            _cap_weeks[_k].sort()
+
+    def _sys_cap(wl_, sysid):
+        def cf(metric):
+            lst = _cap_weeks.get((sysid, metric))
+            if not lst:
+                return None
+            best = lst[0][1]
+            for w, v in lst:
+                if w <= wl_:
+                    best = v
+                else:
+                    break
+            return best
+        return (cf(METRIC_BIOMASS), cf(METRIC_FEED_DAY))
+
     # 6N purge pipeline queue (only meaningful while in purge mode; ignored
     # if the forecast starts in production mode). Pairs are ordered with
     # the lowest-count pair first so W1 harvests it (user H10).
@@ -1463,6 +1650,17 @@ def phase_d_emit_events(
         for a in [a for a in tank_assignments if a.week_label == week_label]:
             for tid in a.tank_ids:
                 this_assignment[tid] = a.batch_id
+
+        # System rebalancing: from the REALIZED end-of-last-week state, move
+        # batches off systems over their biomass/feed cap onto eligible systems
+        # with headroom — editing this_assignment + tank_assignments forward so
+        # the diff machinery below conserves the fish (continuity-safe).
+        if _rebal_on:
+            _rebalance_systems_realized(
+                state, this_assignment, ta_index, week_tank_owner, week_label,
+                sorted_weeks, week_index_r, _sys_cap, _rebal_buf, batch_meta,
+                tables, og_systems_set, growout_systems, og_tanks_by_system_r,
+            )
 
         ws_we = week_ranges.get(week_label)
         week_start_date = ws_we[0] if ws_we else _as_date(control.forecast_start)
@@ -1920,6 +2118,7 @@ def run_placement(
         result.load_table, result.tank_assignments, harvest_demands,
         splits, initial_state, facility, control, batch_meta, tables,
         facility_limits=facility_limits,
+        system_limits=system_limits,
     )
     result.tranog_events = tranog
     result.transfer_events = transfers
