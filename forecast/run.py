@@ -479,7 +479,27 @@ def main(
                   f"{r.projected_pre_cull_avg_wt_g:>12.2f} "
                   f"{r.residual_pct:>10.2f}% {sug:>7}")
 
-    write_biology_projection(wb, states + in_flight_states)
+    # Reports reflect the REALIZED harvest, not the raw "if-never-harvested"
+    # biology curve. The biology projection grows a batch forever — SGR is flat
+    # past the table's harvest-size ceiling, so an un-harvested fish compounds
+    # to 100+ kg over a multi-year horizon, and FeedForecast would sum batches
+    # that actually left the facility years earlier. The realized plan harvests
+    # every batch out FIFO at ~harvest weight (verified: 0 drift), so drop each
+    # batch's projected weeks AFTER its realized harvest-out week.
+    realized_last_week: dict[str, str] = {}
+    for _r in placement.batch_locations:
+        if _r.count > 0 and (_r.batch_id not in realized_last_week
+                             or _r.week_label > realized_last_week[_r.batch_id]):
+            realized_last_week[_r.batch_id] = _r.week_label
+
+    def _to_realized_lifespan(states_list):
+        # Keep weeks up to (and including) the batch's realized harvest-out;
+        # batches never placed in OG (FW-only this horizon) are kept whole.
+        return [s for s in states_list
+                if realized_last_week.get(s.batch_id) is None
+                or s.week_label <= realized_last_week[s.batch_id]]
+
+    write_biology_projection(wb, _to_realized_lifespan(states + in_flight_states))
     write_calibration_diagnostics(wb, residuals)
 
     # Write the plan outputs from Stage 2 placement.
@@ -540,9 +560,12 @@ def main(
         default_hog_yield=control.default_hog_yield,
         facility_limits_hog=facility_hog_overrides,
     )
-    write_feed_forecast_weekly(wb, states_by_batch, fs_date)
-    write_feed_forecast_monthly(wb, states_by_batch, fs_date)
-    all_states = states + in_flight_states
+    rl_states_by_batch = {
+        b: _to_realized_lifespan(sl) for b, sl in states_by_batch.items()
+    }
+    write_feed_forecast_weekly(wb, rl_states_by_batch, fs_date)
+    write_feed_forecast_monthly(wb, rl_states_by_batch, fs_date)
+    all_states = _to_realized_lifespan(states + in_flight_states)
     write_weekly_report(wb, placement.batch_locations, placement.harvest_events, all_states)
     write_monthly_report(wb, placement.batch_locations, placement.harvest_events, all_states)
     write_reconciliation_report(
