@@ -121,6 +121,7 @@ def predictive_move_in_count(
     harvest_avg_wt_g: float,
     weekly_min: float,
     weekly_max: float,
+    arrivals_kg: float = 0.0,
 ) -> float:
     """Forward-looking 6N purge move-in sizing (the operator's #2 design).
 
@@ -138,19 +139,24 @@ def predictive_move_in_count(
         B_future     = total_biomass
                        + (lead_weeks + 1) * growth_kg_week   # growth to the drain
                        - committed_harvest_kg                # pairs already purging
+                       + arrivals_kg                         # TranOG entries en route
         move_in_mass = B_future - setpoint                   # harvest at t+L
         count        = move_in_mass * 1000 / harvest_avg_wt_g
 
     clipped to ``[weekly_min, weekly_max]``. Re-evaluated every week from the
     REALIZED state, so it is predictive *feedback*: model/estimate error (the
-    linearised growth, purge mortality, unmodelled TranOG arrivals) self-
-    corrects within the lead time rather than accumulating.
+    linearised growth, purge mortality) self-corrects within the lead time
+    rather than accumulating.
 
     `committed_harvest_kg` is the biomass that will drain from the pairs
     already in the queue over the next `lead_weeks` weeks (each at least the
     operational floor) — the harvest that is *already locked in* ahead of this
-    move-in. `harvest_avg_wt_g` converts the target mass to a fish count
-    (purged fish do not grow, so their harvest weight ≈ their weight now).
+    move-in. `arrivals_kg` is the biomass scheduled to enter OG via TranOG
+    over the lead window — a KNOWN disturbance, fed forward so the move-in
+    pre-draws biomass down *before* the batch lands instead of spiking over
+    the band and chasing it afterwards (the dominant source of fluctuation).
+    `harvest_avg_wt_g` converts the target mass to a fish count (purged fish
+    do not grow, so their harvest weight ≈ their weight now).
     """
     if harvest_avg_wt_g <= 0 or setpoint is None:
         # No biomass setpoint / no harvestable weight → operational floor.
@@ -158,7 +164,8 @@ def predictive_move_in_count(
 
     b_future = (total_biomass
                 + (lead_weeks + 1) * max(0.0, growth_kg_week)
-                - committed_harvest_kg)
+                - committed_harvest_kg
+                + max(0.0, arrivals_kg))
     move_in_mass = b_future - setpoint
     count = move_in_mass * 1000.0 / harvest_avg_wt_g
     return max(weekly_min, min(weekly_max, count))

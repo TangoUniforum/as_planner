@@ -74,7 +74,7 @@ from .sixn import (
     is_purge_mode,
 )
 from .state import FacilityState, TankState
-from .time_grid import forecast_week_labels, week_range
+from .time_grid import forecast_week_labels, iso_week_label, week_range
 
 
 # Per the lock record §5: all six pipeline tanks (61/63/65 main,
@@ -92,6 +92,14 @@ _SIXN_SYSTEMS = frozenset({"OG6N"})
 #     against the live config; weekly growth (~136t) exceeds the ±1% band
 #     width (~78t), so ~±2.6% swings are the physical floor.
 _SETPOINT_FRACTION = 0.995
+
+# Arrival feed-forward smoothing window (weeks). Each scheduled TranOG arrival
+# is pre-harvested over this many weeks before it lands. Empirically W=1
+# (pre-draw in the move-in whose drain coincides with the arrival week) holds
+# biomass tightest — wider windows draw biomass down too early/deep ahead of
+# each batch and widen the swing. Kept as a tunable for non-default stocking
+# cadences.
+_ARRIVAL_SMOOTH_WEEKS = 1
 
 
 # Eligible system sets used by Phase A.
@@ -1381,6 +1389,20 @@ def phase_d_emit_events(
         weekly_demand_count[d.week_label] = weekly_demand_count.get(d.week_label, 0.0) + d.count
     splits_by_batch = {s.batch_id: s for s in splits}
 
+    # TranOG arrival schedule (kg of biomass entering OG per ISO week). Each
+    # split's post-cull population lands in the facility at its tran_og_date —
+    # a KNOWN disturbance the closed-loop harvest controller feeds forward so
+    # it can pre-draw biomass down before the batch arrives (see
+    # caps.predictive_move_in_count). Approximate; the predictive feedback
+    # re-corrects against realized state each week.
+    arrivals_by_week: dict[str, float] = {}
+    for s in splits:
+        if s.tran_og_date is None or s.post_cull_count <= 0:
+            continue
+        wk = iso_week_label(_as_date(s.tran_og_date))
+        arrivals_by_week[wk] = arrivals_by_week.get(wk, 0.0) + (
+            s.post_cull_count * s.post_cull_avg_wt_g / 1000.0)
+
     # Active batches per week (set of batch_ids).
     active_by_week: dict[str, set[str]] = {}
     for a in tank_assignments:
@@ -1477,6 +1499,22 @@ def phase_d_emit_events(
             )
             committed_kg += max(pair_bio, floor_mass_kg)
 
+        # Feed-forward known TranOG arrivals, AMORTISED so each arrival is
+        # pre-drawn gradually over the `_ARRIVAL_SMOOTH_WEEKS` harvest weeks
+        # ending at the batch's arrival, rather than all at once (which would
+        # saturate the weekly harvest cap and leave a residual spike). This
+        # move-in drives harvest at week t+lead, so it carries that week's
+        # share = (arrivals over [t+lead, t+lead+W)) / W. A single arrival of
+        # size X thus contributes X/W to each of the W move-ins whose drains
+        # precede it — summing to exactly X, no double-count.
+        cur_idx = sorted_weeks.index(week_label)
+        drain_idx = cur_idx + lead
+        W = max(1, _ARRIVAL_SMOOTH_WEEKS)
+        arrivals_kg = sum(
+            arrivals_by_week.get(sorted_weeks[drain_idx + j], 0.0)
+            for j in range(W) if drain_idx + j < len(sorted_weeks)
+        ) / W
+
         move_in_target = predictive_move_in_count(
             total_biomass=fac_bio,
             growth_kg_week=fac_growth_kg,
@@ -1486,6 +1524,7 @@ def phase_d_emit_events(
             harvest_avg_wt_g=oldest_wt,
             weekly_min=min_hv or 0.0,
             weekly_max=weekly_max,
+            arrivals_kg=arrivals_kg,
         )
         # Immediate supplement (reactive deadbeat): harvest this week's growth
         # plus the CURRENT deviation from setpoint, realised now with no lag.

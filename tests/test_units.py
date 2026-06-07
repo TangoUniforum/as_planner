@@ -208,6 +208,20 @@ class TestPredictiveMoveIn:
         out = self._decide(self.SP, committed=0.0, wt=0.0)
         assert out == self.MIN_HV
 
+    def test_arrival_feedforward_raises_move_in(self):
+        # A scheduled TranOG arrival in the projection window raises the
+        # move-in (pre-draw) by exactly arrivals_kg converted to fish.
+        from forecast.caps import predictive_move_in_count
+        base = dict(total_biomass=self.SP, growth_kg_week=self.GROWTH,
+                    committed_harvest_kg=2 * self.GROWTH, setpoint=self.SP,
+                    lead_weeks=self.LEAD, harvest_avg_wt_g=self.WT,
+                    weekly_min=self.MIN_HV, weekly_max=self.MAX_HV)
+        without = predictive_move_in_count(**base, arrivals_kg=0.0)   # 200t->40k
+        with_arr = predictive_move_in_count(**base, arrivals_kg=50_000.0)  # +50t
+        assert math.isclose(without, 40_000.0, rel_tol=1e-9)
+        # +50t / 5kg = +10_000 fish.
+        assert math.isclose(with_arr - without, 10_000.0, rel_tol=1e-9)
+
 
 class TestISOWeekConsistency:
     """Reader-produced labels must equal writer-produced labels for the
