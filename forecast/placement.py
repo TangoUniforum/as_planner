@@ -850,24 +850,34 @@ def _run_sixn_purge_week(
     warnings: list[str],
     move_in_target: Optional[float] = None,
     harvest_target: Optional[float] = None,
-) -> None:
-    """Run one week of the 6N purge pipeline.
+    resting_pair: Optional[tuple[int, int]] = None,
+) -> Optional[tuple[int, int]]:
+    """Run one week of the 6N purge pipeline (3-pair fallow rotation).
 
-    Mutates `pair_queue` in place: pops the front pair, harvests it,
-    restocks it from FIFO production, pushes it to the back.
+    Operational rule: fish are TRANSFERRED into a pair mid-week (Wed) and the
+    harvested pair is EMPTIED end-of-week (Fri) — so the move-in CANNOT go into
+    the pair harvested this week. It fills the RESTING pair (emptied at a prior
+    harvest, fallow since); the pair harvested this week becomes next week's
+    resting pair. Three pairs therefore cycle: 2 purging + 1 fallow.
 
-    Returns nothing — events are appended to `harvest_events` /
-    `transfer_events` and `state` is mutated.
+    Pops the front (lowest-count) pair and harvests it, fills the resting pair
+    from FIFO production, pushes the filled pair to the back. Returns the new
+    resting pair (the one just harvested) for the caller to carry forward.
     """
     if not pair_queue:
         warnings.append(f"{week_label}: 6N purge queue empty — no harvest this week")
-        return
+        return resting_pair
 
-    pair = pair_queue.pop(0)
+    harvest_pair = pair_queue.pop(0)
+    # Wed-fill / Fri-harvest: the move-in fills the RESTING pair, never the pair
+    # harvested this week. Degenerate fallback (no resting pair — e.g. all pairs
+    # stocked at start, no fallow slot) refills the harvested pair as before.
+    fill_pair = resting_pair if resting_pair is not None else harvest_pair
+    new_resting = harvest_pair if resting_pair is not None else None
 
-    # 1. Harvest the pair's contents (both tanks if occupied).
+    # 1. Harvest the harvested pair's contents (both tanks if occupied).
     pair_drain_count = 0.0
-    for tank_id in pair:
+    for tank_id in harvest_pair:
         tank = state.tanks_by_id.get(tank_id)
         if tank is None or tank.is_empty:
             continue
@@ -937,16 +947,16 @@ def _run_sixn_purge_week(
         # threshold but has a meaningful upper portion.
         moved = _try_graded_move_in(
             state, batch_meta, control, week_label, week_start_date,
-            pair, transfer_events, warnings,
+            fill_pair, transfer_events, warnings,
         )
         if moved <= 0:
             warnings.append(
-                f"{week_label}: 6N pair {pair} harvested but no production "
-                "batch above min_harvest_weight available for move-in (pair "
-                "stays in rotation, will be empty next harvest)"
+                f"{week_label}: 6N harvested {harvest_pair} but no production "
+                "batch above min_harvest_weight to fill resting pair "
+                f"{fill_pair} (stays in rotation, empty next harvest)"
             )
-        pair_queue.append(pair)
-        return
+        pair_queue.append(fill_pair)
+        return new_resting
 
     # 3. Move-in target — Layer 2 demand 2 weeks ahead, clamped to
     #    [min_harvest_per_week, max_harvest_per_week]. The min clamp
@@ -959,15 +969,15 @@ def _run_sixn_purge_week(
     else:
         target = min_h
     if target <= 0:
-        pair_queue.append(pair)
-        return
+        pair_queue.append(fill_pair)
+        return new_resting
 
     # 4. Pull from FIFO batches in cascade. When the oldest batch's
     #    production tanks can't fill the target, fall through to the next
     #    FIFO batch. This keeps move-in size >= min_h whenever total
     #    mature inventory >= min_h, and the resulting pair drain 2 weeks
     #    later also >= min_h (minus mortality).
-    main_tank_id = pair[0]  # prefer main (61/63/65) over sister (67/69/71)
+    main_tank_id = fill_pair[0]  # prefer main (61/63/65) over sister (67/69/71)
     count_moved = 0
     contributing_batches: list[str] = []
     for move_in_batch in move_in_batches:
@@ -997,7 +1007,7 @@ def _run_sixn_purge_week(
             # (already taken by first batch). Use sister tank for the
             # second batch's contribution.
             if moved_this_batch == 0 and contributing_batches:
-                dest_tank_id = pair[1]  # sister tank for second+ batch
+                dest_tank_id = fill_pair[1]  # sister tank for second+ batch
             else:
                 dest_tank_id = main_tank_id
             ev = Transfer(
@@ -1019,17 +1029,19 @@ def _run_sixn_purge_week(
 
     if count_moved == 0:
         warnings.append(
-            f"{week_label}: 6N pair {pair} move-in failed (no fish moved); "
-            f"pair will be empty next harvest"
+            f"{week_label}: 6N resting pair {fill_pair} move-in failed (no fish "
+            f"moved); pair will be empty next harvest"
         )
     elif count_moved < min_h:
         warnings.append(
-            f"{week_label}: 6N pair {pair} move-in short of min_hv "
+            f"{week_label}: 6N resting pair {fill_pair} move-in short of min_hv "
             f"({count_moved:,.0f} < {min_h:,.0f}); insufficient mature inventory"
         )
 
-    # Push pair back to queue (will be next harvested after the other pairs ahead).
-    pair_queue.append(pair)
+    # The refilled (resting) pair rejoins the rotation; the harvested pair is now
+    # next week's resting pair.
+    pair_queue.append(fill_pair)
+    return new_resting
 
 
 def _emit_transfers_for_batch_diff(
@@ -2016,6 +2028,14 @@ def phase_d_emit_events(
     except RuntimeError as e:
         warnings.append(str(e))
         sixn_pair_queue = []
+    # 3-pair fallow rotation: the resting (fallow) pair is the one NOT stocked at
+    # forecast start — it takes the first move-in while the stocked pairs purge.
+    # The Wed-fill/Fri-harvest rule needs exactly one fallow pair (2 purge + 1
+    # rest). If none is empty the handler degrades to refill-in-place.
+    _stocked_pairs = set(sixn_pair_queue)
+    _empty_pairs = [p for p in SIXN_PAIRS if p not in _stocked_pairs]
+    sixn_resting_pair: Optional[tuple[int, int]] = (
+        _empty_pairs[0] if _empty_pairs else None)
 
     # Compute forecast_start once for day-by-day biology.
     forecast_start = initial_state.today
@@ -2119,7 +2139,7 @@ def phase_d_emit_events(
 
         # Harvest engine — 6N purge pipeline when in purge mode, else Layer-2 FIFO.
         if purge_this_week:
-            _run_sixn_purge_week(
+            sixn_resting_pair = _run_sixn_purge_week(
                 state=state,
                 pair_queue=sixn_pair_queue,
                 week_label=week_label,
@@ -2131,6 +2151,7 @@ def phase_d_emit_events(
                 warnings=warnings,
                 move_in_target=move_in_target,
                 harvest_target=harvest_target,
+                resting_pair=sixn_resting_pair,
             )
         else:
             # Production mode: fall back to Layer-2 demand application.
