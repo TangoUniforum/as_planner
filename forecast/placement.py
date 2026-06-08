@@ -1960,20 +1960,23 @@ def phase_d_emit_events(
                     # (precalc/runtime divergence in purge mode), fall back to
                     # any empty OG1/2 tank as a last resort. Plan is the hint;
                     # the FW->OG floor is the rule.
-                    # TRANOG MINIMUM TANK FLOOR: cohort gets max(plan, 4,
-                    # ceil(biomass / 95kg/m^3 / 1720m^3)) tanks. Plan can
-                    # under-allocate when free_pool tracking diverges
-                    # from actual tank state (purge mode); the operational
-                    # rule "TranOG must use max(R28, 4) tanks" + density
-                    # cap force a higher floor at runtime.
+                    # TRANOG MINIMUM TANK FLOOR: cohort gets max(plan, R28-floor,
+                    # ceil(biomass / OG1/2-tank-capacity)) tanks. Plan can
+                    # under-allocate when free_pool tracking diverges from actual
+                    # tank state (purge mode); the config floor (Control R28,
+                    # min 2 — one tank per size class) + the density cap force a
+                    # higher floor at runtime. Must match the precalc/Phase-A
+                    # floors (max(2, tran_og_default_tanks)) so the fallback path
+                    # doesn't silently re-impose the old 4-tank reservation.
                     plan_n = len(ta.tank_ids) if ta.tank_ids else 0
                     cohort_kg = split.post_cull_count * (
                         split.post_cull_avg_wt_g / 1000.0
                     )
-                    density_n = max(
-                        1, math.ceil(cohort_kg / (95.0 * 1720.0))
-                    )
-                    n_needed = max(plan_n, 4, density_n)
+                    og12_cap_kg = _max_kg_per_og_tank(facility) or (95.0 * 1720.0)
+                    density_n = max(1, math.ceil(cohort_kg / og12_cap_kg))
+                    cfg_floor = max(2, (control.tran_og_default_tanks or 2)
+                                    if control else 2)
+                    n_needed = max(plan_n, cfg_floor, density_n)
                     if len(tanks_obj) < n_needed:
                         already_ids = {t.tank_id for t in tanks_obj}
                         # Stage 1 fallback: any empty OG1/2 tank.
