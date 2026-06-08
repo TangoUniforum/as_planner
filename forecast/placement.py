@@ -135,6 +135,15 @@ _REBALANCE_VARQTY_BUDGET = 20
 # the week instead of pushing it straight back over (the carried/grown-over
 # cycle). Applied to both the source target and the destination fill.
 _BALANCE_TARGET_FRAC = 0.88
+# Trigger the balancer on tanks already at this fraction of cap, not only those
+# already over it: ~10%/week growth means a tank near ~0.92 of cap will cross by
+# week-end, so relieving it now (into empty capacity like OG6S) pre-empts the
+# spike instead of chasing it a week late (the W27-34 OG6S-empty case).
+_BALANCE_TRIGGER_FRAC = 0.92
+# Fill a destination SYSTEM only to this fraction of its feed/biomass cap (not
+# the 1.05 buffer): same growth-margin logic as density, so a move can't push a
+# destination system over its feed/biomass cap once the week's growth lands.
+_BALANCE_SYS_FILL = 0.90
 # Fill a variable-quantity move's destination only to this fraction of cap (NOT
 # cap*buf), leaving headroom for the week's growth so a move can't relocate a
 # violation into the destination.
@@ -1782,7 +1791,7 @@ def _balance_loads(
                 if t is None or t.is_empty or t.max_density_kg_m3 <= 0:
                     continue
                 ratio = t.density_kg_m3 / t.max_density_kg_m3
-                if ratio > 1.0 and (worst is None or ratio > worst[0]):
+                if ratio > _BALANCE_TRIGGER_FRAC and (worst is None or ratio > worst[0]):
                     worst = (ratio, t)
         if worst is None:
             break
@@ -1803,8 +1812,8 @@ def _balance_loads(
             if not eligible:
                 continue
             tbc, tfc = cap_lookup(wl, s2)
-            bio_head = (tbc * buf - sb[s2]) if tbc else 1e18
-            feed_head = (tfc * buf - sf[s2]) if tfc else 1e18
+            bio_head = (tbc * _BALANCE_SYS_FILL - sb[s2]) if tbc else 1e18
+            feed_head = (tfc * _BALANCE_SYS_FILL - sf[s2]) if tfc else 1e18
             if bio_head <= 0 or feed_head <= 0:
                 continue
             for tid2 in ids:
