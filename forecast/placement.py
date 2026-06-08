@@ -111,6 +111,15 @@ _ARRIVAL_SMOOTH_WEEKS = 1
 # instead of bang-banging floor↔cap. Tuned empirically.
 _MOVE_IN_GAIN = 0.5
 
+# --- Realized rebalancer: split controls -------------------------------------
+# The base rebalancer relocates WHOLE tanks off over-cap systems but cannot help
+# a batch that is over-DENSE because it is crammed into too few tanks (e.g. one
+# tank at 3.8x). SPLIT lets it fan such a batch into free eligible tanks; Phase
+# D's diff machinery then evens it out as a CONSERVED partial transfer. The
+# budget caps splits/week so the pass stays deterministic and transfer-cheap.
+_REBALANCE_SPLIT = True
+_REBALANCE_SPLIT_BUDGET = 8
+
 
 # Eligible system sets used by Phase A.
 _OG_ALL_WITH_6N = ["OG1N", "OG1S", "OG2N", "OG2S", "OG3N", "OG3S",
@@ -1378,6 +1387,30 @@ def _persist_system_move(b, src, y, wl, sorted_weeks, week_index, ta_index,
         owner_w[y] = b
 
 
+def _persist_system_add(b, y, wl, sorted_weeks, week_index, ta_index,
+                        week_tank_owner):
+    """Add free tank y to batch b's tank_assignments from week wl forward.
+
+    Unlike `_persist_system_move`, b KEEPS its existing tanks — this is a SPLIT,
+    not a swap. b spreads onto one more tank; Phase D's diff evens the fish
+    across the larger set (a conserved partial transfer). Stops extending the
+    split as soon as y is claimed by another batch downstream, or b's plan ends.
+    """
+    start = week_index.get(wl)
+    if start is None:
+        return
+    for w in sorted_weeks[start:]:
+        ta = ta_index.get((b, w))
+        if ta is None:
+            break
+        owner_w = week_tank_owner.setdefault(w, {})
+        if y in owner_w and owner_w[y] != b:
+            break
+        if y not in ta.tank_ids:
+            ta.tank_ids = sorted(ta.tank_ids + [y])
+        owner_w[y] = b
+
+
 def _rebalance_systems_realized(
     state, this_assignment, ta_index, week_tank_owner, wl, sorted_weeks,
     week_index, cap_lookup, buf, batch_meta, tables,
@@ -1487,6 +1520,78 @@ def _rebalance_systems_realized(
             break
         if not moved:
             break
+
+    # --- Density-driven SPLIT pass ------------------------------------------
+    # The swap pass above relocates whole tanks but can't de-concentrate a batch
+    # that is over-dense because its fish are crammed into too few tanks (the
+    # B49 "one tank at 3.8x for 24 weeks" failure). Here we SPLIT: hand the most
+    # over-dense batch a free eligible tank and let Phase D even it out (conserved
+    # partial transfer). Targets must have a full per-tank share of headroom under
+    # BOTH caps, so a split never pushes a destination over its limits. We add the
+    # target's load but don't credit the source's de-concentration — conservative,
+    # so we may under-split but never over-fill a destination.
+    if _REBALANCE_SPLIT:
+        bcap: dict[str, float] = collections.defaultdict(float)
+        for tid, bb in this_assignment.items():
+            tk = state.tanks_by_id.get(tid)
+            if tk is not None and tk.max_density_kg_m3 > 0:
+                bcap[bb] += tk.max_biomass_kg
+        for _g2 in range(_REBALANCE_SPLIT_BUDGET):
+            cand = None
+            for bb, bio in bbio.items():
+                cp = bcap.get(bb, 0.0)
+                if cp <= 0:
+                    continue
+                ratio = bio / cp
+                if ratio > buf and (cand is None or ratio > cand[0]):
+                    cand = (ratio, bb)
+            if cand is None:
+                break
+            bb = cand[1]
+            elig = (growout_systems if bwt.get(bb, 0.0) >= OG12_MOVE_LOCK_WT_G
+                    else (og_systems - growout_systems))
+            # Share reflects the FINAL spread, not n+1: a batch crammed in one
+            # tank needs to fan across ceil(biomass / tank-capacity) tanks. Sizing
+            # the share at n+1 would charge a target half the batch on the first
+            # split (always over cap → never fires). avg_cap = the batch's
+            # representative tank density-ceiling.
+            have = max(1, len(planned.get(bb, [])))
+            avg_cap = bcap.get(bb, 0.0) / have
+            target_tanks = max(have + 1,
+                               int(-(-bbio.get(bb, 0.0) // avg_cap)) if avg_cap else have + 1)
+            share_b = bbio.get(bb, 0.0) / target_tanks
+            share_f = bfeed.get(bb, 0.0) / target_tanks
+            chosen = None
+            for tgt in sorted(elig):
+                if tgt not in og_systems:
+                    continue
+                if occ[tgt] >= len(og_tanks_by_system.get(tgt, [])):
+                    continue
+                bc, fc = cap_lookup(wl, tgt)
+                if bc and sb[tgt] + share_b > bc * buf:
+                    continue
+                if fc and sf[tgt] + share_f > fc * buf:
+                    continue
+                for candy in og_tanks_by_system.get(tgt, []):
+                    tk = state.tanks_by_id.get(candy)
+                    if tk is not None and tk.is_empty and candy not in this_assignment:
+                        chosen = (tgt, candy, tk)
+                        break
+                if chosen:
+                    break
+            if chosen is None:
+                break
+            tgt, y, tky = chosen
+            this_assignment[y] = bb
+            planned.setdefault(bb, []).append(y)
+            _persist_system_add(bb, y, wl, sorted_weeks, week_index,
+                                ta_index, week_tank_owner)
+            bcap[bb] += tky.max_biomass_kg
+            sb[tgt] += share_b
+            sf[tgt] += share_f
+            occ[tgt] += 1
+            moves += 1
+
     return moves
 
 

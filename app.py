@@ -1026,16 +1026,29 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
                 index="TankLabel", columns="Week",
                 values="Batch", aggfunc="first",
             ).reindex(index=tank_order, columns=weeks)
+            # Severity-honest scale: span the TRUE worst density (clamping at 130
+            # hid 3.8x spikes as ordinary red). Hard color break at the 95 cap;
+            # over-cap tanks deepen toward dark red as they get worse.
+            _dv = pd.to_numeric(df["Density_kg_m3"], errors="coerce")
+            vmax = max(130.0, float(_dv.max()) if _dv.notna().any() else 130.0)
+            CAP = 95.0
+            c_lo, c_cap = 80.0 / vmax, CAP / vmax
+            colorscale = sorted({
+                0.0: "#f0f0f0",          # empty / ~zero
+                min(c_lo, c_cap * 0.5): "#a8d5a8",   # green, under target
+                max(0.0, c_cap - 1e-3): "#f5d49a",   # amber, just under cap
+                c_cap: "#e8615e",        # red AT the 95 cap
+                1.0: "#7a0d0b",          # dark red at the worst observed
+            }.items())
+            # 6N rows are depuration/purge — empty cells there are NOT free
+            # growout capacity. Mark them so they aren't read as availability.
+            disp_y = [f"{t}  ⛔purge" if t.startswith("OG6N") else t
+                      for t in tank_order]
             fig = px.imshow(
                 density_pivot.values,
-                x=weeks, y=tank_order,
-                color_continuous_scale=[
-                    (0.0, "#f0f0f0"),
-                    (0.50, "#a8d5a8"),
-                    (0.85, "#f5d49a"),
-                    (1.0, "#e8615e"),
-                ],
-                range_color=[0, 130],
+                x=weeks, y=disp_y,
+                color_continuous_scale=[(p, c) for p, c in colorscale],
+                range_color=[0, vmax],
                 labels=dict(x="Week", y="Tank", color="Density (kg/m³)"),
                 aspect="auto",
             )
@@ -1058,9 +1071,12 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
             fig.update_layout(height=600, margin=dict(l=80, r=20, t=20, b=40))
             st.plotly_chart(fig, use_container_width=True)
             st.caption(
-                "Color = per-tank density (light green = under 85% target, "
-                "amber = approaching cap, red = over 95 kg/m³ cap). Hover "
-                "any cell for the batch and exact density."
+                f"Color = per-tank density. Green = under target, amber = "
+                f"approaching the 95 kg/m³ cap, red = over cap, deepening to "
+                f"dark red at the worst observed ({vmax:.0f} kg/m³) — so a 3.8x "
+                f"spike no longer looks like a mild one. Rows tagged ⛔purge are "
+                f"OG6N depuration tanks: empty cells there are NOT free growout "
+                f"capacity. Hover any cell for the batch and exact density."
             )
 
             # ---- Per-system biomass + feed over time ----
