@@ -457,13 +457,15 @@ def _build_batch_week_facts(
                 tanks_needed = max(1, math.ceil(biomass_post / effective_max_kg))
             else:
                 tanks_needed = 0
-            # TranOG arrival weeks need >=4 OG1/2 tanks so the SizeClassSplit
-            # (big + small) can each get >=2 tanks. Density math + size-class
-            # operational management both require this minimum.
+            # TranOG arrival floor. The SizeClassSplit (big + small) wants a
+            # tank per class, so 2 is the working minimum; Control R28 raises it
+            # if set. Lowered from 4 -> 2 to free transition tanks for the
+            # realized split rebalancer to fan batches out reactively as they
+            # grow (maximizes space use; cuts severe single-tank density spikes).
             if is_tranog and tanks_needed > 0:
                 tanks_needed = max(
                     tanks_needed,
-                    max(4, control.tran_og_default_tanks or 3),
+                    max(2, control.tran_og_default_tanks or 2),
                 )
 
             frac_above = (

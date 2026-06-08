@@ -277,13 +277,13 @@ def phase_a_precalc(
             is_tranog = (tranog_date is not None
                          and ws_date <= tranog_date < ws_date + timedelta(days=7))
             # TranOG arrival weeks need >=4 OG1/2 tanks so the SizeClassSplit
-            # (big + small) can each get >=2 tanks. This keeps initial
-            # density well under cap AND lets the big-first harvest pattern
-            # work (drain big tanks → small migrates in via grade-split as
-            # they grow). Control R28 (default 3) is a lower bound;
-            # min(R28, 4) is the size-class working minimum.
+            # (big + small) — one tank per class is the working minimum, so 2.
+            # The big-first harvest pattern still holds (drain big → small
+            # migrates in as it grows) and the realized split rebalancer fans
+            # batches out reactively. Control R28 raises the floor if set.
+            # Lowered 4 -> 2 to free transition tanks (maximizes space use).
             if is_tranog:
-                tanks_needed = max(tanks_needed, max(4, tranog_default_tanks))
+                tanks_needed = max(tanks_needed, max(2, tranog_default_tanks))
             # ----- The 1 kg rule in OG1/2 (two parts) -----
             # PART 1 (this block): fish MUST exit OG1/2 when avg_wt >= 1 kg.
             #   OG1/2 is for sub-1-kg fish only. A batch at avg_wt >= 1 kg
