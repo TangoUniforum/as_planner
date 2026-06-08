@@ -43,6 +43,11 @@ class ControlParams:
     # these are tunable extras with a transfer cost).
     rebalance_varqty_budget: int = 0     # off by default (marginal ROI, transfer cost); opt-in knob
     rebalance_split_budget: int = 8
+    # Multi-objective balancer (moves/week): relieves over-dense tanks into
+    # destinations with headroom in density + system feed + system biomass at
+    # once, so it cuts out-of-bounds across all three without trading one for
+    # another. 0 disables.
+    rebalance_balance_budget: int = 30
 
 
 @dataclass

@@ -130,6 +130,11 @@ _REBALANCE_SPLIT_BUDGET = 8
 # no new tanks -> tank SET is unchanged -> no diff churn, no forward-persist.
 _REBALANCE_VARQTY = True
 _REBALANCE_VARQTY_BUDGET = 20
+# Multi-objective balancer relieves an over-dense tank to THIS fraction of its
+# density cap (not to the cap): ~10%/week growth then keeps it under cap through
+# the week instead of pushing it straight back over (the carried/grown-over
+# cycle). Applied to both the source target and the destination fill.
+_BALANCE_TARGET_FRAC = 0.88
 # Fill a variable-quantity move's destination only to this fraction of cap (NOT
 # cap*buf), leaving headroom for the week's growth so a move can't relocate a
 # violation into the destination.
@@ -1731,6 +1736,129 @@ def _variable_quantity_rebalance(
     return moves
 
 
+def _balance_loads(
+    state, wl, event_date, transfer_events, warnings,
+    ta_index, week_tank_owner, sorted_weeks, week_index,
+    cap_lookup, buf, batch_meta, tables,
+    og_systems, growout_systems, og_tanks_by_system, budget,
+):
+    """Multi-objective balancer: cut out-of-bounds across per-tank DENSITY,
+    per-system FEED, and per-system BIOMASS *together*.
+
+    For each over-dense tank (worst first), move just enough surplus fish
+    (conserved Transfer) into the best destination — an under-cap tank of the
+    SAME batch, or an empty eligible tank — chosen by headroom in ALL THREE
+    dimensions (system biomass, system feed, destination density). The move is
+    capped by every dimension's headroom, so relieving a hot tank can never push
+    a destination over its feed/biomass/density cap (the trap the naive density
+    split fell into). Eligibility honours the 1 kg lock (>=1 kg → growout only;
+    <1 kg → any OG); Transfer.apply is the final INV gate. New tanks are
+    forward-persisted so the set stays stable (no diff churn). Continuity-safe.
+    """
+    sys_of = {tid: s for s, ids in og_tanks_by_system.items() for tid in ids}
+
+    def loads():
+        sb = collections.defaultdict(float)
+        sf = collections.defaultdict(float)
+        for s, ids in og_tanks_by_system.items():
+            for tid in ids:
+                t = state.tanks_by_id.get(tid)
+                if t is not None and not t.is_empty:
+                    sb[s] += t.biomass_kg
+                    sf[s] += realized_feed_kg_day(
+                        t.avg_wt_g, t.biomass_kg, batch_meta.get(t.batch_id), tables)
+        return sb, sf
+
+    moves = 0
+    stuck: set = set()
+    for _ in range(budget):
+        sb, sf = loads()
+        worst = None
+        for s, ids in og_tanks_by_system.items():
+            for tid in ids:
+                if tid in stuck:
+                    continue
+                t = state.tanks_by_id.get(tid)
+                if t is None or t.is_empty or t.max_density_kg_m3 <= 0:
+                    continue
+                ratio = t.density_kg_m3 / t.max_density_kg_m3
+                if ratio > 1.0 and (worst is None or ratio > worst[0]):
+                    worst = (ratio, t)
+        if worst is None:
+            break
+        src = worst[1]
+        b = src.batch_id
+        surplus_kg = src.biomass_kg - src.max_biomass_kg * _BALANCE_TARGET_FRAC
+        if surplus_kg <= 1.0 or src.avg_wt_g <= 0:
+            stuck.add(src.tank_id)
+            continue
+        growout = src.avg_wt_g >= OG12_MOVE_LOCK_WT_G
+        intensity = (realized_feed_kg_day(
+            src.avg_wt_g, src.biomass_kg, batch_meta.get(b), tables)
+            / src.biomass_kg) if src.biomass_kg > 0 else 0.0
+        # Candidate destinations with per-dimension headroom.
+        cands = []
+        for s2, ids in og_tanks_by_system.items():
+            eligible = (s2 in growout_systems) if growout else (s2 in og_systems)
+            if not eligible:
+                continue
+            tbc, tfc = cap_lookup(wl, s2)
+            bio_head = (tbc * buf - sb[s2]) if tbc else 1e18
+            feed_head = (tfc * buf - sf[s2]) if tfc else 1e18
+            if bio_head <= 0 or feed_head <= 0:
+                continue
+            for tid2 in ids:
+                if tid2 == src.tank_id:
+                    continue
+                t2 = state.tanks_by_id.get(tid2)
+                if t2 is None:
+                    continue
+                if (not t2.is_empty) and t2.batch_id == b:
+                    dens_head = t2.max_biomass_kg * _BALANCE_TARGET_FRAC - t2.biomass_kg
+                    is_new = False
+                elif t2.is_empty and week_tank_owner.get(wl, {}).get(tid2, b) == b:
+                    dens_head = t2.max_biomass_kg * _BALANCE_TARGET_FRAC
+                    is_new = True
+                else:
+                    continue
+                if dens_head <= 0:
+                    continue
+                score = min(bio_head, feed_head, dens_head)
+                cands.append((score, is_new, t2, s2, tbc, tfc, bio_head, feed_head, dens_head))
+        if not cands:
+            stuck.add(src.tank_id)
+            continue
+        # Most headroom first; prefer reusing an existing tank over a new one.
+        cands.sort(key=lambda c: (-c[0], c[1]))
+        _sc, is_new, dst, s2, tbc, tfc, bio_head, feed_head, dens_head = cands[0]
+        move_kg = min(surplus_kg, dens_head, bio_head, src.biomass_kg * 0.95)
+        if tfc and intensity > 0:
+            move_kg = min(move_kg, feed_head / intensity)
+        if move_kg <= 1.0:
+            stuck.add(src.tank_id)
+            continue
+        move_count = move_kg / (src.avg_wt_g / 1000.0)
+        before = src.biomass_kg
+        ev = Transfer(
+            batch_id=b, event_date=event_date, source_tank_id=src.tank_id,
+            destinations=[TankAllocation(
+                tank_id=dst.tank_id, count=move_count,
+                avg_wt_g=src.avg_wt_g, cv_pct=src.cv_pct,
+            )],
+            leaves_source_empty=False,
+        )
+        warnings.extend(ev.apply(state))
+        transfer_events.append(ev)
+        if src.biomass_kg >= before - 1.0:      # transfer refused (INV gate)
+            stuck.add(src.tank_id)
+            continue
+        if is_new:
+            _persist_system_add(b, dst.tank_id, wl, sorted_weeks, week_index,
+                                ta_index, week_tank_owner)
+        moves += 1
+    return moves
+
+
 def phase_d_emit_events(
     load_table: list[BatchWeekLoad],
     tank_assignments: list[TankAssignment],
@@ -2070,6 +2198,20 @@ def phase_d_emit_events(
             for b in sorted(set(prev_by_batch) | set(this_by_batch)):
                 _even_out_density(
                     state, b, transfer_date, transfer_events, warnings,
+                )
+
+            # Multi-objective balancer: relieve any tank still over density cap
+            # into the destination with the most headroom across density + system
+            # feed + system biomass — cutting out-of-bounds on all three at once
+            # without trading one for another. Continuity-safe (conserved
+            # Transfers; new tanks forward-persisted).
+            _bal_budget = int(getattr(control, "rebalance_balance_budget", 0) or 0)
+            if _rebal_on and _bal_budget > 0:
+                _balance_loads(
+                    state, week_label, transfer_date, transfer_events, warnings,
+                    ta_index, week_tank_owner, sorted_weeks, week_index_r,
+                    _sys_cap, _rebal_buf, batch_meta, tables, og_systems_set,
+                    growout_systems, og_tanks_by_system_r, _bal_budget,
                 )
 
             # Variable-quantity pass: with the week's placement realized, shave
