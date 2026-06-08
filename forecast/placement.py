@@ -1825,7 +1825,13 @@ def _balance_loads(
                 if (not t2.is_empty) and t2.batch_id == b:
                     dens_head = t2.max_biomass_kg * _BALANCE_TARGET_FRAC - t2.biomass_kg
                     is_new = False
-                elif t2.is_empty and week_tank_owner.get(wl, {}).get(tid2, b) == b:
+                elif t2.is_empty:
+                    # Claim any REALIZED-empty eligible tank, even one the canvas
+                    # plan nominally reserves for another batch — those
+                    # reservations frequently diverge from realized state and
+                    # were stranding 174 fixable over-dense tanks beside empty
+                    # capacity. _persist_system_add's downstream guard backs off
+                    # if the reserving batch actually materialises later.
                     dens_head = t2.max_biomass_kg * _BALANCE_TARGET_FRAC
                     is_new = True
                 else:
