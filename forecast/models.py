@@ -36,6 +36,13 @@ class ControlParams:
     # split trigger, and the PR-concentration advisory/action gate.
     # 0.85 leaves 15% headroom for growth between weekly checks.
     density_target_pct: float = 0.85
+    # Realized-rebalancer budgets (moves/week). 0 disables the pass. VARQTY
+    # moves a precise count of fish off over-cap systems; SPLIT fans over-dense
+    # batches into free tanks. Exposed as Control knobs so they can be swept
+    # from the app without code changes (the floor fixes do the heavy lifting;
+    # these are tunable extras with a transfer cost).
+    rebalance_varqty_budget: int = 0     # off by default (marginal ROI, transfer cost); opt-in knob
+    rebalance_split_budget: int = 8
 
 
 @dataclass

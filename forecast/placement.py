@@ -120,6 +120,21 @@ _MOVE_IN_GAIN = 0.5
 _REBALANCE_SPLIT = True
 _REBALANCE_SPLIT_BUDGET = 8
 
+# --- Realized rebalancer: variable-quantity moves ----------------------------
+# The swap/split passes move WHOLE tanks or even a batch across its tanks --
+# coarse. VARQTY moves a PRECISE number of fish between a batch's EXISTING tanks
+# in different systems: just enough to bring an over-cap system under its
+# biomass/feed cap, capped by the destination's headroom (system caps + dest
+# tank density). Biomass-per-tank is not fixed, so this shaves exactly the
+# excess instead of overshooting. Continuity-safe (conserved Transfer events);
+# no new tanks -> tank SET is unchanged -> no diff churn, no forward-persist.
+_REBALANCE_VARQTY = True
+_REBALANCE_VARQTY_BUDGET = 20
+# Fill a variable-quantity move's destination only to this fraction of cap (NOT
+# cap*buf), leaving headroom for the week's growth so a move can't relocate a
+# violation into the destination.
+_VARQTY_DST_FILL = 0.95
+
 
 # Eligible system sets used by Phase A.
 _OG_ALL_WITH_6N = ["OG1N", "OG1S", "OG2N", "OG2S", "OG3N", "OG3S",
@@ -1414,7 +1429,7 @@ def _persist_system_add(b, y, wl, sorted_weeks, week_index, ta_index,
 def _rebalance_systems_realized(
     state, this_assignment, ta_index, week_tank_owner, wl, sorted_weeks,
     week_index, cap_lookup, buf, batch_meta, tables,
-    og_systems, growout_systems, og_tanks_by_system,
+    og_systems, growout_systems, og_tanks_by_system, split_budget=None,
 ):
     """Move batches off systems over their REALIZED biomass/feed cap onto
     eligible systems with headroom.
@@ -1530,13 +1545,15 @@ def _rebalance_systems_realized(
     # BOTH caps, so a split never pushes a destination over its limits. We add the
     # target's load but don't credit the source's de-concentration — conservative,
     # so we may under-split but never over-fill a destination.
-    if _REBALANCE_SPLIT:
+    _split_budget = (split_budget if split_budget is not None
+                     else _REBALANCE_SPLIT_BUDGET)
+    if _REBALANCE_SPLIT and _split_budget > 0:
         bcap: dict[str, float] = collections.defaultdict(float)
         for tid, bb in this_assignment.items():
             tk = state.tanks_by_id.get(tid)
             if tk is not None and tk.max_density_kg_m3 > 0:
                 bcap[bb] += tk.max_biomass_kg
-        for _g2 in range(_REBALANCE_SPLIT_BUDGET):
+        for _g2 in range(_split_budget):
             cand = None
             for bb, bio in bbio.items():
                 cp = bcap.get(bb, 0.0)
@@ -1592,6 +1609,125 @@ def _rebalance_systems_realized(
             occ[tgt] += 1
             moves += 1
 
+    return moves
+
+
+def _variable_quantity_rebalance(
+    state, wl, event_date, transfer_events, warnings,
+    cap_lookup, buf, batch_meta, tables, og_systems, og_tanks_by_system,
+    budget,
+):
+    """Shave over-cap systems by moving a PRECISE count of fish between a
+    batch's EXISTING tanks in different systems.
+
+    For each over-cap system (biomass or feed), pick a batch that also holds a
+    tank in an under-cap system and transfer just enough fish from its over-cap
+    tank to its under-cap tank to bring the system under cap — bounded by the
+    destination system's headroom and the destination tank's density ceiling.
+    Conserved Transfer events (continuity-safe); the tank SET never changes, so
+    no diff churn and no forward-persist needed. Returns moves made.
+    """
+    sys_of = {tid: s for s, ids in og_tanks_by_system.items() for tid in ids}
+
+    def sys_load(sysid):
+        bio = feed = 0.0
+        for tid in og_tanks_by_system.get(sysid, []):
+            t = state.tanks_by_id.get(tid)
+            if t is not None and not t.is_empty:
+                bio += t.biomass_kg
+                feed += realized_feed_kg_day(
+                    t.avg_wt_g, t.biomass_kg, batch_meta.get(t.batch_id), tables)
+        return bio, feed
+
+    moves = 0
+    stuck: set = set()
+    for _ in range(budget):
+        over = []
+        for s in og_systems:
+            if s in stuck:
+                continue
+            bc, fc = cap_lookup(wl, s)
+            bio, feed = sys_load(s)
+            r = max((bio / (bc * buf)) if bc else 0.0,
+                    (feed / (fc * buf)) if fc else 0.0)
+            if r > 1.0:
+                over.append((r, s, bio, feed, bc, fc))
+        if not over:
+            break
+        over.sort(key=lambda x: (-x[0], x[1]))
+        _, S, sbio, sfeed, bc, fc = over[0]
+        need_bio = (sbio - bc * buf) if bc else 0.0
+        feed_over = (sfeed - fc * buf) if fc else 0.0
+
+        # Source tanks: occupied tanks of S, biggest batch contribution first.
+        src_by_batch: dict = collections.defaultdict(list)
+        for tid in og_tanks_by_system.get(S, []):
+            t = state.tanks_by_id.get(tid)
+            if t is not None and not t.is_empty:
+                src_by_batch[t.batch_id].append(t)
+
+        best = None
+        for bid in sorted(src_by_batch):
+            src = max(src_by_batch[bid], key=lambda t: t.biomass_kg)
+            if src.biomass_kg <= 1.0 or src.avg_wt_g <= 0:
+                continue
+            src_feed = realized_feed_kg_day(
+                src.avg_wt_g, src.biomass_kg, batch_meta.get(bid), tables)
+            intensity = src_feed / src.biomass_kg if src.biomass_kg > 0 else 0.0
+            # Destinations: same batch, in an under-cap system with headroom.
+            # Fill only to _VARQTY_DST_FILL of cap (NOT cap*buf) so a move never
+            # pushes the destination to the violation line — leaving margin for
+            # the week's growth. Sources are >cap*buf, dests <fill*cap, so each
+            # move strictly narrows the spread instead of relocating violations.
+            for tid2 in sorted(t.tank_id for t in state.tanks_by_id.values()
+                               if not t.is_empty and t.batch_id == bid):
+                t2 = state.tanks_by_id.get(tid2)
+                T = sys_of.get(tid2)
+                if T is None or T == S:
+                    continue
+                tbc, tfc = cap_lookup(wl, T)
+                Tbio, Tfeed = sys_load(T)
+                bio_head = (tbc * _VARQTY_DST_FILL - Tbio) if tbc else 9e18
+                feed_head = (tfc * _VARQTY_DST_FILL - Tfeed) if tfc else 9e18
+                if bio_head <= 0 or feed_head <= 0:
+                    continue
+                dens_head = ((t2.max_biomass_kg * 0.98 - t2.biomass_kg)
+                             if t2.max_density_kg_m3 > 0 else 9e18)
+                if dens_head <= 0:
+                    continue
+                move_bio = need_bio
+                if feed_over > 0 and intensity > 0:
+                    move_bio = max(move_bio, feed_over / intensity)
+                feed_head_bio = (feed_head / intensity) if intensity > 0 else 9e18
+                move_bio = min(move_bio, bio_head, feed_head_bio, dens_head,
+                               src.biomass_kg * 0.9)
+                if move_bio <= 1.0:
+                    continue
+                if best is None or move_bio > best[0]:
+                    best = (move_bio, bid, src, t2)
+        if best is None:
+            stuck.add(S)
+            continue
+        move_bio, bid, src, dst = best
+        move_count = move_bio / (src.avg_wt_g / 1000.0)
+        if move_count < 1.0:
+            stuck.add(S)
+            continue
+        before = src.biomass_kg
+        ev = Transfer(
+            batch_id=bid, event_date=event_date, source_tank_id=src.tank_id,
+            destinations=[TankAllocation(
+                tank_id=dst.tank_id, count=move_count,
+                avg_wt_g=src.avg_wt_g, cv_pct=src.cv_pct,
+            )],
+            leaves_source_empty=False,
+        )
+        warnings.extend(ev.apply(state))
+        transfer_events.append(ev)
+        if src.biomass_kg >= before - 1.0:   # transfer refused (INV-4 etc.)
+            stuck.add(S)
+            continue
+        moves += 1
     return moves
 
 
@@ -1765,6 +1901,8 @@ def phase_d_emit_events(
                 state, this_assignment, ta_index, week_tank_owner, week_label,
                 sorted_weeks, week_index_r, _sys_cap, _rebal_buf, batch_meta,
                 tables, og_systems_set, growout_systems, og_tanks_by_system_r,
+                split_budget=int(getattr(control, "rebalance_split_budget",
+                                         _REBALANCE_SPLIT_BUDGET) or 0),
             )
 
         ws_we = week_ranges.get(week_label)
@@ -1932,6 +2070,19 @@ def phase_d_emit_events(
             for b in sorted(set(prev_by_batch) | set(this_by_batch)):
                 _even_out_density(
                     state, b, transfer_date, transfer_events, warnings,
+                )
+
+            # Variable-quantity pass: with the week's placement realized, shave
+            # any system still over its biomass/feed cap by moving a PRECISE
+            # count of fish between a batch's existing tanks into a system with
+            # headroom — exactly enough, no overshoot. Continuity-safe.
+            _vq_budget = int(getattr(control, "rebalance_varqty_budget",
+                                     _REBALANCE_VARQTY_BUDGET) or 0)
+            if _rebal_on and _vq_budget > 0:
+                _variable_quantity_rebalance(
+                    state, week_label, transfer_date, transfer_events, warnings,
+                    _sys_cap, _rebal_buf, batch_meta, tables, og_systems_set,
+                    og_tanks_by_system_r, _vq_budget,
                 )
 
         # Day-by-day biology + TranOG entries within this week.
