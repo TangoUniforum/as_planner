@@ -561,6 +561,7 @@ def main(
         bottlenecks=canvas.bottlenecks,
         density_violations=density_violations,
         invariant_warnings=list(hydration_warns) + list(inv_warns),
+        placed_batches={r.batch_id for r in placement.batch_locations},
     )
     write_daily_harvest_schedule(
         wb, placement.harvest_events, fs_date,

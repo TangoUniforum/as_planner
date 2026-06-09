@@ -1465,6 +1465,7 @@ def write_validation_log(
     bottlenecks=None,
     density_violations=None,
     invariant_warnings=None,
+    placed_batches=None,
     sheet_name: str = "ValidationLog",
 ) -> None:
     """Numbered validation issue stream (matches reference format).
@@ -1485,8 +1486,22 @@ def write_validation_log(
                 "WARNING - FW Calibration",
                 f"Batch {r.batch_id} TranOG {r.tran_og_date.date()}: "
                 f"residual {r.residual_pct:+.2f}%{sug}"))
+    # Bottlenecks are PRECALC static-plan predictions (supply vs demand on the
+    # canvas, before placement runs). A TranOG bottleneck the precalc coordinator
+    # could not seat may still be resolved downstream by the Phase-D make-room
+    # harvest. Annotate each with its ACTUAL outcome (placed vs dropped) so the
+    # log doesn't cry wolf about a problem the executor already handled.
+    _re_tranog_b = re.compile(r"TranOG\s+(B\d+)")
     for b in bottlenecks or ():
-        entries.append((f"WARNING - Bottleneck/{b.kind}", f"{b.week_label}: {b.detail}"))
+        detail = f"{b.week_label}: {b.detail}"
+        if placed_batches is not None and "tranog" in b.kind:
+            m = _re_tranog_b.search(b.detail or "")
+            if m:
+                detail += ("  [RESOLVED at placement — make-room harvest freed a "
+                           "tank; batch placed, not dropped]"
+                           if m.group(1) in placed_batches
+                           else "  [NOT resolved — batch DROPPED; facility saturated]")
+        entries.append((f"WARNING - Bottleneck/{b.kind}", detail))
     for w in scheduler_warnings or ():
         entries.append(("WARNING - Harvest Scheduler", w))
     for w in invariant_warnings or ():
