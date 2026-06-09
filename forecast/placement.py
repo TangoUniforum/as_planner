@@ -851,6 +851,7 @@ def _run_sixn_purge_week(
     move_in_target: Optional[float] = None,
     harvest_target: Optional[float] = None,
     resting_pair: Optional[tuple[int, int]] = None,
+    refill: bool = True,
 ) -> Optional[tuple[int, int]]:
     """Run one week of the 6N purge pipeline (3-pair fallow rotation).
 
@@ -938,6 +939,14 @@ def _run_sixn_purge_week(
                 warnings.extend(ev.apply(state))
                 harvest_events.append(ev)
                 deficit -= take
+
+    # Wind-down (transition): harvest the front pair but do NOT restock — 6N
+    # drains over the rotation while production harvest takes over via in-place
+    # starvation. The resting pair stays empty; rotation continues so all pairs
+    # drain in turn.
+    if not refill:
+        pair_queue.append(fill_pair)
+        return new_resting
 
     # 2. Pick FIFO move-in source batches (cascade list).
     move_in_batches = _pick_fifo_move_in_batches(state, batch_meta, control)
@@ -2037,6 +2046,20 @@ def phase_d_emit_events(
     sixn_resting_pair: Optional[tuple[int, int]] = (
         _empty_pairs[0] if _empty_pairs else None)
 
+    # 6N phase machine (operator spec). sixn_production_start is the STOP-REFILL
+    # (transition) date, not "production begins". Phases advance:
+    #   purge      — round-robin depuration (refilling 6N)
+    #   winddown   — transition date reached: stop refills, 6N drains in rotation
+    #   empty      — 6N drained: hold 61/63/65 empty for sixn_transition_weeks,
+    #                drop 67/69/71 from availability
+    #   production — empty window elapsed: 61/63/65 are normal growout tanks
+    _psd = _as_date(control.sixn_production_start) if control.sixn_production_start else None
+    if control.sixn_growth or (_psd is not None and _as_date(control.forecast_start) >= _psd):
+        sixn_phase = "production"
+    else:
+        sixn_phase = "purge"
+    sixn_empty_weeks = 0
+
     # Compute forecast_start once for day-by-day biology.
     forecast_start = initial_state.today
 
@@ -2070,7 +2093,16 @@ def phase_d_emit_events(
 
         ws_we = week_ranges.get(week_label)
         week_start_date = ws_we[0] if ws_we else _as_date(control.forecast_start)
-        purge_this_week = is_purge_mode(control, week_start_date)
+
+        # Advance the 6N phase machine for this week (entry advancement; the
+        # empty/production advancement happens AFTER the week's 6N harvest below,
+        # once the drain state is known). purge/winddown still run the 6N
+        # pipeline (winddown stops refills → drains); empty/production do not.
+        if (sixn_phase == "purge" and _psd is not None and not control.sixn_growth
+                and week_start_date >= _psd):
+            sixn_phase = "winddown"
+        purge_this_week = sixn_phase in ("purge", "winddown")
+        sixn_refill = (sixn_phase == "purge")
 
         # Closed-loop harvest control (DESIGN: "close the loop" + forward-
         # looking #2). Decide harvest against the REALIZED state — not the
@@ -2152,9 +2184,24 @@ def phase_d_emit_events(
                 move_in_target=move_in_target,
                 harvest_target=harvest_target,
                 resting_pair=sixn_resting_pair,
+                refill=sixn_refill,
             )
+            # Wind-down drain check: once all 6N tanks are empty, enter the
+            # fallow empty window.
+            if sixn_phase == "winddown":
+                _sixn_ids = SIXN_MAIN_TANKS | SIXN_SISTER_TANKS
+                if all(state.tanks_by_id[t].is_empty for t in _sixn_ids
+                       if t in state.tanks_by_id):
+                    sixn_phase = "empty"
+                    sixn_empty_weeks = 0
         else:
-            # Production mode: fall back to Layer-2 demand application.
+            # empty / production. Count the fallow empty window, then flip to
+            # full production once sixn_transition_weeks have elapsed.
+            if sixn_phase == "empty":
+                sixn_empty_weeks += 1
+                if sixn_empty_weeks >= (control.sixn_transition_weeks or 0):
+                    sixn_phase = "production"
+            # Production harvest: Layer-2 FIFO demand application.
             for hd in demands_by_week.get(week_label, []):
                 remaining = hd.count
                 while remaining > 0.5:
