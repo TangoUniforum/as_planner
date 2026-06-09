@@ -459,7 +459,7 @@ def write_feed_forecast_monthly(
 _LEDGER_COLS = [
     "Open_Count (fish)", "Open_AvgWt (g)", "Open_Bio (kg)",
     "Close_Count (fish)", "Close_AvgWt (g)", "Close_Bio (kg)",
-    "Density (kg/m²)", "SGR (%/day)", "Gross_Growth (kg)",
+    "Density (kg/m³)", "SGR (%/day)", "Gross_Growth (kg)",
     "Net_Production (kg)", "Feed (kg)", "SFR (%/day)",
     "Bio_FCR (ratio)", "Econ_FCR (ratio)",
     "Mort_Count (fish)", "Mort_Bio (kg)",
@@ -1174,7 +1174,7 @@ def write_facility_map(
         del wb[sheet_name]
     ws = wb.create_sheet(sheet_name)
     ws.append(["FACILITY MAP"])
-    ws.append(["Each cell: Batch# AvgWt(kg) / Density(kg/m²). Color = batch."])
+    ws.append(["Each cell: Batch# AvgWt(kg) / Density(kg/m³). Color = batch."])
 
     # Order tanks by system + tank_id (OG tanks only for compactness).
     og_tanks = sorted(
