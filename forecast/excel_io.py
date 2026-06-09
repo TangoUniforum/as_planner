@@ -781,6 +781,107 @@ def write_monthly_report(
         ws.column_dimensions[get_column_letter(c)].width = 14
 
 
+def write_input_conservation_audit(
+    wb,
+    batches,
+    batch_locations,
+    harvest_events,
+    control,
+    sheet_name: str = "InputConservationAudit",
+) -> None:
+    """Input-fish conservation: every stocked batch must have a realized fate.
+
+    The TankContinuityAudit proves 0 drift for fish that ARE in tanks, but it is
+    BLIND to a batch that is never placed — a dropped TranOG arrival creates no
+    tank-week row, so it never unbalances per-tank continuity. This audit closes
+    that gap: every batch whose TranOG falls within the forecast horizon MUST
+    appear in the realized placement (BatchLocations). Any in-horizon batch with
+    no placement is DROPPED — its stocked fish vanished from the plan. The
+    Fish_At_Risk total is the count of silently-lost fish; it must be 0.
+    """
+    from datetime import timedelta
+    if sheet_name in wb.sheetnames:
+        del wb[sheet_name]
+    ws = wb.create_sheet(sheet_name)
+
+    fs = control.forecast_start
+    fs = fs.date() if hasattr(fs, "date") else fs
+    horizon_end = fs + timedelta(weeks=control.horizon_weeks)
+
+    placed_first = {}
+    placed_last = {}
+    standing = {}
+    last_wk = max((r.week_label for r in batch_locations), default=None)
+    for r in batch_locations:
+        b = r.batch_id
+        if b not in placed_first or r.week_label < placed_first[b]:
+            placed_first[b] = r.week_label
+        if b not in placed_last or r.week_label > placed_last[b]:
+            placed_last[b] = r.week_label
+        if r.week_label == last_wk:
+            standing[b] = standing.get(b, 0.0) + r.count
+    harv = {}
+    for ev in harvest_events:
+        harv[ev.batch_id] = harv.get(ev.batch_id, 0.0) + ev.count
+
+    dropped_fish = 0.0
+    dropped_batches = 0
+    in_horizon_input = 0.0
+    rowbuf = []
+    for bt in sorted(batches, key=lambda x: x.batch_id):
+        bid = bt.batch_id
+        tog = bt.tran_og_date
+        togd = (tog.date() if hasattr(tog, "date") else tog) if tog else None
+        is_placed = bid in placed_first
+        hv = harv.get(bid, 0.0)
+        in_h = togd is not None and fs <= togd <= horizon_end
+        if is_placed or hv > 0:
+            status = "PLACED"
+        elif togd is None:
+            status = "FW-only (no TranOG)"
+        elif togd > horizon_end:
+            status = "future (TranOG beyond horizon)"
+        elif togd < fs:
+            status = "pre-start"
+        else:
+            status = "*** DROPPED ***"
+        at_risk = 0.0
+        if in_h:
+            in_horizon_input += bt.input_count or 0
+        if status == "*** DROPPED ***":
+            dropped_batches += 1
+            at_risk = bt.input_count or 0.0
+            dropped_fish += at_risk
+        rowbuf.append([
+            bid, round(bt.input_count or 0, 0),
+            togd, "Y" if in_h else "N",
+            "Y" if is_placed else "N",
+            round(hv, 0) if hv else 0,
+            round(standing.get(bid, 0.0), 0),
+            status, round(at_risk, 0) if at_risk else "",
+        ])
+
+    pct = (100.0 * dropped_fish / in_horizon_input) if in_horizon_input > 0 else 0.0
+    ws.append(["INPUT-FISH CONSERVATION AUDIT"])
+    ws.append([f"Generated: {datetime.now().isoformat(timespec='seconds')}"])
+    if dropped_fish > 0:
+        ws.append([f"*** {dropped_batches} batch(es) DROPPED — {dropped_fish:,.0f} stocked "
+                   f"fish ({pct:.1f}% of in-horizon input) never placed. NOT caught by "
+                   f"TankContinuityAudit (a never-placed batch has no tank rows). ***"])
+    else:
+        ws.append(["OK — every in-horizon batch reached the realized facility (0 dropped fish)."])
+    ws.append([
+        "Batch", "Input_Count (fish)", "TranOG_Date", "In_Horizon",
+        "Placed", "Harvested (fish)", "Standing@Horizon (fish)",
+        "Status", "Fish_At_Risk (fish)",
+    ])
+    for r in rowbuf:
+        ws.append(r)
+    widths = {1: 8, 2: 17, 3: 13, 4: 11, 5: 8, 6: 16, 7: 20, 8: 28, 9: 18}
+    for c, w in widths.items():
+        ws.column_dimensions[get_column_letter(c)].width = w
+
+
 def write_reconciliation_report(
     wb,
     batch_locations,

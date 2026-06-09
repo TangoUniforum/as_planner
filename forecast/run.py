@@ -38,6 +38,7 @@ from .excel_io import (
     write_harvest_report,
     write_monthly_report,
     write_reconciliation_report,
+    write_input_conservation_audit,
     write_tank_continuity_audit,
     write_system_limits_audit,
     write_transfer_plan_output,
@@ -595,6 +596,9 @@ def main(
         placement.harvest_events,
         placement.tranog_events,
         state,
+    )
+    write_input_conservation_audit(
+        wb, batches, placement.batch_locations, placement.harvest_events, control,
     )
     write_tank_continuity_audit(
         wb,

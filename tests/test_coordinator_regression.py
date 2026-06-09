@@ -83,9 +83,11 @@ def test_run_completes_and_populates(run_outputs):
 def test_mass_conservation(run_outputs):
     """No fish or biomass created/lost unaccounted (zero drift).
 
-    This is THE correctness invariant — independent of config. Zero drift
-    also means no TranOG arrival was silently dropped (that would unbalance
-    the count).
+    This is the IN-FACILITY correctness invariant — independent of config.
+    NOTE: zero drift does NOT prove no batch was dropped. A never-placed batch
+    creates no tank-week rows, so it never touches per-tank continuity — it is
+    invisible here, not unbalanced. Input-fish conservation (every stocked batch
+    has a realized fate) is enforced separately by test_no_dropped_batches.
     """
     wb = _load(run_outputs)
     ws = wb["TankContinuityAudit"]
@@ -99,6 +101,32 @@ def test_mass_conservation(run_outputs):
             bio_drift += 1
     assert count_drift == 0, f"{count_drift} tank count-drift rows"
     assert bio_drift == 0, f"{bio_drift} tank biomass-drift rows"
+
+
+def test_no_dropped_batches(run_outputs):
+    """Input-fish conservation: no stocked batch is silently dropped.
+
+    Closes the blind spot in test_mass_conservation. Every batch whose TranOG
+    falls within the horizon must reach the realized facility; a batch the
+    placement engine fails to place (no empty OG tank) vanishes from the plan
+    with its full stocked population. The InputConservationAudit flags these as
+    'DROPPED' with a Fish_At_Risk count, which must total zero.
+    """
+    wb = _load(run_outputs)
+    assert "InputConservationAudit" in wb.sheetnames, "missing InputConservationAudit"
+    ws = wb["InputConservationAudit"]
+    dropped = []
+    at_risk = 0.0
+    for i, row in enumerate(ws.iter_rows(values_only=True), 1):
+        if i < 5 or not row or not row[0]:
+            continue
+        if isinstance(row[7], str) and "DROPPED" in row[7]:
+            dropped.append(row[0])
+            if isinstance(row[8], (int, float)):
+                at_risk += row[8]
+    assert not dropped, (
+        f"{len(dropped)} batch(es) dropped (never placed): {dropped} — "
+        f"{at_risk:,.0f} stocked fish lost from the plan")
 
 
 def test_output_sanity(run_outputs):
