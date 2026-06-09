@@ -545,91 +545,206 @@ def write_feed_forecast_monthly(
     ws.column_dimensions["B"].width = 12
 
 
+# Open/Close ledger column headers (shared by Weekly + Monthly reports).
+_LEDGER_COLS = [
+    "Open_Count (fish)", "Open_AvgWt (g)", "Open_Bio (kg)",
+    "Close_Count (fish)", "Close_AvgWt (g)", "Close_Bio (kg)",
+    "Density (kg/m²)", "SGR (%/day)", "Gross_Growth (kg)",
+    "Net_Production (kg)", "Feed (kg)", "SFR (%/day)",
+    "Bio_FCR (ratio)", "Econ_FCR (ratio)",
+    "Mort_Count (fish)", "Mort_Bio (kg)",
+    "Harv_Count (fish)", "Harv_Gross (kg)", "Harv_HOG (kg)", "Harv_AvgWt_HOG (g)",
+    "Cull_Count (fish)", "Cull_Bio (kg)",
+    "Input_Count (fish)", "Xfer_In (fish)", "Xfer_Out (fish)",
+    "Count_Check (fish)", "Bio_Check (kg)",
+]
+
+
+def _build_batch_week_ledger(
+    batch_locations, harvest_events, batch_week_states,
+    transfer_events=None, batches=None, tables=None, hog_yield=0.0,
+):
+    """Assemble a per-(batch, week) open/close production ledger.
+
+    Open = prior week's realized close (chained); Close = this week's realized
+    state (BatchLocations aggregate, falling back to the biology projection for
+    pre-TranOG FW weeks with no tank rows). Growth/feed/FCR/mortality columns
+    are derived to mirror the reference report definitions:
+      Gross_Growth = (close_bio - open_bio) + mort_bio + harv_gross + cull_bio - input_bio
+      Net_Production = Gross_Growth - mort_bio
+      SGR = ln(close_wt/open_wt)/7*100 ; SFR = feed / avg_bio / 7 * 100
+      Bio_FCR = feed / gross_growth ; Econ_FCR = feed / net_production
+    Bio_Check is 0 by construction; Count_Check carries the small count residual.
+    Returns a list of row dicts ordered by (batch, week).
+    """
+    from collections import defaultdict
+    from math import log
+    from .biology import realized_feed_kg_day
+
+    # Realized close per (batch, week) from BatchLocations.
+    rl: dict[tuple, dict] = defaultdict(
+        lambda: {"count": 0.0, "bio": 0.0, "wt_sum": 0.0, "week_start": None})
+    feed: dict[tuple, float] = defaultdict(float)
+    for r in batch_locations:
+        key = (r.batch_id, r.week_label)
+        e = rl[key]
+        e["count"] += r.count
+        e["bio"] += r.biomass_kg
+        e["wt_sum"] += r.avg_wt_g * r.count
+        e["week_start"] = r.week_start
+        if tables is not None:
+            b = (batches or {}).get(r.batch_id)
+            feed[key] += realized_feed_kg_day(r.avg_wt_g, r.biomass_kg, b, tables) * 7.0
+
+    # Harvest per (batch, week).
+    harv: dict[tuple, dict] = defaultdict(lambda: {"count": 0.0, "gross": 0.0, "wt_sum": 0.0})
+    for ev in harvest_events:
+        key = (ev.batch_id, iso_week_label(ev.event_date))
+        e = harv[key]
+        e["count"] += ev.count
+        e["gross"] += ev.count * ev.avg_wt_g / 1000.0
+        e["wt_sum"] += ev.avg_wt_g * ev.count
+
+    # Transfers per (batch, week): intra-batch moves, so In == Out (net 0).
+    xfer: dict[tuple, float] = defaultdict(float)
+    for ev in (transfer_events or ()):
+        moved = sum(getattr(d, "count", 0.0) for d in getattr(ev, "destinations", []))
+        if not moved:
+            moved = getattr(ev, "count_transferred", 0.0)
+        xfer[(ev.batch_id, iso_week_label(ev.event_date))] += moved
+
+    # Cull / mortality% / input / biology fallback, keyed by (batch, week).
+    cull: dict[tuple, dict] = defaultdict(lambda: {"count": 0.0, "bio": 0.0})
+    mortpct: dict[tuple, float] = {}
+    inputc: dict[tuple, float] = defaultdict(float)
+    bio_state: dict[tuple, object] = {}
+    for s in batch_week_states or ():
+        key = (s.batch_id, s.week_label)
+        bio_state[key] = s
+        mortpct[key] = s.mortality_pct_weekly
+        if s.cull_count_week > 0:
+            cull[key]["count"] += s.cull_count_week
+            cull[key]["bio"] += s.cull_biomass_kg_week
+        if s.week_from_input == 0:
+            inputc[key] += s.count
+
+    def close_vals(key):
+        e = rl.get(key)
+        if e and e["count"] > 0:
+            return e["count"], e["wt_sum"] / e["count"], e["bio"], e["week_start"]
+        s = bio_state.get(key)
+        if s:
+            return s.count, s.avg_weight_g, s.biomass_kg, s.week_start
+        return 0.0, 0.0, 0.0, None
+
+    # All (batch, week) cells: union of realized + projected weeks.
+    by_batch: dict[str, set] = defaultdict(set)
+    for (b, wk) in set(rl) | set(bio_state) | set(harv) | set(cull):
+        by_batch[b].add(wk)
+
+    rows = []
+    for b in sorted(by_batch):
+        weeks = sorted(by_batch[b])
+        for i, wk in enumerate(weeks):
+            cc, cwt, cbio, ws_date = close_vals((b, wk))
+            if i == 0:
+                s0 = bio_state.get((b, wk))
+                oc, owt, obio = ((s0.count, s0.avg_weight_g, s0.biomass_kg)
+                                 if s0 else (cc, cwt, cbio))
+            else:
+                oc, owt, obio, _ = close_vals((b, weeks[i - 1]))
+            h = harv.get((b, wk), {"count": 0.0, "gross": 0.0, "wt_sum": 0.0})
+            cu = cull.get((b, wk), {"count": 0.0, "bio": 0.0})
+            mort_count = oc * mortpct.get((b, wk), 0.0) / 100.0
+            mort_bio = mort_count * owt / 1000.0
+            input_count = inputc.get((b, wk), 0.0)
+            input_bio = input_count * owt / 1000.0
+            xf = xfer.get((b, wk), 0.0)
+            harv_gross = h["gross"]
+            harv_hog = harv_gross * hog_yield
+            harv_avg_hog = ((h["wt_sum"] / h["count"]) * hog_yield) if h["count"] > 0 else 0.0
+            gross_growth = (cbio - obio) + mort_bio + harv_gross + cu["bio"] - input_bio
+            net_prod = gross_growth - mort_bio
+            f = feed.get((b, wk), 0.0)
+            avg_bio = (obio + cbio) / 2.0
+            sgr = (log(cwt / owt) / 7.0 * 100.0) if owt > 0 and cwt > 0 else 0.0
+            sfr = (f / avg_bio / 7.0 * 100.0) if avg_bio > 0 else 0.0
+            bio_fcr = (f / gross_growth) if gross_growth > 0 else 0.0
+            econ_fcr = (f / net_prod) if net_prod > 0 else 0.0
+            count_check = (oc - mort_count - h["count"] - cu["count"]
+                           + input_count + xf - xf - cc)
+            # Bio_Check is 0 by construction (gross_growth balances the ledger).
+            bio_check = (obio + gross_growth - mort_bio - harv_gross - cu["bio"]
+                         + input_bio - cbio)
+            if oc <= 0 and cc <= 0 and h["count"] <= 0 and cu["count"] <= 0:
+                continue
+            rows.append({
+                "batch": b, "week": wk, "week_start": ws_date,
+                "open_count": oc, "open_wt": owt, "open_bio": obio,
+                "close_count": cc, "close_wt": cwt, "close_bio": cbio,
+                "sgr": sgr, "gross_growth": gross_growth, "net_prod": net_prod,
+                "feed": f, "sfr": sfr, "bio_fcr": bio_fcr, "econ_fcr": econ_fcr,
+                "mort_count": mort_count, "mort_bio": mort_bio,
+                "harv_count": h["count"], "harv_gross": harv_gross,
+                "harv_hog": harv_hog, "harv_avg_hog": harv_avg_hog,
+                "cull_count": cu["count"], "cull_bio": cu["bio"],
+                "input_count": input_count, "xfer_in": xf, "xfer_out": xf,
+                "count_check": count_check, "bio_check": bio_check,
+            })
+    return rows
+
+
+def _ledger_value_cells(d: dict) -> list:
+    """Format the 27 shared open/close ledger value columns from a row dict."""
+    return [
+        round(d["open_count"], 0), round(d["open_wt"], 1), round(d["open_bio"], 0),
+        round(d["close_count"], 0), round(d["close_wt"], 1), round(d["close_bio"], 0),
+        0, round(d["sgr"], 4), round(d["gross_growth"], 0),
+        round(d["net_prod"], 0), round(d["feed"], 0), round(d["sfr"], 4),
+        round(d["bio_fcr"], 2), round(d["econ_fcr"], 2),
+        round(d["mort_count"], 0), round(d["mort_bio"], 1),
+        round(d["harv_count"], 0), round(d["harv_gross"], 1),
+        round(d["harv_hog"], 1), round(d["harv_avg_hog"], 1),
+        round(d["cull_count"], 0), round(d["cull_bio"], 1),
+        round(d["input_count"], 0), round(d["xfer_in"], 0), round(d["xfer_out"], 0),
+        round(d["count_check"], 0), round(d["bio_check"], 0),
+    ]
+
+
 def write_weekly_report(
     wb,
     batch_locations,
     harvest_events,
     batch_week_states=None,
+    transfer_events=None,
+    batches=None,
+    tables=None,
+    scenario_name: str = "",
+    hog_yield: float = 0.0,
     sheet_name: str = "WeeklyReport",
 ) -> None:
-    """Per-(week, batch) aggregated snapshot: count, biomass, feed, harvest, cull.
+    """Per-(week, batch) open/close production ledger (matches reference format).
 
-    Rolls up the BatchLocations rows (which are per-tank) into one row
-    per (week, batch). Adds harvest + cull totals from harvest_events
-    and batch_week_states. FW-pre-TranOG weeks with culls but no
-    BatchLocations rows still emit a row carrying the cull totals.
+    Columns: Scenario, Week, Week_Start, Batch, then the 27 shared open/close
+    ledger columns (open/close count-avgwt-bio, density, SGR, growth, feed, FCR,
+    mortality, harvest, cull, transfers, and reconciliation checks).
     """
     if sheet_name in wb.sheetnames:
         del wb[sheet_name]
     ws = wb.create_sheet(sheet_name)
-    ws.append(["WEEKLY REPORT"])
-    ws.append(["Per-(week, batch) aggregate across all tanks. Auto-generated."])
+    ws.append([f"{sheet_name} - populated by RunForecast"])
     ws.append([])
-    ws.append([
-        "Week", "Week_Start", "Batch", "Tanks",
-        "Count (fish)", "AvgWt (kg)", "Biomass (kg)",
-        "Peak_Density (kg/m3)",
-        "Harvest_Count (fish)", "Harvest_Biomass (kg)",
-        "Cull_Count (fish)", "Cull_Biomass (kg)",
-    ])
+    ws.append([])
+    ws.append(["Scenario", "Week", "Week_Start", "Batch"] + _LEDGER_COLS)
 
-    # Aggregate locations by (week, batch).
-    from collections import defaultdict
-    agg: dict[tuple, dict] = defaultdict(
-        lambda: {"tanks": [], "count": 0.0, "biomass": 0.0, "peak_density": 0.0,
-                 "week_start": None},
-    )
-    for r in batch_locations:
-        key = (r.week_label, r.batch_id)
-        e = agg[key]
-        e["tanks"].append(r.tank_id)
-        e["count"] += r.count
-        e["biomass"] += r.biomass_kg
-        e["peak_density"] = max(e["peak_density"], r.density_kg_m3)
-        e["week_start"] = r.week_start
-
-    # Harvests by (week, batch).
-    harvest_agg: dict[tuple, dict] = defaultdict(lambda: {"count": 0.0, "biomass": 0.0})
-    for ev in harvest_events:
-        wk = iso_week_label(ev.event_date)
-        e = harvest_agg[(wk, ev.batch_id)]
-        e["count"] += ev.count
-        e["biomass"] += ev.count * ev.avg_wt_g / 1000.0
-
-    # Culls by (week, batch) from biology projection.
-    cull_agg: dict[tuple, dict] = defaultdict(lambda: {"count": 0.0, "biomass": 0.0, "week_start": None})
-    for s in batch_week_states or ():
-        if s.cull_count_week <= 0:
-            continue
-        e = cull_agg[(s.week_label, s.batch_id)]
-        e["count"] += s.cull_count_week
-        e["biomass"] += s.cull_biomass_kg_week
-        e["week_start"] = s.week_start
-
-    rows = sorted(set(agg.keys()) | set(cull_agg.keys()))
-    for k in rows:
-        wk, b = k
-        a = agg.get(k, {"tanks": [], "count": 0.0, "biomass": 0.0,
-                        "peak_density": 0.0, "week_start": None})
-        h = harvest_agg.get(k, {"count": 0.0, "biomass": 0.0})
-        c = cull_agg.get(k, {"count": 0.0, "biomass": 0.0, "week_start": None})
-        avg_wt_kg = (a["biomass"] / a["count"]) if a["count"] > 0 else 0.0
-        ws.append([
-            wk, a["week_start"] or c["week_start"], b,
-            ",".join(str(t) for t in sorted(a["tanks"])) if a["tanks"] else None,
-            round(a["count"], 0) if a["count"] > 0 else None,
-            round(avg_wt_kg, 3) if a["count"] > 0 else None,
-            round(a["biomass"], 0) if a["biomass"] > 0 else None,
-            round(a["peak_density"], 1) if a["peak_density"] > 0 else None,
-            round(h["count"], 0) if h["count"] > 0 else None,
-            round(h["biomass"], 0) if h["biomass"] > 0 else None,
-            round(c["count"], 0) if c["count"] > 0 else None,
-            round(c["biomass"], 1) if c["biomass"] > 0 else None,
-        ])
-    widths = {1: 11, 2: 12, 3: 8, 4: 18, 5: 13, 6: 11, 7: 13, 8: 18,
-              9: 18, 10: 19, 11: 16, 12: 17}
-    for c, w in widths.items():
-        ws.column_dimensions[get_column_letter(c)].width = w
+    rows = _build_batch_week_ledger(
+        batch_locations, harvest_events, batch_week_states,
+        transfer_events, batches, tables, hog_yield)
+    for d in rows:
+        ws.append([scenario_name, d["week"], d["week_start"], d["batch"]]
+                  + _ledger_value_cells(d))
+    for c in range(1, 5 + len(_LEDGER_COLS)):
+        ws.column_dimensions[get_column_letter(c)].width = 14
 
 
 def write_monthly_report(
@@ -637,80 +752,78 @@ def write_monthly_report(
     batch_locations,
     harvest_events,
     batch_week_states=None,
+    transfer_events=None,
+    batches=None,
+    tables=None,
+    scenario_name: str = "",
+    hog_yield: float = 0.0,
     sheet_name: str = "MonthlyReport",
 ) -> None:
-    """Per-(month, batch) rollup of weekly per-batch state + harvest + cull."""
+    """Per-(month, batch) open/close production ledger (matches reference format).
+
+    Rolls the weekly ledger up to months: Open = first week's open in the month,
+    Close = last week's close; flows (growth, feed, mortality, harvest, cull,
+    transfers, input) are summed; SGR/SFR/FCR are recomputed from the monthly
+    aggregates. Columns mirror the weekly report minus Week_Start.
+    """
     if sheet_name in wb.sheetnames:
         del wb[sheet_name]
     ws = wb.create_sheet(sheet_name)
-    ws.append(["MONTHLY REPORT"])
-    ws.append(["Per-(month, batch) aggregate. Closing-of-month state + harvest sum + cull sum."])
+    ws.append([f"{sheet_name} - populated by RunForecast"])
     ws.append([])
-    ws.append([
-        "Month", "Batch", "Closing_Tanks",
-        "Closing_Count (fish)", "Closing_AvgWt (kg)", "Closing_Biomass (kg)",
-        "Harvest_Count (fish)", "Harvest_Biomass (kg)",
-        "Cull_Count (fish)", "Cull_Biomass (kg)",
-    ])
+    ws.append([])
+    ws.append(["Scenario", "Month", "Batch"] + _LEDGER_COLS)
 
     from collections import defaultdict
-    # For closing state per (month, batch): take the last week in the month.
-    by_month_batch: dict[tuple[str, str], dict] = {}
-    for r in batch_locations:
-        mo = r.week_start.strftime("%Y-%m") if hasattr(r.week_start, "strftime") else str(r.week_start)[:7]
-        key = (mo, r.batch_id)
-        e = by_month_batch.setdefault(key, {
-            "last_week": "", "tanks": [], "count": 0.0, "biomass": 0.0,
-        })
-        # Reset on new week within the month (we want the LAST week's snapshot).
-        if r.week_label > e["last_week"]:
-            e["last_week"] = r.week_label
-            e["tanks"] = []
-            e["count"] = 0.0
-            e["biomass"] = 0.0
-        if r.week_label == e["last_week"]:
-            e["tanks"].append(r.tank_id)
-            e["count"] += r.count
-            e["biomass"] += r.biomass_kg
+    from math import log
 
-    harvest_agg: dict[tuple, dict] = defaultdict(lambda: {"count": 0.0, "biomass": 0.0})
-    for ev in harvest_events:
-        ev_d = ev.event_date.date() if hasattr(ev.event_date, "date") else ev.event_date
-        mo = ev_d.strftime("%Y-%m")
-        e = harvest_agg[(mo, ev.batch_id)]
-        e["count"] += ev.count
-        e["biomass"] += ev.count * ev.avg_wt_g / 1000.0
+    weekly = _build_batch_week_ledger(
+        batch_locations, harvest_events, batch_week_states,
+        transfer_events, batches, tables, hog_yield)
 
-    cull_agg: dict[tuple, dict] = defaultdict(lambda: {"count": 0.0, "biomass": 0.0})
-    for s in batch_week_states or ():
-        if s.cull_count_week <= 0:
-            continue
-        mo = s.week_start.strftime("%Y-%m") if hasattr(s.week_start, "strftime") else str(s.week_start)[:7]
-        e = cull_agg[(mo, s.batch_id)]
-        e["count"] += s.cull_count_week
-        e["biomass"] += s.cull_biomass_kg_week
+    # Group weekly rows into (batch, month); preserve week order for open/close.
+    grouped: dict[tuple, list] = defaultdict(list)
+    for d in weekly:
+        ws_d = d["week_start"]
+        mo = (ws_d.strftime("%Y-%m") if hasattr(ws_d, "strftime")
+              else (d["week"][:4] + "-" + d["week"][6:8] if ws_d is None else str(ws_d)[:7]))
+        grouped[(mo, d["batch"])].append(d)
 
-    keys = sorted(set(by_month_batch) | set(harvest_agg) | set(cull_agg))
-    for k in keys:
-        mo, b = k
-        a = by_month_batch.get(k, {"tanks": [], "count": 0.0, "biomass": 0.0})
-        h = harvest_agg.get(k, {"count": 0.0, "biomass": 0.0})
-        c = cull_agg.get(k, {"count": 0.0, "biomass": 0.0})
-        avg_wt = (a["biomass"] / a["count"]) if a["count"] > 0 else 0.0
-        ws.append([
-            mo, b,
-            ",".join(str(t) for t in sorted(a["tanks"])) if a["tanks"] else None,
-            round(a["count"], 0) if a["count"] > 0 else None,
-            round(avg_wt, 3) if a["count"] > 0 else None,
-            round(a["biomass"], 0) if a["biomass"] > 0 else None,
-            round(h["count"], 0) if h["count"] > 0 else None,
-            round(h["biomass"], 0) if h["biomass"] > 0 else None,
-            round(c["count"], 0) if c["count"] > 0 else None,
-            round(c["biomass"], 1) if c["biomass"] > 0 else None,
-        ])
-    widths = {1: 10, 2: 8, 3: 18, 4: 19, 5: 17, 6: 17, 7: 18, 8: 19, 9: 16, 10: 17}
-    for c, w in widths.items():
-        ws.column_dimensions[get_column_letter(c)].width = w
+    for (mo, b) in sorted(grouped):
+        wks = sorted(grouped[(mo, b)], key=lambda x: x["week"])
+        first, last = wks[0], wks[-1]
+        def s(key):
+            return sum(w[key] for w in wks)
+        gross_growth = s("gross_growth")
+        net_prod = s("net_prod")
+        f = s("feed")
+        open_bio, close_bio = first["open_bio"], last["close_bio"]
+        open_wt, close_wt = first["open_wt"], last["close_wt"]
+        avg_bio = (open_bio + close_bio) / 2.0
+        days = 7.0 * len(wks)
+        sgr = (log(close_wt / open_wt) / days * 100.0) if open_wt > 0 and close_wt > 0 else 0.0
+        sfr = (f / avg_bio / days * 100.0) if avg_bio > 0 else 0.0
+        harv_count = s("harv_count")
+        harv_gross = s("harv_gross")
+        agg = {
+            "batch": b, "week": mo, "week_start": None,
+            "open_count": first["open_count"], "open_wt": open_wt, "open_bio": open_bio,
+            "close_count": last["close_count"], "close_wt": close_wt, "close_bio": close_bio,
+            "sgr": sgr, "gross_growth": gross_growth, "net_prod": net_prod,
+            "feed": f, "sfr": sfr,
+            "bio_fcr": (f / gross_growth) if gross_growth > 0 else 0.0,
+            "econ_fcr": (f / net_prod) if net_prod > 0 else 0.0,
+            "mort_count": s("mort_count"), "mort_bio": s("mort_bio"),
+            "harv_count": harv_count, "harv_gross": harv_gross,
+            "harv_hog": s("harv_hog"),
+            "harv_avg_hog": (s("harv_hog") * 1000.0 / harv_count) if harv_count > 0 else 0.0,
+            "cull_count": s("cull_count"), "cull_bio": s("cull_bio"),
+            "input_count": s("input_count"), "xfer_in": s("xfer_in"), "xfer_out": s("xfer_out"),
+            "count_check": s("count_check"), "bio_check": s("bio_check"),
+        }
+        ws.append([scenario_name, mo, b] + _ledger_value_cells(agg))
+    for c in range(1, 4 + len(_LEDGER_COLS)):
+        ws.column_dimensions[get_column_letter(c)].width = 14
 
 
 def write_reconciliation_report(

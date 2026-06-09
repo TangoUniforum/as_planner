@@ -567,8 +567,14 @@ def main(
     write_feed_forecast_weekly(wb, rl_states_by_batch, fs_date, tables)
     write_feed_forecast_monthly(wb, rl_states_by_batch, fs_date, tables)
     all_states = _to_realized_lifespan(states + in_flight_states)
-    write_weekly_report(wb, placement.batch_locations, placement.harvest_events, all_states)
-    write_monthly_report(wb, placement.batch_locations, placement.harvest_events, all_states)
+    write_weekly_report(
+        wb, placement.batch_locations, placement.harvest_events, all_states,
+        transfer_events=placement.transfer_events, batches=batch_by_id, tables=tables,
+        scenario_name=control.scenario_name, hog_yield=control.default_hog_yield)
+    write_monthly_report(
+        wb, placement.batch_locations, placement.harvest_events, all_states,
+        transfer_events=placement.transfer_events, batches=batch_by_id, tables=tables,
+        scenario_name=control.scenario_name, hog_yield=control.default_hog_yield)
     write_reconciliation_report(
         wb,
         placement.batch_locations,
