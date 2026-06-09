@@ -2374,6 +2374,64 @@ def phase_d_emit_events(
         ws_we = week_ranges.get(week_label)
         if ws_we is not None:
             ws_date, we_date = ws_we
+
+            # PROACTIVE MAKE-ROOM HARVEST (pre-biology). The facility is a
+            # conveyor (OG1/2 -> ... -> OG6 -> harvest); harvest is biomass-
+            # driven, so when biomass is under cap it lets near-market fish keep
+            # growing — which OCCUPIES TANKS and can box out a TranOG arrival
+            # scheduled THIS week, forcing the arrival to be DROPPED (losing its
+            # entire stocked population — an input-fish-conservation breach; see
+            # InputConservationAudit). Before the week's biology runs, ensure
+            # enough empty OG growout tanks for this week's arrivals by harvesting
+            # the readiest tanks (biggest fish first — nearest market, would be
+            # harvested within days anyway). Done PRE-biology at week-open weight
+            # so it matches the continuity audit's event order (harvest before
+            # growth) and stays drift-free. Conserved via Harvest events.
+            _arrivals = [s for s in splits
+                         if ws_date <= _as_date(s.tran_og_date) < we_date]
+            if _arrivals:
+                _need = 0
+                for s in _arrivals:
+                    _ta = next((a for a in tank_assignments
+                                if a.week_label == week_label
+                                and a.batch_id == s.batch_id), None)
+                    _plan_n = len(_ta.tank_ids) if _ta and _ta.tank_ids else 0
+                    _cohort_kg = s.post_cull_count * (s.post_cull_avg_wt_g / 1000.0)
+                    _og12_cap = _max_kg_per_og_tank(facility) or (95.0 * 1720.0)
+                    _density_n = max(1, math.ceil(_cohort_kg / _og12_cap))
+                    _cfg_floor = max(2, (control.tran_og_default_tanks or 2)
+                                     if control else 2)
+                    _need += max(_plan_n, _cfg_floor, _density_n)
+                _empty_og = [t for t in state.tanks_by_id.values()
+                             if t.is_empty and t.type == "OG"
+                             and t.system_id not in _SIXN_SYSTEMS]
+                _deficit = _need - len(_empty_og)
+                _min_hv_wt = control.min_harvest_weight_g or 0
+                while _deficit > 0:
+                    _cands = [t for t in state.tanks_by_id.values()
+                              if not t.is_empty and t.type == "OG"
+                              and t.system_id not in _SIXN_SYSTEMS
+                              and t.avg_wt_g >= _min_hv_wt]
+                    if not _cands:
+                        break  # genuinely saturated — arrival drop handled below
+                    _cands.sort(key=lambda t: (-t.avg_wt_g, t.tank_id))
+                    _src = _cands[0]
+                    _ev = Harvest(
+                        batch_id=_src.batch_id, event_date=ws_date,
+                        source_tank_id=_src.tank_id, count=_src.count,
+                        avg_wt_g=_src.avg_wt_g, min_tank_control=0,
+                    )
+                    warnings.extend(_ev.apply(state))
+                    harvest_events.append(_ev)
+                    warnings.append(
+                        f"{week_label}: proactive MAKE-ROOM harvest of "
+                        f"{_src.location_id} (batch {_src.batch_id}, "
+                        f"{_src.count:.0f} fish @ {_src.avg_wt_g / 1000:.2f}kg) — "
+                        f"freeing a tank for {len(_arrivals)} TranOG arrival(s) "
+                        f"this week to avoid dropping them"
+                    )
+                    _deficit -= 1
+
             day = ws_date
             while day < we_date:
                 # Apply TranOG entries scheduled for this day.
@@ -2462,8 +2520,9 @@ def phase_d_emit_events(
                     if not tanks_obj:
                         warnings.append(
                             f"{week_label}: TranOG {split.batch_id} on {day}: "
-                            f"no empty OG1/2 tanks ANYWHERE; arrival DROPPED "
-                            f"(biomass model broken — operator action required)"
+                            f"no empty OG tank AND no harvestable fish ANYWHERE; "
+                            f"arrival DROPPED (facility genuinely saturated — "
+                            f"operator action required)"
                         )
                         continue
                     N = len(tanks_obj)
