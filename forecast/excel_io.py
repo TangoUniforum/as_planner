@@ -396,49 +396,48 @@ def write_harvest_report(
     harvest_events,
     default_hog_yield: float,
     facility_limits_hog: dict,
+    forecast_start=None,
     sheet_name: str = "HarvestReport",
 ) -> None:
-    """Per-week harvest aggregates: total fish + biomass + HOG."""
+    """Per-event harvest forecast (one row per tank harvest), matches reference.
+
+    Columns: Year, Month, Week, Date, Tank, Batch, Count (fish),
+    Gross Biomass (kg), HOG Biomass (kg), Avg Live Wt (kg).
+    """
     if sheet_name in wb.sheetnames:
         del wb[sheet_name]
     ws = wb.create_sheet(sheet_name)
-    ws.append(["HARVEST REPORT"])
-    ws.append(["Per-week harvest totals."])
+    ws.append(["HARVEST FORECAST"])
+    fs = forecast_start.date() if hasattr(forecast_start, "date") else forecast_start
+    ws.append([f"Generated from forecast starting {fs}" if fs else "Generated from forecast"])
     ws.append([])
     ws.append([
-        "Week", "Batches", "Tanks", "Count (fish)",
-        "Avg_AvgWt (kg)", "Gross_Biomass (kg)",
-        "HOG_Yield", "HOG_AvgWt (kg)", "HOG_Biomass (kg)",
+        "Year", "Month", "Week", "Date", "Tank", "Batch",
+        "Count (fish)", "Gross Biomass (kg)", "HOG Biomass (kg)", "Avg Live Wt (kg)",
     ])
 
-    from collections import defaultdict
-    by_week: dict[str, list] = defaultdict(list)
-    for ev in harvest_events:
-        wk = iso_week_label(ev.event_date)
-        by_week[wk].append(ev)
+    def _d(ev_date):
+        return ev_date.date() if hasattr(ev_date, "date") else ev_date
 
-    for wk in sorted(by_week.keys()):
-        evs = by_week[wk]
-        total_count = sum(e.count for e in evs)
-        total_biomass = sum(e.count * e.avg_wt_g / 1000.0 for e in evs)
-        avg_wt_kg = (total_biomass / total_count) if total_count > 0 else 0.0
-        batches = sorted({e.batch_id for e in evs})
-        tanks = sorted({e.source_tank_id for e in evs})
+    evs = sorted(harvest_events, key=lambda e: (_d(e.event_date), e.source_tank_id))
+    for ev in evs:
+        d = _d(ev.event_date)
+        wk = iso_week_label(ev.event_date)
         hog_yield = facility_limits_hog.get(wk, default_hog_yield)
-        hog_avg = avg_wt_kg * hog_yield
-        hog_biomass = total_biomass * hog_yield
+        gross = ev.count * ev.avg_wt_g / 1000.0
         ws.append([
+            d.year,
+            d.replace(day=1),
             wk,
-            ",".join(batches),
-            ",".join(str(t) for t in tanks),
-            round(total_count, 0),
-            round(avg_wt_kg, 3),
-            round(total_biomass, 0),
-            round(hog_yield, 4),
-            round(hog_avg, 3),
-            round(hog_biomass, 0),
+            d,
+            ev.source_tank_id,
+            ev.batch_id,
+            round(ev.count, 0),
+            round(gross, 0),
+            round(gross * hog_yield, 0),
+            round(ev.avg_wt_g / 1000.0, 2),
         ])
-    widths = {1: 11, 2: 14, 3: 16, 4: 13, 5: 14, 6: 17, 7: 10, 8: 14, 9: 16}
+    widths = {1: 7, 2: 12, 3: 10, 4: 12, 5: 7, 6: 8, 7: 13, 8: 18, 9: 17, 10: 16}
     for c, w in widths.items():
         ws.column_dimensions[get_column_letter(c)].width = w
 
@@ -1264,139 +1263,122 @@ def write_facility_map(
         del wb[sheet_name]
     ws = wb.create_sheet(sheet_name)
     ws.append(["FACILITY MAP"])
-    ws.append(["Per-tank occupancy across weeks. Cell = batch_id; blank = empty."])
-    ws.append([])
+    ws.append(["Each cell: Batch# AvgWt(kg) / Density(kg/m²). Color = batch."])
 
     # Order tanks by system + tank_id (OG tanks only for compactness).
     og_tanks = sorted(
         [t for t in facility.tanks if t.type == "OG"],
         key=lambda t: (t.system_id, t.tank_id),
     )
-    # Weeks in chronological order.
+    # Weeks in chronological order + their start dates.
     weeks = sorted({r.week_label for r in batch_locations})
-
-    # Build occupancy map (tank, week) → batch_id
-    occ: dict[tuple[int, str], str] = {}
+    wk_start: dict[str, object] = {}
     for r in batch_locations:
-        occ[(r.tank_id, r.week_label)] = r.batch_id
+        wk_start.setdefault(r.week_label, r.week_start)
 
-    # Header row: Tank | System | Vol_m3 | <week1> | <week2> | ...
-    header = ["Tank", "System", "Vol_m3"] + weeks
-    ws.append(header)
+    # Build occupancy map (tank, week) → (batch_id, avg_wt_g, density).
+    occ: dict[tuple[int, str], tuple] = {}
+    for r in batch_locations:
+        occ[(r.tank_id, r.week_label)] = (r.batch_id, r.avg_wt_g, r.density_kg_m3)
+
+    # Two-row header: week labels then week-start dates.
+    ws.append(["Week", ""] + weeks)
+    ws.append(["Tank", "Sys"] + [wk_start.get(w) for w in weeks])
 
     for t in og_tanks:
-        row = [t.location_id, t.system_id, t.volume_m3]
+        sys = t.system_id[2:] if t.system_id.startswith("OG") else t.system_id
+        row = [t.tank_id, sys]
         for wk in weeks:
-            row.append(occ.get((t.tank_id, wk), ""))
+            cell = occ.get((t.tank_id, wk))
+            if cell:
+                bid, wt_g, dens = cell
+                bnum = bid[1:] if bid and bid[:1] == "B" else bid
+                row.append(f"{bnum} {wt_g / 1000.0:.1f}/{dens:.0f}")
+            else:
+                row.append("")
         ws.append(row)
-    # Column widths
-    ws.column_dimensions[get_column_letter(1)].width = 10
-    ws.column_dimensions[get_column_letter(2)].width = 7
-    ws.column_dimensions[get_column_letter(3)].width = 8
-    for c in range(4, 4 + len(weeks)):
-        ws.column_dimensions[get_column_letter(c)].width = 10
+    ws.column_dimensions[get_column_letter(1)].width = 6
+    ws.column_dimensions[get_column_letter(2)].width = 6
+    for c in range(3, 3 + len(weeks)):
+        ws.column_dimensions[get_column_letter(c)].width = 12
 
 
 def write_advisory(
     wb,
-    residuals,
-    placement_warnings,
-    scheduler_warnings,
-    bottlenecks,
-    density_violations=None,
-    invariant_warnings=None,
+    batch_locations,
+    harvest_events,
+    facility_limits,
+    control,
+    batches=None,
+    tables=None,
     sheet_name: str = "Advisory",
 ) -> None:
-    """Consolidated diagnostics + warnings from every layer.
+    """Per-week capacity advisory + harvest recommendations (matches reference).
 
-    Args:
-        residuals: FW calibration residuals.
-        placement_warnings: strings from the placement walk (INV-x,
-            TranOG, 6N, Phase B/C/D).
-        scheduler_warnings: harvest scheduler warning strings.
-        bottlenecks: precalc-detected supply/demand gaps.
-        density_violations: iterable of tuples
-            (week_label, location_id, batch_id, density, cap_kg_m3) for
-            every BatchLocations row that exceeds its tank's density cap.
-        invariant_warnings: strings from hydration + check_invariants
-            (INV-1/5 + density at snapshot time).
+    Caps summary header, then one row per week: facility biomass + feed vs their
+    (per-week resolved) limits with excess, that week's harvest, and an advisory
+    flag (OK / REDUCE ...). Realized feed (kg/day) via realized_feed_kg_day so
+    the totals match what fish in the tanks actually eat.
     """
+    from collections import defaultdict
+    from .caps import resolve_facility_cap, METRIC_BIOMASS, METRIC_FEED_DAY
+    from .biology import realized_feed_kg_day
+
     if sheet_name in wb.sheetnames:
         del wb[sheet_name]
     ws = wb.create_sheet(sheet_name)
-    ws.append(["ADVISORY"])
-    ws.append([f"Generated: {datetime.now().isoformat(timespec='seconds')}"])
-
-    entries: list[tuple[str, str]] = []
-    for r in residuals:
-        if abs(r.residual_pct) >= 0.5:
-            sug = (f"; suggested FW_Correction = {r.suggested_fw_correction:.3f}"
-                   if r.suggested_fw_correction is not None else "")
-            entries.append((
-                "FW Calibration",
-                f"Batch {r.batch_id} TranOG {r.tran_og_date.date()}: "
-                f"residual {r.residual_pct:+.2f}%{sug}",
-            ))
-    for b in bottlenecks:
-        entries.append((f"Bottleneck / {b.kind}", f"{b.week_label}: {b.detail}"))
-    for w in scheduler_warnings:
-        entries.append(("Harvest Scheduler", w))
-    for w in invariant_warnings or ():
-        if "INV-1" in w:
-            cat = "INV-1 (one-batch-per-tank)"
-        elif "INV-5" in w:
-            cat = "INV-5 (min_tank_control)"
-        elif "Density" in w:
-            cat = "Hydration density"
-        else:
-            cat = "Hydration / Invariants"
-        entries.append((cat, w))
-    for v in density_violations or ():
-        wk, loc, bid, d, cap = v
-        entries.append((
-            "Density violation",
-            f"{wk}: tank {loc} (batch {bid}) at {d:.1f} kg/m³ "
-            f"> cap {cap:.1f}",
-        ))
-    for w in placement_warnings:
-        if "INV-4" in w:
-            cat = "INV-4 (1 kg rule)"
-        elif "INV-5" in w:
-            cat = "INV-5 (min_tank_control)"
-        elif "INV-1" in w:
-            cat = "INV-1 (one-batch-per-tank)"
-        elif "6N" in w or "purge" in w.lower():
-            cat = "6N Pipeline"
-        elif "TranOG" in w:
-            cat = "TranOG Entry"
-        elif w.startswith("[B]"):
-            cat = "Placement / Phase B"
-        elif w.startswith("[C]"):
-            cat = "Placement / Phase C"
-        elif w.startswith("[D]"):
-            cat = "Placement / Phase D"
-        else:
-            cat = "Placement"
-        entries.append((cat, w))
-
-    # Summary roll-up by category (count + first example).
-    by_cat: dict[str, int] = {}
-    for cat, _ in entries:
-        by_cat[cat] = by_cat.get(cat, 0) + 1
-
-    ws.append([f"{len(entries)} issue(s) found across {len(by_cat)} categories"])
+    ws.append(["CAPACITY ADVISORY - HARVEST RECOMMENDATIONS"])
+    ws.append(["Max Feed/Day:", f"{control.max_feed_per_day_kg:,.0f} kg/day"])
+    ws.append(["Max Facility Biomass:", f"{control.max_biomass_kg:,.0f} kg"])
     ws.append([])
-    ws.append(["Summary by category"])
-    ws.append(["Category", "Count"])
-    for cat in sorted(by_cat, key=lambda c: -by_cat[c]):
-        ws.append([cat, by_cat[cat]])
-    ws.append([])
-    ws.append(["Full list"])
-    ws.append(["#", "Category", "Detail"])
-    for i, (cat, detail) in enumerate(entries, 1):
-        ws.append([i, cat, detail])
+    ws.append([
+        "Week", "Week_Start", "Total_Biomass (kg)", "Biomass_Limit (kg)",
+        "Biomass_Excess (kg)", "Total_Feed (kg/day)", "Feed_Limit (kg/day)",
+        "Feed_Excess (kg/day)", "Harvest_Count", "Harvest_Biomass (kg)",
+        "Advisory", "Harvest_Batch", "Harvest_Recommended (kg)",
+    ])
 
-    widths = {1: 6, 2: 30, 3: 110}
+    bio: dict[str, float] = defaultdict(float)
+    feed: dict[str, float] = defaultdict(float)
+    wk_start: dict[str, object] = {}
+    for r in batch_locations:
+        bio[r.week_label] += r.biomass_kg
+        wk_start.setdefault(r.week_label, r.week_start)
+        if tables is not None:
+            b = (batches or {}).get(r.batch_id)
+            feed[r.week_label] += realized_feed_kg_day(r.avg_wt_g, r.biomass_kg, b, tables)
+
+    harv_c: dict[str, float] = defaultdict(float)
+    harv_b: dict[str, float] = defaultdict(float)
+    for ev in harvest_events:
+        wk = iso_week_label(ev.event_date)
+        harv_c[wk] += ev.count
+        harv_b[wk] += ev.count * ev.avg_wt_g / 1000.0
+
+    for wk in sorted(set(bio) | set(feed) | set(harv_c)):
+        tb = bio.get(wk, 0.0)
+        tf = feed.get(wk, 0.0)
+        bcap = resolve_facility_cap(METRIC_BIOMASS, wk, facility_limits, control) or 0.0
+        fcap = resolve_facility_cap(METRIC_FEED_DAY, wk, facility_limits, control) or 0.0
+        bex = max(0.0, tb - bcap)
+        fex = max(0.0, tf - fcap)
+        if bex > 0 and fex > 0:
+            adv = "REDUCE BIOMASS + FEED"
+        elif bex > 0:
+            adv = "REDUCE BIOMASS"
+        elif fex > 0:
+            adv = "REDUCE FEED"
+        else:
+            adv = "OK"
+        ws.append([
+            wk, wk_start.get(wk),
+            round(tb, 0), round(bcap, 0), round(bex, 0),
+            round(tf, 0), round(fcap, 0), round(fex, 0),
+            round(harv_c.get(wk, 0.0), 0), round(harv_b.get(wk, 0.0), 0),
+            adv, "", round(bex, 0) if bex > 0 else "",
+        ])
+    widths = {1: 10, 2: 12, 3: 18, 4: 18, 5: 18, 6: 18, 7: 18, 8: 18,
+              9: 14, 10: 18, 11: 22, 12: 14, 13: 22}
     for c, w in widths.items():
         ws.column_dimensions[get_column_letter(c)].width = w
 
@@ -1428,86 +1410,76 @@ def write_validation_log(
     invariant_warnings=None,
     sheet_name: str = "ValidationLog",
 ) -> None:
-    """Raw per-event audit trail.
+    """Numbered validation issue stream (matches reference format).
 
-    One row per warning/diagnostic, sortable by severity / source / code /
-    week / batch / tank. Companion to Advisory: Advisory is the curated
-    operator-facing summary, ValidationLog is the structured stream for
-    filtering and triage.
+    Title rows + a "# | Category | Detail" table, one row per
+    warning/diagnostic from every layer.
     """
     if sheet_name in wb.sheetnames:
         del wb[sheet_name]
     ws = wb.create_sheet(sheet_name)
-    ws.append([
-        "Severity", "Source", "Code", "Week", "Batch", "Tank", "Message",
-    ])
 
-    def emit(sev, src, code, msg):
-        wk, b, t = _vlog_parse(msg)
-        ws.append([sev, src, code, wk or "", b or "", t or "", msg])
-
+    entries: list[tuple[str, str]] = []
     for r in residuals or ():
         if abs(r.residual_pct) >= 0.5:
-            sev = "WARN" if abs(r.residual_pct) >= 1.0 else "INFO"
             sug = (f"; suggested FW_Correction={r.suggested_fw_correction:.3f}"
                    if r.suggested_fw_correction is not None else "")
-            emit(sev, "FWCalibration", "FW_RESIDUAL",
-                 f"Batch {r.batch_id} TranOG {r.tran_og_date.date()}: "
-                 f"residual {r.residual_pct:+.2f}%{sug}")
-
+            entries.append((
+                "WARNING - FW Calibration",
+                f"Batch {r.batch_id} TranOG {r.tran_og_date.date()}: "
+                f"residual {r.residual_pct:+.2f}%{sug}"))
     for b in bottlenecks or ():
-        emit("WARN", "Precalc", f"BOTTLE_{b.kind.upper()}",
-             f"{b.week_label}: {b.detail}")
-
+        entries.append((f"WARNING - Bottleneck/{b.kind}", f"{b.week_label}: {b.detail}"))
     for w in scheduler_warnings or ():
-        emit("WARN", "HarvestScheduler", "HSCHED", w)
-
+        entries.append(("WARNING - Harvest Scheduler", w))
     for w in invariant_warnings or ():
         if "INV-1" in w:
-            code = "INV1"
+            cat = "WARNING - INV-1 (one-batch-per-tank)"
         elif "INV-5" in w:
-            code = "INV5"
+            cat = "WARNING - INV-5 (min_tank_control)"
         elif "Density" in w:
-            code = "DENSITY_HYDRATION"
+            cat = "WARNING - Hydration Density"
         else:
-            code = "HYDRATION"
-        emit("WARN", "Hydration", code, w)
-
+            cat = "WARNING - Hydration"
+        entries.append((cat, w))
     for v in density_violations or ():
         wk, loc, bid, d, cap = v
-        ws.append([
-            "WARN", "PhaseD", "DENSITY", wk, bid, loc,
-            f"{loc} (batch {bid}) at {d:.1f} kg/m³ > cap {cap:.1f}",
-        ])
-
+        entries.append((
+            "WARNING - Density",
+            f"{wk}: {loc} (batch {bid}) at {d:.1f} kg/m³ > cap {cap:.1f}"))
     for w in placement_warnings or ():
         if "INV-4" in w:
-            code = "INV4"
+            cat = "WARNING - INV-4 (1 kg rule)"
         elif "INV-5" in w:
-            code = "INV5"
+            cat = "WARNING - INV-5 (min_tank_control)"
         elif "INV-1" in w:
-            code = "INV1"
+            cat = "WARNING - INV-1 (one-batch-per-tank)"
         elif "TranOG" in w:
-            code = "TRANOG"
+            cat = "WARNING - TranOG Entry"
         elif "6N" in w or "purge" in w.lower():
-            code = "SIXN"
-        else:
-            code = "PLACEMENT"
-        # Source tag from Phase B/C/D prefix if present.
-        if w.startswith("[B]"):
-            src = "PhaseB"
+            cat = "WARNING - 6N Pipeline"
+        elif w.startswith("[B]"):
+            cat = "WARNING - Placement/Phase B"
         elif w.startswith("[C]"):
-            src = "PhaseC"
+            cat = "WARNING - Placement/Phase C"
         elif w.startswith("[D]"):
-            src = "PhaseD"
+            cat = "WARNING - Placement/Phase D"
         else:
-            src = "Placement"
-        emit("WARN", src, code, w)
+            cat = "WARNING - Placement"
+        entries.append((cat, w))
 
-    widths = {1: 9, 2: 14, 3: 18, 4: 10, 5: 8, 6: 10, 7: 110}
+    ws.append(["VALIDATION LOG"])
+    ws.append([f"Generated: {datetime.now().isoformat(timespec='seconds')}"])
+    ws.append([f"{len(entries)} issue(s) found - review below" if entries
+               else "No issues found"])
+    ws.append(["#", "Category", "Detail"])
+    for i, (cat, detail) in enumerate(entries, 1):
+        ws.append([i, cat, detail])
+
+    widths = {1: 6, 2: 34, 3: 120}
     for c, w in widths.items():
         ws.column_dimensions[get_column_letter(c)].width = w
-    ws.freeze_panes = "A2"
+    ws.freeze_panes = "A5"
 
 
 def write_forecast_start(wb, forecast_start, sheet_name: str = "Control") -> None:

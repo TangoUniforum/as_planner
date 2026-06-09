@@ -541,7 +541,12 @@ def main(
         grade_events=placement.grade_events,
         pinned_transfers=pinned_transfers,
     )
-    advisory_kwargs = dict(
+    write_advisory(
+        wb, placement.batch_locations, placement.harvest_events,
+        facility_limits, control, batches=batch_by_id, tables=tables,
+    )
+    write_validation_log(
+        wb,
         residuals=residuals,
         placement_warnings=placement.warnings,
         scheduler_warnings=sched_warns,
@@ -549,8 +554,6 @@ def main(
         density_violations=density_violations,
         invariant_warnings=list(hydration_warns) + list(inv_warns),
     )
-    write_advisory(wb, **advisory_kwargs)
-    write_validation_log(wb, **advisory_kwargs)
     write_daily_harvest_schedule(
         wb, placement.harvest_events, fs_date,
         default_hog_yield=control.default_hog_yield,
@@ -560,6 +563,7 @@ def main(
         wb, placement.harvest_events,
         default_hog_yield=control.default_hog_yield,
         facility_limits_hog=facility_hog_overrides,
+        forecast_start=fs_date,
     )
     rl_states_by_batch = {
         b: _to_realized_lifespan(sl) for b, sl in states_by_batch.items()
