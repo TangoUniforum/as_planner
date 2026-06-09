@@ -2213,32 +2213,38 @@ def phase_d_emit_events(
                 sixn_empty_weeks += 1
                 if sixn_empty_weeks >= (control.sixn_transition_weeks or 0):
                     sixn_phase = "production"
-            # Production harvest: Layer-2 FIFO demand application.
-            for hd in demands_by_week.get(week_label, []):
-                remaining = hd.count
-                while remaining > 0.5:
+            # Production harvest (in-place purge): meet the CLOSED-LOOP harvest
+            # target by draining FIFO mature production tanks — the fish purge in
+            # place before harvest, keeping the harvest flow the 6N round-robin
+            # provided in purge. The realized-biomass target overrides the
+            # scheduler's projected demand (decide vs REALIZED biomass), the same
+            # control law purge mode uses. OG6N is a normal growout source here.
+            target = min(weekly_max, max(min_hv or 0.0, harvest_target or 0.0))
+            harvested = 0.0
+            if target > 0:
+                for bid in _pick_fifo_move_in_batches(state, batch_meta, control):
+                    if harvested >= target:
+                        break
                     src_tanks = [t for t in state.tanks_by_id.values()
-                                 if t.batch_id == hd.batch_id and not t.is_empty]
-                    if not src_tanks:
-                        warnings.append(
-                            f"{week_label}: batch {hd.batch_id} has no occupied tanks; "
-                            f"harvest demand of {remaining:.0f} fish dropped"
+                                 if t.batch_id == bid and not t.is_empty
+                                 and t.avg_wt_g >= control.min_harvest_weight_g]
+                    # Biggest avg_wt first: harvest the most mature fish.
+                    src_tanks.sort(key=lambda t: t.avg_wt_g, reverse=True)
+                    for src in src_tanks:
+                        if harvested >= target:
+                            break
+                        take = min(target - harvested, src.count)
+                        if take <= 0:
+                            continue
+                        ev = Harvest(
+                            batch_id=bid, event_date=week_start_date,
+                            source_tank_id=src.tank_id, count=take,
+                            avg_wt_g=src.avg_wt_g,
+                            min_tank_control=control.min_tank_control,
                         )
-                        break
-                    src_tanks.sort(key=lambda t: t.count)
-                    src = src_tanks[0]
-                    take = min(remaining, src.count)
-                    ev = Harvest(
-                        batch_id=hd.batch_id, event_date=week_start_date,
-                        source_tank_id=src.tank_id, count=take,
-                        avg_wt_g=src.avg_wt_g,
-                        min_tank_control=control.min_tank_control,
-                    )
-                    warnings.extend(ev.apply(state))
-                    harvest_events.append(ev)
-                    remaining -= take
-                    if take <= 0:
-                        break
+                        warnings.extend(ev.apply(state))
+                        harvest_events.append(ev)
+                        harvested += take
 
         # Emit Transfer events for assignment diff (after harvests).
         # In purge mode the 6N tanks are owned by the purge pipeline (see
