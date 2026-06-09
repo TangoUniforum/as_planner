@@ -77,119 +77,44 @@ def write_harvest_plan_output(
     pinned_harvests=None,
     sheet_name: str = "HarvestPlan",
 ) -> None:
-    """Per-event harvest plan, with operator pins clearly separated
-    from planner-generated rows.
+    """Per-event harvest plan as a single table (matches reference format).
 
-    Layout: two sections separated by a section header.
-      [1] OPERATOR-PINNED — preserved across runs; rows the operator
-          set Pinned=TRUE on. These are HONORED as hard constraints by
-          the harvest scheduler.
-      [2] PLANNER-GENERATED — rewritten every run; the algorithm's
-          additional harvest events to meet facility caps.
+    Columns: Week, Batch, Tank, Count (fish), Gross_AvgWt (kg),
+    Gross_Biomass (kg), HOG_Yield (ratio), HOG_AvgWt (kg), HOG_Biomass (kg).
 
-    `facility_limits_hog` is a dict `{week_label: hog_yield}` for
-    per-week HOG yield overrides; default falls back to `default_hog_yield`.
+    `facility_limits_hog` is a dict `{week_label: hog_yield}` for per-week HOG
+    yield overrides; default falls back to `default_hog_yield`. Pins (if any —
+    the workbook is now write-only, so normally none) are honored upstream as
+    harvest events and so already appear in `harvest_events`.
     """
-    from openpyxl.styles import Font, PatternFill
     if sheet_name in wb.sheetnames:
         del wb[sheet_name]
     ws = wb.create_sheet(sheet_name)
     ws.append(["HARVEST PLAN"])
-    ws.append([
-        "Two sections: OPERATOR-PINNED rows first (preserved across runs, "
-        "honored as hard constraints), then PLANNER-GENERATED rows "
-        "(rewritten each run). Operator marks Pinned=TRUE in the pin "
-        "section to keep a row across runs."
-    ])
+    ws.append(["For each harvest: specify batch, date or week#, tank, counts and biomass."])
     ws.append([])
-
-    headers = [
+    ws.append([
         "Week", "Batch", "Tank", "Count (fish)",
         "Gross_AvgWt (kg)", "Gross_Biomass (kg)",
         "HOG_Yield (ratio)", "HOG_AvgWt (kg)", "HOG_Biomass (kg)",
-        "Source", "Pinned",
-    ]
-    bold = Font(bold=True)
-    pin_fill = PatternFill("solid", fgColor="FFF3CD")
-    section_fill = PatternFill("solid", fgColor="D9E2F3")
-
-    # Identify which harvest events match operator pins (by week, batch,
-    # tank). The scheduler honors pins as hard constraints, so each pin
-    # appears as an event; we tag those rows as Source="Pin".
-    pin_keys = {
-        (p.week_label, p.batch_id, p.tank_id)
-        for p in (pinned_harvests or [])
-    }
-
-    # Track current row explicitly (openpyxl's append+max_row dance is
-    # unreliable for empty rows). Row 1=title, 2=description, 3=blank.
-    cur_row = 4
-
-    def _write_row(values: list, fill=None, bold_font: bool = False):
-        nonlocal cur_row
-        for c, v in enumerate(values, start=1):
-            cell = ws.cell(row=cur_row, column=c, value=v)
-            if fill is not None:
-                cell.fill = fill
-            if bold_font:
-                cell.font = bold
-        cur_row += 1
-
-    # ----- Section 1: operator-pinned rows -----
-    _write_row(
-        [f"=== OPERATOR-PINNED ({len(pinned_harvests or [])} row(s) — "
-         f"honored as hard constraints) ==="]
-        + [None] * (len(headers) - 1),
-        fill=section_fill, bold_font=True,
-    )
-    _write_row(headers, bold_font=True)
-    for p in (pinned_harvests or []):
-        _write_row([
-            p.week_label or p.raw_week_cell, p.batch_id, p.tank_id,
-            round(p.count, 0),
-            round(p.gross_avg_wt_kg, 3),
-            round(p.gross_biomass_kg, 0),
-            round(p.hog_yield, 4) if p.hog_yield else None,
-            round(p.hog_avg_wt_kg, 3) if p.hog_avg_wt_kg else None,
-            round(p.hog_biomass_kg, 0) if p.hog_biomass_kg else None,
-            "Pin",
-            True,
-        ], fill=pin_fill)
-
-    # ----- Divider + Section 2 header -----
-    cur_row += 1  # blank divider row
-    _write_row(
-        ["=== PLANNER-GENERATED (rewritten every run) ==="]
-        + [None] * (len(headers) - 1),
-        fill=section_fill, bold_font=True,
-    )
-    _write_row(headers, bold_font=True)
+    ])
 
     events_sorted = sorted(harvest_events, key=lambda e: (e.event_date, e.source_tank_id))
     for ev in events_sorted:
         wk = iso_week_label(ev.event_date)
-        # Skip events that came from operator pins — they're already in
-        # the pin section above.
-        if (wk, ev.batch_id, ev.source_tank_id) in pin_keys:
-            continue
         gross_avg_kg = ev.avg_wt_g / 1000.0
         gross_biomass = ev.count * gross_avg_kg
         hog_yield = facility_limits_hog.get(wk, default_hog_yield)
-        hog_avg = gross_avg_kg * hog_yield
-        hog_biomass = gross_biomass * hog_yield
-        _write_row([
+        ws.append([
             wk, ev.batch_id, ev.source_tank_id,
             round(ev.count, 0),
-            round(gross_avg_kg, 3),
+            round(gross_avg_kg, 2),
             round(gross_biomass, 0),
-            round(hog_yield, 4),
-            round(hog_avg, 3),
-            round(hog_biomass, 0),
-            "Planner",
-            None,   # Pinned — operator sets TRUE to keep across runs
+            round(hog_yield, 2),
+            round(gross_avg_kg * hog_yield, 2),
+            round(gross_biomass * hog_yield, 0),
         ])
-    widths = {1: 11, 2: 8, 3: 6, 4: 13, 5: 16, 6: 17, 7: 17, 8: 14, 9: 16,
-              10: 9, 11: 8}
+    widths = {1: 11, 2: 8, 3: 6, 4: 13, 5: 16, 6: 17, 7: 17, 8: 14, 9: 16}
     for c, w in widths.items():
         ws.column_dimensions[get_column_letter(c)].width = w
 
@@ -202,83 +127,26 @@ def write_transfer_plan_output(
     pinned_transfers=None,
     sheet_name: str = "TransferPlan",
 ) -> None:
-    """Per-event transfer + TranOG + Grade plan, with operator pins
-    clearly separated from planner-generated rows.
+    """Per-event transfer + TranOG + Grade plan as a single table (matches
+    reference format).
 
-    Layout: two sections separated by a blank row + section header.
-      [1] OPERATOR-PINNED — preserved across runs; rows the operator
-          set Pinned=TRUE on. NOTE: placement does not yet HONOR these
-          as hard constraints (run.py prints a WARN); they're echoed
-          here for visibility so the operator can see what was set.
-      [2] PLANNER-GENERATED — rewritten every run; the algorithm's
-          decisions for transfers / TranOG / Grade events.
-
-    Row schema: Week, Batch, From_Tank, To_Tank, Count, Avg_Weight (kg),
-    Type, CV (%), Status, Source, Pinned. From_Tank is 'FW' for TranOG;
-    multi-tank source for Grade is comma-separated. Source is "Pin" or
-    "Planner" for at-a-glance distinction.
+    Columns: Week, Batch, From_Tank, To_Tank, Count (fish), Avg_Weight (kg),
+    Grade, CV (%). From_Tank is 'FW' for TranOG entries; a Grade event's
+    multi-tank source is comma-separated. The Grade column carries the grade
+    class (A/B/big/small) for Grade events, blank otherwise. Rejected transfer
+    attempts (count_transferred == 0) are omitted — this is the actionable
+    plan, not the attempt log (the audit sheets carry rejected attempts).
     """
-    from openpyxl.styles import Font, PatternFill
     if sheet_name in wb.sheetnames:
         del wb[sheet_name]
     ws = wb.create_sheet(sheet_name)
     ws.append(["TRANSFER PLAN"])
-    ws.append([
-        "Two sections: OPERATOR-PINNED rows first (preserved across runs), "
-        "then PLANNER-GENERATED rows (rewritten each run). Operator marks a "
-        "Pinned=TRUE row in the pin section to keep it across runs."
-    ])
+    ws.append(["For each transfer: specify batch, date or week#, from/to tanks, count, avg weight."])
     ws.append([])
-
-    headers = [
+    ws.append([
         "Week", "Batch", "From_Tank", "To_Tank",
-        "Count (fish)", "Avg_Weight (kg)", "Type", "CV (%)", "Status",
-        "Source", "Pinned",
-    ]
-    bold = Font(bold=True)
-    pin_fill = PatternFill("solid", fgColor="FFF3CD")     # soft yellow
-    section_fill = PatternFill("solid", fgColor="D9E2F3")  # soft blue
-
-    cur_row = 4
-
-    def _write_row(values: list, fill=None, bold_font: bool = False):
-        nonlocal cur_row
-        for c, v in enumerate(values, start=1):
-            cell = ws.cell(row=cur_row, column=c, value=v)
-            if fill is not None:
-                cell.fill = fill
-            if bold_font:
-                cell.font = bold
-        cur_row += 1
-
-    # ----- Section 1: operator-pinned rows -----
-    _write_row(
-        [f"=== OPERATOR-PINNED ({len(pinned_transfers or [])} row(s) — "
-         f"NOT YET HONORED by placement) ==="]
-        + [None] * (len(headers) - 1),
-        fill=section_fill, bold_font=True,
-    )
-    _write_row(headers, bold_font=True)
-    for p in (pinned_transfers or []):
-        _write_row([
-            p.week_label or p.raw_week_cell, p.batch_id, p.from_tank, p.to_tank,
-            round(p.count, 0),
-            round(p.avg_weight_kg, 3),
-            p.grade or "Transfer",
-            round(p.cv_pct, 1) if p.cv_pct else None,
-            "pinned",
-            "Pin",
-            True,
-        ], fill=pin_fill)
-
-    # ----- Divider + Section 2 header -----
-    cur_row += 1  # blank divider row
-    _write_row(
-        ["=== PLANNER-GENERATED (rewritten every run) ==="]
-        + [None] * (len(headers) - 1),
-        fill=section_fill, bold_font=True,
-    )
-    _write_row(headers, bold_font=True)
+        "Count (fish)", "Avg_Weight (kg)", "Grade", "CV (%)",
+    ])
 
     rows: list[tuple] = []
     for ev in tranog_events:
@@ -286,27 +154,17 @@ def write_transfer_plan_output(
         for dest in ev.destinations:
             rows.append((
                 ev.event_date, wk, ev.batch_id, "FW", dest.tank_id,
-                dest.count, dest.avg_wt_g / 1000.0,
-                "TranOG", dest.cv_pct, "applied",
+                dest.count, dest.avg_wt_g / 1000.0, "", dest.cv_pct,
             ))
     for ev in transfer_events:
-        # Show ALL events, including rejected ones (count_transferred==0)
-        # so the audit can account for every state change attempt.
         ct = getattr(ev, "count_transferred", None)
-        if ct is None:
-            status = "applied"
-        elif ct <= 0:
-            status = "rejected"
-        elif ct < sum(d.count for d in ev.destinations) - 0.5:
-            status = "partial"
-        else:
-            status = "applied"
+        if ct is not None and ct <= 0:
+            continue  # rejected attempt — not part of the actionable plan
         wk = iso_week_label(ev.event_date)
         for dest in ev.destinations:
             rows.append((
                 ev.event_date, wk, ev.batch_id, str(ev.source_tank_id), dest.tank_id,
-                dest.count, dest.avg_wt_g / 1000.0,
-                "Transfer", dest.cv_pct, status,
+                dest.count, dest.avg_wt_g / 1000.0, "", dest.cv_pct,
             ))
     for ev in (grade_events or []):
         wk = iso_week_label(ev.event_date)
@@ -315,25 +173,78 @@ def write_transfer_plan_output(
             rows.append((
                 ev.event_date, wk, ev.batch_id, src_str, dest.tank_id,
                 dest.count, dest.avg_wt_g / 1000.0,
-                "Grade", dest.cv_pct, "applied",
+                getattr(dest, "grade", "") or "", dest.cv_pct,
             ))
     rows.sort(key=lambda r: (r[0], r[2]))
 
     for r in rows:
-        _write_row([
+        ws.append([
             r[1], r[2], r[3], r[4],
             round(r[5], 0),
             round(r[6], 3),
             r[7],
             round(r[8], 1) if r[8] else None,
-            r[9],
-            "Planner",
-            None,   # Pinned — operator sets TRUE to keep across runs
         ])
-    widths = {1: 11, 2: 8, 3: 10, 4: 8, 5: 13, 6: 14, 7: 9, 8: 8, 9: 10,
-              10: 9, 11: 8}
+    widths = {1: 11, 2: 8, 3: 10, 4: 8, 5: 13, 6: 14, 7: 9, 8: 8}
     for c, w in widths.items():
         ws.column_dimensions[get_column_letter(c)].width = w
+
+
+def write_harvest_plan_report(
+    wb,
+    harvest_events,
+    scenario_name: str,
+    default_hog_yield: float,
+    facility_limits_hog: dict,
+    sheet_name: str = "HarvestPlan Report",
+) -> None:
+    """Annual per-batch harvest summary (matches reference format).
+
+    One block per year. Each block: a "<scenario> <year>" title row, a month-
+    header row (12 month-start columns + "TOTAL <year>"), then three rows per
+    batch — Units, Av Weight - Kg HOG, Biomass - Tons HOG — with monthly values
+    and a year total. Blank cells for months with no harvest.
+    """
+    from collections import defaultdict
+    from datetime import date as _date
+
+    if sheet_name in wb.sheetnames:
+        del wb[sheet_name]
+    ws = wb.create_sheet(sheet_name)
+
+    # Aggregate per (year, batch, month) -> count + HOG biomass (kg).
+    agg: dict[tuple, dict] = defaultdict(lambda: {"count": 0.0, "hog_kg": 0.0})
+    years: set[int] = set()
+    batches_by_year: dict[int, set] = defaultdict(set)
+    for ev in harvest_events:
+        d = ev.event_date.date() if hasattr(ev.event_date, "date") else ev.event_date
+        hog_yield = facility_limits_hog.get(iso_week_label(ev.event_date), default_hog_yield)
+        e = agg[(d.year, ev.batch_id, d.month)]
+        e["count"] += ev.count
+        e["hog_kg"] += ev.count * ev.avg_wt_g / 1000.0 * hog_yield
+        years.add(d.year)
+        batches_by_year[d.year].add(ev.batch_id)
+
+    for year in sorted(years):
+        ws.append([f"{scenario_name} {year}"])
+        ws.append(["", ""] + [_date(year, m, 1) for m in range(1, 13)] + [f"TOTAL {year}"])
+        for b in sorted(batches_by_year[year]):
+            months = [agg.get((year, b, m)) for m in range(1, 13)]
+            tot_count = sum(m["count"] for m in months if m)
+            tot_hog = sum(m["hog_kg"] for m in months if m)
+            units = [round(m["count"], 0) if m else "" for m in months]
+            avgwt = [round(m["hog_kg"] / m["count"], 2) if m and m["count"] else "" for m in months]
+            tons = [round(m["hog_kg"] / 1000.0, 0) if m else "" for m in months]
+            ws.append([b, "Units"] + units + [round(tot_count, 0)])
+            ws.append(["", "Av Weight - Kg HOG"] + avgwt
+                      + [round(tot_hog / tot_count, 2) if tot_count else ""])
+            ws.append(["", "Biomass - Tons HOG"] + tons + [round(tot_hog / 1000.0, 0)])
+        ws.append([])
+
+    ws.column_dimensions["A"].width = 8
+    ws.column_dimensions["B"].width = 20
+    for c in range(3, 16):
+        ws.column_dimensions[get_column_letter(c)].width = 11
 
 
 def write_daily_harvest_schedule(
