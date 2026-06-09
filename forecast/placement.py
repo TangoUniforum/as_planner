@@ -2204,8 +2204,13 @@ def phase_d_emit_events(
                 _sixn_ids = SIXN_MAIN_TANKS | SIXN_SISTER_TANKS
                 if all(state.tanks_by_id[t].is_empty for t in _sixn_ids
                        if t in state.tanks_by_id):
-                    sixn_phase = "empty"
-                    sixn_empty_weeks = 0
+                    # sixn_transition_weeks=0 → no fallow window: 6N goes straight
+                    # from drained to production (no empty-capacity dip).
+                    if (control.sixn_transition_weeks or 0) <= 0:
+                        sixn_phase = "production"
+                    else:
+                        sixn_phase = "empty"
+                        sixn_empty_weeks = 0
         else:
             # empty / production. Count the fallow empty window, then flip to
             # full production once sixn_transition_weeks have elapsed.
