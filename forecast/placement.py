@@ -2078,19 +2078,6 @@ def phase_d_emit_events(
             for tid in a.tank_ids:
                 this_assignment[tid] = a.batch_id
 
-        # System rebalancing: from the REALIZED end-of-last-week state, move
-        # batches off systems over their biomass/feed cap onto eligible systems
-        # with headroom — editing this_assignment + tank_assignments forward so
-        # the diff machinery below conserves the fish (continuity-safe).
-        if _rebal_on:
-            _rebalance_systems_realized(
-                state, this_assignment, ta_index, week_tank_owner, week_label,
-                sorted_weeks, week_index_r, _sys_cap, _rebal_buf, batch_meta,
-                tables, og_systems_set, growout_systems, og_tanks_by_system_r,
-                split_budget=int(getattr(control, "rebalance_split_budget",
-                                         _REBALANCE_SPLIT_BUDGET) or 0),
-            )
-
         ws_we = week_ranges.get(week_label)
         week_start_date = ws_we[0] if ws_we else _as_date(control.forecast_start)
 
@@ -2103,6 +2090,31 @@ def phase_d_emit_events(
             sixn_phase = "winddown"
         purge_this_week = sixn_phase in ("purge", "winddown")
         sixn_refill = (sixn_phase == "purge")
+
+        # In production, OG6N's main tanks (61/63/65) become a normal growout
+        # system (sisters 67/69/71 stay unavailable). Augment the eligible system
+        # sets so the rebalancer + balancer route and relieve density into OG6N.
+        if sixn_phase == "production":
+            _og_sys = og_systems_set | {"OG6N"}
+            _grow_sys = growout_systems | {"OG6N"}
+            _og_tanks = dict(og_tanks_by_system_r)
+            _og_tanks["OG6N"] = [t for t in (61, 63, 65) if t in state.tanks_by_id]
+        else:
+            _og_sys, _grow_sys, _og_tanks = (
+                og_systems_set, growout_systems, og_tanks_by_system_r)
+
+        # System rebalancing: from the REALIZED end-of-last-week state, move
+        # batches off systems over their biomass/feed cap onto eligible systems
+        # with headroom — editing this_assignment + tank_assignments forward so
+        # the diff machinery below conserves the fish (continuity-safe).
+        if _rebal_on:
+            _rebalance_systems_realized(
+                state, this_assignment, ta_index, week_tank_owner, week_label,
+                sorted_weeks, week_index_r, _sys_cap, _rebal_buf, batch_meta,
+                tables, _og_sys, _grow_sys, _og_tanks,
+                split_budget=int(getattr(control, "rebalance_split_budget",
+                                         _REBALANCE_SPLIT_BUDGET) or 0),
+            )
 
         # Closed-loop harvest control (DESIGN: "close the loop" + forward-
         # looking #2). Decide harvest against the REALIZED state — not the
@@ -2293,8 +2305,8 @@ def phase_d_emit_events(
                 _balance_loads(
                     state, week_label, transfer_date, transfer_events, warnings,
                     ta_index, week_tank_owner, sorted_weeks, week_index_r,
-                    _sys_cap, _rebal_buf, batch_meta, tables, og_systems_set,
-                    growout_systems, og_tanks_by_system_r, _bal_budget,
+                    _sys_cap, _rebal_buf, batch_meta, tables, _og_sys,
+                    _grow_sys, _og_tanks, _bal_budget,
                 )
 
             # Variable-quantity pass: with the week's placement realized, shave
