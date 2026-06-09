@@ -564,8 +564,8 @@ def main(
     rl_states_by_batch = {
         b: _to_realized_lifespan(sl) for b, sl in states_by_batch.items()
     }
-    write_feed_forecast_weekly(wb, rl_states_by_batch, fs_date)
-    write_feed_forecast_monthly(wb, rl_states_by_batch, fs_date)
+    write_feed_forecast_weekly(wb, rl_states_by_batch, fs_date, tables)
+    write_feed_forecast_monthly(wb, rl_states_by_batch, fs_date, tables)
     all_states = _to_realized_lifespan(states + in_flight_states)
     write_weekly_report(wb, placement.batch_locations, placement.harvest_events, all_states)
     write_monthly_report(wb, placement.batch_locations, placement.harvest_events, all_states)

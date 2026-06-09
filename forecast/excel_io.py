@@ -447,82 +447,102 @@ def write_feed_forecast_weekly(
     wb,
     biology_states_by_batch,
     forecast_start,
+    tables=None,
     sheet_name: str = "FeedForecastWeekly",
 ) -> None:
-    """Per-week facility-wide feed forecast.
+    """Per-week feed forecast as a Feed Type x Week matrix (kg/week).
 
-    Aggregates per-batch weekly feed projections (from biology) into a
-    single facility-level series.
+    Matches the reference report: rows are feed types (ordered by Max Size),
+    columns are ISO weeks with a week-start date sub-row, cells are the weekly
+    feed (kg) consumed by fish in that feed-type size band, plus a Total row.
     """
     if sheet_name in wb.sheetnames:
         del wb[sheet_name]
     ws = wb.create_sheet(sheet_name)
-    ws.append(["FEED FORECAST — WEEKLY"])
-    ws.append(["Per-week facility-wide feed projections from biology."])
-    ws.append([])
-    ws.append(["Week", "Feed_kg_week", "Feed_kg_day (peak)", "Active_Batches"])
 
     from collections import defaultdict
-    by_week_total: dict[str, float] = defaultdict(float)
-    by_week_peak: dict[str, float] = defaultdict(float)
-    by_week_batches: dict[str, set] = defaultdict(set)
-    for batch_id, states in biology_states_by_batch.items():
+    ftw: dict[tuple[str, str], float] = defaultdict(float)  # (feed_type, week) -> kg
+    wk_start: dict[str, object] = {}
+    for states in biology_states_by_batch.values():
         for s in states:
-            by_week_total[s.week_label] += s.feed_kg_week
-            by_week_peak[s.week_label] = max(by_week_peak[s.week_label], s.feed_kg_day)
-            if s.feed_kg_week > 0:
-                by_week_batches[s.week_label].add(batch_id)
+            wk_start.setdefault(s.week_label, s.week_start)
+            if s.feed_kg_week:
+                ftw[(s.feed_type, s.week_label)] += s.feed_kg_week
+    weeks = sorted(wk_start.keys())
+    # Feed-type row order (by Max Size) from biology tables; fall back to the
+    # feed_type values present in the states if tables weren't passed.
+    if tables is not None and getattr(tables, "feed_types", None):
+        ftypes = sorted(tables.feed_types, key=lambda x: x[0])  # (max_size_g, name)
+    else:
+        names = sorted({ft for (ft, _) in ftw})
+        ftypes = [(None, n) for n in names]
 
-    for wk in sorted(by_week_total.keys()):
-        ws.append([
-            wk,
-            round(by_week_total[wk], 0),
-            round(by_week_peak[wk], 0),
-            len(by_week_batches[wk]),
-        ])
-    widths = {1: 11, 2: 14, 3: 19, 4: 16}
-    for c, w in widths.items():
-        ws.column_dimensions[get_column_letter(c)].width = w
+    ws.append(["WEEKLY FEED FORECAST BY TYPE (kg)"])
+    ws.append([])
+    ws.append(["Feed Type", "Max Size (g)"] + weeks)
+    ws.append(["", ""] + [wk_start[w] for w in weeks])
+    totals = [0.0] * len(weeks)
+    for max_size, name in ftypes:
+        row = [name, max_size]
+        for i, w in enumerate(weeks):
+            v = ftw.get((name, w), 0.0)
+            row.append(round(v, 0))
+            totals[i] += v
+        ws.append(row)
+    ws.append(["Total (kg)", ""] + [round(t, 0) for t in totals])
+    ws.column_dimensions["A"].width = 18
+    ws.column_dimensions["B"].width = 12
 
 
 def write_feed_forecast_monthly(
     wb,
     biology_states_by_batch,
     forecast_start,
+    tables=None,
     sheet_name: str = "FeedForecastMonthly",
 ) -> None:
-    """Per-month rollup of weekly feed projections."""
+    """Per-month feed forecast as a Feed Type x Month matrix (kg/month).
+
+    Matches the reference: rows are feed types (by Max Size), columns are
+    month-start dates, cells are monthly feed (kg) by feed-type band, plus a
+    Grand Total row.
+    """
     if sheet_name in wb.sheetnames:
         del wb[sheet_name]
     ws = wb.create_sheet(sheet_name)
-    ws.append(["FEED FORECAST — MONTHLY"])
-    ws.append(["Per-month facility-wide feed projections from biology."])
-    ws.append([])
-    ws.append(["Month", "Feed_kg_month", "Feed_kg_day (avg)", "Feed_kg_day (peak)"])
 
     from collections import defaultdict
-    by_month: dict[str, float] = defaultdict(float)
-    by_month_peak: dict[str, float] = defaultdict(float)
-    by_month_days: dict[str, int] = defaultdict(int)
-    for batch_id, states in biology_states_by_batch.items():
+    from datetime import date as _date
+    ftm: dict[tuple[str, str], float] = defaultdict(float)  # (feed_type, month) -> kg
+    months: set[str] = set()
+    for states in biology_states_by_batch.values():
         for s in states:
-            mo = s.week_start.strftime("%Y-%m") if hasattr(s.week_start, "strftime") else str(s.week_start)[:7]
-            by_month[mo] += s.feed_kg_week
-            by_month_peak[mo] = max(by_month_peak[mo], s.feed_kg_day)
-            by_month_days[mo] += 7
+            mo = (s.week_start.strftime("%Y-%m") if hasattr(s.week_start, "strftime")
+                  else str(s.week_start)[:7])
+            months.add(mo)
+            if s.feed_kg_week:
+                ftm[(s.feed_type, mo)] += s.feed_kg_week
+    months_sorted = sorted(months)
+    mo_dates = [_date(int(m[:4]), int(m[5:7]), 1) for m in months_sorted]
+    if tables is not None and getattr(tables, "feed_types", None):
+        ftypes = sorted(tables.feed_types, key=lambda x: x[0])
+    else:
+        ftypes = [(None, n) for n in sorted({ft for (ft, _) in ftm})]
 
-    for mo in sorted(by_month.keys()):
-        days = by_month_days[mo] or 1
-        avg_day = by_month[mo] / days
-        ws.append([
-            mo,
-            round(by_month[mo], 0),
-            round(avg_day, 0),
-            round(by_month_peak[mo], 0),
-        ])
-    widths = {1: 10, 2: 15, 3: 19, 4: 19}
-    for c, w in widths.items():
-        ws.column_dimensions[get_column_letter(c)].width = w
+    ws.append(["MONTHLY FEED FORECAST BY TYPE (kg)"])
+    ws.append([])
+    ws.append(["Feed Type", "Max Size (g)"] + mo_dates)
+    totals = [0.0] * len(months_sorted)
+    for max_size, name in ftypes:
+        row = [name, max_size]
+        for i, m in enumerate(months_sorted):
+            v = ftm.get((name, m), 0.0)
+            row.append(round(v, 0))
+            totals[i] += v
+        ws.append(row)
+    ws.append(["Grand Total", ""] + [round(t, 0) for t in totals])
+    ws.column_dimensions["A"].width = 18
+    ws.column_dimensions["B"].width = 12
 
 
 def write_weekly_report(
