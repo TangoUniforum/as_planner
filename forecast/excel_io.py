@@ -353,11 +353,41 @@ def write_harvest_report(
         ws.column_dimensions[get_column_letter(c)].width = w
 
 
+def _feed_by_type_week(batch_locations, biology_states_by_batch, tables, batches=None):
+    """(feed_name, week_label) -> kg/week, plus a week_label -> week_start map.
+
+    OG/SW feed comes from REALIZED batch_locations via realized_feed_kg_day, so
+    totals match the WeeklyReport Feed column and the Advisory feed/day. FW/EGG
+    feed comes from the projection (FW fish live in FW tanks, which are absent
+    from batch_locations). Phantom unharvested SW projection fish are excluded —
+    they never appear in batch_locations — so later-year feed no longer balloons.
+    """
+    from collections import defaultdict
+    from .biology import realized_feed_kg_day, _feed_type_for_size
+    ftw: dict[tuple[str, str], float] = defaultdict(float)
+    wk_start: dict[str, object] = {}
+    for r in batch_locations:
+        wk_start.setdefault(r.week_label, r.week_start)
+        if tables is not None:
+            b = (batches or {}).get(r.batch_id)
+            fkg = realized_feed_kg_day(r.avg_wt_g, r.biomass_kg, b, tables) * 7.0
+            if fkg:
+                ftw[(_feed_type_for_size(tables, r.avg_wt_g), r.week_label)] += fkg
+    for states in (biology_states_by_batch or {}).values():
+        for s in states:
+            if s.stage in ("FW", "EGG") and s.feed_kg_week:
+                wk_start.setdefault(s.week_label, s.week_start)
+                ftw[(s.feed_type, s.week_label)] += s.feed_kg_week
+    return ftw, wk_start
+
+
 def write_feed_forecast_weekly(
     wb,
+    batch_locations,
     biology_states_by_batch,
     forecast_start,
     tables=None,
+    batches=None,
     sheet_name: str = "FeedForecastWeekly",
 ) -> None:
     """Per-week feed forecast as a Feed Type x Week matrix (kg/week).
@@ -365,27 +395,20 @@ def write_feed_forecast_weekly(
     Matches the reference report: rows are feed types (ordered by Max Size),
     columns are ISO weeks with a week-start date sub-row, cells are the weekly
     feed (kg) consumed by fish in that feed-type size band, plus a Total row.
+    Feed source = realized OG/SW + projected FW (see _feed_by_type_week).
     """
     if sheet_name in wb.sheetnames:
         del wb[sheet_name]
     ws = wb.create_sheet(sheet_name)
 
-    from collections import defaultdict
-    ftw: dict[tuple[str, str], float] = defaultdict(float)  # (feed_type, week) -> kg
-    wk_start: dict[str, object] = {}
-    for states in biology_states_by_batch.values():
-        for s in states:
-            wk_start.setdefault(s.week_label, s.week_start)
-            if s.feed_kg_week:
-                ftw[(s.feed_type, s.week_label)] += s.feed_kg_week
+    ftw, wk_start = _feed_by_type_week(batch_locations, biology_states_by_batch, tables, batches)
     weeks = sorted(wk_start.keys())
     # Feed-type row order (by Max Size) from biology tables; fall back to the
-    # feed_type values present in the states if tables weren't passed.
+    # feed_type values present if tables weren't passed.
     if tables is not None and getattr(tables, "feed_types", None):
         ftypes = sorted(tables.feed_types, key=lambda x: x[0])  # (max_size_g, name)
     else:
-        names = sorted({ft for (ft, _) in ftw})
-        ftypes = [(None, n) for n in names]
+        ftypes = [(None, n) for n in sorted({ft for (ft, _) in ftw})]
 
     ws.append(["WEEKLY FEED FORECAST BY TYPE (kg)"])
     ws.append([])
@@ -406,16 +429,19 @@ def write_feed_forecast_weekly(
 
 def write_feed_forecast_monthly(
     wb,
+    batch_locations,
     biology_states_by_batch,
     forecast_start,
     tables=None,
+    batches=None,
     sheet_name: str = "FeedForecastMonthly",
 ) -> None:
     """Per-month feed forecast as a Feed Type x Month matrix (kg/month).
 
     Matches the reference: rows are feed types (by Max Size), columns are
     month-start dates, cells are monthly feed (kg) by feed-type band, plus a
-    Grand Total row.
+    Grand Total row. Feed source = realized OG/SW + projected FW (rolled up
+    from the same per-week aggregation as the weekly sheet).
     """
     if sheet_name in wb.sheetnames:
         del wb[sheet_name]
@@ -423,15 +449,14 @@ def write_feed_forecast_monthly(
 
     from collections import defaultdict
     from datetime import date as _date
+    ftw, wk_start = _feed_by_type_week(batch_locations, biology_states_by_batch, tables, batches)
     ftm: dict[tuple[str, str], float] = defaultdict(float)  # (feed_type, month) -> kg
     months: set[str] = set()
-    for states in biology_states_by_batch.values():
-        for s in states:
-            mo = (s.week_start.strftime("%Y-%m") if hasattr(s.week_start, "strftime")
-                  else str(s.week_start)[:7])
-            months.add(mo)
-            if s.feed_kg_week:
-                ftm[(s.feed_type, mo)] += s.feed_kg_week
+    for (name, wk), v in ftw.items():
+        ws_ = wk_start.get(wk)
+        mo = (ws_.strftime("%Y-%m") if hasattr(ws_, "strftime") else str(ws_)[:7])
+        months.add(mo)
+        ftm[(name, mo)] += v
     months_sorted = sorted(months)
     mo_dates = [_date(int(m[:4]), int(m[5:7]), 1) for m in months_sorted]
     if tables is not None and getattr(tables, "feed_types", None):
@@ -537,13 +562,24 @@ def _build_batch_week_ledger(
             cull[key]["bio"] += s.cull_biomass_kg_week
         if s.week_from_input == 0:
             inputc[key] += s.count
+        # FW (pre-TranOG) feed: FW fish live in FW tanks, which are NOT in
+        # batch_locations (OG-only). Pull their feed from the projection so the
+        # ledger + FeedForecast cover small-fish feed. SW/OG feed always comes
+        # from realized batch_locations above — never the projection, which
+        # would re-introduce phantom unharvested fish (see close_vals gate).
+        if s.stage in ("FW", "EGG") and s.feed_kg_week and key not in rl:
+            feed[key] += s.feed_kg_week
 
     def close_vals(key):
         e = rl.get(key)
         if e and e["count"] > 0:
             return e["count"], e["wt_sum"] / e["count"], e["bio"], e["week_start"]
+        # Biology fallback ONLY for genuine pre-TranOG FW/EGG weeks. A projected
+        # SW/STARVE week with no realized placement is a phantom (batch never
+        # placed, or already harvested out) and must not contribute biomass —
+        # else facility totals balloon far past the real ~4M kg.
         s = bio_state.get(key)
-        if s:
+        if s and s.stage in ("FW", "EGG"):
             return s.count, s.avg_weight_g, s.biomass_kg, s.week_start
         return 0.0, 0.0, 0.0, None
 
@@ -692,12 +728,21 @@ def write_monthly_report(
         transfer_events, batches, tables, hog_yield)
 
     # Group weekly rows into (batch, month); preserve week order for open/close.
+    from datetime import date as _date
+    def _month_key(d):
+        ws_d = d["week_start"]
+        if hasattr(ws_d, "strftime"):
+            return ws_d.strftime("%Y-%m")
+        # Fallback: derive the month from the ISO week label (NOT a raw slice —
+        # d["week"][6:8] is the week NUMBER, which produced bogus "2027-20" keys).
+        try:
+            yy, wwk = int(d["week"][:4]), int(d["week"][6:8])
+            return _date.fromisocalendar(yy, wwk, 1).strftime("%Y-%m")
+        except Exception:
+            return str(ws_d)[:7]
     grouped: dict[tuple, list] = defaultdict(list)
     for d in weekly:
-        ws_d = d["week_start"]
-        mo = (ws_d.strftime("%Y-%m") if hasattr(ws_d, "strftime")
-              else (d["week"][:4] + "-" + d["week"][6:8] if ws_d is None else str(ws_d)[:7]))
-        grouped[(mo, d["batch"])].append(d)
+        grouped[(_month_key(d), d["batch"])].append(d)
 
     for (mo, b) in sorted(grouped):
         wks = sorted(grouped[(mo, b)], key=lambda x: x["week"])
