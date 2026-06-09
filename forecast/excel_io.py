@@ -53,7 +53,7 @@ def write_batch_locations(wb, batch_locations, sheet_name: str = "BatchLocations
     ws.append([])
     ws.append([
         "Week", "Week_Start", "Batch", "Tank", "System",
-        "Count (fish)", "AvgWt (kg)", "Biomass (kg)", "Density (kg/m3)",
+        "Count (fish)", "AvgWt (kg)", "Biomass (kg)", "Density (kg/m3)", "Stage",
     ])
     for r in batch_locations:
         ws.append([
@@ -62,6 +62,7 @@ def write_batch_locations(wb, batch_locations, sheet_name: str = "BatchLocations
             round(r.avg_wt_g / 1000.0, 3),
             round(r.biomass_kg, 0),
             round(r.density_kg_m3, 1),
+            getattr(r, "stage", ""),
         ])
     widths = {1: 11, 2: 12, 3: 8, 4: 6, 5: 9, 6: 12, 7: 11, 8: 13, 9: 14}
     for c, w in widths.items():
@@ -745,11 +746,19 @@ def write_reconciliation_report(
     # Per-(batch, week) aggregates from BatchLocations.
     loc_count: dict[tuple[str, str], float] = defaultdict(float)
     loc_biomass: dict[tuple[str, str], float] = defaultdict(float)
+    # STARVE (6N production in-place purge) tanks neither grow nor take mortality;
+    # track their count/biomass per (batch, week) so the reconciliation excludes
+    # them from the growth + mortality expectation (else they read as drift).
+    starve_count: dict[tuple[str, str], float] = defaultdict(float)
+    starve_biomass: dict[tuple[str, str], float] = defaultdict(float)
     weeks_seen: set[str] = set()
     week_start_by_label: dict[str, object] = {}
     for r in batch_locations:
         loc_count[(r.batch_id, r.week_label)] += r.count
         loc_biomass[(r.batch_id, r.week_label)] += r.biomass_kg
+        if getattr(r, "stage", "") == "STARVE":
+            starve_count[(r.batch_id, r.week_label)] += r.count
+            starve_biomass[(r.batch_id, r.week_label)] += r.biomass_kg
         weeks_seen.add(r.week_label)
         week_start_by_label[r.week_label] = r.week_start
     weeks = sorted(weeks_seen)
@@ -796,7 +805,10 @@ def write_reconciliation_report(
             if prev_count == 0 and actual_c == 0:
                 continue
             m_pct = mort_pct.get((batch, wk), 0.0) or 0.0
-            mort = prev_count * (m_pct / 100.0)
+            # STARVE fish this week neither grow nor take mortality.
+            st_b = starve_biomass.get((batch, wk), 0.0)
+            st_c = starve_count.get((batch, wk), 0.0)
+            mort = max(0.0, prev_count - st_c) * (m_pct / 100.0)
             cull = cull_count.get((batch, wk), 0.0) or 0.0
             cull_b = cull_biomass.get((batch, wk), 0.0) or 0.0
             hv_c = harv_count.get((batch, wk), 0.0)
@@ -814,10 +826,12 @@ def write_reconciliation_report(
             growth_factor = (1.0 + sgr / 100.0) ** 7
             partial_factor = 1.0 + (growth_factor - 1.0) * 0.5
             bio_full_growth = prev_biomass - hv_b
-            growth_full = bio_full_growth * (growth_factor - 1.0)
+            # Only the NON-starve biomass grows / takes mortality.
+            grow_bio = max(0.0, bio_full_growth - st_b)
+            growth_full = grow_bio * (growth_factor - 1.0)
             growth_tnin = in_b * (partial_factor - 1.0)
             growth_kg = growth_full + growth_tnin
-            mort_kg = bio_full_growth * (m_pct / 100.0)
+            mort_kg = grow_bio * (m_pct / 100.0)
             expected_b = bio_full_growth + growth_full - mort_kg + in_b + growth_tnin
             delta_c = actual_c - expected_c
             delta_b = actual_b - expected_b
@@ -983,8 +997,12 @@ def write_tank_continuity_audit(
 
     # Per-(tank, week) biomass from BatchLocations.
     tank_wk_bio: dict[tuple[int, str], float] = {}
+    # STARVE (in-place purge) tank-weeks: no growth, no mortality.
+    tank_wk_starve: dict[tuple[int, str], bool] = {}
     for r in batch_locations:
         tank_wk_bio[(r.tank_id, r.week_label)] = r.biomass_kg
+        if getattr(r, "stage", "") == "STARVE":
+            tank_wk_starve[(r.tank_id, r.week_label)] = True
 
     pr_tank_bio: dict[int, float] = {}
     if initial_state is not None:
@@ -1004,10 +1022,12 @@ def write_tank_continuity_audit(
             cur_biomass = tank_wk_bio.get((tid, wk), 0.0)
             if prev_count == 0 and cur_count == 0:
                 continue
+            # STARVE (in-place purge) this week: no growth, no mortality.
+            is_starve = tank_wk_starve.get((tid, wk), False)
 
             # ---- Count balance ----
             m_pct = mort_pct.get((prev_batch, wk), 0.0) if prev_batch else 0.0
-            mort = prev_count * (m_pct / 100.0)
+            mort = 0.0 if is_starve else prev_count * (m_pct / 100.0)
             h_out = harvest_out.get((tid, wk), 0.0)
             t_out = transfer_out.get((tid, wk), 0.0)
             t_in = transfer_in.get((tid, wk), 0.0)
@@ -1042,10 +1062,10 @@ def write_tank_continuity_audit(
             partial_factor = 1.0 + (growth_factor - 1.0) * 0.5
             # Biomass that grew the FULL week (in tank at start of biology):
             bio_full_growth = prev_biomass - h_out_kg - t_out_kg + t_in_kg
-            growth_full = bio_full_growth * (growth_factor - 1.0)
+            growth_full = 0.0 if is_starve else bio_full_growth * (growth_factor - 1.0)
             growth_tnin = tn_in_kg * (partial_factor - 1.0)
             growth_kg = growth_full + growth_tnin
-            mort_kg = bio_full_growth * (m_pct / 100.0)  # tn_in too young
+            mort_kg = 0.0 if is_starve else bio_full_growth * (m_pct / 100.0)
             # Expected close = biomass after biology, then grade events:
             bio_after_biology = bio_full_growth + growth_full - mort_kg + tn_in_kg + growth_tnin
             expected_bio = bio_after_biology - g_out_kg + g_in_kg
@@ -1511,8 +1531,10 @@ def write_system_limits_audit(
             continue
         b = batch_by_id.get(r.batch_id)
         sb[(r.week_label, r.system_id)] += r.biomass_kg
-        sf[(r.week_label, r.system_id)] += realized_feed_kg_day(
-            r.avg_wt_g, r.biomass_kg, b, tables)
+        # STARVE = in-place purge: biomass counts to the system, but no feed.
+        if getattr(r, "stage", "") != "STARVE":
+            sf[(r.week_label, r.system_id)] += realized_feed_kg_day(
+                r.avg_wt_g, r.biomass_kg, b, tables)
 
     if sheet_name in wb.sheetnames:
         del wb[sheet_name]

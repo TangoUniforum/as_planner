@@ -76,7 +76,7 @@ from .sixn import (
     initial_purge_pair_queue,
     is_purge_mode,
 )
-from .state import FacilityState, TankState
+from .state import FacilityState, TankState, STAGE_STARVE
 from .time_grid import forecast_week_labels, iso_week_label, week_range
 
 
@@ -217,6 +217,7 @@ class BatchLocationRow:
     avg_wt_g: float
     biomass_kg: float
     density_kg_m3: float
+    stage: str = ""   # tank stage; "STARVE" = in-place purge (no feed/growth)
 
 
 @dataclass
@@ -1253,7 +1254,8 @@ def _even_out_density(
     transfers are emitted only where actually needed.
     """
     tanks = [t for t in state.tanks_by_id.values()
-             if t.batch_id == batch_id and not t.is_empty]
+             if t.batch_id == batch_id and not t.is_empty
+             and t.stage != STAGE_STARVE]   # STARVE tanks are purge-pipeline-owned
     if len(tanks) < 2:
         return
 
@@ -1794,9 +1796,10 @@ def _balance_loads(
             for tid in ids:
                 t = state.tanks_by_id.get(tid)
                 if t is not None and not t.is_empty:
-                    sb[s] += t.biomass_kg
-                    sf[s] += realized_feed_kg_day(
-                        t.avg_wt_g, t.biomass_kg, batch_meta.get(t.batch_id), tables)
+                    sb[s] += t.biomass_kg   # STARVE biomass still counts to caps
+                    if t.stage != STAGE_STARVE:   # but STARVE fish eat nothing
+                        sf[s] += realized_feed_kg_day(
+                            t.avg_wt_g, t.biomass_kg, batch_meta.get(t.batch_id), tables)
         return sb, sf
 
     moves = 0
@@ -1809,7 +1812,8 @@ def _balance_loads(
                 if tid in stuck:
                     continue
                 t = state.tanks_by_id.get(tid)
-                if t is None or t.is_empty or t.max_density_kg_m3 <= 0:
+                if (t is None or t.is_empty or t.max_density_kg_m3 <= 0
+                        or t.stage == STAGE_STARVE):   # don't relieve purge tanks
                     continue
                 ratio = t.density_kg_m3 / t.max_density_kg_m3
                 if ratio > _BALANCE_TRIGGER_FRAC and (worst is None or ratio > worst[0]):
@@ -1841,7 +1845,7 @@ def _balance_loads(
                 if tid2 == src.tank_id:
                     continue
                 t2 = state.tanks_by_id.get(tid2)
-                if t2 is None:
+                if t2 is None or t2.stage == STAGE_STARVE:   # don't fill purge tanks
                     continue
                 if (not t2.is_empty) and t2.batch_id == b:
                     dens_head = t2.max_biomass_kg * _BALANCE_TARGET_FRAC - t2.biomass_kg
@@ -2218,22 +2222,55 @@ def phase_d_emit_events(
                 sixn_empty_weeks += 1
                 if sixn_empty_weeks >= (control.sixn_transition_weeks or 0):
                     sixn_phase = "production"
-            # Production harvest (in-place purge): meet the CLOSED-LOOP harvest
-            # target by draining FIFO mature production tanks — the fish purge in
-            # place before harvest, keeping the harvest flow the 6N round-robin
-            # provided in purge. The realized-biomass target overrides the
-            # scheduler's projected demand (decide vs REALIZED biomass), the same
-            # control law purge mode uses. OG6N is a normal growout source here.
+            # Production harvest = IN-PLACE PURGE pipeline. A tank selected for
+            # harvest enters STARVE (no feed, no growth — biomass holds, weight
+            # frozen) and is harvested starvation_period_days later AT ITS ENTRY
+            # weight, so facility biomass, feed, and the harvest avg weight are
+            # correct (vs harvesting after ~2 more weeks of growth). STARVE tanks
+            # are pipeline-owned: the rebalancing passes below skip them so their
+            # fish aren't scrambled between purging and growing tanks.
+            # purge_days=0 → harvest immediately (no in-place purge configured).
             target = min(weekly_max, max(min_hv or 0.0, harvest_target or 0.0))
-            harvested = 0.0
-            if target > 0:
+            purge_days = int(getattr(control, "starvation_period_days", 0) or 0)
+            if sixn_phase == "production" and purge_days > 0:
+                # (a) Harvest tanks whose in-place purge has completed.
+                for t in list(state.tanks_by_id.values()):
+                    if t.stage == STAGE_STARVE and not t.is_empty:
+                        t.starvation_days_remaining -= 7
+                        if t.starvation_days_remaining <= 0:
+                            ev = Harvest(
+                                batch_id=t.batch_id, event_date=week_start_date,
+                                source_tank_id=t.tank_id, count=t.count,
+                                avg_wt_g=t.avg_wt_g, min_tank_control=0,
+                            )
+                            warnings.extend(ev.apply(state))
+                            harvest_events.append(ev)
+                # (b) Enter fresh whole tanks into purge so ~target/week flows out.
+                entered = 0.0
+                if target > 0:
+                    for bid in _pick_fifo_move_in_batches(state, batch_meta, control):
+                        if entered >= target:
+                            break
+                        src_tanks = [t for t in state.tanks_by_id.values()
+                                     if t.batch_id == bid and not t.is_empty
+                                     and t.stage == "SW"
+                                     and t.avg_wt_g >= control.min_harvest_weight_g]
+                        src_tanks.sort(key=lambda t: t.avg_wt_g, reverse=True)
+                        for src in src_tanks:
+                            if entered >= target:
+                                break
+                            src.stage = STAGE_STARVE
+                            src.starvation_days_remaining = purge_days
+                            entered += src.count
+            elif target > 0:
+                # Immediate harvest (empty-phase tail, or purge_days unset).
+                harvested = 0.0
                 for bid in _pick_fifo_move_in_batches(state, batch_meta, control):
                     if harvested >= target:
                         break
                     src_tanks = [t for t in state.tanks_by_id.values()
                                  if t.batch_id == bid and not t.is_empty
                                  and t.avg_wt_g >= control.min_harvest_weight_g]
-                    # Biggest avg_wt first: harvest the most mature fish.
                     src_tanks.sort(key=lambda t: t.avg_wt_g, reverse=True)
                     for src in src_tanks:
                         if harvested >= target:
@@ -2570,6 +2607,7 @@ def phase_d_emit_events(
                 avg_wt_g=tank.avg_wt_g,
                 biomass_kg=tank.biomass_kg,
                 density_kg_m3=tank.density_kg_m3,
+                stage=tank.stage,
             ))
 
         prev_assignment = this_assignment
