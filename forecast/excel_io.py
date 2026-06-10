@@ -240,6 +240,10 @@ def write_harvest_plan_report(
     for year in sorted(years):
         ws.append([f"{scenario_name} {year}"])
         ws.append(["", ""] + [_date(year, m, 1) for m in range(1, 13)] + [f"TOTAL {year}"])
+        # Per-month totals across all batches (the bottom TOTAL block) — what
+        # sales planning reads: how much HOG lands each month.
+        mo_count = [0.0] * 12
+        mo_hog = [0.0] * 12
         for b in sorted(batches_by_year[year]):
             months = [agg.get((year, b, m)) for m in range(1, 13)]
             tot_count = sum(m["count"] for m in months if m)
@@ -251,6 +255,23 @@ def write_harvest_plan_report(
             ws.append(["", "Av Weight - Kg HOG"] + avgwt
                       + [round(tot_hog / tot_count, 2) if tot_count else ""])
             ws.append(["", "Biomass - Tons HOG"] + tons + [round(tot_hog / 1000.0, 0)])
+            for i, m in enumerate(months):
+                if m:
+                    mo_count[i] += m["count"]
+                    mo_hog[i] += m["hog_kg"]
+        # Bottom TOTAL block: monthly sums across batches (Units / weighted Av
+        # Weight / Biomass tons), plus the year total in the last column.
+        yr_count = sum(mo_count)
+        yr_hog = sum(mo_hog)
+        ws.append(["TOTAL", "Units"]
+                  + [round(c, 0) if c else "" for c in mo_count]
+                  + [round(yr_count, 0)])
+        ws.append(["", "Av Weight - Kg HOG"]
+                  + [round(mo_hog[i] / mo_count[i], 2) if mo_count[i] else "" for i in range(12)]
+                  + [round(yr_hog / yr_count, 2) if yr_count else ""])
+        ws.append(["", "Biomass - Tons HOG"]
+                  + [round(h / 1000.0, 0) if h else "" for h in mo_hog]
+                  + [round(yr_hog / 1000.0, 0)])
         ws.append([])
 
     ws.column_dimensions["A"].width = 8

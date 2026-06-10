@@ -834,6 +834,7 @@ def _parse_output_workbook(path: Path) -> dict:
             cnt = row[3]
             gross_kg = row[5]
             gross_avg_kg = row[4]
+            hog_kg = row[8] if len(row) > 8 and isinstance(row[8], (int, float)) else None
             if isinstance(cnt, (int, float)) and isinstance(gross_kg, (int, float)):
                 harvest_count += cnt
                 harvest_kg += gross_kg
@@ -841,6 +842,7 @@ def _parse_output_workbook(path: Path) -> dict:
                     "Week": row[0], "Batch": row[1],
                     "Count": cnt, "Gross_kg": gross_kg,
                     "Avg_wt_kg": gross_avg_kg,
+                    "HOG_kg": hog_kg if hog_kg is not None else 0.0,
                 })
 
     # Validation warnings now live in ValidationLog ("# | Category | Detail",
@@ -1440,6 +1442,38 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
                           annotation_text="Min harvest weight (3.5 kg)")
             fig.update_layout(height=300, yaxis_title="kg/fish")
             st.plotly_chart(fig, use_container_width=True)
+
+            # Monthly rollup (sales planning): HOG tonnes + count per calendar
+            # month, derived from each event's ISO week.
+            import datetime as _dt
+
+            def _wk_to_month(wk):
+                try:
+                    y, w = int(str(wk)[:4]), int(str(wk)[6:8])
+                    return _dt.date.fromisocalendar(y, w, 1).strftime("%Y-%m")
+                except Exception:
+                    return None
+
+            hm = he_df.copy()
+            hm["Month"] = hm["Week"].map(_wk_to_month)
+            hm = hm.dropna(subset=["Month"])
+            if not hm.empty:
+                mo = hm.groupby("Month").agg(
+                    HOG_t=("HOG_kg", lambda s: s.sum() / 1000.0),
+                    Count=("Count", "sum"),
+                ).reset_index()
+                st.markdown("**Monthly harvest (sales planning)**")
+                cc1, cc2 = st.columns(2)
+                with cc1:
+                    fig = px.bar(mo, x="Month", y="HOG_t", text_auto=".0f",
+                                 title="HOG tonnes harvested per month")
+                    fig.update_layout(height=320, yaxis_title="t HOG", xaxis_title="")
+                    st.plotly_chart(fig, use_container_width=True)
+                with cc2:
+                    fig = px.bar(mo, x="Month", y="Count", text_auto=".2s",
+                                 title="Fish harvested per month")
+                    fig.update_layout(height=320, yaxis_title="fish", xaxis_title="")
+                    st.plotly_chart(fig, use_container_width=True)
 
             with st.expander("Raw harvest events"):
                 st.dataframe(he_df, hide_index=True, use_container_width=True)
