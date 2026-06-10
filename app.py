@@ -816,60 +816,62 @@ def _parse_output_workbook(path: Path) -> dict:
                 "Cull_count_wk": float(cull_count),
             })
 
-    # Harvest events from HarvestPlan (skip section headers).
+    # Harvest events from HarvestPlan. Single-table format (title rows 1-3,
+    # header row 4, data rows from row 5):
+    #   Week | Batch | Tank | Count (fish) | Gross_AvgWt (kg) | Gross_Biomass (kg)
+    #   | HOG_Yield | HOG_AvgWt | HOG_Biomass
+    # Data rows are identified by an ISO week label in col 0 ("2026-W23").
     harvest_kg = 0.0
     harvest_count = 0
     harvest_events = []
     if "HarvestPlan" in wb.sheetnames:
         ws = wb["HarvestPlan"]
         for row in ws.iter_rows(values_only=True):
-            if not row or row[0] is None:
+            if not row or not isinstance(row[0], str) or "-W" not in row[0]:
                 continue
-            # Planner rows have Source="Planner" (col 10), Pin rows have "Pin"
-            if len(row) >= 10 and row[9] in ("Pin", "Planner"):
-                wk = row[0]
-                bid = row[1]
-                cnt = row[3]
-                gross_kg = row[5]
-                gross_avg_kg = row[4]
-                if isinstance(cnt, (int, float)) and isinstance(gross_kg, (int, float)):
-                    harvest_count += cnt
-                    harvest_kg += gross_kg
-                    harvest_events.append({
-                        "Week": wk, "Batch": bid, "Source": row[9],
-                        "Count": cnt, "Gross_kg": gross_kg,
-                        "Avg_wt_kg": gross_avg_kg,
-                    })
+            if len(row) < 6:
+                continue
+            cnt = row[3]
+            gross_kg = row[5]
+            gross_avg_kg = row[4]
+            if isinstance(cnt, (int, float)) and isinstance(gross_kg, (int, float)):
+                harvest_count += cnt
+                harvest_kg += gross_kg
+                harvest_events.append({
+                    "Week": row[0], "Batch": row[1],
+                    "Count": cnt, "Gross_kg": gross_kg,
+                    "Avg_wt_kg": gross_avg_kg,
+                })
 
-    # Advisory entries (skip the summary section).
+    # Validation warnings now live in ValidationLog ("# | Category | Detail",
+    # data rows have a numeric '#'); the Advisory sheet is the per-week capacity
+    # table. Build the issues-by-category summary + detail list from ValidationLog.
     advisory_entries = []
     advisory_summary = []
-    if "Advisory" in wb.sheetnames:
-        ws = wb["Advisory"]
-        rows = list(ws.iter_rows(values_only=True))
-        # Find "Summary by category" and "Full list" markers.
-        in_summary = False
-        in_full = False
-        for r in rows:
-            if not r:
+    if "ValidationLog" in wb.sheetnames:
+        ws = wb["ValidationLog"]
+        cat_counts: dict[str, int] = defaultdict(int)
+        for r in ws.iter_rows(values_only=True):
+            if not r or not isinstance(r[0], (int, float)):
+                continue  # title/header rows have no numeric '#'
+            cat = str(r[1]) if len(r) > 1 and r[1] else ""
+            det = str(r[2]) if len(r) > 2 and r[2] else ""
+            advisory_entries.append({"#": int(r[0]), "Category": cat, "Detail": det})
+            cat_counts[cat] += 1
+        advisory_summary = [{"Category": c, "Count": n}
+                            for c, n in sorted(cat_counts.items(), key=lambda x: -x[1])]
+
+    # Yearly summary (facility-wide per-year rollup) for the app's yearly trends.
+    yearly = []
+    if "YearlySummary" in wb.sheetnames:
+        ws = wb["YearlySummary"]
+        hdr = None
+        for row in ws.iter_rows(values_only=True):
+            if row and row[0] == "Year":
+                hdr = [str(c) for c in row if c is not None]
                 continue
-            v0 = r[0] if len(r) > 0 else None
-            if isinstance(v0, str):
-                if v0.strip() == "Summary by category":
-                    in_summary = True
-                    continue
-                if v0.strip() == "Full list":
-                    in_summary = False
-                    in_full = True
-                    continue
-            if in_summary and len(r) >= 2 and isinstance(r[1], (int, float)):
-                advisory_summary.append({"Category": str(r[0]), "Count": int(r[1])})
-            elif in_full and len(r) >= 3 and isinstance(r[0], (int, float)):
-                advisory_entries.append({
-                    "#": int(r[0]),
-                    "Category": str(r[1]) if r[1] else "",
-                    "Detail": str(r[2]) if r[2] else "",
-                })
+            if hdr and row and isinstance(row[0], (int, float)):
+                yearly.append({hdr[i]: row[i] for i in range(min(len(hdr), len(row)))})
 
     # Control status (R8-R16).
     status = {}
@@ -894,6 +896,7 @@ def _parse_output_workbook(path: Path) -> dict:
         "advisory_summary": advisory_summary,
         "advisory_entries": advisory_entries,
         "control_status": status,
+        "yearly": yearly,
     }
 
 
@@ -974,11 +977,12 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
     he_df = pd.DataFrame(r["harvest_events"]) if r["harvest_events"] else pd.DataFrame()
     bio_df = pd.DataFrame(r.get("biology_projection", []))
 
-    tab_over, tab_batch, tab_period, tab_harvest = st.tabs([
+    tab_over, tab_batch, tab_period, tab_harvest, tab_yearly = st.tabs([
         "Overview",
         "Per-Batch",
         "Period Summary",
         "Harvest",
+        "Yearly",
     ])
 
     # ============================================================
@@ -1401,13 +1405,10 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
             tot_kg = he_df["Gross_kg"].sum()
             tot_count = he_df["Count"].sum()
             avg_kg = tot_kg / tot_count if tot_count else 0
-            n_pin = (he_df["Source"] == "Pin").sum()
-            n_plan = (he_df["Source"] == "Planner").sum()
-            k1, k2, k3, k4 = st.columns(4)
+            k1, k2, k3 = st.columns(3)
             k1.metric("Total harvest", f"{tot_kg/1000:,.1f} t")
             k2.metric("Total fish", f"{tot_count:,.0f}")
             k3.metric("Avg weight at harvest", f"{avg_kg:.2f} kg")
-            k4.metric("Operator pins / Planner", f"{n_pin} / {n_plan}")
 
             c1, c2 = st.columns(2)
             with c1:
@@ -1442,6 +1443,33 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
 
             with st.expander("Raw harvest events"):
                 st.dataframe(he_df, hide_index=True, use_container_width=True)
+
+    # ============================================================
+    # Tab 5: Yearly — facility-wide per-year trends
+    # ============================================================
+    with tab_yearly:
+        st.subheader("Yearly trends (facility-wide)")
+        yr = pd.DataFrame(r.get("yearly", []))
+        if yr.empty:
+            st.info("No yearly summary in this workbook.")
+        else:
+            st.caption("Per-calendar-year rollup. Partial first/last years reflect "
+                       "the forecast horizon, not full calendar years.")
+            st.dataframe(yr, hide_index=True, use_container_width=True)
+            yr["Year"] = yr["Year"].astype(str)
+            charts = [
+                ("Harvest_HOG (t)", "Harvest (HOG tonnes) per year"),
+                ("Feed (t)", "Feed (tonnes) per year"),
+                ("Peak_Biomass (t)", "Peak facility biomass (tonnes) per year"),
+                ("Harvest_Count (fish)", "Harvest count (fish) per year"),
+            ]
+            cols = st.columns(2)
+            for i, (col, title) in enumerate(charts):
+                if col not in yr.columns:
+                    continue
+                fig = px.bar(yr, x="Year", y=col, title=title, text_auto=True)
+                fig.update_layout(height=320, xaxis_title="")
+                cols[i % 2].plotly_chart(fig, use_container_width=True)
 
     # ---- Run log (collapsed) ----
     with st.expander("Run log (console output)"):

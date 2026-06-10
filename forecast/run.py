@@ -35,6 +35,7 @@ from .excel_io import (
     write_feed_forecast_weekly,
     write_harvest_plan_output,
     write_harvest_plan_report,
+    write_yearly_summary,
     write_harvest_report,
     write_monthly_report,
     write_reconciliation_report,
@@ -543,6 +544,11 @@ def main(
         scenario_name=control.scenario_name,
         default_hog_yield=control.default_hog_yield,
         facility_limits_hog=facility_hog_overrides,
+    )
+    write_yearly_summary(
+        wb, placement.batch_locations, placement.harvest_events,
+        facility_limits, control, batches=batch_by_id, tables=tables,
+        default_hog_yield=control.default_hog_yield, hog_overrides=facility_hog_overrides,
     )
     write_transfer_plan_output(
         wb, placement.transfer_events, placement.tranog_events,

@@ -259,6 +259,101 @@ def write_harvest_plan_report(
         ws.column_dimensions[get_column_letter(c)].width = 11
 
 
+def write_yearly_summary(
+    wb,
+    batch_locations,
+    harvest_events,
+    facility_limits,
+    control,
+    batches=None,
+    tables=None,
+    default_hog_yield: float = 0.0,
+    hog_overrides=None,
+    sheet_name: str = "YearlySummary",
+) -> None:
+    """Facility-wide per-year rollup for at-a-glance yearly trends.
+
+    One row per calendar year: harvest (count, HOG tonnes, gross tonnes, avg HOG
+    weight), feed (realized tonnes), and facility biomass (peak / mean tonnes,
+    mean utilisation vs the per-week cap). Aggregates the same realized data the
+    other sheets use (HarvestReport harvest, realized_feed_kg_day feed,
+    BatchLocations biomass) so it reconciles with them.
+    """
+    from collections import defaultdict
+    from .caps import resolve_facility_cap, METRIC_BIOMASS
+    from .biology import realized_feed_kg_day
+
+    if sheet_name in wb.sheetnames:
+        del wb[sheet_name]
+    ws = wb.create_sheet(sheet_name)
+
+    # Per-week facility biomass + realized feed (kg/day), with each week's year.
+    wk_bio: dict[str, float] = defaultdict(float)
+    wk_feed: dict[str, float] = defaultdict(float)
+    wk_year: dict[str, int] = {}
+    for r in batch_locations:
+        wk_bio[r.week_label] += r.biomass_kg
+        if r.week_label not in wk_year and hasattr(r.week_start, "year"):
+            wk_year[r.week_label] = r.week_start.year
+        if tables is not None:
+            b = (batches or {}).get(r.batch_id)
+            wk_feed[r.week_label] += realized_feed_kg_day(r.avg_wt_g, r.biomass_kg, b, tables)
+
+    # Harvest per year (HOG via per-week override or default).
+    hog_overrides = hog_overrides or {}
+    yr_hc: dict[int, float] = defaultdict(float)
+    yr_gross: dict[int, float] = defaultdict(float)
+    yr_hog: dict[int, float] = defaultdict(float)
+    for ev in harvest_events:
+        d = ev.event_date.date() if hasattr(ev.event_date, "date") else ev.event_date
+        y = d.year
+        gross = ev.count * ev.avg_wt_g / 1000.0
+        hy = hog_overrides.get(iso_week_label(ev.event_date), default_hog_yield)
+        yr_hc[y] += ev.count
+        yr_gross[y] += gross
+        yr_hog[y] += gross * hy
+
+    # Feed + biomass + utilisation per year.
+    yr_feed: dict[int, float] = defaultdict(float)
+    yr_bio: dict[int, list] = defaultdict(list)
+    yr_util: dict[int, list] = defaultdict(list)
+    for wk, bio in wk_bio.items():
+        y = wk_year.get(wk)
+        if y is None:
+            continue
+        yr_bio[y].append(bio)
+        yr_feed[y] += wk_feed.get(wk, 0.0) * 7.0
+        cap = resolve_facility_cap(METRIC_BIOMASS, wk, facility_limits, control)
+        if cap:
+            yr_util[y].append(100.0 * bio / cap)
+
+    years = sorted(set(yr_hc) | set(yr_bio))
+    ws.append(["YEARLY SUMMARY (facility-wide)"])
+    ws.append([])
+    ws.append([
+        "Year", "Harvest_Count (fish)", "Harvest_HOG (t)", "Harvest_Gross (t)",
+        "Avg_HOG_Wt (kg)", "Feed (t)", "Peak_Biomass (t)", "Mean_Biomass (t)",
+        "Mean_Utilisation (%)",
+    ])
+    for y in years:
+        hc = yr_hc.get(y, 0.0)
+        hog_t = yr_hog.get(y, 0.0) / 1000.0
+        gross_t = yr_gross.get(y, 0.0) / 1000.0
+        avg_hog = (yr_hog.get(y, 0.0) / hc) if hc > 0 else 0.0
+        bios = yr_bio.get(y, [])
+        utils = yr_util.get(y, [])
+        ws.append([
+            y, round(hc, 0), round(hog_t, 0), round(gross_t, 0),
+            round(avg_hog, 2), round(yr_feed.get(y, 0.0) / 1000.0, 0),
+            round(max(bios) / 1000.0, 0) if bios else 0,
+            round((sum(bios) / len(bios)) / 1000.0, 0) if bios else 0,
+            round(sum(utils) / len(utils), 1) if utils else 0,
+        ])
+    widths = {1: 8, 2: 20, 3: 16, 4: 17, 5: 16, 6: 12, 7: 17, 8: 17, 9: 20}
+    for c, w in widths.items():
+        ws.column_dimensions[get_column_letter(c)].width = w
+
+
 def write_daily_harvest_schedule(
     wb,
     harvest_events,
