@@ -129,6 +129,29 @@ def test_no_dropped_batches(run_outputs):
         f"{at_risk:,.0f} stocked fish lost from the plan")
 
 
+def test_facility_count_conservation(run_outputs):
+    """No DISTRIBUTED fish loss across the facility.
+
+    Per-tank-week count drift is bounded by a 50-fish tolerance, so a small
+    same-sign leak spread across many tanks (each under tolerance) passes
+    test_mass_conservation while still losing fish in aggregate. The
+    TankContinuityAudit FACILITY CONSERVATION SUMMARY sums every tank-week count
+    delta; the signed/abs ratio must stay near 0 (random/cancelling = conserved).
+    A ratio near 1 means a systematic, distributed one-way loss.
+    """
+    wb = _load(run_outputs)
+    ws = wb["TankContinuityAudit"]
+    ratio = None
+    for row in ws.iter_rows(values_only=True):
+        if row and row[0] == "Count (fish)" and isinstance(row[3], (int, float)):
+            ratio = row[3]
+            break
+    assert ratio is not None, "missing FACILITY CONSERVATION SUMMARY count row"
+    assert abs(ratio) < 0.3, (
+        f"facility count signed/abs ratio {ratio:.3f} — distributed fish loss "
+        f"(systematic one-way count drift across tank-weeks)")
+
+
 def test_output_sanity(run_outputs):
     """Densities are finite and non-negative; counts non-negative.
 

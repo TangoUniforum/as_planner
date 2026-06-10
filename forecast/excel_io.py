@@ -157,6 +157,18 @@ def write_transfer_plan_output(
                 dest.count, dest.avg_wt_g / 1000.0, "", dest.cv_pct,
             ))
     for ev in transfer_events:
+        # GradedHarvest (Event 5) rides in transfer_events with a different shape
+        # (no .destinations): 1 source -> pickup + retention. Emit its two legs
+        # instead of crashing on ev.destinations.
+        if hasattr(ev, "pickup_tank_id"):
+            wk = iso_week_label(ev.event_date)
+            rows.append((ev.event_date, wk, ev.batch_id, str(ev.source_tank_id),
+                         ev.pickup_tank_id, ev.pickup_count,
+                         ev.pickup_avg_wt_g / 1000.0, "pickup", ev.cv_pct))
+            rows.append((ev.event_date, wk, ev.batch_id, str(ev.source_tank_id),
+                         ev.retention_tank_id, ev.retention_count,
+                         ev.retention_avg_wt_g / 1000.0, "retention", ev.cv_pct))
+            continue
         ct = getattr(ev, "count_transferred", None)
         if ct is not None and ct <= 0:
             continue  # rejected attempt — not part of the actionable plan
@@ -1143,6 +1155,22 @@ def write_tank_continuity_audit(
     transfer_in: dict[tuple[int, str], float] = defaultdict(float)
     transfer_in_kg: dict[tuple[int, str], float] = defaultdict(float)
     for ev in (transfer_events or []):
+        # GradedHarvest (Event 5) rides in transfer_events but has a different
+        # shape (1 source -> pickup + retention, no .destinations). Account its
+        # moves explicitly so the audit conserves if it ever fires — otherwise it
+        # is invisible (no count_transferred) and the source/pickup/retention
+        # tank-weeks silently mis-reconcile.
+        if hasattr(ev, "pickup_tank_id"):
+            wk = iso_week_label(ev.event_date)
+            transfer_out[(ev.source_tank_id, wk)] += ev.pickup_count + ev.retention_count
+            transfer_out_kg[(ev.source_tank_id, wk)] += (
+                ev.pickup_count * ev.pickup_avg_wt_g
+                + ev.retention_count * ev.retention_avg_wt_g) / 1000.0
+            transfer_in[(ev.pickup_tank_id, wk)] += ev.pickup_count
+            transfer_in_kg[(ev.pickup_tank_id, wk)] += ev.pickup_count * ev.pickup_avg_wt_g / 1000.0
+            transfer_in[(ev.retention_tank_id, wk)] += ev.retention_count
+            transfer_in_kg[(ev.retention_tank_id, wk)] += ev.retention_count * ev.retention_avg_wt_g / 1000.0
+            continue
         ct = getattr(ev, "count_transferred", None)
         if ct is None or ct <= 0:
             continue   # rejected transfers don't count
@@ -1202,6 +1230,14 @@ def write_tank_continuity_audit(
     TOLERANCE = 50.0      # fish
     BIO_TOLERANCE = 500.0  # kg
 
+    # Facility-level conservation accumulators. Per-row tolerances pass small
+    # same-sign drifts; summing every tank-week delta catches a DISTRIBUTED leak
+    # (many tanks each under tolerance) that the per-row flags miss — the audit-
+    # blind-spot class that hid the dropped batches. Count must cancel to ~0
+    # (fish conserved); biomass carries a known systematic + bias from the
+    # weekly-vs-daily growth approximation (reported, not asserted).
+    _fac_dc_signed = _fac_dc_abs = 0.0
+    _fac_db_signed = _fac_db_abs = 0.0
     for tid in all_tanks:
         prev_batch, prev_count = pr_tank.get(tid, (None, 0.0))
         prev_biomass = pr_tank_bio.get(tid, 0.0)
@@ -1262,6 +1298,10 @@ def write_tank_continuity_audit(
             bio_flag = ""
             if abs(delta_bio) > BIO_TOLERANCE and abs(delta_bio) > 0.01 * max(cur_biomass, prev_biomass, 1):
                 bio_flag = "BIO_DRIFT"
+            _fac_dc_signed += delta_count
+            _fac_dc_abs += abs(delta_count)
+            _fac_db_signed += delta_bio
+            _fac_db_abs += abs(delta_bio)
 
             display_batch = cur_batch or (prev_batch if prev_count > 0 else "")
             ws.append([
@@ -1295,6 +1335,23 @@ def write_tank_continuity_audit(
             prev_batch = cur_batch
             prev_count = cur_count
             prev_biomass = cur_biomass
+
+    # Facility-level conservation summary (catches DISTRIBUTED drift the per-row
+    # tolerances miss). Count must cancel to ~0; the |signed|/|abs| ratio is the
+    # scale-free leak gauge — near 0 = random/cancelling (conserved), near 1 =
+    # systematic one-way loss. Biomass carries a known + bias (weekly-vs-daily
+    # growth approximation), surfaced here as a caveat, not a defect.
+    _dc_ratio = (_fac_dc_signed / _fac_dc_abs) if _fac_dc_abs else 0.0
+    _db_ratio = (_fac_db_signed / _fac_db_abs) if _fac_db_abs else 0.0
+    ws.append([])
+    ws.append(["FACILITY CONSERVATION SUMMARY (sum over all tank-weeks)"])
+    ws.append(["Metric", "Signed_Sum", "Abs_Sum", "Signed/Abs_ratio", "Note"])
+    ws.append(["Count (fish)", round(_fac_dc_signed, 0), round(_fac_dc_abs, 0),
+               round(_dc_ratio, 4),
+               "must cancel to ~0 (|ratio|<0.3); near 1 = distributed fish loss"])
+    ws.append(["Biomass (kg)", round(_fac_db_signed, 0), round(_fac_db_abs, 0),
+               round(_db_ratio, 4),
+               "known + bias from weekly-vs-daily growth approximation (not a leak)"])
 
     widths = {1: 11, 2: 6, 3: 7, 4: 11, 5: 10, 6: 11, 7: 11, 8: 11,
               9: 9, 10: 9, 11: 10, 12: 14, 13: 12, 14: 9, 15: 11,
