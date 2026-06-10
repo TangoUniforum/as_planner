@@ -30,7 +30,7 @@ class ControlParams:
     # R28-R30 (added 2026-05).
     tran_og_default_tanks: int = 3
     global_buffer_pct: float = 0.05      # R29: system-limits symmetric buffer
-    starvation_period_days: int = 10     # R30: in-place purge length (production mode)
+    starvation_period_days: int = 7      # R30: in-place purge length (production mode); 7d = one weekly step (single-cohort pipeline)
     # R31: per-tank density target as a fraction of the cap. Drives
     # precalc `tanks_needed_at_density_cap` sizing, the Phase D Grade-
     # split trigger, and the PR-concentration advisory/action gate.

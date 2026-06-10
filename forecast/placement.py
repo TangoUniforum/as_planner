@@ -2185,6 +2185,11 @@ def phase_d_emit_events(
         else:
             harvest_target = min_hv or 0.0
 
+        # In-place purge length + this week's harvest target (shared by the
+        # winddown pre-stage and the production harvest below).
+        purge_days = int(getattr(control, "starvation_period_days", 0) or 0)
+        weekly_target = min(weekly_max, max(min_hv or 0.0, harvest_target or 0.0))
+
         # Harvest engine — 6N purge pipeline when in purge mode, else Layer-2 FIFO.
         if purge_this_week:
             sixn_resting_pair = _run_sixn_purge_week(
@@ -2202,6 +2207,48 @@ def phase_d_emit_events(
                 resting_pair=sixn_resting_pair,
                 refill=sixn_refill,
             )
+            # PRE-STAGE the in-place purge during WINDDOWN (sixn_refill is False
+            # only in winddown). Depuration takes purge_days, so if the first
+            # STARVE tank only STARTS when production begins it isn't harvest-ready
+            # for ~purge_days — leaving a harvest GAP exactly when the 6N purge
+            # drain stops (the 0-harvest weeks). Here we enter mature tanks into
+            # STARVE while the 6N drain still supplies THIS week's harvest, so they
+            # finish purging by the time production begins and are ready to harvest
+            # immediately — no break in harvest. We only ENTER + AGE them here
+            # (don't harvest yet); the 6N drain covers winddown harvest. Bounded:
+            # keep ~one weekly_target of fish in the pipeline, no more.
+            if not sixn_refill and purge_days > 0 and weekly_target > 0:
+                # Depuration takes ceil(purge_days/7) weekly steps to complete, so
+                # the pipeline must hold that many staggered cohorts of ~target to
+                # deliver target EVERY week from production's first week. Fill up to
+                # that depth, entering ~target/week (the steady production rate).
+                _stage_cap = math.ceil(purge_days / 7.0) * weekly_target
+                _in_pipe = sum(t.count for t in state.tanks_by_id.values()
+                               if t.stage == STAGE_STARVE and not t.is_empty)
+                _entered = 0.0
+                for bid in _pick_fifo_move_in_batches(state, batch_meta, control):
+                    if _in_pipe >= _stage_cap or _entered >= weekly_target:
+                        break
+                    src_tanks = sorted(
+                        [t for t in state.tanks_by_id.values()
+                         if t.batch_id == bid and not t.is_empty and t.stage == "SW"
+                         and t.avg_wt_g >= control.min_harvest_weight_g],
+                        key=lambda t: (-t.avg_wt_g, t.tank_id))
+                    for src in src_tanks:
+                        if _in_pipe >= _stage_cap or _entered >= weekly_target:
+                            break
+                        src.stage = STAGE_STARVE
+                        src.starvation_days_remaining = purge_days
+                        _in_pipe += src.count
+                        _entered += src.count
+                        warnings.append(
+                            f"{week_label}: PRE-STAGE in-place purge {src.location_id} "
+                            f"(batch {src.batch_id}, {src.count:.0f} fish) — readying "
+                            f"the 6N->production harvest handoff (no gap)")
+                # Age the pre-staged tanks so they complete purge by production.
+                for t in state.tanks_by_id.values():
+                    if t.stage == STAGE_STARVE and not t.is_empty:
+                        t.starvation_days_remaining -= 7
             # Wind-down drain check: once all 6N tanks are empty, enter the
             # fallow empty window.
             if sixn_phase == "winddown":
@@ -2230,38 +2277,56 @@ def phase_d_emit_events(
             # are pipeline-owned: the rebalancing passes below skip them so their
             # fish aren't scrambled between purging and growing tanks.
             # purge_days=0 → harvest immediately (no in-place purge configured).
-            target = min(weekly_max, max(min_hv or 0.0, harvest_target or 0.0))
-            purge_days = int(getattr(control, "starvation_period_days", 0) or 0)
+            target = weekly_target
             if sixn_phase == "production" and purge_days > 0:
-                # (a) Harvest tanks whose in-place purge has completed.
+                # (a) Age all in-place purge tanks; harvest the ones that have
+                # completed purge, BUT only up to the weekly target (biggest
+                # first). Ready tanks beyond the target stay STARVE (frozen) and
+                # carry over to next week — so a backlog drains smoothly instead
+                # of dumping as a surge (the post-handoff harvest spike).
+                _ready = []
                 for t in list(state.tanks_by_id.values()):
                     if t.stage == STAGE_STARVE and not t.is_empty:
                         t.starvation_days_remaining -= 7
                         if t.starvation_days_remaining <= 0:
-                            ev = Harvest(
-                                batch_id=t.batch_id, event_date=week_start_date,
-                                source_tank_id=t.tank_id, count=t.count,
-                                avg_wt_g=t.avg_wt_g, min_tank_control=0,
-                            )
-                            warnings.extend(ev.apply(state))
-                            harvest_events.append(ev)
-                # (b) Enter fresh whole tanks into purge so ~target/week flows out.
-                entered = 0.0
-                if target > 0:
+                            _ready.append(t)
+                _ready.sort(key=lambda t: (-t.avg_wt_g, t.tank_id))
+                _hv = 0.0
+                for t in _ready:
+                    if _hv >= target:
+                        break
+                    ev = Harvest(
+                        batch_id=t.batch_id, event_date=week_start_date,
+                        source_tank_id=t.tank_id, count=t.count,
+                        avg_wt_g=t.avg_wt_g, min_tank_control=0,
+                    )
+                    warnings.extend(ev.apply(state))
+                    harvest_events.append(ev)
+                    _hv += t.count
+                # (b) Enter ~target/week of fresh tanks into purge to keep the
+                # staircase going (in == out == target ⇒ the pipeline stays
+                # bounded at ~ceil(purge_days/7) cohorts; the step-(a) cap drains
+                # any transient backlog smoothly). Don't enter while a ripe backlog
+                # already covers next week's target — avoids freezing extra fish.
+                _backlog = sum(t.count for t in state.tanks_by_id.values()
+                               if t.stage == STAGE_STARVE and not t.is_empty
+                               and t.starvation_days_remaining <= 0)
+                _entered = 0.0
+                if target > 0 and _backlog < target:
                     for bid in _pick_fifo_move_in_batches(state, batch_meta, control):
-                        if entered >= target:
+                        if _entered >= target:
                             break
                         src_tanks = [t for t in state.tanks_by_id.values()
                                      if t.batch_id == bid and not t.is_empty
                                      and t.stage == "SW"
                                      and t.avg_wt_g >= control.min_harvest_weight_g]
-                        src_tanks.sort(key=lambda t: t.avg_wt_g, reverse=True)
+                        src_tanks.sort(key=lambda t: (-t.avg_wt_g, t.tank_id))
                         for src in src_tanks:
-                            if entered >= target:
+                            if _entered >= target:
                                 break
                             src.stage = STAGE_STARVE
                             src.starvation_days_remaining = purge_days
-                            entered += src.count
+                            _entered += src.count
             elif target > 0:
                 # Immediate harvest (empty-phase tail, or purge_days unset).
                 harvested = 0.0
