@@ -127,6 +127,10 @@ def test_no_dropped_batches(run_outputs):
     assert not dropped, (
         f"{len(dropped)} batch(es) dropped (never placed): {dropped} — "
         f"{at_risk:,.0f} stocked fish lost from the plan")
+    # And the other end: no batch may harvest + still-hold MORE than it stocked.
+    over = [row[0] for row in ws.iter_rows(values_only=True)
+            if row and isinstance(row[0], str) and "OVER-PRODUCED" in row[0]]
+    assert not over, f"input-fish conservation breached (fish created): {over}"
 
 
 def test_facility_count_conservation(run_outputs):

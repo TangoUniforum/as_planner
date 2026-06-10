@@ -510,6 +510,7 @@ _LEDGER_COLS = [
 def _build_batch_week_ledger(
     batch_locations, harvest_events, batch_week_states,
     transfer_events=None, batches=None, tables=None, hog_yield=0.0,
+    hog_overrides=None,
 ):
     """Assemble a per-(batch, week) open/close production ledger.
 
@@ -619,8 +620,11 @@ def _build_batch_week_ledger(
             input_bio = input_count * owt / 1000.0
             xf = xfer.get((b, wk), 0.0)
             harv_gross = h["gross"]
-            harv_hog = harv_gross * hog_yield
-            harv_avg_hog = ((h["wt_sum"] / h["count"]) * hog_yield) if h["count"] > 0 else 0.0
+            # Per-week HOG yield override (matches HarvestReport/HarvestPlan);
+            # falls back to the scalar default when no override for the week.
+            _hy = hog_overrides.get(wk, hog_yield) if hog_overrides else hog_yield
+            harv_hog = harv_gross * _hy
+            harv_avg_hog = ((h["wt_sum"] / h["count"]) * _hy) if h["count"] > 0 else 0.0
             gross_growth = (cbio - obio) + mort_bio + harv_gross + cu["bio"] - input_bio
             net_prod = gross_growth - mort_bio
             f = feed.get((b, wk), 0.0)
@@ -679,6 +683,7 @@ def write_weekly_report(
     tables=None,
     scenario_name: str = "",
     hog_yield: float = 0.0,
+    hog_overrides=None,
     sheet_name: str = "WeeklyReport",
 ) -> None:
     """Per-(week, batch) open/close production ledger (matches reference format).
@@ -697,7 +702,7 @@ def write_weekly_report(
 
     rows = _build_batch_week_ledger(
         batch_locations, harvest_events, batch_week_states,
-        transfer_events, batches, tables, hog_yield)
+        transfer_events, batches, tables, hog_yield, hog_overrides)
     for d in rows:
         ws.append([scenario_name, d["week"], d["week_start"], d["batch"]]
                   + _ledger_value_cells(d))
@@ -715,6 +720,7 @@ def write_monthly_report(
     tables=None,
     scenario_name: str = "",
     hog_yield: float = 0.0,
+    hog_overrides=None,
     sheet_name: str = "MonthlyReport",
 ) -> None:
     """Per-(month, batch) open/close production ledger (matches reference format).
@@ -737,7 +743,7 @@ def write_monthly_report(
 
     weekly = _build_batch_week_ledger(
         batch_locations, harvest_events, batch_week_states,
-        transfer_events, batches, tables, hog_yield)
+        transfer_events, batches, tables, hog_yield, hog_overrides)
 
     # Group weekly rows into (batch, month); preserve week order for open/close.
     from datetime import date as _date
@@ -839,6 +845,7 @@ def write_input_conservation_audit(
     dropped_fish = 0.0
     dropped_batches = 0
     in_horizon_input = 0.0
+    over_produced = []   # harvested + standing > input (impossible: fish created)
     rowbuf = []
     for bt in sorted(batches, key=lambda x: x.batch_id):
         bid = bt.batch_id
@@ -846,6 +853,12 @@ def write_input_conservation_audit(
         togd = (tog.date() if hasattr(tog, "date") else tog) if tog else None
         is_placed = bid in placed_first
         hv = harv.get(bid, 0.0)
+        _st = standing.get(bid, 0.0)
+        # Over-production guard: a batch cannot harvest + still-hold MORE fish
+        # than were stocked (mortality + culls only remove). Catches count
+        # CREATION — the opposite of a drop, a different conservation breach.
+        if (bt.input_count or 0) > 0 and hv + _st > (bt.input_count or 0) * 1.001:
+            over_produced.append(bid)
         in_h = togd is not None and fs <= togd <= horizon_end
         if is_placed or hv > 0:
             status = "PLACED"
@@ -882,6 +895,9 @@ def write_input_conservation_audit(
                    f"TankContinuityAudit (a never-placed batch has no tank rows). ***"])
     else:
         ws.append(["OK — every in-horizon batch reached the realized facility (0 dropped fish)."])
+    if over_produced:
+        ws.append([f"*** {len(over_produced)} batch(es) OVER-PRODUCED (harvested + standing > "
+                   f"stocked input — fish created): {', '.join(over_produced)} ***"])
     ws.append([
         "Batch", "Input_Count (fish)", "TranOG_Date", "In_Horizon",
         "Placed", "Harvested (fish)", "Standing@Horizon (fish)",

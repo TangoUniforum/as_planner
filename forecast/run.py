@@ -585,11 +585,13 @@ def main(
     write_weekly_report(
         wb, placement.batch_locations, placement.harvest_events, all_states,
         transfer_events=placement.transfer_events, batches=batch_by_id, tables=tables,
-        scenario_name=control.scenario_name, hog_yield=control.default_hog_yield)
+        scenario_name=control.scenario_name, hog_yield=control.default_hog_yield,
+        hog_overrides=facility_hog_overrides)
     write_monthly_report(
         wb, placement.batch_locations, placement.harvest_events, all_states,
         transfer_events=placement.transfer_events, batches=batch_by_id, tables=tables,
-        scenario_name=control.scenario_name, hog_yield=control.default_hog_yield)
+        scenario_name=control.scenario_name, hog_yield=control.default_hog_yield,
+        hog_overrides=facility_hog_overrides)
     write_reconciliation_report(
         wb,
         placement.batch_locations,
