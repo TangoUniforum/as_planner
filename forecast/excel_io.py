@@ -921,6 +921,7 @@ def write_input_conservation_audit(
     batch_locations,
     harvest_events,
     control,
+    tranog_events=None,
     sheet_name: str = "InputConservationAudit",
 ) -> None:
     """Input-fish conservation: every stocked batch must have a realized fate.
@@ -930,10 +931,17 @@ def write_input_conservation_audit(
     tank-week row, so it never unbalances per-tank continuity. This audit closes
     that gap: every batch whose TranOG falls within the forecast horizon MUST
     appear in the realized placement (BatchLocations). Any in-horizon batch with
-    no placement is DROPPED — its stocked fish vanished from the plan. The
-    Fish_At_Risk total is the count of silently-lost fish; it must be 0.
+    no placement is DROPPED — its stocked fish vanished from the plan.
+
+    It ALSO reconciles the otherwise-unaudited FRESHWATER phase: the realized
+    count entering seawater (TranOG) vs the operator's planned tran_og_count. A
+    material shortfall = the FW survival model delivered fewer smolts than planned
+    (a calibration gap) — not lost fish (the realized count is conserved
+    downstream), but a real production divergence that was previously only buried
+    in a FW-Calibration warning. The FW_Flag surfaces it as a clear row.
     """
     from datetime import timedelta
+    _FW_DIVERGENCE_THRESH = 0.05   # flag |realized - planned| / planned beyond this
     if sheet_name in wb.sheetnames:
         del wb[sheet_name]
     ws = wb.create_sheet(sheet_name)
@@ -957,11 +965,18 @@ def write_input_conservation_audit(
     harv = {}
     for ev in harvest_events:
         harv[ev.batch_id] = harv.get(ev.batch_id, 0.0) + ev.count
+    # Realized count placed into seawater at TranOG per batch (sum of destination
+    # counts) — the FW-phase reconciliation reference.
+    tranog_placed = {}
+    for ev in (tranog_events or []):
+        tranog_placed[ev.batch_id] = tranog_placed.get(ev.batch_id, 0.0) + sum(
+            getattr(d, "count", 0.0) for d in getattr(ev, "destinations", []))
 
     dropped_fish = 0.0
     dropped_batches = 0
     in_horizon_input = 0.0
     over_produced = []   # harvested + standing > input (impossible: fish created)
+    fw_divergent = []    # realized seawater entry materially off the planned tran_og_count
     rowbuf = []
     for bt in sorted(batches, key=lambda x: x.batch_id):
         bid = bt.batch_id
@@ -993,6 +1008,19 @@ def write_input_conservation_audit(
             dropped_batches += 1
             at_risk = bt.input_count or 0.0
             dropped_fish += at_risk
+        # FW/TranOG reconciliation: realized seawater entry vs planned tran_og_count.
+        planned_tog = bt.tran_og_count or 0
+        realized_tog = tranog_placed.get(bid, 0.0)
+        fw_surv = (100.0 * realized_tog / bt.input_count) if (realized_tog and bt.input_count) else None
+        fw_flag = ""
+        if realized_tog > 0 and planned_tog > 0:
+            _div = (realized_tog - planned_tog) / planned_tog
+            if _div < -_FW_DIVERGENCE_THRESH:
+                fw_flag = "FW UNDER plan"
+                fw_divergent.append((bid, _div))
+            elif _div > _FW_DIVERGENCE_THRESH:
+                fw_flag = "FW OVER plan"
+                fw_divergent.append((bid, _div))
         rowbuf.append([
             bid, round(bt.input_count or 0, 0),
             togd, "Y" if in_h else "N",
@@ -1000,6 +1028,10 @@ def write_input_conservation_audit(
             round(hv, 0) if hv else 0,
             round(standing.get(bid, 0.0), 0),
             status, round(at_risk, 0) if at_risk else "",
+            round(planned_tog, 0) if planned_tog else "",
+            round(realized_tog, 0) if realized_tog else "",
+            round(fw_surv, 1) if fw_surv is not None else "",
+            fw_flag,
         ])
 
     pct = (100.0 * dropped_fish / in_horizon_input) if in_horizon_input > 0 else 0.0
@@ -1014,14 +1046,21 @@ def write_input_conservation_audit(
     if over_produced:
         ws.append([f"*** {len(over_produced)} batch(es) OVER-PRODUCED (harvested + standing > "
                    f"stocked input — fish created): {', '.join(over_produced)} ***"])
+    if fw_divergent:
+        _d = ", ".join(f"{b} ({100 * v:+.0f}%)" for b, v in sorted(fw_divergent, key=lambda x: x[1]))
+        ws.append([f"NOTE: {len(fw_divergent)} batch(es) reached seawater >"
+                   f"{_FW_DIVERGENCE_THRESH * 100:.0f}% off the planned tran_og_count — FW "
+                   f"survival calibration gap (NOT lost fish; realized count is conserved): {_d}"])
     ws.append([
         "Batch", "Input_Count (fish)", "TranOG_Date", "In_Horizon",
         "Placed", "Harvested (fish)", "Standing@Horizon (fish)",
         "Status", "Fish_At_Risk (fish)",
+        "Planned_TranOG (fish)", "Realized_TranOG (fish)", "FW_Survival (%)", "FW_Flag",
     ])
     for r in rowbuf:
         ws.append(r)
-    widths = {1: 8, 2: 17, 3: 13, 4: 11, 5: 8, 6: 16, 7: 20, 8: 28, 9: 18}
+    widths = {1: 8, 2: 17, 3: 13, 4: 11, 5: 8, 6: 16, 7: 20, 8: 28, 9: 18,
+              10: 18, 11: 18, 12: 14, 13: 14}
     for c, w in widths.items():
         ws.column_dimensions[get_column_letter(c)].width = w
 
