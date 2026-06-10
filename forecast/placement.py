@@ -110,9 +110,17 @@ _SETPOINT_FRACTION = 0.995
 # harvest pre-sheds each peak across the calm run-up weeks. Anchored in realized
 # growth (NOT a forward projection: the Phase-A projection under-predicts realized
 # peaks by ~3% and breaches the hard cap if trusted for tight anticipation).
-# 0.9 holds 0 cap breaches at ~94.8% mean utilisation — the tightest SAFE walk of
-# the line; the residual gap to 100% is natural cohort troughs, not slack.
-_SETPOINT_LOOKAHEAD_WEEKS = 0.9
+#
+# Tuning (config(7), measured; biomass-over-cap weeks / mean facility utilisation):
+#   0.50 -> 3 wks over (worst +1.8%) / 96.1%
+#   0.60 -> 2 wks over (worst +0.6%) / 96.2%
+#   0.75 -> 1 wk  over (worst +0.4%) / 95.8%   <- DEFAULT (tolerance-aware: the
+#           lone touch sits inside the R24 +-deviation band, ~1% more utilisation)
+#   0.90 -> 0 wks over (strictly under the HARD cap) / 94.8%
+# Larger = safer/lower utilisation; smaller = tighter/occasional touches. The
+# residual gap to 100% is NATURAL cohort troughs (weeks with little mature
+# biomass), not slack. Raise toward 0.90 for a strict zero-breach run.
+_SETPOINT_LOOKAHEAD_WEEKS = 0.75
 _MARGIN_MIN_FRAC = 0.005
 _MARGIN_MAX_FRAC = 0.04
 
