@@ -95,6 +95,26 @@ _SIXN_SYSTEMS = frozenset({"OG6N"})
 #     against the live config; weekly growth (~136t) exceeds the ±1% band
 #     width (~78t), so ~±2.6% swings are the physical floor.
 _SETPOINT_FRACTION = 0.995
+# ANTICIPATORY setpoint margin. Instead of a flat fraction, pre-position biomass
+# below the cap by ~_SETPOINT_LOOKAHEAD_WEEKS of the facility's REALIZED weekly
+# growth, so the upcoming growth fills the headroom up to (not over) the cap and
+# the harvest pre-sheds each peak across the calm run-up weeks rather than
+# spiking past the processing max in the peak week. Self-adapting and safe: the
+# margin grows when the facility is actually growing fast toward a peak and
+# shrinks when flat (full utilisation), and it is anchored in realized growth —
+# NOT the decoupled projection that historically drove harvest oscillation. The
+# margin is clamped to [_MARGIN_MIN_FRAC, _MARGIN_MAX_FRAC] of the cap so
+# utilisation never drops below ~(1 - _MARGIN_MAX_FRAC).
+# Anticipatory margin = this many weeks of the facility's REALIZED growth, held
+# below the cap so growth fills the headroom up to (not over) the cap and the
+# harvest pre-sheds each peak across the calm run-up weeks. Anchored in realized
+# growth (NOT a forward projection: the Phase-A projection under-predicts realized
+# peaks by ~3% and breaches the hard cap if trusted for tight anticipation).
+# 0.9 holds 0 cap breaches at ~94.8% mean utilisation — the tightest SAFE walk of
+# the line; the residual gap to 100% is natural cohort troughs, not slack.
+_SETPOINT_LOOKAHEAD_WEEKS = 0.9
+_MARGIN_MIN_FRAC = 0.005
+_MARGIN_MAX_FRAC = 0.04
 
 # Arrival feed-forward smoothing window (weeks). Each scheduled TranOG arrival
 # is pre-harvested over this many weeks before it lands. Empirically W=1
@@ -2142,7 +2162,19 @@ def phase_d_emit_events(
         max_hv = resolve_facility_cap(METRIC_MAX_HARVEST, week_label, facility_limits, control)
         min_hv = resolve_facility_cap(METRIC_MIN_HARVEST, week_label, facility_limits, control)
         weekly_max = max_hv if max_hv else float("inf")
-        setpoint = bio_cap * _SETPOINT_FRACTION if bio_cap is not None else None
+        if bio_cap is not None:
+            # ANTICIPATORY setpoint: pre-position biomass below the cap by ~one
+            # lookahead-week of the facility's REALIZED growth, so the upcoming
+            # growth fills the headroom up to (not over) the cap and the harvest
+            # pre-sheds each peak across the calm run-up weeks instead of spiking
+            # in the peak week. Self-adapting (bigger margin when growing fast
+            # toward a peak, smaller when flat) and anchored in realized growth.
+            _margin = min(max(_SETPOINT_LOOKAHEAD_WEEKS * max(0.0, fac_growth_kg),
+                              bio_cap * _MARGIN_MIN_FRAC),
+                          bio_cap * _MARGIN_MAX_FRAC)
+            setpoint = bio_cap - _margin
+        else:
+            setpoint = None
 
         lead = max(1, len(sixn_pair_queue))
 
@@ -2295,14 +2327,21 @@ def phase_d_emit_events(
                 for t in _ready:
                     if _hv >= target:
                         break
+                    # Partial-tank harvest: take exactly the remaining target from
+                    # the last tank so the week lands on target instead of
+                    # overshooting by up to a whole tank (which both spikes harvest
+                    # past the processing max AND drags biomass below the setpoint).
+                    # The remnant stays STARVE (frozen weight), front of next week.
+                    take = min(t.count, target - _hv)
                     ev = Harvest(
                         batch_id=t.batch_id, event_date=week_start_date,
-                        source_tank_id=t.tank_id, count=t.count,
-                        avg_wt_g=t.avg_wt_g, min_tank_control=0,
+                        source_tank_id=t.tank_id, count=take,
+                        avg_wt_g=t.avg_wt_g,
+                        min_tank_control=control.min_tank_control,
                     )
                     warnings.extend(ev.apply(state))
                     harvest_events.append(ev)
-                    _hv += t.count
+                    _hv += ev.count
                 # (b) Enter ~target/week of fresh tanks into purge to keep the
                 # staircase going (in == out == target ⇒ the pipeline stays
                 # bounded at ~ceil(purge_days/7) cohorts; the step-(a) cap drains
