@@ -231,10 +231,55 @@ may need re-calibrating — but it can't tell you the model's *absolute* truth.
 3. **Check `Advisory`** for over-cap weeks. If biomass runs over the cap, either
    raise `harvest_setpoint_lookahead_weeks` toward 0.90 (tighter walk) or accept the touch
    if it's within your deviation band.
-4. **Check `YearlySummary` / HarvestPlan Report monthly totals** for the production
+4. **Check the `Plan` tab / `TransferTemplate` §B for per-batch density.** See
+   §7.1 — read the *distribution*, not the raw OVER CAP count.
+5. **Check `YearlySummary` / HarvestPlan Report monthly totals** for the production
    and sales plan.
-5. For a **new scenario**, re-run the K sweep (Section 4.2) to re-anchor the tuning
+6. For a **new scenario**, re-run the K sweep (Section 4.2) to re-anchor the tuning
    table before trusting the recommendation.
+
+### 7.1 Tuning per-batch density over-cap (the Plan tab)
+
+The Plan tab flags every batch whose **peak tank density** exceeds the cap. Do
+**not** chase the raw "OVER CAP" count to zero — read the *distribution*:
+
+- **≤ 1.0** — under cap.
+- **1.0–1.1** — *at* cap. Running the facility near full utilisation means many
+  batches peak right at the cap; with ~10%/week growth and weekly rebalancing, a
+  tank sitting at cap crosses it mid-week before the next check. This is the
+  structural between-check touch, **not a problem**.
+- **1.1–1.3** — mild; worth a glance but usually transient.
+- **> 1.3** — **severe**: a batch crammed well over cap. These are the only ones
+  worth acting on.
+
+**To find the right knobs, sweep — don't guess.** Run:
+```
+python -m tools.tune_sweep --config-template "C:\path\config_template (N).xlsx"
+```
+It runs the forecast across a grid of `density_target_pct`, the rebalancer
+budgets, and `harvest_setpoint_lookahead_weeks`, and prints the peak-density
+distribution + conservation for each. Pick the row that **minimises `sev>1.3`
+while `cons==OK`** (conservation must always hold). Edit the `GRID` in the script
+to sweep other values.
+
+**Counter-intuitive but important — this facility is tank-constrained.** The
+obvious moves backfire:
+- *Lowering* `density_target_pct` (more per-tank headroom) demands **more** tanks
+  per batch. There aren't any, so placement crams the survivors **harder** —
+  over-cap gets *worse*. On config(7), `0.99` (tight packing) is the **best**
+  setting, beating 0.90/0.85.
+- *Raising* `harvest_setpoint_lookahead_weeks` frees finishing tanks but not the
+  grow-out tanks where mid-life peaks happen — over-cap got worse (worst 1.42→1.92).
+- More `rebalance_*` budget had **no effect** on the severe peaks: the rebalancer
+  can only move fish into a tank with room, and at peak there are none.
+
+**When no knob helps, it's not a tuning problem.** On config(7) the severe
+batches (B45, B52, B51, B61, B47, B49 at 1.3–1.4×) all peak **mid-grow-out**
+(+28–44 weeks from entry) — a *capacity collision*: too much biomass wanting
+grow-out tanks at the same time for the tank count available. The fix is upstream
+of the controller: **stagger batch entries**, **reduce input counts**, or **add
+grow-out tanks** — see §8. The current config(7) controller tuning is already
+optimal; the residual over-cap is a stocking-vs-capacity fact, not slack.
 
 ---
 
