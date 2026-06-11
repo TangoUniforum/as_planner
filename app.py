@@ -1148,6 +1148,48 @@ def _optimizer():
     else:
         st.success(f"**Recommendation:** {rec.text}")
 
+    # ---- Feed the recommendation back into the forecast ----
+    best = next((v for v in results if v.label == rec.best_label), results[0])
+    with st.container(border=True):
+        st.markdown(f"**Apply & verify — `{best.label}`**")
+        st.caption("These are control-knob overrides — the same knobs a normal run "
+                   "reads. Paste them into Configure → Control to keep them, or run a "
+                   "full forecast now to verify the optimized result end-to-end.")
+        st.code(optimize.overrides_yaml(best.overrides) or "# baseline", language="yaml")
+        if st.button("▶ Run full forecast with these knobs", key="opt_apply_run"):
+            work = Path(tempfile.mkdtemp(prefix="as_optrun_in_"))
+            in_path = work / (uploaded.name or "input.xlsm")
+            in_path.write_bytes(uploaded.getvalue())
+            with st.spinner("Running the full pipeline with the recommended knobs…"):
+                try:
+                    out = optimize.run_full_forecast(
+                        str(in_path), str(CONFIG_DIR), str(SCENARIO_DIR), best.overrides)
+                    m, dropped, overprod = optimize.metrics_from_workbook(
+                        out, optimize._harvest_cap(str(CONFIG_DIR), best.overrides))
+                    st.session_state["_opt_run"] = {
+                        "bytes": Path(out).read_bytes(),
+                        "dropped": dropped, "overprod": overprod,
+                        "cv": m.harvest_var, "over": m.weeks_over_harvest_cap,
+                        "peak": m.overall_peak_biomass, "cap": m.biomass_cap,
+                    }
+                except Exception as e:  # noqa: BLE001
+                    st.error(f"Run failed: {e}")
+                    st.code(traceback.format_exc())
+        run_out = st.session_state.get("_opt_run")
+        if run_out:
+            ok = run_out["dropped"] == 0 and run_out["overprod"] == 0
+            cc1, cc2, cc3 = st.columns(3)
+            cc1.metric("Conservation", "PASS ✓" if ok else "FAIL ✗",
+                       help=f"{run_out['dropped']} dropped / {run_out['overprod']} over-produced")
+            cc2.metric("Harvest CV", f"{run_out['cv']:.3f}")
+            cc3.metric("Weeks over 55k", run_out["over"])
+            st.download_button(
+                "⬇ Download optimized forecast workbook",
+                data=run_out["bytes"],
+                file_name="Forecast_optimized.xlsm",
+                mime="application/vnd.ms-excel.sheet.macroenabled.12",
+                use_container_width=True)
+
     df = _opt_table(results).sort_values("Score")
 
     def _hl(row):

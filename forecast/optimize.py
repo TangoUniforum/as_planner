@@ -366,6 +366,22 @@ def run_variant(label, overrides, config_dir, scenario_dir, input_path) -> OptVa
                       metrics=metrics, dropped=dropped, overprod=overprod)
 
 
+def overrides_yaml(overrides) -> str:
+    """Render a recommendation's knob overrides as a control.yaml snippet."""
+    if not overrides:
+        return "# (baseline — no knob changes)"
+    return "\n".join(f"{k}: {('null' if v is None else str(v).lower() if isinstance(v, bool) else v)}"
+                     for k, v in overrides.items())
+
+
+def run_full_forecast(input_path, config_dir, scenario_dir, overrides) -> str:
+    """Apply `overrides` onto control.yaml and run the FULL pipeline, returning
+    the output workbook path — i.e. feed a recommendation straight back into the
+    forecast. Reuses the shared run harness; nothing mutates the caller's config."""
+    return tuning._run_in_tempdir("optimized", overrides or {},
+                                  config_dir, scenario_dir, input_path)
+
+
 def sweep(input_path, config_dir, scenario_dir, grid=None, progress=None) -> list[OptVariant]:
     """Run every grid row and return per-variant results (unscored — call
     recommend()/score_variants() with an emphasis). Nothing mutates the caller's
