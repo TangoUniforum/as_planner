@@ -382,6 +382,24 @@ def run_full_forecast(input_path, config_dir, scenario_dir, overrides) -> str:
                                   config_dir, scenario_dir, input_path)
 
 
+def config_dir_with_overrides(config_dir, overrides) -> str:
+    """Return a TEMP copy of `config_dir` with `overrides` merged into
+    control.yaml — so a caller (e.g. the app) can run the full pipeline against
+    it and parse the result for visualization. Nothing mutates `config_dir`."""
+    import shutil
+    import tempfile
+    tmp = tempfile.mkdtemp(prefix="as_optcfg_")
+    dst = os.path.join(tmp, "config")
+    shutil.copytree(config_dir, dst)
+    cy = os.path.join(dst, "control.yaml")
+    with open(cy) as f:
+        cfg = yaml.safe_load(f)
+    cfg.update(overrides or {})
+    with open(cy, "w") as f:
+        yaml.safe_dump(cfg, f)
+    return dst
+
+
 def sweep(input_path, config_dir, scenario_dir, grid=None, progress=None) -> list[OptVariant]:
     """Run every grid row and return per-variant results (unscored — call
     recommend()/score_variants() with an emphasis). Nothing mutates the caller's

@@ -1157,26 +1157,32 @@ def _optimizer():
                    "full forecast now to verify the optimized result end-to-end.")
         st.code(optimize.overrides_yaml(best.overrides) or "# baseline", language="yaml")
         if st.button("▶ Run full forecast with these knobs", key="opt_apply_run"):
-            work = Path(tempfile.mkdtemp(prefix="as_optrun_in_"))
-            in_path = work / (uploaded.name or "input.xlsm")
-            in_path.write_bytes(uploaded.getvalue())
             with st.spinner("Running the full pipeline with the recommended knobs…"):
                 try:
-                    out = optimize.run_full_forecast(
-                        str(in_path), str(CONFIG_DIR), str(SCENARIO_DIR), best.overrides)
-                    m, dropped, overprod = optimize.metrics_from_workbook(
-                        out, optimize._harvest_cap(str(CONFIG_DIR), best.overrides))
-                    st.session_state["_opt_run"] = {
-                        "bytes": Path(out).read_bytes(),
-                        "dropped": dropped, "overprod": overprod,
-                        "cv": m.harvest_var, "over": m.weeks_over_harvest_cap,
-                        "peak": m.overall_peak_biomass, "cap": m.biomass_cap,
-                    }
+                    # Run via the SAME path as Run-forecast mode, against a temp
+                    # config with the knobs applied — so the result populates the
+                    # full visualization tabs AND the download, not just metrics.
+                    tmpcfg = optimize.config_dir_with_overrides(str(CONFIG_DIR), best.overrides)
+                    result = _run_with_workbook_bytes(
+                        uploaded.getvalue(), uploaded.name,
+                        config_dir=tmpcfg, scenario_dir=str(SCENARIO_DIR))
+                    if result.get("ok"):
+                        st.session_state.result = result  # lights up Run-forecast tabs
+                        m, dropped, overprod = optimize.metrics_from_workbook(
+                            result["output_path"],
+                            optimize._harvest_cap(str(CONFIG_DIR), best.overrides))
+                        st.session_state["_opt_run"] = {
+                            "dropped": dropped, "overprod": overprod,
+                            "cv": m.harvest_var, "over": m.weeks_over_harvest_cap,
+                        }
+                    else:
+                        st.error(f"Run failed: {result.get('error', 'unknown')}")
                 except Exception as e:  # noqa: BLE001
                     st.error(f"Run failed: {e}")
                     st.code(traceback.format_exc())
         run_out = st.session_state.get("_opt_run")
-        if run_out:
+        if run_out and "result" in st.session_state and st.session_state.result.get("ok"):
+            r = st.session_state.result
             ok = run_out["dropped"] == 0 and run_out["overprod"] == 0
             cc1, cc2, cc3 = st.columns(3)
             cc1.metric("Conservation", "PASS ✓" if ok else "FAIL ✗",
@@ -1185,10 +1191,12 @@ def _optimizer():
             cc3.metric("Weeks over 55k", run_out["over"])
             st.download_button(
                 "⬇ Download optimized forecast workbook",
-                data=run_out["bytes"],
-                file_name="Forecast_optimized.xlsm",
+                data=r["output_bytes"], file_name="Forecast_optimized.xlsm",
                 mime="application/vnd.ms-excel.sheet.macroenabled.12",
                 use_container_width=True)
+            st.info("✓ Optimized forecast is loaded. Switch **Mode → Run forecast** "
+                    "(sidebar) to explore all visualization tabs — Overview, "
+                    "Per-Batch, Harvest, Yearly, Plan — for this run.")
 
     df = _opt_table(results).sort_values("Score")
 
