@@ -72,10 +72,13 @@ Facility-wide knobs read into `ControlParams`:
 |---|---|---|
 | `horizon_weeks` | forecast length | 140 |
 | `max_biomass_kg` | facility biomass cap (default; per-week overrides in FacilityLimits) | 3,900,000 (→ 4,200,000 raised in later years) |
+| `max_feed_per_day_kg` | facility daily feed cap (kg/day) | 34,000 |
 | `max_harvest_per_week` | weekly harvest/processing ceiling (fish) | 55,000 |
 | `min_harvest_per_week` | weekly harvest floor | 30,000 |
 | `min_harvest_weight_g` | minimum weight a fish can be harvested at | 3,500 |
+| `min_tank_control` | force-empty floor (fish): a harvest/transfer leaving fewer than this empties the tank (INV-5) | 7,000 |
 | `default_hog_yield` | gross→HOG conversion (per-week overrides in FacilityLimits) | 0.81 |
+| `scenario_name` | label for the run (reports + RunConfig) | Forecast |
 | `facility_biomass_deviation_pct` | ± tolerance band around the cap (R24) | 0.01 |
 | `handling_mortality_pct` | mortality applied per transfer | small |
 | `sixn_growth` | 6N runs as growout (vs purge) for the whole horizon | false |

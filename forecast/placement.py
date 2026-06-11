@@ -138,7 +138,6 @@ class _HarvestBudget:
     past `cap` (captured in `overdraw`, carried into next week by the caller)."""
     cap: float
     used: float = 0.0
-    allow_overdraw: bool = False   # make-room exception only (conservation > cap)
     overdraw: float = 0.0
 
     def remaining(self) -> float:
@@ -147,8 +146,6 @@ class _HarvestBudget:
     def take(self, want: float) -> float:
         if want <= 0:
             return 0.0
-        if self.allow_overdraw:
-            return want
         return min(want, self.remaining())
 
     def record(self, emitted: float) -> None:
@@ -2423,7 +2420,7 @@ def phase_d_emit_events(
                     # past the processing max AND drags biomass below the setpoint).
                     # The remnant stays STARVE (frozen weight), front of next week.
                     take = min(t.count, target - _hv)
-                    if _budget.take(take) <= 0:
+                    if _budget.remaining() <= 0:
                         break              # HARD weekly ceiling reached
                     take = _budget.take(take)
                     ev = Harvest(
