@@ -1073,6 +1073,30 @@ def _opt_table(results) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _quick_viz(r):
+    """Inline visualization of a forecast result (used in the Optimize tab so the
+    optimized run can be visualized without switching modes). Charts the harvest-
+    flattening + facility biomass straight from the parsed result."""
+    he = pd.DataFrame(r.get("harvest_events") or [])
+    bl = pd.DataFrame(r.get("batch_locations") or [])
+    if not he.empty and "Week" in he and "Count" in he:
+        hw = (he.groupby("Week", as_index=False)["Count"].sum()
+                .sort_values("Week"))
+        fig = px.bar(hw, x="Week", y="Count", title="Harvest — fish per week")
+        fig.add_hline(y=55000, line_dash="dot", annotation_text="55k cap")
+        fig.update_layout(height=340, xaxis_title="", yaxis_title="fish")
+        st.plotly_chart(fig, use_container_width=True)
+    if not bl.empty and "Week" in bl and "Biomass_kg" in bl:
+        bw = (bl.groupby("Week", as_index=False)["Biomass_kg"].sum()
+                .sort_values("Week"))
+        bw["Biomass_t"] = bw["Biomass_kg"] / 1000.0
+        fig2 = px.line(bw, x="Week", y="Biomass_t",
+                       title="Facility biomass per week (t)")
+        fig2.add_hline(y=3900, line_dash="dot", annotation_text="3.9M cap")
+        fig2.update_layout(height=340, xaxis_title="", yaxis_title="tonnes")
+        st.plotly_chart(fig2, use_container_width=True)
+
+
 def _optimizer():
     st.header("🧭 Optimize — multi-objective")
     st.caption(
@@ -1194,9 +1218,14 @@ def _optimizer():
                 data=r["output_bytes"], file_name="Forecast_optimized.xlsm",
                 mime="application/vnd.ms-excel.sheet.macroenabled.12",
                 use_container_width=True)
-            st.info("✓ Optimized forecast is loaded. Switch **Mode → Run forecast** "
-                    "(sidebar) to explore all visualization tabs — Overview, "
-                    "Per-Batch, Harvest, Yearly, Plan — for this run.")
+            # Visualize inline — no mode-switch needed (the harvest chart is the
+            # level-loading result you want to see).
+            st.markdown("**Visualize this run**")
+            _quick_viz(r)
+            st.caption("For the full interactive tabs (Per-Batch, Yearly, Plan, "
+                       "occupancy heatmap), switch **Mode → Run forecast** — this "
+                       "run is already loaded there. Or open the downloaded "
+                       "workbook in Excel for every report sheet.")
 
     df = _opt_table(results).sort_values("Score")
 
