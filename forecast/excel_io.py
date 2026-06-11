@@ -130,8 +130,9 @@ def write_transfer_plan_output(
     """Per-event transfer + TranOG + Grade plan as a single table (matches
     reference format).
 
-    Columns: Week, Batch, From_Tank, To_Tank, Count (fish), Avg_Weight (kg),
-    Grade, CV (%). From_Tank is 'FW' for TranOG entries (FW->seawater), and those
+    Columns: Week, Batch, Type, From_Tank, To_Tank, Count (fish), Avg_Weight (kg),
+    Grade, CV (%). Type is TranOG (FW->seawater) / Transfer / Grade — filter on it
+    to find the FW->OG arrivals. From_Tank is 'FW' for TranOG entries, and those
     arrivals are size-class split, so the Grade column shows A (big class) / B
     (small class); a regular transfer is blank; a Grade event's multi-tank source
     is comma-separated. Rejected transfer attempts (count_transferred == 0) are
@@ -146,7 +147,7 @@ def write_transfer_plan_output(
                "Grade A = big size class, B = small (size-class split)."])
     ws.append([])
     ws.append([
-        "Week", "Batch", "From_Tank", "To_Tank",
+        "Week", "Batch", "Type", "From_Tank", "To_Tank",
         "Count (fish)", "Avg_Weight (kg)", "Grade", "CV (%)",
     ])
 
@@ -162,6 +163,7 @@ def write_transfer_plan_output(
             rows.append((
                 ev.event_date, wk, ev.batch_id, "FW", dest.tank_id,
                 dest.count, dest.avg_wt_g / 1000.0, _grade(dest), dest.cv_pct,
+                "TranOG",
             ))
     for ev in transfer_events:
         # GradedHarvest (Event 5) rides in transfer_events with a different shape
@@ -171,10 +173,10 @@ def write_transfer_plan_output(
             wk = iso_week_label(ev.event_date)
             rows.append((ev.event_date, wk, ev.batch_id, str(ev.source_tank_id),
                          ev.pickup_tank_id, ev.pickup_count,
-                         ev.pickup_avg_wt_g / 1000.0, "pickup", ev.cv_pct))
+                         ev.pickup_avg_wt_g / 1000.0, "pickup", ev.cv_pct, "Grade"))
             rows.append((ev.event_date, wk, ev.batch_id, str(ev.source_tank_id),
                          ev.retention_tank_id, ev.retention_count,
-                         ev.retention_avg_wt_g / 1000.0, "retention", ev.cv_pct))
+                         ev.retention_avg_wt_g / 1000.0, "retention", ev.cv_pct, "Grade"))
             continue
         ct = getattr(ev, "count_transferred", None)
         if ct is not None and ct <= 0:
@@ -184,6 +186,7 @@ def write_transfer_plan_output(
             rows.append((
                 ev.event_date, wk, ev.batch_id, str(ev.source_tank_id), dest.tank_id,
                 dest.count, dest.avg_wt_g / 1000.0, _grade(dest), dest.cv_pct,
+                "Transfer",
             ))
     for ev in (grade_events or []):
         wk = iso_week_label(ev.event_date)
@@ -192,19 +195,20 @@ def write_transfer_plan_output(
             rows.append((
                 ev.event_date, wk, ev.batch_id, src_str, dest.tank_id,
                 dest.count, dest.avg_wt_g / 1000.0,
-                _grade(dest), dest.cv_pct,
+                _grade(dest), dest.cv_pct, "Grade",
             ))
     rows.sort(key=lambda r: (r[0], r[2]))
 
     for r in rows:
         ws.append([
-            r[1], r[2], r[3], r[4],
+            r[1], r[2], r[9],   # Week, Batch, Type
+            r[3], r[4],         # From_Tank, To_Tank
             round(r[5], 0),
             round(r[6], 3),
             r[7],
             round(r[8], 1) if r[8] else None,
         ])
-    widths = {1: 11, 2: 8, 3: 10, 4: 8, 5: 13, 6: 14, 7: 9, 8: 8}
+    widths = {1: 11, 2: 8, 3: 10, 4: 10, 5: 8, 6: 13, 7: 14, 8: 9, 9: 8}
     for c, w in widths.items():
         ws.column_dimensions[get_column_letter(c)].width = w
 
