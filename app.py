@@ -28,6 +28,7 @@ from openpyxl import load_workbook
 # launched from the project root or elsewhere.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from forecast.run import main as run_pipeline  # noqa: E402
+from forecast import tuning  # noqa: E402
 
 # App-managed config (Phase 1) + scenario (Phase 2) live here. In PR-only
 # mode the app reads these instead of pulling everything from the upload;
@@ -620,9 +621,11 @@ st.caption(
 with st.sidebar:
     app_mode = st.radio(
         "Mode",
-        ["Run forecast", "Configure (models & control)"],
+        ["Run forecast", "Configure (models & control)", "Tune (density knobs)"],
         help="Run forecast: upload a PR and run. Configure: edit the app's "
-             "biology models, facility, control, batches, and limits.",
+             "biology models, facility, control, batches, and limits. "
+             "Tune: sweep the controller knobs and read the per-batch "
+             "density distribution to find the best tuning for this scenario.",
     )
     st.divider()
 
@@ -917,11 +920,133 @@ def _parse_output_workbook(path: Path) -> dict:
 
 
 # ============================================================
-# Configure mode — render the editor and stop
+# Tune mode — sweep the controller knobs, read the distribution
+# ============================================================
+
+def _results_to_frame(results) -> pd.DataFrame:
+    rows = []
+    for r in results:
+        d = r.dist
+        rows.append({
+            "Variant": r.label,
+            "OVER": f"{d.over}/{d.n}",
+            "Severe (>1.3x)": d.severe,
+            "Worst": round(d.worst, 2),
+            "Median": round(d.median, 2),
+            "<=1.0": d.buckets["<=1.0"],
+            "1.0-1.1": d.buckets["1.0-1.1"],
+            "1.1-1.3": d.buckets["1.1-1.3"],
+            ">1.3": d.buckets[">1.3"],
+            "Conservation": "OK" if r.conservation_ok else f"FAIL ({r.dropped} drop/{r.overprod} over)",
+        })
+    return pd.DataFrame(rows)
+
+
+def _tuner():
+    st.header("🎛️ Tune — per-batch density knobs")
+    st.caption(
+        "Sweeps the controller knobs and reports the per-batch **peak-density "
+        "distribution** for each, using the current config + the uploaded "
+        "ProductionReport. Read the distribution, not the raw OVER count: 1.0–1.1 "
+        "is *at cap* (normal near full utilisation); only **severe (>1.3×)** rows "
+        "matter. Pick the variant with the fewest severe while conservation holds. "
+        "If none beats baseline, it's a capacity problem, not a tuning one "
+        "(see USER_GUIDE §7.1)."
+    )
+
+    _cfg_ok = _config_ready() and _scenario_ready()
+    _pr_ok = pr is not None and pr["ok"]
+    if not _cfg_ok:
+        st.info("No config yet — set it up in **Configure** first.")
+        return
+    if not _pr_ok:
+        st.info("Upload a valid **ProductionReport** in the sidebar first.")
+        return
+
+    n_variants = len(tuning.DEFAULT_GRID)
+    st.write(
+        f"The sweep runs the forecast **{n_variants} times** "
+        f"(~{n_variants * 90 // 60}–{n_variants * 100 // 60} min). "
+        "The current config is never modified — each variant runs on a temp copy."
+    )
+    go = st.button("▶ Run tuning sweep", type="primary")
+
+    if go:
+        work = Path(tempfile.mkdtemp(prefix="as_tune_in_"))
+        in_path = work / (uploaded.name or "input.xlsm")
+        in_path.write_bytes(uploaded.getvalue())
+        bar = st.progress(0.0, text="Starting sweep…")
+
+        def _progress(i, n, label):
+            bar.progress(i / n, text=f"[{i+1}/{n}] running {label} …")
+
+        try:
+            results = tuning.sweep(str(in_path), str(CONFIG_DIR),
+                                   str(SCENARIO_DIR), progress=_progress)
+        except Exception as e:  # noqa: BLE001
+            bar.empty()
+            st.error(f"Sweep failed: {e}")
+            st.code(traceback.format_exc())
+            return
+        bar.progress(1.0, text="Sweep complete")
+        st.session_state["_tune_results"] = results
+
+    results = st.session_state.get("_tune_results")
+    if not results:
+        return
+
+    rec = tuning.recommend(results)
+    if rec.is_capacity_bound:
+        st.warning(f"**Capacity-bound:** {rec.text}")
+    else:
+        st.success(f"**Recommendation:** {rec.text}")
+
+    df = _results_to_frame(results)
+
+    def _hl(row):
+        if row["Variant"] == rec.best_label:
+            return ["background-color: #d7f0d7"] * len(row)
+        if row["Variant"] == "baseline":
+            return ["background-color: #eef3fb"] * len(row)
+        return [""] * len(row)
+
+    st.dataframe(df.style.apply(_hl, axis=1), use_container_width=True,
+                 hide_index=True)
+
+    # Peak-density distribution chart (stacked bands per variant).
+    band_cols = ["<=1.0", "1.0-1.1", "1.1-1.3", ">1.3"]
+    long = df.melt(id_vars="Variant", value_vars=band_cols,
+                   var_name="Band", value_name="Batches")
+    fig = px.bar(long, x="Variant", y="Batches", color="Band",
+                 title="Peak-density distribution by variant",
+                 color_discrete_map={"<=1.0": "#2e7d32", "1.0-1.1": "#9ccc65",
+                                     "1.1-1.3": "#ffb300", ">1.3": "#c62828"})
+    st.plotly_chart(fig, use_container_width=True)
+
+    # Severe-batch detail for the recommended (or baseline) variant.
+    best = next((r for r in results if r.label == rec.best_label), results[0])
+    if best.severe_rows:
+        st.subheader(f"Batches over 1.2× cap — {best.label}")
+        st.caption(
+            "Where the density pressure actually is. If these cluster in time "
+            "(close Entry weeks) and peak mid-grow-out, it's a capacity collision."
+        )
+        st.dataframe(pd.DataFrame(best.severe_rows), use_container_width=True,
+                     hide_index=True)
+    else:
+        st.info(f"No batch exceeds 1.2× cap in **{best.label}**.")
+
+
+# ============================================================
+# Configure / Tune modes — render and stop
 # ============================================================
 
 if app_mode.startswith("Configure"):
     _config_editor()
+    st.stop()
+
+if app_mode.startswith("Tune"):
+    _tuner()
     st.stop()
 
 

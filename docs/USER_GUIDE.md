@@ -36,8 +36,10 @@ cd "…/Forecasts/Tool/Python"
 streamlit run app.py
 ```
 Opens `localhost:8501`. Flow: **upload** a Production Report → **▶ Run forecast**
-→ review KPIs + tabs → **download** the output workbook. Use **Configure** mode in
-the sidebar to edit Control parameters and per-batch models before running.
+→ review KPIs + tabs → **download** the output workbook. The sidebar **Mode**
+selector has three windows: **Run forecast**, **Configure** (edit Control
+parameters and per-batch models before running), and **Tune (density knobs)**
+(sweep the controller knobs and read the per-batch density distribution — §7.1).
 
 ### CLI
 ```
@@ -252,15 +254,22 @@ The Plan tab flags every batch whose **peak tank density** exceeds the cap. Do
 - **> 1.3** — **severe**: a batch crammed well over cap. These are the only ones
   worth acting on.
 
-**To find the right knobs, sweep — don't guess.** Run:
-```
-python -m tools.tune_sweep --config-template "C:\path\config_template (N).xlsx"
-```
-It runs the forecast across a grid of `density_target_pct`, the rebalancer
-budgets, and `harvest_setpoint_lookahead_weeks`, and prints the peak-density
-distribution + conservation for each. Pick the row that **minimises `sev>1.3`
-while `cons==OK`** (conservation must always hold). Edit the `GRID` in the script
-to sweep other values.
+**To find the right knobs, sweep — don't guess.** Two ways, both driven by the
+same engine (`forecast/tuning.py`):
+
+- **In the app (recommended):** sidebar **Mode → Tune (density knobs)**. With your
+  config set and a Production Report uploaded, click **▶ Run tuning sweep**. It
+  shows the peak-density distribution per variant, a stacked-band chart, the
+  **recommended** variant, and the severe-batch list. The current config is never
+  modified.
+- **CLI:** `python -m tools.tune_sweep --config-template "C:\path\config_template (N).xlsx"`
+  (or no `--config-template` to use the repo `config/` + `scenario/` yaml).
+
+Both run the forecast across a grid of `density_target_pct`, the rebalancer
+budgets, and `harvest_setpoint_lookahead_weeks`, and report the peak-density
+distribution + conservation for each. Pick the row that **minimises severe
+(>1.3×) while conservation holds** (must always be 0 dropped / 0 over-produced).
+Edit `DEFAULT_GRID` in `forecast/tuning.py` to sweep other knobs/values.
 
 **Counter-intuitive but important — this facility is tank-constrained.** The
 obvious moves backfire:
