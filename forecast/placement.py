@@ -2616,7 +2616,19 @@ def phase_d_emit_events(
                               and t.avg_wt_g >= _min_hv_wt]
                     if not _cands:
                         break  # genuinely saturated — arrival drop handled below
-                    _cands.sort(key=lambda t: (-t.avg_wt_g, t.tank_id))
+                    if _level_load:
+                        # Under level-load, free the SMALLEST harvestable tank first
+                        # so the whole-tank make-room dump (which exceeds the cap) is
+                        # as SMALL as possible — i.e. drain the cheap remnant tanks
+                        # as the escape valve rather than the readiest/fullest tank.
+                        # This is the dominant spike lever on a tank-tight facility:
+                        # the make-room dump size IS the spike, so minimizing it
+                        # flattens harvest (config(8): CV 0.215->0.157, max 86k->67k).
+                        # Default (no level-load) keeps harvesting the readiest
+                        # (nearest-market) tank, so OFF behaviour is unchanged.
+                        _cands.sort(key=lambda t: (t.count, t.avg_wt_g, t.tank_id))
+                    else:
+                        _cands.sort(key=lambda t: (-t.avg_wt_g, t.tank_id))
                     _src = _cands[0]
                     # Make-room harvests the WHOLE tank (a partial wouldn't free
                     # it), so under level-load this is the one pass that may exceed

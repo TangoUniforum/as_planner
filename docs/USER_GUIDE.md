@@ -177,6 +177,17 @@ fixes this. Set `harvest_level_load: true` (Configure → Control) to:
    throughput is leveled under the cap and biomass never piles into a dump — fish are
    harvested 1–2 weeks earlier (slightly lower avg weight, still above
    `min_harvest_weight_g`). Walks the line: near the cap, flat.
+3. **Make-room drains the SMALLEST tank first.** The residual spikes are whole-tank
+   make-room dumps (a tank harvested whole to free space for a TranOG arrival on a
+   tank-tight facility — the one pass allowed over the cap). Under level-load,
+   make-room frees the **smallest harvestable tank** instead of the readiest/fullest,
+   so the dump — which *is* the spike — is as small as possible. This is the
+   **dominant spike lever**: on config(8) it cut harvest CV 0.215→**0.157** and the
+   worst spike 86k→**67k**, with avg harvest weight *unchanged-to-higher* and
+   conservation intact. (Three other smoothing ideas — count-leveling, anticipatory
+   make-room, tank consolidation — were tried and all made spikes *worse*, because
+   they compete for the harvest budget or pack tanks fuller so the dump is bigger;
+   minimizing the dump itself is what works.)
 
 **Opt-in and safe:** default `false` = today's behavior, byte-identical (same
 conservation, same determinism). Anchored in REALIZED growth (the Phase-A projection
