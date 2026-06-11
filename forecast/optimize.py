@@ -382,6 +382,19 @@ def run_full_forecast(input_path, config_dir, scenario_dir, overrides) -> str:
                                   config_dir, scenario_dir, input_path)
 
 
+def save_overrides_to_config(config_dir, overrides) -> None:
+    """Persist `overrides` by merging them into the REAL config_dir/control.yaml,
+    so every later normal run (and the Configure editor) uses them. This is how a
+    recommendation becomes the standing config — without it, the knobs live only
+    in the optimizer's temp run and a normal 'Run forecast' reverts to baseline."""
+    cy = os.path.join(config_dir, "control.yaml")
+    with open(cy) as f:
+        cfg = yaml.safe_load(f)
+    cfg.update(overrides or {})
+    with open(cy, "w") as f:
+        yaml.safe_dump(cfg, f, sort_keys=False)
+
+
 def config_dir_with_overrides(config_dir, overrides) -> str:
     """Return a TEMP copy of `config_dir` with `overrides` merged into
     control.yaml — so a caller (e.g. the app) can run the full pipeline against

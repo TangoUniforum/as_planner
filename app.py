@@ -1073,6 +1073,20 @@ def _opt_table(results) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _harvest_mode_label(config_dir) -> str:
+    """Short description of the harvest controller mode in a config dir, so the
+    Results view can always say WHICH run is on screen (keeping the correct data)."""
+    import yaml
+    try:
+        c = yaml.safe_load(open(Path(config_dir) / "control.yaml"))
+    except Exception:  # noqa: BLE001
+        return "current app config"
+    if c.get("harvest_level_load"):
+        return (f"level-load ON (K={c.get('harvest_smooth_lookahead_weeks')}, "
+                f"setpoint={c.get('harvest_setpoint_lookahead_weeks')})")
+    return "level-load OFF (default controller)"
+
+
 def _quick_viz(r):
     """Inline visualization of a forecast result (used in the Optimize tab so the
     optimized run can be visualized without switching modes). Charts the harvest-
@@ -1180,7 +1194,17 @@ def _optimizer():
                    "reads. Paste them into Configure → Control to keep them, or run a "
                    "full forecast now to verify the optimized result end-to-end.")
         st.code(optimize.overrides_yaml(best.overrides) or "# baseline", language="yaml")
-        if st.button("▶ Run full forecast with these knobs", key="opt_apply_run"):
+        _bcol1, _bcol2 = st.columns(2)
+        with _bcol2:
+            if best.overrides and st.button("💾 Save these knobs to my config",
+                                            key="opt_save", use_container_width=True):
+                optimize.save_overrides_to_config(str(CONFIG_DIR), best.overrides)
+                _clear_all_editor_state()
+                st.success("Saved to config — **Run forecast** and future runs now "
+                           "use these knobs (no longer baseline).")
+        _run_clicked_opt = _bcol1.button("▶ Run full forecast with these knobs",
+                                         key="opt_apply_run", use_container_width=True)
+        if _run_clicked_opt:
             with st.spinner("Running the full pipeline with the recommended knobs…"):
                 try:
                     # Run via the SAME path as Run-forecast mode, against a temp
@@ -1191,6 +1215,8 @@ def _optimizer():
                         uploaded.getvalue(), uploaded.name,
                         config_dir=tmpcfg, scenario_dir=str(SCENARIO_DIR))
                     if result.get("ok"):
+                        result["_run_label"] = ("Optimized — "
+                            + optimize.overrides_yaml(best.overrides).replace("\n", " · "))
                         st.session_state.result = result  # lights up Run-forecast tabs
                         m, dropped, overprod = optimize.metrics_from_workbook(
                             result["output_path"],
@@ -1299,6 +1325,7 @@ if run_clicked and uploaded is not None:
                 f"worst {result['worst_density']:.1f} kg/m³"
             )
             status.update(label="✓ Forecast complete", state="complete")
+            result["_run_label"] = f"Run forecast — {_harvest_mode_label(CONFIG_DIR)}"
             st.session_state.result = result
         else:
             st.error(f"Pipeline failed: {result.get('error', 'unknown')}")
@@ -1318,6 +1345,9 @@ if run_clicked and uploaded is not None:
 
 if "result" in st.session_state and st.session_state.result.get("ok"):
     r = st.session_state.result
+
+    # Provenance — always show WHICH run is on screen (keep the correct data).
+    st.caption(f"📋 Showing: **{r.get('_run_label', 'forecast run')}**")
 
     # ---- KPIs + prominent download button ----
     top_kpi, top_dl = st.columns([3, 1])
