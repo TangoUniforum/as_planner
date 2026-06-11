@@ -48,6 +48,15 @@ class ControlParams:
     # once, so it cuts out-of-bounds across all three without trading one for
     # another. 0 disables.
     rebalance_balance_budget: int = 30
+    # Anticipatory harvest setpoint: hold facility biomass below the cap by ~this
+    # many weeks of the facility's REALIZED weekly growth (margin clamped to
+    # [0.5%, 4%] of cap), so harvest pre-sheds each peak across the calm run-up
+    # weeks instead of spiking past the processing max. 0.75 = tightest walk of
+    # the line (~1 wk ~0.4% over cap, within the R24 deviation band, ~95.8%
+    # utilisation); 0.90 = strict zero-breach of a hard cap (~94.8%); higher =
+    # safer/lower utilisation. Config(7)-anchored — re-tune per scenario (see
+    # docs/USER_GUIDE.md).
+    harvest_setpoint_lookahead_weeks: float = 0.75
 
 
 @dataclass

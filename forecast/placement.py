@@ -120,6 +120,9 @@ _SETPOINT_FRACTION = 0.995
 # Larger = safer/lower utilisation; smaller = tighter/occasional touches. The
 # residual gap to 100% is NATURAL cohort troughs (weeks with little mature
 # biomass), not slack. Raise toward 0.90 for a strict zero-breach run.
+#
+# EXPOSED as the Control knob `harvest_setpoint_lookahead_weeks` (default 0.75);
+# the constant below is only the fallback default if a config predates the knob.
 _SETPOINT_LOOKAHEAD_WEEKS = 0.75
 _MARGIN_MIN_FRAC = 0.005
 _MARGIN_MAX_FRAC = 0.04
@@ -2177,7 +2180,9 @@ def phase_d_emit_events(
             # pre-sheds each peak across the calm run-up weeks instead of spiking
             # in the peak week. Self-adapting (bigger margin when growing fast
             # toward a peak, smaller when flat) and anchored in realized growth.
-            _margin = min(max(_SETPOINT_LOOKAHEAD_WEEKS * max(0.0, fac_growth_kg),
+            _la_weeks = getattr(control, "harvest_setpoint_lookahead_weeks",
+                                _SETPOINT_LOOKAHEAD_WEEKS)
+            _margin = min(max(_la_weeks * max(0.0, fac_growth_kg),
                               bio_cap * _MARGIN_MIN_FRAC),
                           bio_cap * _MARGIN_MAX_FRAC)
             setpoint = bio_cap - _margin

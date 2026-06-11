@@ -83,6 +83,7 @@ Facility-wide knobs read into `ControlParams`:
 | `rebalance_balance_budget` | multi-objective rebalancer moves/week (density+feed+biomass) | 30 |
 | `rebalance_split_budget` | split over-dense batches into free tanks (moves/week) | 8 |
 | `rebalance_varqty_budget` | precise-count shaving of over-cap systems (opt-in) | 0 |
+| `harvest_setpoint_lookahead_weeks` | **anticipatory harvest margin** = weeks of realized growth held below the cap (see §4.2) | **0.75** |
 
 ### 3.3 Scenario batches + per-batch models (`scenario/batches.yaml` / BatchRegistry)
 Each batch row carries its stocking AND its **growth models**:
@@ -111,7 +112,7 @@ The controller decides how much to harvest each week to hold facility biomass
 under the cap **without** spiking past the 55k/week processing ceiling.
 
 ### 4.1 How it works
-- **Setpoint = cap − anticipatory margin.** The margin is ~`_SETPOINT_LOOKAHEAD_WEEKS`
+- **Setpoint = cap − anticipatory margin.** The margin is ~`harvest_setpoint_lookahead_weeks`
   weeks of the facility's **realized** weekly growth, clamped to [0.5%, 4%] of the
   cap. It is *self-adapting*: it widens when the facility is climbing toward a peak
   (pre-sheds across the calm run-up weeks) and shrinks when flat (full utilization).
@@ -125,11 +126,10 @@ under the cap **without** spiking past the 55k/week processing ceiling.
   `starvation_period_days` later — pre-staged during the 6N wind-down so there is no
   harvest gap at the purge→production handoff.
 
-### 4.2 The one tuning knob: `_SETPOINT_LOOKAHEAD_WEEKS`
-> **Note:** this is a **constant in `forecast/placement.py`**, not a Control-sheet
-> knob. Change it in code (or ask for it to be exposed as a Control knob).
-
-Measured on config(7) — *biomass-over-cap weeks / mean facility utilization*:
+### 4.2 The one tuning knob: `harvest_setpoint_lookahead_weeks`
+A **Control parameter** (config/control.yaml, or the app's Configure → Control
+editor). Default **0.75**. Measured on config(7) — *biomass-over-cap weeks / mean
+facility utilization*:
 
 | K | over-cap weeks | worst breach | util mean | when to use |
 |---|---|---|---|---|
@@ -227,7 +227,7 @@ may need re-calibrating — but it can't tell you the model's *absolute* truth.
    ValidationLog's FW-Calibration warning suggests a corrected value) if you want it
    to hit your plan.
 3. **Check `Advisory`** for over-cap weeks. If biomass runs over the cap, either
-   raise `_SETPOINT_LOOKAHEAD_WEEKS` toward 0.90 (tighter walk) or accept the touch
+   raise `harvest_setpoint_lookahead_weeks` toward 0.90 (tighter walk) or accept the touch
    if it's within your deviation band.
 4. **Check `YearlySummary` / HarvestPlan Report monthly totals** for the production
    and sales plan.
