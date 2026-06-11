@@ -373,6 +373,21 @@ over-produced fish is rejected and never recommended. When no variant beats base
 on the chosen objective, the optimizer says so (capacity-bound — a stocking problem,
 not a knob).
 
+**Apply, verify, and visualize a recommendation.** The recommendation is just
+control-knob overrides — the same knobs a normal run reads. Under it, an **Apply &
+verify** panel shows them as a pasteable `control.yaml` snippet plus a **▶ Run full
+forecast with these knobs** button. Clicking it:
+- runs the full pipeline with the knobs applied (config never mutated — a temp copy),
+- shows inline **Conservation / Harvest CV / Weeks-over-55k** so you confirm it's
+  correct, and
+- **loads the run into all the visualization tabs** — switch **Mode → Run forecast**
+  to explore Overview / Per-Batch / Harvest / Yearly / Plan for the optimized forecast,
+  and **⬇ download** the workbook (all 24 report sheets) for Excel.
+
+To keep the knobs permanently, paste the snippet into **Configure → Control** (or
+`config/control.yaml`); every later run then uses them. The CLI prints the same
+snippet at the end of a sweep.
+
 ---
 
 ## 8. Key facts to remember
@@ -383,3 +398,38 @@ not a knob).
   You can trade one for the other; eliminating both needs a stocking change.
 - Conservation holds for *any* models; the models' *biological correctness* is the
   one thing the audits can't certify.
+
+---
+
+## 9. Running locally (CLI)
+
+Everything the app does can be run from the terminal — useful for understanding the
+pipeline (a direct run **narrates every stage to the console**) and for scripting.
+
+```powershell
+# The app (visual: Run / Configure / Tune / Optimize)
+streamlit run app.py
+
+# A single forecast, directly — prints the full stage-by-stage narration
+python -m forecast.run --workbook Forecast.xlsm --output out.xlsm `
+    --config-dir config --scenario-dir scenario
+
+# Tests (the conservation + determinism guardrails)
+python -m pytest tests/ -q          # -v = test names, -s = see the pipeline prints
+
+# Density tuner (per-batch density sweep — §7.1)
+python -m tools.tune_sweep --quick [--config-template "C:\path\config_template (N).xlsx"]
+
+# Multi-objective optimizer (§7.2) — prints the recommended knobs at the end
+python -m tools.optimize_sweep --emphasis "Walk the line" [--quick] [--weights bvar=3,...]
+```
+
+**The narration maps to the pipeline stages** (`forecast/run.py` orchestrates):
+`Load` inputs → `Hydrate` facility state from the PR → `Resolve caps` (`caps.py`) →
+**Precalc** projection + demand (`precalc.py`, the static "canvas") → **Layer-2
+harvest plan** (`harvest_scheduler.py`) → **Phase-D realized engine** (`placement.py`
+`phase_d_emit_events` — the closed-loop controller + level-load) → **Reports**
+(`excel_io.py`, 24 sheets + audits). Read one run top-to-bottom and the function
+names match the narration. The `config/` + `scenario/` dirs are the working config a
+direct run reads; load a different `config_template (N).xlsx` into them via
+**Configure → upload** in the app.
