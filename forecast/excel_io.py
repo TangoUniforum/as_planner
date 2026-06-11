@@ -213,6 +213,130 @@ def write_transfer_plan_output(
         ws.column_dimensions[get_column_letter(c)].width = w
 
 
+def write_transfer_template(
+    wb,
+    batch_locations,
+    harvest_events,
+    tranog_events,
+    control,
+    facility,
+    sheet_name: str = "TransferTemplate",
+) -> None:
+    """Generalized batch-flow template + a per-batch plan summary.
+
+    Two sections:
+      A) OVERALL TEMPLATE — the canonical seawater journey every batch follows
+         (entry → nursery → fan-out grow-out → finishing/depuration → harvest),
+         with relative week offsets, weights, systems, and tank counts.
+      B) PER-BATCH SUMMARY — one row per batch: when it enters seawater (week +
+         weeks from forecast start), its entry weight/count/density, its PEAK
+         tank footprint + PEAK density (the density-risk indicator) and when, its
+         harvest window (weeks from entry) and weight, and a Density_Status flag.
+         Keeps the facility aware of each batch's footprint, density risk, and
+         harvest timing at a glance.
+    """
+    from collections import defaultdict
+    if sheet_name in wb.sheetnames:
+        del wb[sheet_name]
+    ws = wb.create_sheet(sheet_name)
+
+    # ---- Section A: overall template ----
+    ws.append(["TRANSFER PLAN TEMPLATE"])
+    ws.append([])
+    ws.append(["A. OVERALL TEMPLATE — the canonical seawater journey every batch "
+               "follows (timing varies by stocking date; the shape does not)."])
+    ws.append(["Stage", "Week from SW entry", "Avg weight (kg)", "From", "To",
+               "Grade", "Tanks", "Purpose"])
+    for row in [
+        ("1. Seawater entry (TranOG)", "0", "~0.37", "FW", "OG1 / OG2",
+         "A big + B small", "2", "size-class split into the nursery"),
+        ("2. Nursery hold", "0–11", "0.37 → 1.0", "OG1/2", "OG1/2",
+         "—", "1–2", "grow to 1 kg (the <1 kg nursery lock)"),
+        ("3. Cross the 1 kg lock", "~11", "~1.0", "OG1/2", "OG3",
+         "—", "+1", "first grow-out move"),
+        ("4. Grow-out fan-out", "~11–31", "1.0 → 2.9", "OG3", "OG4 → OG5",
+         "—", "6–7", "spread across systems to hold density"),
+        ("5. Finishing / depuration", "~31–35", "2.9 → 3.8", "OG5", "OG6 / 6N / 6S",
+         "—", "~8 (peak)", "enter top systems; 6N = in-place depuration purge"),
+        ("6. Harvest drain", "~35–43", "3.8 → 4.4", "OG6 / 6N", "harvest",
+         "—", "drains down", "~4.2 kg over ~6 weeks; ~43 wk SW phase total"),
+    ]:
+        ws.append(list(row))
+    ws.append([])
+    ws.append([])
+
+    # ---- Section B: per-batch summary ----
+    ws.append(["B. PER-BATCH PLAN SUMMARY — entry timing, footprint, density risk, "
+               "and harvest window per batch."])
+    ws.append([
+        "Batch", "SW_Entry_Week", "Wks_from_Start", "Entry_AvgWt (kg)",
+        "Entry_Count (fish)", "Entry_Density (×cap)", "Peak_Tanks",
+        "Peak_Density (×cap)", "Peak_Wk (from entry)", "Harvest_Start",
+        "Wks_Entry→Harvest", "Harvest_AvgWt (kg)", "Density_Status",
+    ])
+
+    cap = {t.tank_id: t.max_density_kg_m3 for t in facility.tanks}
+    weeks = sorted({r.week_label for r in batch_locations})
+    widx = {w: i for i, w in enumerate(weeks)}
+
+    bw = defaultdict(lambda: {"cnt": 0.0, "wsum": 0.0, "tanks": set(), "maxratio": 0.0})
+    for r in batch_locations:
+        e = bw[(r.batch_id, r.week_label)]
+        e["cnt"] += r.count
+        e["wsum"] += r.avg_wt_g * r.count
+        e["tanks"].add(r.tank_id)
+        c = cap.get(r.tank_id)
+        if c and r.density_kg_m3:
+            e["maxratio"] = max(e["maxratio"], r.density_kg_m3 / c)
+
+    tog_week = {}
+    for ev in (tranog_events or []):
+        tog_week[ev.batch_id] = iso_week_label(ev.event_date)
+
+    hv = defaultdict(lambda: {"first": None, "cnt": 0.0, "wsum": 0.0})
+    for ev in harvest_events:
+        wk = iso_week_label(ev.event_date)
+        h = hv[ev.batch_id]
+        if h["first"] is None or wk < h["first"]:
+            h["first"] = wk
+        h["cnt"] += ev.count
+        h["wsum"] += ev.avg_wt_g * ev.count
+
+    weeks_by_batch = defaultdict(list)
+    for (b, w) in bw:
+        weeks_by_batch[b].append(w)
+
+    for b in sorted(weeks_by_batch):
+        bws = sorted(weeks_by_batch[b], key=lambda w: widx[w])
+        # SW entry = the forecast TranOG week if any, else first-seen (in-flight).
+        entry_wk = tog_week.get(b, bws[0])
+        if entry_wk not in widx:
+            entry_wk = bws[0]
+        in_flight = b not in tog_week
+        e0 = bw[(b, entry_wk)]
+        entry_wt = (e0["wsum"] / e0["cnt"] / 1000.0) if e0["cnt"] else 0.0
+        peak_tanks = max(len(bw[(b, w)]["tanks"]) for w in bws)
+        peak_wk = max(bws, key=lambda w: bw[(b, w)]["maxratio"])
+        peak_ratio = bw[(b, peak_wk)]["maxratio"]
+        h = hv.get(b)
+        hstart = h["first"] if h and h["first"] else ""
+        h_off = (widx[hstart] - widx[entry_wk]) if (hstart and hstart in widx) else ""
+        h_wt = (h["wsum"] / h["cnt"] / 1000.0) if (h and h["cnt"]) else ""
+        ws.append([
+            b, entry_wk + (" (in-flight)" if in_flight else ""),
+            widx[entry_wk], round(entry_wt, 2), round(e0["cnt"], 0),
+            round(e0["maxratio"], 2) if e0["maxratio"] else "",
+            peak_tanks, round(peak_ratio, 2) if peak_ratio else "",
+            widx[peak_wk] - widx[entry_wk],
+            hstart, h_off, round(h_wt, 2) if h_wt != "" else "",
+            "OVER CAP" if peak_ratio > 1.0 else "OK",
+        ])
+
+    ws.column_dimensions["A"].width = 18
+    for c in range(2, 14):
+        ws.column_dimensions[get_column_letter(c)].width = 16
+
+
 def write_harvest_plan_report(
     wb,
     harvest_events,

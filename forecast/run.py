@@ -43,6 +43,7 @@ from .excel_io import (
     write_tank_continuity_audit,
     write_system_limits_audit,
     write_transfer_plan_output,
+    write_transfer_template,
     write_weekly_report,
 )
 from .caps import METRIC_HOG_YIELD
@@ -554,6 +555,10 @@ def main(
         wb, placement.transfer_events, placement.tranog_events,
         grade_events=placement.grade_events,
         pinned_transfers=pinned_transfers,
+    )
+    write_transfer_template(
+        wb, placement.batch_locations, placement.harvest_events,
+        placement.tranog_events, control, facility,
     )
     write_advisory(
         wb, placement.batch_locations, placement.harvest_events,
