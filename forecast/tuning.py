@@ -232,10 +232,14 @@ def recommend(results) -> Recommendation:
 # --------------------------------------------------------------------------- #
 # The sweep
 # --------------------------------------------------------------------------- #
-def run_variant(label, overrides, base_config_dir, base_scenario_dir,
-                input_path) -> VariantResult:
-    """Run the pipeline once with `overrides` applied to control.yaml."""
-    work = tempfile.mkdtemp(prefix="as_tune_")
+def _run_in_tempdir(label, overrides, base_config_dir, base_scenario_dir,
+                    input_path) -> str:
+    """Run the pipeline once with `overrides` applied onto control.yaml in an
+    isolated temp copy of the config/scenario, and return the output workbook
+    path. Shared run harness — used by both this module's tuning sweep and
+    forecast.optimize's multi-objective sweep, so the temp-copy + override + run
+    plumbing lives in exactly one place. Nothing mutates the caller's dirs."""
+    work = tempfile.mkdtemp(prefix="as_run_")
     cdir = os.path.join(work, "config")
     sdir = os.path.join(work, "scenario")
     shutil.copytree(base_config_dir, cdir)
@@ -252,7 +256,14 @@ def run_variant(label, overrides, base_config_dir, base_scenario_dir,
     shutil.copy(input_path, inp)
     with contextlib.redirect_stdout(io.StringIO()):
         _run.main(inp, out, config_dir=cdir, scenario_dir=sdir)
+    return out
 
+
+def run_variant(label, overrides, base_config_dir, base_scenario_dir,
+                input_path) -> VariantResult:
+    """Run the pipeline once with `overrides` applied to control.yaml."""
+    out = _run_in_tempdir(label, overrides, base_config_dir, base_scenario_dir,
+                          input_path)
     peaks, detail = _peaks_and_detail(out)
     dropped, overprod = _conservation(out)
     return VariantResult(

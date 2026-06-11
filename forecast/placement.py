@@ -127,6 +127,35 @@ _SETPOINT_LOOKAHEAD_WEEKS = 0.75
 _MARGIN_MIN_FRAC = 0.005
 _MARGIN_MAX_FRAC = 0.04
 
+
+@dataclass
+class _HarvestBudget:
+    """Shared per-week harvest ceiling (fish count) threaded through every
+    harvest pass when level-loading is ON. When OFF the caller sets cap=inf, so
+    `take()` is a pass-through and emissions are byte-identical to the legacy
+    path. `record()` tracks the ACTUAL fish taken (INV-5 force-empty aware), so
+    the budget never under-counts; a forced full-tank may push `used` slightly
+    past `cap` (captured in `overdraw`, carried into next week by the caller)."""
+    cap: float
+    used: float = 0.0
+    allow_overdraw: bool = False   # make-room exception only (conservation > cap)
+    overdraw: float = 0.0
+
+    def remaining(self) -> float:
+        return max(0.0, self.cap - self.used)
+
+    def take(self, want: float) -> float:
+        if want <= 0:
+            return 0.0
+        if self.allow_overdraw:
+            return want
+        return min(want, self.remaining())
+
+    def record(self, emitted: float) -> None:
+        self.used += emitted
+        if self.used > self.cap:
+            self.overdraw = self.used - self.cap
+
 # Arrival feed-forward smoothing window (weeks). Each scheduled TranOG arrival
 # is pre-harvested over this many weeks before it lands. Empirically W=1
 # (pre-draw in the move-in whose drain coincides with the arrival week) holds
@@ -884,6 +913,7 @@ def _run_sixn_purge_week(
     harvest_target: Optional[float] = None,
     resting_pair: Optional[tuple[int, int]] = None,
     refill: bool = True,
+    budget: Optional["_HarvestBudget"] = None,
 ) -> Optional[tuple[int, int]]:
     """Run one week of the 6N purge pipeline (3-pair fallow rotation).
 
@@ -925,6 +955,10 @@ def _run_sixn_purge_week(
         )
         warnings.extend(ev.apply(state))
         harvest_events.append(ev)
+        # Physical drain — never clamped, but recorded so the supplemental pass
+        # below (and the rest of the week) sees the reduced remaining budget.
+        if budget is not None:
+            budget.record(ev.count)
 
     # 1b. Supplemental harvest from FIFO production tanks to top the weekly
     # total up to the CLOSED-LOOP target. `harvest_target` is the realized-
@@ -958,6 +992,10 @@ def _run_sixn_purge_week(
                 if deficit <= 0:
                     break
                 take = min(deficit, src.count)
+                if budget is not None:
+                    if budget.remaining() <= 0:
+                        break              # HARD weekly ceiling reached
+                    take = budget.take(take)
                 if take <= 0:
                     continue
                 ev = Harvest(
@@ -970,6 +1008,8 @@ def _run_sixn_purge_week(
                 )
                 warnings.extend(ev.apply(state))
                 harvest_events.append(ev)
+                if budget is not None:
+                    budget.record(ev.count)
                 deficit -= take
 
     # Wind-down (transition): harvest the front pair but do NOT restock — 6N
@@ -2106,6 +2146,12 @@ def phase_d_emit_events(
             continue
         week_ranges[label] = (wload.week_start, wload.week_start + timedelta(days=7))
 
+    # Level-load: fish over the hard weekly harvest cap that a single make-room
+    # week was forced to take (conservation > cap) are borrowed from next week's
+    # ceiling, so the multi-week total stays <= cap x weeks. 0.0 unless ON.
+    _level_load = bool(getattr(control, "harvest_level_load", False))
+    _carry_debt = 0.0
+
     for week_label in sorted_weeks:
         # Build this week's tank → batch map.
         this_assignment: dict[int, str] = {}
@@ -2230,10 +2276,40 @@ def phase_d_emit_events(
         else:
             harvest_target = min_hv or 0.0
 
+        # LEVEL-LOAD anticipation (opt-in): pre-harvest cohorts EARLIER so weekly
+        # throughput is leveled under the hard cap and biomass never piles into a
+        # one-week dump. Project REALIZED facility growth K weeks out (the Phase-A
+        # projection under-predicts peaks ~3% and is unsafe), estimate the biomass
+        # that must be shed over that window, and raise the harvest floor to 1/K of
+        # it — so the controller starts shedding a coming peak across the calm
+        # run-up weeks rather than reacting in the peak week. Composes with the
+        # anticipatory setpoint (which sets HOW FAR below cap to sit; this sets HOW
+        # EARLY to start). The weekly_max clamp below still caps each week, and the
+        # _HarvestBudget enforces it hard across all passes.
+        if (_level_load and setpoint is not None and oldest_wt > 0
+                and math.isfinite(weekly_max)):
+            _K = max(1, int(getattr(control, "harvest_smooth_lookahead_weeks", 6) or 1))
+            _proj_bio_K = fac_bio + _K * max(0.0, fac_growth_kg)
+            _shed_K = max(0.0, _proj_bio_K - setpoint)
+            _level_floor = (_shed_K * 1000.0 / oldest_wt) / _K
+            _lt = getattr(control, "harvest_level_target", None)
+            if _lt not in (None, "auto"):
+                _level_floor = max(_level_floor, float(_lt))
+            harvest_target = max(harvest_target, _level_floor)
+
         # In-place purge length + this week's harvest target (shared by the
         # winddown pre-stage and the production harvest below).
         purge_days = int(getattr(control, "starvation_period_days", 0) or 0)
         weekly_target = min(weekly_max, max(min_hv or 0.0, harvest_target or 0.0))
+
+        # Shared per-week harvest budget. ON: a HARD ceiling at weekly_max less any
+        # carried overdraw, threaded through every harvest pass below. OFF: inf, so
+        # every take() is a pass-through and emissions are byte-identical to legacy.
+        if _level_load and math.isfinite(weekly_max):
+            _budget = _HarvestBudget(cap=max(0.0, weekly_max - _carry_debt))
+        else:
+            _budget = _HarvestBudget(cap=float("inf"))
+        _carry_debt = 0.0
 
         # Harvest engine — 6N purge pipeline when in purge mode, else Layer-2 FIFO.
         if purge_this_week:
@@ -2251,6 +2327,7 @@ def phase_d_emit_events(
                 harvest_target=harvest_target,
                 resting_pair=sixn_resting_pair,
                 refill=sixn_refill,
+                budget=_budget,
             )
             # PRE-STAGE the in-place purge during WINDDOWN (sixn_refill is False
             # only in winddown). Depuration takes purge_days, so if the first
@@ -2346,6 +2423,9 @@ def phase_d_emit_events(
                     # past the processing max AND drags biomass below the setpoint).
                     # The remnant stays STARVE (frozen weight), front of next week.
                     take = min(t.count, target - _hv)
+                    if _budget.take(take) <= 0:
+                        break              # HARD weekly ceiling reached
+                    take = _budget.take(take)
                     ev = Harvest(
                         batch_id=t.batch_id, event_date=week_start_date,
                         source_tank_id=t.tank_id, count=take,
@@ -2354,6 +2434,7 @@ def phase_d_emit_events(
                     )
                     warnings.extend(ev.apply(state))
                     harvest_events.append(ev)
+                    _budget.record(ev.count)
                     _hv += ev.count
                 # (b) Enter ~target/week of fresh tanks into purge to keep the
                 # staircase going (in == out == target ⇒ the pipeline stays
@@ -2393,6 +2474,9 @@ def phase_d_emit_events(
                         if harvested >= target:
                             break
                         take = min(target - harvested, src.count)
+                        if _budget.remaining() <= 0:
+                            break          # HARD weekly ceiling reached
+                        take = _budget.take(take)
                         if take <= 0:
                             continue
                         ev = Harvest(
@@ -2403,6 +2487,7 @@ def phase_d_emit_events(
                         )
                         warnings.extend(ev.apply(state))
                         harvest_events.append(ev)
+                        _budget.record(ev.count)
                         harvested += take
 
         # Emit Transfer events for assignment diff (after harvests).
@@ -2533,6 +2618,13 @@ def phase_d_emit_events(
                         break  # genuinely saturated — arrival drop handled below
                     _cands.sort(key=lambda t: (-t.avg_wt_g, t.tank_id))
                     _src = _cands[0]
+                    # Make-room harvests the WHOLE tank (a partial wouldn't free
+                    # it), so under level-load this is the one pass that may exceed
+                    # the weekly harvest ceiling: dropping a stocked TranOG batch
+                    # (a conservation breach) is worse and unrecoverable. The
+                    # overage is recorded and borrowed from next week's ceiling
+                    # (_carry_debt), so the multi-week total stays within cap.
+                    _over = max(0.0, _budget.used + _src.count - _budget.cap)
                     _ev = Harvest(
                         batch_id=_src.batch_id, event_date=ws_date,
                         source_tank_id=_src.tank_id, count=_src.count,
@@ -2540,6 +2632,7 @@ def phase_d_emit_events(
                     )
                     warnings.extend(_ev.apply(state))
                     harvest_events.append(_ev)
+                    _budget.record(_ev.count)
                     warnings.append(
                         f"{week_label}: proactive MAKE-ROOM harvest of "
                         f"{_src.location_id} (batch {_src.batch_id}, "
@@ -2547,6 +2640,13 @@ def phase_d_emit_events(
                         f"freeing a tank for {len(_arrivals)} TranOG arrival(s) "
                         f"this week to avoid dropping them"
                     )
+                    if _level_load and _over > 0:
+                        warnings.append(
+                            f"{week_label}: make-room exceeded the weekly harvest "
+                            f"cap by {_over:.0f} fish to free a tank for a TranOG "
+                            f"arrival — conservation takes priority; the overage is "
+                            f"borrowed from next week's ceiling"
+                        )
                     _deficit -= 1
 
             day = ws_date
@@ -2787,6 +2887,11 @@ def phase_d_emit_events(
             ))
 
         prev_assignment = this_assignment
+
+        # Borrow any over-cap fish this week took (make-room exception / INV-5
+        # force-empty) from next week's ceiling, so the multi-week harvest total
+        # stays within cap x weeks. 0.0 in the common case.
+        _carry_debt = _budget.overdraw
 
     return state, tranog_events, transfer_events, harvest_events, grade_events, locations, warnings
 

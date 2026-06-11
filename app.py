@@ -29,6 +29,7 @@ from openpyxl import load_workbook
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from forecast.run import main as run_pipeline  # noqa: E402
 from forecast import tuning  # noqa: E402
+from forecast import optimize  # noqa: E402
 
 # App-managed config (Phase 1) + scenario (Phase 2) live here. In PR-only
 # mode the app reads these instead of pulling everything from the upload;
@@ -621,11 +622,13 @@ st.caption(
 with st.sidebar:
     app_mode = st.radio(
         "Mode",
-        ["Run forecast", "Configure (models & control)", "Tune (density knobs)"],
+        ["Run forecast", "Configure (models & control)", "Tune (density knobs)",
+         "Optimize (multi-objective)"],
         help="Run forecast: upload a PR and run. Configure: edit the app's "
              "biology models, facility, control, batches, and limits. "
              "Tune: sweep the controller knobs and read the per-batch "
-             "density distribution to find the best tuning for this scenario.",
+             "density distribution. Optimize: sweep knobs and rank variants on a "
+             "selectable objective (walk the line + minimize feed/handling).",
     )
     st.divider()
 
@@ -1050,12 +1053,152 @@ def _tuner():
 # Configure / Tune modes — render and stop
 # ============================================================
 
+def _opt_table(results) -> pd.DataFrame:
+    rows = []
+    for v in results:
+        m = v.metrics
+        rows.append({
+            "Variant": v.label,
+            "Score": round(v.score, 3),
+            "Biomass_overshoot": round(m.biomass_overshoot, 3),
+            "Biomass_var": round(m.biomass_var, 3),
+            "Util_gap": round(m.biomass_util_gap, 3),
+            "Harvest_var": round(m.harvest_var, 3),
+            "Harvest_overshoot": round(m.harvest_overshoot, 3),
+            "Feed_load": round(m.feed_load),
+            "Transfers/fish": round(m.transfers_per_fish, 2),
+            "Wks_over_55k": m.weeks_over_harvest_cap,
+            "Conservation": "OK" if v.conservation_ok else f"FAIL ({v.dropped}/{v.overprod})",
+        })
+    return pd.DataFrame(rows)
+
+
+def _optimizer():
+    st.header("🧭 Optimize — multi-objective")
+    st.caption(
+        "Sweeps the controller knobs and ranks variants on a **selectable** "
+        "objective. The goal is to **walk the line**: hold biomass and harvest "
+        "close to their limits AND flat (no lumps, no breaches), with feed and "
+        "handling minimized — gated on conservation. The transfer/density trade "
+        "is real (relieving density adds transfers), so you pick the emphasis; "
+        "nothing is auto-decided. Conservation-failing variants are rejected."
+    )
+
+    _cfg_ok = _config_ready() and _scenario_ready()
+    _pr_ok = pr is not None and pr["ok"]
+    if not _cfg_ok:
+        st.info("No config yet — set it up in **Configure** first.")
+        return
+    if not _pr_ok:
+        st.info("Upload a valid **ProductionReport** in the sidebar first.")
+        return
+
+    emphasis = st.radio("Objective emphasis", list(optimize.EMPHASIS_PRESETS.keys()),
+                        horizontal=True,
+                        help="Re-scoring is instant — change this after a sweep "
+                             "without re-running.")
+    custom = None
+    with st.expander("Advanced: custom weights"):
+        st.caption("Override the preset (all 'less is better'). 0 drops a component.")
+        base = optimize.EMPHASIS_PRESETS[emphasis]
+        cols = st.columns(4)
+        custom = {}
+        for i, comp in enumerate(optimize.COMPONENTS):
+            with cols[i % 4]:
+                custom[comp] = st.number_input(comp, min_value=0.0, max_value=10.0,
+                                               value=float(base.get(comp, 0.0)), step=0.5,
+                                               key=f"w_{comp}")
+        if st.checkbox("Use custom weights", key="use_custom_w"):
+            pass
+        else:
+            custom = None
+
+    depth = st.radio("Sweep depth", ["Quick", "Full"], horizontal=True,
+                     help="Quick: 4 variants. Full: ~11 across the trade space.")
+    grid = optimize.opt_grid_for(depth == "Quick")
+    n = len(grid)
+    st.write(f"**{depth}** sweep — runs the forecast **{n} times** "
+             f"(~{n * 90 // 60}–{max(1, n * 100 // 60)} min). Config never modified.")
+    if st.button("▶ Run optimization sweep", type="primary"):
+        work = Path(tempfile.mkdtemp(prefix="as_opt_in_"))
+        in_path = work / (uploaded.name or "input.xlsm")
+        in_path.write_bytes(uploaded.getvalue())
+        bar = st.progress(0.0, text="Starting sweep…")
+        try:
+            results = optimize.sweep(
+                str(in_path), str(CONFIG_DIR), str(SCENARIO_DIR), grid=grid,
+                progress=lambda i, m, label: bar.progress(i / m, text=f"[{i+1}/{m}] {label} …"))
+        except Exception as e:  # noqa: BLE001
+            bar.empty()
+            st.error(f"Sweep failed: {e}")
+            st.code(traceback.format_exc())
+            return
+        bar.progress(1.0, text="Sweep complete")
+        st.session_state["_opt_results"] = results
+
+    results = st.session_state.get("_opt_results")
+    if not results:
+        return
+
+    # Re-score instantly against the currently selected emphasis (no re-run).
+    rec = optimize.recommend(results, emphasis=emphasis,
+                             weights=optimize.weights_for(emphasis, custom))
+    if rec.is_capacity_bound:
+        st.warning(f"**Capacity-bound:** {rec.text}")
+    else:
+        st.success(f"**Recommendation:** {rec.text}")
+
+    df = _opt_table(results).sort_values("Score")
+
+    def _hl(row):
+        if row["Variant"] == rec.best_label:
+            return ["background-color: #d7f0d7"] * len(row)
+        if "FAIL" in str(row["Conservation"]):
+            return ["color: #999"] * len(row)
+        return [""] * len(row)
+
+    st.dataframe(df.style.apply(_hl, axis=1), use_container_width=True, hide_index=True)
+
+    best = next((v for v in results if v.label == rec.best_label), results[0])
+    c1, c2 = st.columns(2)
+    with c1:
+        st.subheader("Component scores — recommended")
+        comp_df = pd.DataFrame(
+            [{"Component": c, "Normalized": round(best.norm.get(c, 0.0), 3)}
+             for c in optimize.COMPONENTS])
+        fig = px.bar(comp_df, x="Normalized", y="Component", orientation="h",
+                     title=f"{best.label} (lower = better)")
+        st.plotly_chart(fig, use_container_width=True)
+    with c2:
+        st.subheader("Transfers by type — recommended")
+        tt = best.metrics.transfers_by_type
+        st.caption("TranOG + Transfer are structural; Grade is the discretionary "
+                   "part the rebalancer budgets add (the handling/density trade).")
+        st.dataframe(pd.DataFrame([{"Type": k, "Fish moved": round(v)} for k, v in tt.items()]),
+                     use_container_width=True, hide_index=True)
+
+    # Per-system biomass peak/CV for the recommended variant.
+    ps = best.metrics.per_system
+    if ps:
+        st.subheader("Per-system biomass — recommended")
+        psd = pd.DataFrame([
+            {"System": s, "Mean_kg": round(d["mean"]), "Peak_kg": round(d["peak"]),
+             "CV": round(d["cv"], 3),
+             "Peak/cap": round(d["peak"] / d["cap"], 3) if d.get("cap") else None}
+            for s, d in sorted(ps.items())])
+        st.dataframe(psd, use_container_width=True, hide_index=True)
+
+
 if app_mode.startswith("Configure"):
     _config_editor()
     st.stop()
 
 if app_mode.startswith("Tune"):
     _tuner()
+    st.stop()
+
+if app_mode.startswith("Optimize"):
+    _optimizer()
     st.stop()
 
 

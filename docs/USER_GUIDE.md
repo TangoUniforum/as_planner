@@ -37,9 +37,11 @@ streamlit run app.py
 ```
 Opens `localhost:8501`. Flow: **upload** a Production Report → **▶ Run forecast**
 → review KPIs + tabs → **download** the output workbook. The sidebar **Mode**
-selector has three windows: **Run forecast**, **Configure** (edit Control
-parameters and per-batch models before running), and **Tune (density knobs)**
-(sweep the controller knobs and read the per-batch density distribution — §7.1).
+selector has four windows: **Run forecast**, **Configure** (edit Control
+parameters and per-batch models before running), **Tune (density knobs)** (sweep
+the controller knobs and read the per-batch density distribution — §7.1), and
+**Optimize (multi-objective)** (rank knob variants on a selectable walk-the-line /
+feed / handling objective — §7.2).
 
 ### CLI
 ```
@@ -86,6 +88,9 @@ Facility-wide knobs read into `ControlParams`:
 | `rebalance_split_budget` | split over-dense batches into free tanks (moves/week) | 8 |
 | `rebalance_varqty_budget` | precise-count shaving of over-cap systems (opt-in) | 0 |
 | `harvest_setpoint_lookahead_weeks` | **anticipatory harvest margin** = weeks of realized growth held below the cap (see §4.2) | **0.75** |
+| `harvest_level_load` | **opt-in smoother** — enforce `max_harvest_per_week` as a HARD ceiling + pre-harvest earlier so harvest is flat and biomass stays under cap (see §4.3) | **false** |
+| `harvest_smooth_lookahead_weeks` | level-load window K — weeks of coming-due biomass to spread the pre-harvest over | 6 |
+| `harvest_level_target` | flat fish/week floor when level-loading (unset/null = auto from realized growth) | null |
 
 ### 3.3 Scenario batches + per-batch models (`scenario/batches.yaml` / BatchRegistry)
 Each batch row carries its stocking AND its **growth models**:
@@ -153,6 +158,42 @@ Below ~0.6 the breaches grow faster than the utilization gain.
 The remaining gap from ~96% to 100% is **natural cohort troughs** (weeks with
 little mature biomass), not controller slack — only the stocking cadence could fill
 those.
+
+### 4.3 Harvest level-loading (opt-in smoother): `harvest_level_load`
+
+Even with uniform stocking, the default controller produces **lumpy** harvest — it
+builds biomass to the cap then dumps a big harvest, a sawtooth that on config(7)
+**breaches the 55k/week processing cap in 12 weeks (up to 113k fish)**. Level-loading
+fixes this. Set `harvest_level_load: true` (Configure → Control) to:
+
+1. **Enforce `max_harvest_per_week` as a HARD weekly ceiling** across *every* harvest
+   pass (the default only clamps the main pass; three others — 6N supplemental,
+   make-room, production — bypassed it). The one allowed exception is make-room
+   freeing a tank for a TranOG arrival: dropping a stocked batch is a worse,
+   unrecoverable conservation breach, so that pass may exceed the cap for one week
+   and the overage is **borrowed from next week's ceiling** (the multi-week total
+   stays within cap × weeks).
+2. **Pre-harvest cohorts earlier** (`harvest_smooth_lookahead_weeks` = K) so weekly
+   throughput is leveled under the cap and biomass never piles into a dump — fish are
+   harvested 1–2 weeks earlier (slightly lower avg weight, still above
+   `min_harvest_weight_g`). Walks the line: near the cap, flat.
+
+**Opt-in and safe:** default `false` = today's behavior, byte-identical (same
+conservation, same determinism). Anchored in REALIZED growth (the Phase-A projection
+under-predicts peaks and is unsafe). Measured on config(7):
+
+| setting | weeks over 55k | harvest CV | peak biomass | mean biomass |
+|---|---|---|---|---|
+| OFF (default) | 12 | 0.359 | 4.29M | 3.87M |
+| ON, K=6 | 10 | 0.293 | 4.24M | 3.85M |
+| **ON, K=10 + setpoint_lookahead=2.0** | **8** | **0.247** | **4.20M** | 3.81M |
+
+Higher K / setpoint-lookahead = flatter + fewer breaches, at slightly lower mean
+utilization. **The residual (8 weeks, biomass still ~8% over cap) is a stocking/
+capacity limit** — this config is over-stocked (it wants >55k/week in burst weeks),
+which no controller setting can fully fix. Use the **Optimizer (§7.2)** to find the
+best level-load + knob combination for your scenario, and re-stock if the residual
+matters.
 
 ---
 
@@ -294,6 +335,43 @@ grow-out tanks at the same time for the tank count available. The fix is upstrea
 of the controller: **stagger batch entries**, **reduce input counts**, or **add
 grow-out tanks** — see §8. The current config(7) controller tuning is already
 optimal; the residual over-cap is a stocking-vs-capacity fact, not slack.
+
+### 7.2 The multi-objective optimizer (Optimize mode)
+
+The tuner (§7.1) reads ONE axis (per-batch density). The **optimizer** ranks knob
+variants on a **selectable, weighted objective** across several goals at once. Run
+it from the app sidebar **Mode → Optimize (multi-objective)**, or the CLI:
+```
+python -m tools.optimize_sweep --emphasis "Walk the line"
+python -m tools.optimize_sweep --emphasis "Minimize handling" --quick
+python -m tools.optimize_sweep --weights biomass_var=3,harvest_var=3,feed_load=1
+```
+
+**Objective components** (all "less is better"), built to *walk the line* — near the
+limit AND flat, not minimized:
+
+| component | meaning | direction |
+|---|---|---|
+| `biomass_overshoot` | peak / weeks of biomass over cap | no breach |
+| `biomass_var` | per-system CV + facility weekly swing | flat |
+| `biomass_util_gap` | distance of mean biomass below cap | close to the limit |
+| `harvest_var` | weekly-harvest fish CV | flat harvest |
+| `harvest_overshoot` | weeks over the 55k processing cap | no breach |
+| `feed_load` | mean daily feed | minimize (the one cost target) |
+| `feed_var` | feed CV + swing | flat |
+| `transfers_per_fish` | avg tank-to-tank moves a fish sees | minimize handling |
+
+**Emphasis presets:** *Walk the line* (default — flatness + no-breach dominate),
+*Flatten biomass*, *Minimize feed*, *Minimize handling*, *Balanced*; plus advanced
+custom weights. In the app, **changing the emphasis re-scores instantly** without
+re-running the sweep — explore the trade-offs live.
+
+**The transfer/density trade is real and is why it's selectable, not auto:** the
+rebalancer cuts biomass variability by *adding* transfers, so there's no single
+optimum — you choose. **Conservation is a hard gate:** any variant with dropped or
+over-produced fish is rejected and never recommended. When no variant beats baseline
+on the chosen objective, the optimizer says so (capacity-bound — a stocking problem,
+not a knob).
 
 ---
 
