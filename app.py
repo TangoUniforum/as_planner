@@ -875,6 +875,19 @@ def _parse_output_workbook(path: Path) -> dict:
             if hdr and row and isinstance(row[0], (int, float)):
                 yearly.append({hdr[i]: row[i] for i in range(min(len(hdr), len(row)))})
 
+    # Per-batch plan summary (TransferTemplate Section B) for the Plan tab.
+    plan_summary = []
+    if "TransferTemplate" in wb.sheetnames:
+        ws = wb["TransferTemplate"]
+        hdr = None
+        for row in ws.iter_rows(values_only=True):
+            if row and row[0] == "Batch":          # Section B header row
+                hdr = [str(c) for c in row if c is not None]
+                continue
+            if (hdr and row and isinstance(row[0], str)
+                    and row[0].startswith("B") and len(row[0]) > 1 and row[0][1].isdigit()):
+                plan_summary.append({hdr[i]: row[i] for i in range(min(len(hdr), len(row)))})
+
     # Control status (R8-R16).
     status = {}
     if "Control" in wb.sheetnames:
@@ -899,6 +912,7 @@ def _parse_output_workbook(path: Path) -> dict:
         "advisory_entries": advisory_entries,
         "control_status": status,
         "yearly": yearly,
+        "plan_summary": plan_summary,
     }
 
 
@@ -979,12 +993,13 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
     he_df = pd.DataFrame(r["harvest_events"]) if r["harvest_events"] else pd.DataFrame()
     bio_df = pd.DataFrame(r.get("biology_projection", []))
 
-    tab_over, tab_batch, tab_period, tab_harvest, tab_yearly = st.tabs([
+    tab_over, tab_batch, tab_period, tab_harvest, tab_yearly, tab_plan = st.tabs([
         "Overview",
         "Per-Batch",
         "Period Summary",
         "Harvest",
         "Yearly",
+        "Plan",
     ])
 
     # ============================================================
@@ -1504,6 +1519,46 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
                 fig = px.bar(yr, x="Year", y=col, title=title, text_auto=True)
                 fig.update_layout(height=320, xaxis_title="")
                 cols[i % 2].plotly_chart(fig, use_container_width=True)
+
+    # ============================================================
+    # Tab 6: Plan — per-batch plan summary + density risk
+    # ============================================================
+    with tab_plan:
+        st.subheader("Batch plan summary")
+        pf = pd.DataFrame(r.get("plan_summary", []))
+        if pf.empty:
+            st.info("No TransferTemplate plan summary in this workbook.")
+        else:
+            st.caption("When each batch enters seawater, its tank footprint, density "
+                       "risk, and harvest window. Rows flagged OVER CAP peak above the "
+                       "density cap at some point in their life.")
+            status_col = next((c for c in pf.columns if c.startswith("Density_Status")), None)
+            peak_col = next((c for c in pf.columns if c.startswith("Peak_Density")), None)
+            n_over = int((pf[status_col] == "OVER CAP").sum()) if status_col else 0
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Batches", len(pf))
+            c2.metric("Density risk (OVER CAP)", n_over)
+            if peak_col:
+                worst = pd.to_numeric(pf[peak_col], errors="coerce").max()
+                c3.metric("Worst peak density", f"{worst:.2f}× cap" if pd.notna(worst) else "—")
+
+            def _hl(row):
+                over = status_col and row.get(status_col) == "OVER CAP"
+                return ['background-color: #fde2e2' if over else '' for _ in row]
+            st.dataframe(pf.style.apply(_hl, axis=1), hide_index=True, use_container_width=True)
+
+            if peak_col and status_col:
+                pf2 = pf.copy()
+                pf2["_peak"] = pd.to_numeric(pf2[peak_col], errors="coerce")
+                pf2 = pf2.dropna(subset=["_peak"])
+                if not pf2.empty:
+                    fig = px.bar(pf2, x="Batch", y="_peak", color=status_col,
+                                 color_discrete_map={"OVER CAP": "#e45756", "OK": "#54a24b"},
+                                 title="Peak density per batch (× cap)")
+                    fig.add_hline(y=1.0, line_dash="dot", line_color="red",
+                                  annotation_text="density cap")
+                    fig.update_layout(height=360, yaxis_title="× cap", xaxis_title="")
+                    st.plotly_chart(fig, use_container_width=True)
 
     # ---- Run log (collapsed) ----
     with st.expander("Run log (console output)"):
