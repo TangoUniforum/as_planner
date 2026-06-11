@@ -39,7 +39,11 @@ from . import run as _run
 # Each grid row is (label, {control-knob: value, ...}); the first is the baseline
 # (no overrides). These are the knobs that plausibly move per-batch density; on a
 # tank-constrained config the baseline usually wins (see module docstring).
-DEFAULT_GRID: list[tuple[str, dict]] = [
+#
+# FULL_GRID sweeps both directions of every relevant knob. QUICK_GRID is the
+# cheapest informative subset — baseline plus the one dominant lever on each axis
+# (sizing, finishing/harvest) — for a fast read before committing to the full run.
+FULL_GRID: list[tuple[str, dict]] = [
     ("baseline", {}),
     ("density=0.90", {"density_target_pct": 0.90}),
     ("density=0.85", {"density_target_pct": 0.85}),
@@ -48,6 +52,18 @@ DEFAULT_GRID: list[tuple[str, dict]] = [
     ("setpoint=0.90", {"harvest_setpoint_lookahead_weeks": 0.90}),
     ("setpoint=1.20", {"harvest_setpoint_lookahead_weeks": 1.20}),
 ]
+QUICK_GRID: list[tuple[str, dict]] = [
+    ("baseline", {}),
+    ("density=0.85", {"density_target_pct": 0.85}),
+    ("setpoint=0.90", {"harvest_setpoint_lookahead_weeks": 0.90}),
+]
+# Back-compat default.
+DEFAULT_GRID = FULL_GRID
+
+
+def grid_for(quick: bool) -> list:
+    """The grid for a 'quick' (cheap subset) or full sweep."""
+    return QUICK_GRID if quick else FULL_GRID
 
 # A peak density at/above this fraction of cap is "severe" — the only band worth
 # acting on. Below it is the normal between-check overshoot of running near cap.
@@ -205,7 +221,7 @@ def recommend(results) -> Recommendation:
         )
     else:
         text = (
-            f"Best: {best.label} — {best.dist.severe} severe (worst "
+            f"Best: {best.label} -- {best.dist.severe} severe (worst "
             f"{best.dist.worst:.2f}x) vs baseline "
             f"{baseline.dist.severe if baseline else '?'}. Apply these knobs in "
             "Configure, then re-run the forecast."

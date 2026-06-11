@@ -51,6 +51,9 @@ def main(argv=None):
     ap.add_argument("--config-template", default=None,
                     help="Optional config_template.xlsx to seed config/scenario from. "
                          "If omitted, the repo config/ + scenario/ yaml are used.")
+    ap.add_argument("--quick", action="store_true",
+                    help="Quick sweep (baseline + the dominant lever per axis) "
+                         "instead of the full knob grid.")
     args = ap.parse_args(argv)
 
     if not os.path.exists(args.input):
@@ -58,9 +61,11 @@ def main(argv=None):
 
     seed = tempfile.mkdtemp()
     cdir0, sdir0 = _base_config(args, seed)
+    grid = tuning.grid_for(args.quick)
 
     print(f"input={args.input}  "
-          f"config={'template:'+args.config_template if args.config_template else 'repo yaml'}")
+          f"config={'template:'+args.config_template if args.config_template else 'repo yaml'}  "
+          f"sweep={'quick' if args.quick else 'full'} ({len(grid)} runs)")
     print(f"{'variant':<18} {'OVER':>5} {'sev>1.3':>7} {'worst':>6} {'median':>6} | "
           f"{'<=1.0':>5} {'1.0-1.1':>7} {'1.1-1.3':>7} {'>1.3':>5} | cons")
     print("-" * 96)
@@ -68,7 +73,7 @@ def main(argv=None):
     def progress(i, n, label):
         print(f"  [{i+1}/{n}] running {label} ...", file=sys.stderr, flush=True)
 
-    results = tuning.sweep(args.input, cdir0, sdir0, progress=progress)
+    results = tuning.sweep(args.input, cdir0, sdir0, grid=grid, progress=progress)
     for r in results:
         d = r.dist
         cons = "OK" if r.conservation_ok else f"FAIL d={r.dropped} o={r.overprod}"

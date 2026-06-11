@@ -258,12 +258,17 @@ The Plan tab flags every batch whose **peak tank density** exceeds the cap. Do
 same engine (`forecast/tuning.py`):
 
 - **In the app (recommended):** sidebar **Mode → Tune (density knobs)**. With your
-  config set and a Production Report uploaded, click **▶ Run tuning sweep**. It
-  shows the peak-density distribution per variant, a stacked-band chart, the
-  **recommended** variant, and the severe-batch list. The current config is never
-  modified.
+  config set and a Production Report uploaded, pick **Quick** or **Full** sweep
+  depth and click **▶ Run tuning sweep**. It shows the peak-density distribution
+  per variant, a stacked-band chart, the **recommended** variant, and the
+  severe-batch list. The current config is never modified.
 - **CLI:** `python -m tools.tune_sweep --config-template "C:\path\config_template (N).xlsx"`
-  (or no `--config-template` to use the repo `config/` + `scenario/` yaml).
+  (or no `--config-template` to use the repo `config/` + `scenario/` yaml; add
+  `--quick` for the cheap subset).
+
+**Quick vs full.** *Quick* (3 runs: baseline + the dominant lever on each axis —
+`density_target_pct` and `harvest_setpoint_lookahead_weeks`) is a fast read.
+*Full* (7 runs) sweeps both directions of every relevant knob.
 
 Both run the forecast across a grid of `density_target_pct`, the rebalancer
 budgets, and `harvest_setpoint_lookahead_weeks`, and report the peak-density

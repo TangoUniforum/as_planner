@@ -963,10 +963,19 @@ def _tuner():
         st.info("Upload a valid **ProductionReport** in the sidebar first.")
         return
 
-    n_variants = len(tuning.DEFAULT_GRID)
+    depth = st.radio(
+        "Sweep depth",
+        ["Quick", "Full"],
+        horizontal=True,
+        help="Quick: baseline + the dominant lever on each axis (fast read). "
+             "Full: both directions of every relevant knob.",
+    )
+    quick = depth == "Quick"
+    grid = tuning.grid_for(quick)
+    n_variants = len(grid)
     st.write(
-        f"The sweep runs the forecast **{n_variants} times** "
-        f"(~{n_variants * 90 // 60}–{n_variants * 100 // 60} min). "
+        f"**{depth}** sweep — runs the forecast **{n_variants} times** "
+        f"(~{n_variants * 90 // 60}–{max(1, n_variants * 100 // 60)} min). "
         "The current config is never modified — each variant runs on a temp copy."
     )
     go = st.button("▶ Run tuning sweep", type="primary")
@@ -982,7 +991,7 @@ def _tuner():
 
         try:
             results = tuning.sweep(str(in_path), str(CONFIG_DIR),
-                                   str(SCENARIO_DIR), progress=_progress)
+                                   str(SCENARIO_DIR), grid=grid, progress=_progress)
         except Exception as e:  # noqa: BLE001
             bar.empty()
             st.error(f"Sweep failed: {e}")
