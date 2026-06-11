@@ -131,22 +131,29 @@ def write_transfer_plan_output(
     reference format).
 
     Columns: Week, Batch, From_Tank, To_Tank, Count (fish), Avg_Weight (kg),
-    Grade, CV (%). From_Tank is 'FW' for TranOG entries; a Grade event's
-    multi-tank source is comma-separated. The Grade column carries the grade
-    class (A/B/big/small) for Grade events, blank otherwise. Rejected transfer
-    attempts (count_transferred == 0) are omitted — this is the actionable
-    plan, not the attempt log (the audit sheets carry rejected attempts).
+    Grade, CV (%). From_Tank is 'FW' for TranOG entries (FW->seawater), and those
+    arrivals are size-class split, so the Grade column shows A (big class) / B
+    (small class); a regular transfer is blank; a Grade event's multi-tank source
+    is comma-separated. Rejected transfer attempts (count_transferred == 0) are
+    omitted — this is the actionable plan, not the attempt log (the audit sheets
+    carry rejected attempts).
     """
     if sheet_name in wb.sheetnames:
         del wb[sheet_name]
     ws = wb.create_sheet(sheet_name)
     ws.append(["TRANSFER PLAN"])
-    ws.append(["For each transfer: specify batch, date or week#, from/to tanks, count, avg weight."])
+    ws.append(["For each transfer: specify batch, date or week#, from/to tanks, count, avg weight. "
+               "Grade A = big size class, B = small (size-class split)."])
     ws.append([])
     ws.append([
         "Week", "Batch", "From_Tank", "To_Tank",
         "Count (fish)", "Avg_Weight (kg)", "Grade", "CV (%)",
     ])
+
+    def _grade(dest):
+        # TankAllocation.size_class is "big" / "small" / "mixed" / "". Map to the
+        # A/B grade convention; mixed/blank -> no grade.
+        return {"big": "A", "small": "B"}.get(getattr(dest, "size_class", "") or "", "")
 
     rows: list[tuple] = []
     for ev in tranog_events:
@@ -154,7 +161,7 @@ def write_transfer_plan_output(
         for dest in ev.destinations:
             rows.append((
                 ev.event_date, wk, ev.batch_id, "FW", dest.tank_id,
-                dest.count, dest.avg_wt_g / 1000.0, "", dest.cv_pct,
+                dest.count, dest.avg_wt_g / 1000.0, _grade(dest), dest.cv_pct,
             ))
     for ev in transfer_events:
         # GradedHarvest (Event 5) rides in transfer_events with a different shape
@@ -176,7 +183,7 @@ def write_transfer_plan_output(
         for dest in ev.destinations:
             rows.append((
                 ev.event_date, wk, ev.batch_id, str(ev.source_tank_id), dest.tank_id,
-                dest.count, dest.avg_wt_g / 1000.0, "", dest.cv_pct,
+                dest.count, dest.avg_wt_g / 1000.0, _grade(dest), dest.cv_pct,
             ))
     for ev in (grade_events or []):
         wk = iso_week_label(ev.event_date)
@@ -185,7 +192,7 @@ def write_transfer_plan_output(
             rows.append((
                 ev.event_date, wk, ev.batch_id, src_str, dest.tank_id,
                 dest.count, dest.avg_wt_g / 1000.0,
-                getattr(dest, "grade", "") or "", dest.cv_pct,
+                _grade(dest), dest.cv_pct,
             ))
     rows.sort(key=lambda r: (r[0], r[2]))
 
