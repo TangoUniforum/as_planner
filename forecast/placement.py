@@ -1841,6 +1841,7 @@ def _balance_loads(
     ta_index, week_tank_owner, sorted_weeks, week_index,
     cap_lookup, buf, batch_meta, tables,
     og_systems, growout_systems, og_tanks_by_system, budget,
+    level=False,
 ):
     """Multi-objective balancer: cut out-of-bounds across per-tank DENSITY,
     per-system FEED, and per-system BIOMASS *together*.
@@ -1874,8 +1875,20 @@ def _balance_loads(
     stuck: set = set()
     for _ in range(budget):
         sb, sf = loads()
+        # LEVEL mode: per-system utilization = max(biomass, feed) vs cap (the
+        # binding constraint), so the balancer fires on a system over ANY of its
+        # caps, not only on tank density. Off => density-only, byte-identical.
+        sys_u = {}
+        if level:
+            for s in og_tanks_by_system:
+                bc, fc = cap_lookup(wl, s)
+                sys_u[s] = max((sb[s] / bc) if bc else 0.0,
+                               (sf[s] / fc) if fc else 0.0)
         worst = None
+        worst_key = None
+        worst_sys = None
         for s, ids in og_tanks_by_system.items():
+            su = sys_u.get(s, 0.0)
             for tid in ids:
                 if tid in stuck:
                     continue
@@ -1884,20 +1897,46 @@ def _balance_loads(
                         or t.stage == STAGE_STARVE):   # don't relieve purge tanks
                     continue
                 ratio = t.density_kg_m3 / t.max_density_kg_m3
-                if ratio > _BALANCE_TRIGGER_FRAC and (worst is None or ratio > worst[0]):
-                    worst = (ratio, t)
+                if level:
+                    # Relieve the hottest system (density OR system biomass/feed
+                    # over cap); among its tanks prefer the biggest fish (most
+                    # eligible to flow downstream). Deterministic via tank_id.
+                    pressure = ratio if ratio >= su else su
+                    if pressure <= _BALANCE_TRIGGER_FRAC:
+                        continue
+                    key = (pressure, t.avg_wt_g, t.tank_id)
+                else:
+                    if ratio <= _BALANCE_TRIGGER_FRAC:
+                        continue
+                    key = ratio
+                if worst is None or key > worst_key:
+                    worst = t
+                    worst_key = key
+                    worst_sys = s
         if worst is None:
             break
-        src = worst[1]
+        src = worst
         b = src.batch_id
-        surplus_kg = src.biomass_kg - src.max_biomass_kg * _BALANCE_TARGET_FRAC
-        if surplus_kg <= 1.0 or src.avg_wt_g <= 0:
+        if src.avg_wt_g <= 0:
             stuck.add(src.tank_id)
             continue
-        growout = src.avg_wt_g >= OG12_MOVE_LOCK_WT_G
         intensity = (realized_feed_kg_day(
             src.avg_wt_g, src.biomass_kg, batch_meta.get(b), tables)
             / src.biomass_kg) if src.biomass_kg > 0 else 0.0
+        surplus_kg = src.biomass_kg - src.max_biomass_kg * _BALANCE_TARGET_FRAC
+        if level:
+            # Relieve the hot system's BINDING cap (biomass and/or feed) to
+            # _BALANCE_SYS_FILL of cap — whichever is over.
+            _bc, _fc = cap_lookup(wl, worst_sys)
+            if _bc and sb[worst_sys] > _bc:
+                surplus_kg = max(surplus_kg, sb[worst_sys] - _bc * _BALANCE_SYS_FILL)
+            if _fc and intensity > 0 and sf[worst_sys] > _fc:
+                surplus_kg = max(surplus_kg,
+                                 (sf[worst_sys] - _fc * _BALANCE_SYS_FILL) / intensity)
+        if surplus_kg <= 1.0:
+            stuck.add(src.tank_id)
+            continue
+        growout = src.avg_wt_g >= OG12_MOVE_LOCK_WT_G
         # Candidate destinations with per-dimension headroom.
         cands = []
         for s2, ids in og_tanks_by_system.items():
@@ -1936,8 +1975,15 @@ def _balance_loads(
         if not cands:
             stuck.add(src.tank_id)
             continue
-        # Most headroom first; prefer reusing an existing tank over a new one.
-        cands.sort(key=lambda c: (-c[0], c[1]))
+        if level:
+            # BALANCE, not concentrate: send the load to the COLDEST eligible
+            # system (lowest utilization) so it spreads across the facility,
+            # rather than filling the single most-headroom tank. c[3] = dest
+            # system; tiebreak most-headroom then existing-tank.
+            cands.sort(key=lambda c: (sys_u.get(c[3], 0.0), -c[0], c[1]))
+        else:
+            # Most headroom first; prefer reusing an existing tank over a new one.
+            cands.sort(key=lambda c: (-c[0], c[1]))
         _sc, is_new, dst, s2, tbc, tfc, bio_head, feed_head, dens_head = cands[0]
         move_kg = min(surplus_kg, dens_head, bio_head, src.biomass_kg * 0.95)
         if tfc and intensity > 0:
@@ -2554,6 +2600,7 @@ def phase_d_emit_events(
                     ta_index, week_tank_owner, sorted_weeks, week_index_r,
                     _sys_cap, _rebal_buf, batch_meta, tables, _og_sys,
                     _grow_sys, _og_tanks, _bal_budget,
+                    level=bool(getattr(control, "rebalance_level", False)),
                 )
 
             # Variable-quantity pass: with the week's placement realized, shave

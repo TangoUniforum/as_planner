@@ -1060,6 +1060,8 @@ def _opt_table(results) -> pd.DataFrame:
         rows.append({
             "Variant": v.label,
             "Score": round(v.score, 3),
+            "Sys_over-cap": round(m.system_overshoot, 3),
+            "Density_over-cap": round(m.density_overshoot, 3),
             "Biomass_overshoot": round(m.biomass_overshoot, 3),
             "Biomass_var": round(m.biomass_var, 3),
             "Util_gap": round(m.biomass_util_gap, 3),

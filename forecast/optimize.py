@@ -43,7 +43,7 @@ OPT_QUICK_GRID = [
     ("levelload:K10,sp2.0", {"harvest_level_load": True,
                              "harvest_smooth_lookahead_weeks": 10,
                              "harvest_setpoint_lookahead_weeks": 2.0}),
-    ("flatten:balance=60", {"rebalance_balance_budget": 60}),
+    ("level-balance", {"rebalance_level": True}),
     ("handling:balance=0", {"rebalance_balance_budget": 0}),
 ]
 OPT_FULL_GRID = [
@@ -62,6 +62,11 @@ OPT_FULL_GRID = [
     ("varqty=20", {"rebalance_varqty_budget": 20}),
     ("split=12", {"rebalance_split_budget": 12}),
     ("setpoint=1.20", {"harvest_setpoint_lookahead_weeks": 1.20}),
+    ("level-balance", {"rebalance_level": True}),
+    ("level-balance:bud60", {"rebalance_level": True, "rebalance_balance_budget": 60}),
+    ("level+levelload", {"rebalance_level": True, "harvest_level_load": True,
+                         "harvest_smooth_lookahead_weeks": 12,
+                         "harvest_setpoint_lookahead_weeks": 3.0}),
     ("handling:balance=0", {"rebalance_balance_budget": 0}),
 ]
 
@@ -75,6 +80,8 @@ COMPONENTS = [
     "biomass_overshoot", "biomass_var", "biomass_util_gap",
     "harvest_var", "harvest_overshoot", "feed_load", "feed_var",
     "transfers_per_fish",
+    "system_overshoot",    # per-system feed+biomass over-cap (compliance)
+    "density_overshoot",   # per-tank density over-cap (compliance)
 ]
 
 # Selectable emphasis presets (component -> weight; 0 drops out).
@@ -84,18 +91,30 @@ EMPHASIS_PRESETS = {
     # secondary (don't waste capacity, but never at the cost of breaching).
     "Walk the line": {"biomass_var": 3, "harvest_var": 3,
                       "biomass_overshoot": 2, "harvest_overshoot": 2,
+                      "system_overshoot": 2, "density_overshoot": 2,
                       "biomass_util_gap": 1,
                       "feed_load": 0.5, "feed_var": 0.5, "transfers_per_fish": 0.5},
     "Flatten biomass": {"biomass_var": 3, "biomass_overshoot": 2, "harvest_var": 2,
                         "biomass_util_gap": 1, "harvest_overshoot": 1,
+                        "system_overshoot": 1, "density_overshoot": 1,
                         "feed_var": 0.5, "feed_load": 0.5, "transfers_per_fish": 0.25},
-    "Minimize feed": {"feed_load": 3, "feed_var": 2, "biomass_var": 1,
-                      "biomass_util_gap": 0.5, "biomass_overshoot": 0.5,
+    "Minimize feed": {"feed_load": 3, "feed_var": 2, "system_overshoot": 2,
+                      "biomass_var": 1, "biomass_util_gap": 0.5, "biomass_overshoot": 0.5,
+                      "density_overshoot": 1,
                       "harvest_var": 0.5, "harvest_overshoot": 0.5,
                       "transfers_per_fish": 0.5},
     "Minimize handling": {"transfers_per_fish": 3, "biomass_var": 1, "harvest_var": 1,
                           "biomass_util_gap": 1, "biomass_overshoot": 1,
-                          "harvest_overshoot": 1, "feed_load": 0.5, "feed_var": 0.5},
+                          "harvest_overshoot": 1, "system_overshoot": 1,
+                          "density_overshoot": 1, "feed_load": 0.5, "feed_var": 0.5},
+    # Respect caps: minimize ALL over-cap excursions (per-system feed/biomass,
+    # per-tank density, facility biomass + harvest) above everything else — the
+    # emphasis for judging the leveling knob's compliance trade.
+    "Respect caps": {"system_overshoot": 3, "density_overshoot": 3,
+                     "biomass_overshoot": 2, "harvest_overshoot": 2,
+                     "biomass_var": 1, "harvest_var": 1,
+                     "feed_load": 0.5, "feed_var": 0.5,
+                     "biomass_util_gap": 0.5, "transfers_per_fish": 0.5},
     "Balanced": {c: 1 for c in COMPONENTS},
 }
 DEFAULT_EMPHASIS = "Walk the line"
@@ -112,6 +131,8 @@ class Metrics:
     feed_load: float
     feed_var: float
     transfers_per_fish: float
+    system_overshoot: float
+    density_overshoot: float
     # display-only context
     overall_peak_biomass: float
     overall_mean_biomass: float
@@ -248,6 +269,48 @@ def _transfers_per_fish(wb):
     return tpf, by_type
 
 
+def _system_overshoot(wb):
+    """Fraction of (system, week) cells over their per-system biomass OR feed cap.
+    The per-system compliance dimension the leveling knob targets — the optimizer
+    needs this to 'see' whether leveling actually helps."""
+    if "SystemLimitsAudit" not in wb.sheetnames:
+        return 0.0
+    over = tot = 0
+    for d in _table(
+            wb["SystemLimitsAudit"],
+            lambda r: r and r[0] == "Week" and len(r) > 1 and r[1] == "System",
+            lambda r: _is_week(r[0])):
+        b = d.get("Biomass_kg"); bc = d.get("Biomass_cap")
+        f = d.get("Feed_kg_day"); fc = d.get("Feed_cap")
+        has_bc = isinstance(bc, (int, float)) and bc > 0
+        has_fc = isinstance(fc, (int, float)) and fc > 0
+        if not (has_bc or has_fc):
+            continue
+        tot += 1
+        bover = has_bc and isinstance(b, (int, float)) and b > bc
+        fover = has_fc and isinstance(f, (int, float)) and f > fc
+        if bover or fover:
+            over += 1
+    return (over / tot) if tot else 0.0
+
+
+def _density_overshoot(wb):
+    """Fraction of (tank, week) cells over the ~95 kg/m3 density cap (per-tank
+    density compliance — the trade leveling can create)."""
+    if "BatchLocations" not in wb.sheetnames:
+        return 0.0
+    over = tot = 0
+    for i, row in enumerate(wb["BatchLocations"].iter_rows(values_only=True), 1):
+        if i < 5 or not row or row[0] is None:
+            continue
+        dens = row[8] if len(row) > 8 else None
+        if isinstance(dens, (int, float)):
+            tot += 1
+            if dens > 95:
+                over += 1
+    return (over / tot) if tot else 0.0
+
+
 def metrics_from_workbook(out_path, harvest_cap) -> tuple["Metrics", int, int]:
     wb = openpyxl.load_workbook(out_path, data_only=True)
     bio, feed, bcap, fcap, per = _biomass_and_feed(wb)
@@ -287,6 +350,8 @@ def metrics_from_workbook(out_path, harvest_cap) -> tuple["Metrics", int, int]:
         feed_load=statistics.mean(feed) if feed else 0.0,
         feed_var=_cv(feed) + _swing(feed),
         transfers_per_fish=tpf,
+        system_overshoot=_system_overshoot(wb),
+        density_overshoot=_density_overshoot(wb),
         overall_peak_biomass=peak_b,
         overall_mean_biomass=mean_b,
         biomass_cap=bcap,

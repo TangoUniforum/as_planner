@@ -88,6 +88,7 @@ Facility-wide knobs read into `ControlParams`:
 | `tran_og_default_tanks` | min tanks a TranOG arrival gets | 2–3 |
 | `density_target_pct` | per-tank density target as a fraction of cap | 0.85–0.99 |
 | `rebalance_balance_budget` | multi-objective rebalancer moves/week (density+feed+biomass) | 30 |
+| `rebalance_level` | **opt-in load-LEVELING** — cap-agnostic balancer that spreads load off the hottest system onto the COLDEST (vs concentrating); levels feed+biomass+density together (see §7.3) | **false** |
 | `rebalance_split_budget` | split over-dense batches into free tanks (moves/week) | 8 |
 | `rebalance_varqty_budget` | precise-count shaving of over-cap systems (opt-in) | 0 |
 | `harvest_setpoint_lookahead_weeks` | **anticipatory harvest margin** = weeks of realized growth held below the cap (see §4.2) | **0.75** |
@@ -374,11 +375,14 @@ limit AND flat, not minimized:
 | `feed_load` | mean daily feed | minimize (the one cost target) |
 | `feed_var` | feed CV + swing | flat |
 | `transfers_per_fish` | avg tank-to-tank moves a fish sees | minimize handling |
+| `system_overshoot` | per-system feed+biomass over-cap fraction (compliance, §7.3) | no breach |
+| `density_overshoot` | per-tank density over-cap fraction (compliance, §7.3) | no breach |
 
 **Emphasis presets:** *Walk the line* (default — flatness + no-breach dominate),
-*Flatten biomass*, *Minimize feed*, *Minimize handling*, *Balanced*; plus advanced
-custom weights. In the app, **changing the emphasis re-scores instantly** without
-re-running the sweep — explore the trade-offs live.
+*Flatten biomass*, *Minimize feed*, *Minimize handling*, *Respect caps* (minimize all
+over-cap excursions — see §7.3), *Balanced*; plus advanced custom weights. In the app,
+**changing the emphasis re-scores instantly** without re-running the sweep — explore
+the trade-offs live.
 
 **The transfer/density trade is real and is why it's selectable, not auto:** the
 rebalancer cuts biomass variability by *adding* transfers, so there's no single
@@ -401,6 +405,37 @@ forecast with these knobs** button. Clicking it:
 To keep the knobs permanently, paste the snippet into **Configure → Control** (or
 `config/control.yaml`); every later run then uses them. The CLI prints the same
 snippet at the end of a sweep.
+
+### 7.3 Load-leveling (`rebalance_level`) + the compliance objective
+
+**Symptom:** the per-system utilization maps (density / biomass / feed) show a wide
+spread — some systems run away over cap while others sit idle (the facility has the
+capacity, it's just badly positioned). **`rebalance_level: true`** is a cap-agnostic
+load-leveler: it computes each system's utilization as `max(biomass, feed, density)
+/ cap` (the *binding* constraint), and moves fish off the **hottest** system onto the
+**coldest eligible** one — *spreading* load instead of *concentrating* it into the
+most-headroom tank (which is what over-densified earlier attempts). It levels feed,
+biomass and density together, from any starting state, following the rules (1 kg
+move-lock, conservation, destination headroom).
+
+**It's a trade, and that's why it's swept, not hardcoded.** On config(8) it cut
+per-system over-cap **~60%** and narrowed the spread, but per-tank density over-cap
+roughly **doubled** (more tanks marginally over 95; the *worst* density barely moved)
+and it adds transfers. So the optimizer must *measure* the trade — which is why the
+objective gained two compliance components:
+
+- **`system_overshoot`** — fraction of (system, week) cells over their feed *or*
+  biomass cap (read from SystemLimitsAudit).
+- **`density_overshoot`** — fraction of (tank, week) cells over the density cap.
+
+`rebalance_level` is in the optimizer grid, so the sweep tries it and scores the
+trade. The **Respect caps** emphasis (and Walk the line) weight compliance heavily
+and will recommend leveling when its gain outweighs the density/transfer cost;
+**Minimize handling** won't (it adds transfers). So you tune the knob *through* the
+optimizer + your emphasis — never blind. **Honest limit:** every *greedy* balancer
+trades feed ↔ density; a layout respecting all caps provably exists (it fits in the
+tanks), but finding it perfectly needs a constraint *solver*, not a greedy pass —
+leveling gets most of the way, the optimizer tells you how far.
 
 ---
 
