@@ -48,13 +48,6 @@ class ControlParams:
     # once, so it cuts out-of-bounds across all three without trading one for
     # another. 0 disables.
     rebalance_balance_budget: int = 30
-    # Feed-aware rebalancing (opt-in): also relieve a system that is over its
-    # per-system FEED cap (not only over density/biomass) by moving fish to a
-    # system with feed headroom — including pushing sub-1kg nursery fish out to
-    # grow-out early, where there is far more feed capacity. Fixes the "feed-only
-    # over-cap" case (small fast-growing fish eat past the cap while under the
-    # biomass cap). 0/false = off (density-only, unchanged).
-    rebalance_feed_aware: bool = False
     # Anticipatory harvest setpoint: hold facility biomass below the cap by ~this
     # many weeks of the facility's REALIZED weekly growth (margin clamped to
     # [0.5%, 4%] of cap), so harvest pre-sheds each peak across the calm run-up

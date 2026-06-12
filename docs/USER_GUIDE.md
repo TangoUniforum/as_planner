@@ -88,7 +88,6 @@ Facility-wide knobs read into `ControlParams`:
 | `tran_og_default_tanks` | min tanks a TranOG arrival gets | 2–3 |
 | `density_target_pct` | per-tank density target as a fraction of cap | 0.85–0.99 |
 | `rebalance_balance_budget` | multi-objective rebalancer moves/week (density+feed+biomass) | 30 |
-| `rebalance_feed_aware` | also relieve a system over its **feed** cap (not only density) — moves over-feed nursery fish out to grow-out early; fixes "feed-only over-cap" (see §4.4) | **false** |
 | `rebalance_split_budget` | split over-dense batches into free tanks (moves/week) | 8 |
 | `rebalance_varqty_budget` | precise-count shaving of over-cap systems (opt-in) | 0 |
 | `harvest_setpoint_lookahead_weeks` | **anticipatory harvest margin** = weeks of realized growth held below the cap (see §4.2) | **0.75** |
@@ -209,31 +208,6 @@ capacity limit** — this config is over-stocked (it wants >55k/week in burst we
 which no controller setting can fully fix. Use the **Optimizer (§7.2)** to find the
 best level-load + knob combination for your scenario, and re-stock if the residual
 matters.
-
-### 4.4 Feed-aware rebalancing (opt-in): `rebalance_feed_aware`
-
-**Symptom:** the per-system feed chart shows a couple of systems — usually the
-**nursery (OG1/2)** — running well over their feed cap (config(8): 353 system-weeks
-over, worst 1.55×). **Cause:** small fast-growing fish have high feed-per-kg, so a
-nursery system can be *under* its biomass/density cap but *over* its feed cap. The
-multi-objective rebalancer only triggered on **density**, so it never relieved this
-"feed-only" case — half the violations.
-
-It's a **distribution problem, not capacity**: the data showed grow-out (8 systems)
-has ~5× the feed headroom needed in the worst weeks, and facility-*total* feed is
-never over cap. Set `rebalance_feed_aware: true` and the rebalancer also relieves a
-system over its **feed** cap — moving the readiest fish out (including sub-1 kg
-nursery fish pushed to grow-out *early*, where they expand into the spare capacity).
-The move is capped by the destination's feed/biomass/density headroom, so it can't
-create a new violation.
-
-Measured on config(8): **feed over-cap 353 → 132 (−63%, worst 1.55×→1.36×), and
-biomass over-cap 208 → 28 (−87%)** as a bonus (the same moves relieve both),
-conservation intact, deterministic. **Cost:** harvest CV ticks up (~0.17→0.20) —
-the extra rebalancing moves perturb harvest timing, and each move is a transfer
-(handling). It's the feed/biomass-compliance ↔ harvest-flatness trade; turn it on
-when per-system feed compliance matters. Raising `rebalance_balance_budget` (more
-moves/week) relieves more of the residual, at more transfers.
 
 ---
 

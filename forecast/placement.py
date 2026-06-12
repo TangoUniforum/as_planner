@@ -1841,7 +1841,6 @@ def _balance_loads(
     ta_index, week_tank_owner, sorted_weeks, week_index,
     cap_lookup, buf, batch_meta, tables,
     og_systems, growout_systems, og_tanks_by_system, budget,
-    feed_aware=False,
 ):
     """Multi-objective balancer: cut out-of-bounds across per-tank DENSITY,
     per-system FEED, and per-system BIOMASS *together*.
@@ -1875,19 +1874,8 @@ def _balance_loads(
     stuck: set = set()
     for _ in range(budget):
         sb, sf = loads()
-        # Per-system feed pressure (demand / cap), feed-aware only: a system over
-        # its FEED cap is relieved even when no tank is over its density cap (the
-        # "feed-only over-cap" case — small fast-growing fish eat past the cap
-        # while under the biomass cap). Off => density-only, byte-identical.
-        feed_press = {}
-        if feed_aware:
-            for s in og_tanks_by_system:
-                _, _tfc = cap_lookup(wl, s)
-                feed_press[s] = (sf[s] / _tfc) if _tfc else 0.0
         worst = None
-        worst_key = None
         for s, ids in og_tanks_by_system.items():
-            fp = feed_press.get(s, 0.0)
             for tid in ids:
                 if tid in stuck:
                     continue
@@ -1895,41 +1883,15 @@ def _balance_loads(
                 if (t is None or t.is_empty or t.max_density_kg_m3 <= 0
                         or t.stage == STAGE_STARVE):   # don't relieve purge tanks
                     continue
-                dratio = t.density_kg_m3 / t.max_density_kg_m3
-                if feed_aware:
-                    # Relieve a tank whose DENSITY is over the trigger OR whose
-                    # SYSTEM is over its feed cap; among ties prefer the biggest
-                    # fish (closest to grow-out) so a feed push-out lands a
-                    # grow-out-eligible cohort. Deterministic via tank_id.
-                    pressure = dratio if dratio >= fp else fp
-                    if pressure <= _BALANCE_TRIGGER_FRAC:
-                        continue
-                    k = (pressure, t.avg_wt_g, t.tank_id)
-                else:
-                    if dratio <= _BALANCE_TRIGGER_FRAC:
-                        continue
-                    k = dratio
-                if worst is None or k > worst_key:
-                    worst = (t, s, fp)
-                    worst_key = k
+                ratio = t.density_kg_m3 / t.max_density_kg_m3
+                if ratio > _BALANCE_TRIGGER_FRAC and (worst is None or ratio > worst[0]):
+                    worst = (ratio, t)
         if worst is None:
             break
-        src, _s_src, _fp_src = worst
+        src = worst[1]
         b = src.batch_id
-        if src.avg_wt_g <= 0:
-            stuck.add(src.tank_id)
-            continue
         surplus_kg = src.biomass_kg - src.max_biomass_kg * _BALANCE_TARGET_FRAC
-        # Feed-triggered relief: move enough biomass off the over-feed system to
-        # bring it to _BALANCE_SYS_FILL of its feed cap (feed = biomass x intensity).
-        if feed_aware and _fp_src > 1.0 and src.biomass_kg > 0:
-            _, _tfc_src = cap_lookup(wl, _s_src)
-            _ints = (realized_feed_kg_day(src.avg_wt_g, src.biomass_kg,
-                                          batch_meta.get(b), tables) / src.biomass_kg)
-            if _tfc_src and _ints > 0:
-                surplus_kg = max(surplus_kg,
-                                 (sf[_s_src] - _tfc_src * _BALANCE_SYS_FILL) / _ints)
-        if surplus_kg <= 1.0:
+        if surplus_kg <= 1.0 or src.avg_wt_g <= 0:
             stuck.add(src.tank_id)
             continue
         growout = src.avg_wt_g >= OG12_MOVE_LOCK_WT_G
@@ -2592,7 +2554,6 @@ def phase_d_emit_events(
                     ta_index, week_tank_owner, sorted_weeks, week_index_r,
                     _sys_cap, _rebal_buf, batch_meta, tables, _og_sys,
                     _grow_sys, _og_tanks, _bal_budget,
-                    feed_aware=bool(getattr(control, "rebalance_feed_aware", False)),
                 )
 
             # Variable-quantity pass: with the week's placement realized, shave
