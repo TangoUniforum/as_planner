@@ -48,13 +48,18 @@ class ControlParams:
     # once, so it cuts out-of-bounds across all three without trading one for
     # another. 0 disables.
     rebalance_balance_budget: int = 30
-    # General load-LEVELING (opt-in): a cap-agnostic balancer that spreads load
-    # off the hottest OG system (highest utilization = max of biomass/feed/density
-    # vs cap) onto the COLDEST eligible one, instead of concentrating fish into the
+    # General load-LEVELING: a cap-agnostic balancer that spreads load off the
+    # hottest OG system (highest utilization = max of biomass/feed/density vs cap)
+    # onto the COLDEST eligible one, instead of concentrating fish into the
     # most-headroom tank. Levels density, biomass AND feed together, from any
     # starting state, following the rules (1 kg move-lock, conservation, dest
-    # headroom). Shares rebalance_balance_budget moves/week. 0/false = off.
-    rebalance_level: bool = False
+    # headroom). Shares rebalance_balance_budget moves/week. ON by default: the
+    # density-only balancer leaves per-system FEED badly skewed (measured on
+    # config(8): 312 feed + 149 biomass over-cap system-weeks); leveling cuts that
+    # to 25 / 6 with 0 dropped fish and byte-identical determinism — total OG feed
+    # fits capacity every week (86% mean / 97% peak), so the breaches were pure
+    # distribution. Set false to recover the old density-only behavior.
+    rebalance_level: bool = True
     # Anticipatory harvest setpoint: hold facility biomass below the cap by ~this
     # many weeks of the facility's REALIZED weekly growth (margin clamped to
     # [0.5%, 4%] of cap), so harvest pre-sheds each peak across the calm run-up

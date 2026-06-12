@@ -35,15 +35,18 @@ import yaml
 
 from . import tuning
 
-# Knob grid: (label, {control-knob: value}); baseline first. Spans BOTH ends of
-# the transfer/density trade and the level-load knobs so the emphasis has real
-# spread to choose between.
+# Knob grid: (label, {control-knob: value}); baseline first. Every variant
+# inherits the caller's config (incl. rebalance_level, ON by default) and changes
+# only the listed knobs. Spans BOTH ends of the transfer/density trade and the
+# level-load knobs so the emphasis has real spread to choose between — including
+# `density-only` (rebalance_level: False), the control that lets the sweep VERIFY
+# leveling earns its per-tank-density cost rather than assuming it.
 OPT_QUICK_GRID = [
     ("baseline", {}),
     ("levelload:K10,sp2.0", {"harvest_level_load": True,
                              "harvest_smooth_lookahead_weeks": 10,
                              "harvest_setpoint_lookahead_weeks": 2.0}),
-    ("level-balance", {"rebalance_level": True}),
+    ("density-only", {"rebalance_level": False}),
     ("handling:balance=0", {"rebalance_balance_budget": 0}),
 ]
 OPT_FULL_GRID = [
@@ -62,11 +65,11 @@ OPT_FULL_GRID = [
     ("varqty=20", {"rebalance_varqty_budget": 20}),
     ("split=12", {"rebalance_split_budget": 12}),
     ("setpoint=1.20", {"harvest_setpoint_lookahead_weeks": 1.20}),
-    ("level-balance", {"rebalance_level": True}),
-    ("level-balance:bud60", {"rebalance_level": True, "rebalance_balance_budget": 60}),
-    ("level+levelload", {"rebalance_level": True, "harvest_level_load": True,
-                         "harvest_smooth_lookahead_weeks": 12,
-                         "harvest_setpoint_lookahead_weeks": 3.0}),
+    ("density-only", {"rebalance_level": False}),
+    ("density-only:bud60", {"rebalance_level": False, "rebalance_balance_budget": 60}),
+    ("density-only+levelload", {"rebalance_level": False, "harvest_level_load": True,
+                                "harvest_smooth_lookahead_weeks": 12,
+                                "harvest_setpoint_lookahead_weeks": 3.0}),
     ("handling:balance=0", {"rebalance_balance_budget": 0}),
 ]
 

@@ -88,7 +88,7 @@ Facility-wide knobs read into `ControlParams`:
 | `tran_og_default_tanks` | min tanks a TranOG arrival gets | 2–3 |
 | `density_target_pct` | per-tank density target as a fraction of cap | 0.85–0.99 |
 | `rebalance_balance_budget` | multi-objective rebalancer moves/week (density+feed+biomass) | 30 |
-| `rebalance_level` | **opt-in load-LEVELING** — cap-agnostic balancer that spreads load off the hottest system onto the COLDEST (vs concentrating); levels feed+biomass+density together (see §7.3) | **false** |
+| `rebalance_level` | **load-LEVELING (ON by default)** — cap-agnostic balancer that spreads load off the hottest system onto the COLDEST (vs concentrating); levels feed+biomass+density together. Cuts per-system feed/biomass over-cap ~90% at the cost of more marginal-density tank-weeks (see §7.3). Set `false` for the old density-only behavior | **true** |
 | `rebalance_split_budget` | split over-dense batches into free tanks (moves/week) | 8 |
 | `rebalance_varqty_budget` | precise-count shaving of over-cap systems (opt-in) | 0 |
 | `harvest_setpoint_lookahead_weeks` | **anticipatory harvest margin** = weeks of realized growth held below the cap (see §4.2) | **0.75** |
@@ -410,29 +410,39 @@ snippet at the end of a sweep.
 
 **Symptom:** the per-system utilization maps (density / biomass / feed) show a wide
 spread — some systems run away over cap while others sit idle (the facility has the
-capacity, it's just badly positioned). **`rebalance_level: true`** is a cap-agnostic
-load-leveler: it computes each system's utilization as `max(biomass, feed, density)
-/ cap` (the *binding* constraint), and moves fish off the **hottest** system onto the
-**coldest eligible** one — *spreading* load instead of *concentrating* it into the
-most-headroom tank (which is what over-densified earlier attempts). It levels feed,
-biomass and density together, from any starting state, following the rules (1 kg
-move-lock, conservation, destination headroom).
+capacity, it's just badly positioned). **`rebalance_level` (ON by default)** is a
+cap-agnostic load-leveler: it computes each system's utilization as `max(biomass,
+feed, density) / cap` (the *binding* constraint), and moves fish off the **hottest**
+system onto the **coldest eligible** one — *spreading* load instead of *concentrating*
+it into the most-headroom tank (which is what over-densified earlier attempts). It
+levels feed, biomass and density together, from any starting state, following the
+rules (1 kg move-lock, conservation, destination headroom).
 
-**It's a trade, and that's why it's swept, not hardcoded.** On config(8) it cut
-per-system over-cap **~60%** and narrowed the spread, but per-tank density over-cap
-roughly **doubled** (more tanks marginally over 95; the *worst* density barely moved)
-and it adds transfers. So the optimizer must *measure* the trade — which is why the
-objective gained two compliance components:
+**Why on by default — and the trade.** Without it the density-only balancer leaves
+per-system FEED badly skewed: on config(8), **312 feed + 149 biomass** over-cap
+system-weeks, with the nursery (OG1/2) running away while OG5/6 idle. The diagnosis
+(2026-06-12): total OG feed *fits* capacity every week (86% mean / 97% peak; 0 weeks
+over the 11-system total), so those breaches are pure **distribution**, not a capacity
+wall — and `≥1 kg` fish *must* use OG1/2 feed capacity because OG3-6's feed cap alone
+(21k kg/day) is below their demand (22-28k) in every week. Turning leveling on cuts
+the breaches to **25 feed / 6 biomass** (−90%), 0 dropped fish, byte-identical across
+`PYTHONHASHSEED`. **The cost:** per-tank density over-cap rises **110 → 195**
+tank-weeks (2.3% → 4.0%) — but these are tanks pushed *marginally* over 95; the
+**worst** density is unchanged (~142, capacity-bound either way), and it adds
+transfers. Set `rebalance_level: false` to recover the old density-only behavior. The
+optimizer still *measures* this trade via two compliance components:
 
 - **`system_overshoot`** — fraction of (system, week) cells over their feed *or*
   biomass cap (read from SystemLimitsAudit).
 - **`density_overshoot`** — fraction of (tank, week) cells over the density cap.
 
-`rebalance_level` is in the optimizer grid, so the sweep tries it and scores the
-trade. The **Respect caps** emphasis (and Walk the line) weight compliance heavily
-and will recommend leveling when its gain outweighs the density/transfer cost;
-**Minimize handling** won't (it adds transfers). So you tune the knob *through* the
-optimizer + your emphasis — never blind. **Honest limit:** every *greedy* balancer
+Leveling is on by default, so the optimizer grid carries the **`density-only`**
+control (`rebalance_level: false`) instead — the sweep runs *both* and scores the
+trade, so it *verifies* leveling earns its keep rather than assuming it. The
+**Respect caps** emphasis (and Walk the line) weight compliance heavily and keep
+leveling when its per-system gain outweighs the density/transfer cost; **Minimize
+handling** may pick `density-only` (fewer transfers). So you confirm the knob
+*through* the optimizer + your emphasis — never blind. **Honest limit:** every *greedy* balancer
 trades feed ↔ density; a layout respecting all caps provably exists (it fits in the
 tanks), but finding it perfectly needs a constraint *solver*, not a greedy pass —
 leveling gets most of the way, the optimizer tells you how far.
