@@ -243,7 +243,7 @@ matters.
 - **Period Summary** — facility biomass, weekly harvest, active batches, density
 - **Harvest** — totals, per-week stacked harvest, avg harvest weight, **monthly HOG rollup (sales planning)**
 - **Yearly** — HOG tonnes / feed / peak biomass / count per year
-- **Plan** — per-batch plan summary (TransferTemplate §B): entry timing, footprint, harvest window, with a **density-risk highlight** + peak-density-per-batch chart (OVER CAP flagged)
+- **Plan** — the **production-flow template** (TransferTemplate §A: the canonical seawater journey every batch follows — FW → OG1/2 nursery → 1 kg lock → grow-out fan-out → finishing → harvest drain) at the top, then the **per-batch plan summary** (§B): entry timing, footprint, harvest window, with a **density-risk highlight** + peak-density-per-batch chart (OVER CAP flagged)
 
 ---
 

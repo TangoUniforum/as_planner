@@ -633,11 +633,14 @@ with st.sidebar:
     st.divider()
 
     st.header("ProductionReport")
+    # Keyed by a nonce so "Clear PR & last run" can reset the widget (bumping
+    # the nonce gives the uploader a fresh key → it renders empty).
     uploaded = st.file_uploader(
         "ProductionReport workbook (.xlsx / .xlsm)",
         type=["xlsm", "xlsx"],
         help="Only the ProductionReport sheet is read. The forecast start is "
              "derived from its closing date. Models/limits come from config.",
+        key=f"pr_upload_{st.session_state.get('_pr_nonce', 0)}",
     )
 
     pr = _ingest_pr(uploaded) if uploaded is not None else None
@@ -696,6 +699,19 @@ with st.sidebar:
             "Upload a workbook, click ▶ Run forecast. The download "
             "button appears here after the run completes."
         )
+
+    # ---- Clear / start fresh (config + scenario are kept) ----
+    if uploaded is not None or "result" in st.session_state:
+        st.divider()
+        if st.button("🗑 Clear PR & last run", use_container_width=True,
+                     help="Remove the uploaded ProductionReport and the last run "
+                          "result, to start a fresh forecast. Your config + "
+                          "scenario (models, limits, batches) are kept."):
+            for _k in ("result", "_pr", "_pr_key"):
+                st.session_state.pop(_k, None)
+            # Bump the nonce so the file_uploader widget resets to empty.
+            st.session_state["_pr_nonce"] = st.session_state.get("_pr_nonce", 0) + 1
+            st.rerun()
 
 
 # ============================================================
@@ -881,15 +897,27 @@ def _parse_output_workbook(path: Path) -> dict:
             if hdr and row and isinstance(row[0], (int, float)):
                 yearly.append({hdr[i]: row[i] for i in range(min(len(hdr), len(row)))})
 
-    # Per-batch plan summary (TransferTemplate Section B) for the Plan tab.
+    # TransferTemplate: Section A = the canonical production-flow template (the
+    # seawater journey every batch follows), Section B = per-batch plan summary.
+    # Parse both for the Plan tab.
     plan_summary = []
+    flow_template = []
     if "TransferTemplate" in wb.sheetnames:
         ws = wb["TransferTemplate"]
-        hdr = None
+        hdr = None            # Section B (per-batch) header
+        flow_hdr = None       # Section A (production-flow) header
         for row in ws.iter_rows(values_only=True):
+            if row and row[0] == "Stage":          # Section A header row
+                flow_hdr = [str(c) if c is not None else "" for c in row]
+                continue
             if row and row[0] == "Batch":          # Section B header row
                 hdr = [str(c) for c in row if c is not None]
                 continue
+            if (flow_hdr and row and isinstance(row[0], str)
+                    and row[0][:1].isdigit()):     # Section A stage rows ("1. …")
+                flow_template.append({flow_hdr[i]: row[i]
+                                      for i in range(min(len(flow_hdr), len(row)))
+                                      if flow_hdr[i]})
             if (hdr and row and isinstance(row[0], str)
                     and row[0].startswith("B") and len(row[0]) > 1 and row[0][1].isdigit()):
                 plan_summary.append({hdr[i]: row[i] for i in range(min(len(hdr), len(row)))})
@@ -919,6 +947,7 @@ def _parse_output_workbook(path: Path) -> dict:
         "control_status": status,
         "yearly": yearly,
         "plan_summary": plan_summary,
+        "flow_template": flow_template,
     }
 
 
@@ -1897,6 +1926,20 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
     # Tab 6: Plan — per-batch plan summary + density risk
     # ============================================================
     with tab_plan:
+        # Production-flow template (TransferTemplate Section A) — the canonical
+        # journey every batch follows through the seawater conveyor.
+        ft = pd.DataFrame(r.get("flow_template", []))
+        if not ft.empty:
+            st.subheader("Production flow — the canonical batch journey")
+            st.caption(
+                "Every batch follows this seawater journey; only the timing "
+                "shifts with stocking date, the shape is fixed: FW → OG1/2 "
+                "nursery → the 1 kg move-lock → grow-out fan-out across systems "
+                "→ finishing/depuration in the top systems → harvest drain."
+            )
+            st.dataframe(ft, hide_index=True, use_container_width=True)
+            st.divider()
+
         st.subheader("Batch plan summary")
         pf = pd.DataFrame(r.get("plan_summary", []))
         if pf.empty:
