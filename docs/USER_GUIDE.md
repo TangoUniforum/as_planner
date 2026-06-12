@@ -238,7 +238,7 @@ matters.
 > reference: AccumulatedReport, AccumulatedOutput, MonthlyTargets, RunComparison.
 
 ### The app tabs
-- **Overview** — advisory issues + tank-occupancy heatmap + per-system biomass/feed
+- **Overview** — advisory issues + tank-occupancy heatmap + per-system biomass + **realized** per-system feed (read from `SystemLimitsAudit`, with the per-system feed-cap line). This is the *fed plan after harvest/FIFO* — **not** the `BiologyProjection` per-batch feed, which is the unharvested projection (fish growing along the curve, ignoring harvest/caps) and runs far higher (10k+ vs a realized ~3–4k). If a feed line looks like it spikes to 5–10× the cap, you're looking at projection feed, not the plan.
 - **Per-Batch** — per-batch weight/biomass/density/losses over a period slider
 - **Period Summary** — facility biomass, weekly harvest, active batches, density
 - **Harvest** — totals, per-week stacked harvest, avg harvest weight, **monthly HOG rollup (sales planning)**
@@ -455,6 +455,17 @@ leveling gets most of the way, the optimizer tells you how far.
 - The harvest spike and the biomass overage are **two symptoms of one cause** — the
   stocking plan vs the facility's combined hold (cap) + process (55k/week) capacity.
   You can trade one for the other; eliminating both needs a stocking change.
+- **Per-system feed/biomass spikes are a *distribution* problem, not a capacity wall.**
+  Total OG feed fits capacity every week (≈86% mean / 97% peak); `rebalance_level`
+  (on by default) levels load off the hottest system onto the coldest, cutting
+  per-system over-cap ~90%. A residual few % at peak weeks is the greedy-balancer
+  floor (§7.3).
+- **≥1 kg fish in the nursery (OG1/2) is correct, not a bug** — OG3-6's feed cap
+  alone is below the grow-out fish's feed demand, so they *must* use OG1/2 feed
+  capacity. The conveyor's 1 kg "move-lock" is a placement preference, not a hard
+  biological rule.
+- **The per-system feed chart shows *realized* feed** (`SystemLimitsAudit`), capped
+  near the per-system limit — not the much-higher unharvested biology projection.
 - Conservation holds for *any* models; the models' *biological correctness* is the
   one thing the audits can't certify.
 

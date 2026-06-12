@@ -1496,19 +1496,6 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
                     Biomass_kg=("Biomass_kg", "sum"),
                 ).reset_index().sort_values(["Week", "System"])
             )
-            # Per-system feed: derive from BiologyProjection (per-batch
-            # feed_kg_day) attributed to each system by the batch's
-            # biomass share in that system. Approximation: feed splits
-            # proportionally to where the batch's biomass lives.
-            if not bio_df.empty:
-                # Read full biology data (need Feed_kg_day too) from output
-                # workbook. The runner currently strips that — pull it
-                # from BatchLocations + biology projection via a join on
-                # (Batch, Week). bio_df has Count but not Feed_kg_day.
-                # Compute per-(batch, week) biomass share of each system,
-                # then multiply by per-batch total biomass to get
-                # per-(system, week) biomass — that's what we did above.
-                pass
 
             c1, c2 = st.columns(2)
             with c1:
@@ -1555,64 +1542,62 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
                 "— that's the operational signal of imbalance."
             )
 
-            # Per-system feed/day — sum the batch's feed/day attributed
-            # by biomass share to each system.
-            if not bio_df.empty:
-                # Build a feed map from BiologyProjection. The current
-                # parsed bio_df has Mortality + Cull but not Feed_kg_day.
-                # Re-read it from the output workbook one more time.
-                # (Simpler than restructuring the parser — Feed is needed
-                # only here.)
-                feed_per_batch_week = {}
-                from openpyxl import load_workbook as _lwb
-                if r.get("output_path"):
-                    _wb = _lwb(r["output_path"], keep_vba=True, data_only=False, read_only=True)
-                    if "BiologyProjection" in _wb.sheetnames:
-                        _ws = _wb["BiologyProjection"]
-                        _hdr = None
-                        for _i, _row in enumerate(_ws.iter_rows(values_only=True), 1):
-                            if _hdr is None and _row and _row[0] == "Batch":
-                                _hdr = list(_row)
-                                _idx = {h: j for j, h in enumerate(_hdr)}
-                                continue
-                            if _hdr is None or not _row or _row[0] is None:
-                                continue
-                            _bid = _row[_idx.get("Batch")]
-                            _wk = _row[_idx.get("Week")]
-                            _fd = _row[_idx.get("Feed_kg_day", 16)] or 0
-                            feed_per_batch_week[(_bid, _wk)] = float(_fd)
-                if feed_per_batch_week:
-                    # Per (System, Week) feed: sum over batches of
-                    # batch_feed × (batch_biomass_in_system / batch_total_biomass)
-                    tmp = bl_df.copy()
-                    tmp["Biomass_kg"] = tmp["Biomass_kg"].fillna(0)
-                    batch_tot = tmp.groupby(["Batch", "Week"])["Biomass_kg"].sum().to_dict()
-                    tmp["BatchTotal"] = tmp.apply(
-                        lambda r: batch_tot.get((r["Batch"], r["Week"]), 0), axis=1
-                    )
-                    tmp["BatchFeed"] = tmp.apply(
-                        lambda r: feed_per_batch_week.get((r["Batch"], r["Week"]), 0), axis=1
-                    )
-                    tmp["Feed_attributed"] = (
-                        tmp["BatchFeed"] * tmp["Biomass_kg"] / tmp["BatchTotal"]
-                    ).where(tmp["BatchTotal"] > 0, 0)
-                    sys_feed = tmp.groupby(["System", "Week"]).agg(
-                        Feed_kg_day=("Feed_attributed", "sum"),
-                    ).reset_index().sort_values(["Week", "System"])
-                    fig = px.line(
-                        sys_feed, x="Week", y="Feed_kg_day", color="System",
-                        markers=True,
-                        title="Per-system feed (kg/day) over time",
-                    )
-                    fig.update_layout(height=380, yaxis_title="kg/day",
-                                      legend=dict(title="System"))
-                    st.plotly_chart(fig, use_container_width=True)
-                    st.caption(
-                        "Feed attributed to each system by the share of the "
-                        "batch's biomass that lives in that system. Approximate "
-                        "— a batch spanning multiple systems splits its total "
-                        "feed proportionally."
-                    )
+            # Per-system feed/day — REALIZED, read straight from the
+            # SystemLimitsAudit sheet (the per-(system, week) feed the caps are
+            # actually checked against). NOT BiologyProjection.Feed_kg_day, which
+            # is the raw UNHARVESTED projection (fish growing along the curve,
+            # ignoring harvest + caps) and spikes far above any realized
+            # per-system feed (e.g. >10,000 vs a realized ~3,980 / 3,000 cap) —
+            # the same projection-vs-realized gap fixed at the report layer in
+            # 63dd6cc. This chart must mirror the realized plan, so it reads the
+            # audit directly (also exact, not a biomass-share approximation).
+            sys_feed_rows = []
+            feed_cap_val = None
+            from openpyxl import load_workbook as _lwb
+            if r.get("output_path"):
+                _wb = _lwb(r["output_path"], data_only=True, read_only=True)
+                if "SystemLimitsAudit" in _wb.sheetnames:
+                    _hdr = None
+                    for _row in _wb["SystemLimitsAudit"].iter_rows(values_only=True):
+                        if _hdr is None:
+                            if _row and _row[0] == "Week":
+                                _hdr = {h: j for j, h in enumerate(_row)}
+                            continue
+                        if not _row or _row[0] is None:
+                            continue
+                        _sys = _row[_hdr.get("System", 1)]
+                        _fd = _row[_hdr.get("Feed_kg_day", 5)]
+                        _fc = _row[_hdr.get("Feed_cap", 6)]
+                        if _sys is None or _fd is None:
+                            continue
+                        sys_feed_rows.append({"System": str(_sys),
+                                              "Week": str(_row[_hdr.get("Week", 0)]),
+                                              "Feed_kg_day": float(_fd)})
+                        if _fc:
+                            feed_cap_val = float(_fc)
+                _wb.close()
+            if sys_feed_rows:
+                sys_feed = pd.DataFrame(sys_feed_rows).sort_values(["Week", "System"])
+                fig = px.line(
+                    sys_feed, x="Week", y="Feed_kg_day", color="System",
+                    markers=True,
+                    title="Per-system feed (kg/day) over time — REALIZED",
+                )
+                if feed_cap_val:
+                    fig.add_hline(y=feed_cap_val, line_dash="dash",
+                                  line_color="red",
+                                  annotation_text=f"{feed_cap_val:.0f} kg/day cap")
+                fig.update_layout(height=380, yaxis_title="kg/day",
+                                  legend=dict(title="System"))
+                st.plotly_chart(fig, use_container_width=True)
+                st.caption(
+                    "REALIZED per-system feed from SystemLimitsAudit — the actual "
+                    "fed plan (after harvest + FIFO), the exact series the feed "
+                    "caps are checked against. NOT the unharvested biology "
+                    "projection (which ignores harvest and spikes well past the "
+                    "cap). Lines riding just under the dashed cap = leveled "
+                    "correctly; brief crossings are the residual over-cap weeks."
+                )
 
     # ============================================================
     # Tab 2: Per-Batch lifecycle
