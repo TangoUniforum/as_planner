@@ -69,15 +69,20 @@ class ControlParams:
     # safer/lower utilisation. Config(7)-anchored — re-tune per scenario (see
     # docs/USER_GUIDE.md).
     harvest_setpoint_lookahead_weeks: float = 0.75
-    # Harvest LEVEL-LOADING (opt-in smoother). When True, the realized harvest
-    # controller enforces max_harvest_per_week as a HARD weekly ceiling across
-    # every harvest pass AND pre-harvests cohorts earlier so weekly throughput is
-    # leveled (no sawtooth dump) while biomass stays under its cap — walking the
-    # line near the cap, flat. Default False = today's tuned behavior, byte-
-    # identical. harvest_smooth_lookahead_weeks (K) sets how many weeks of
+    # Harvest LEVEL-LOADING smoother. When True, the realized harvest controller
+    # enforces max_harvest_per_week as a HARD weekly ceiling across every harvest
+    # pass AND pre-harvests cohorts earlier so weekly throughput is leveled (no
+    # sawtooth dump) while biomass stays under its cap — walking the line near the
+    # cap, flat. ON by default, PAIRED with rebalance_level: feed-leveling spreads
+    # fish thinner, leaving fewer free whole tanks, so the controller does more
+    # make-room dumps and harvest gets SPIKIER (config(8): 11->15 weeks over the
+    # 55k processing cap). This recovers and beats it — 15->10 weeks, max 119k->
+    # 89k/wk, harvest CV 0.407->0.251, biomass over-cap 19->9, HOG tonnage + avg
+    # weight unchanged, for +7 feed system-weeks (of ~1540). The processing cap is
+    # hard, so holding it wins. harvest_smooth_lookahead_weeks (K) = weeks of
     # coming-due biomass to spread the pre-harvest over; harvest_level_target pins
-    # a flat fish/week floor (None = auto-computed from realized growth).
-    harvest_level_load: bool = False
+    # a flat fish/week floor (None = auto). Set false for the old reactive behavior.
+    harvest_level_load: bool = True
     harvest_smooth_lookahead_weeks: int = 6
     harvest_level_target: Optional[float] = None
 

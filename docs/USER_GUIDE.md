@@ -92,7 +92,7 @@ Facility-wide knobs read into `ControlParams`:
 | `rebalance_split_budget` | split over-dense batches into free tanks (moves/week) | 8 |
 | `rebalance_varqty_budget` | precise-count shaving of over-cap systems (opt-in) | 0 |
 | `harvest_setpoint_lookahead_weeks` | **anticipatory harvest margin** = weeks of realized growth held below the cap (see §4.2) | **0.75** |
-| `harvest_level_load` | **opt-in smoother** — enforce `max_harvest_per_week` as a HARD ceiling + pre-harvest earlier so harvest is flat and biomass stays under cap (see §4.3) | **false** |
+| `harvest_level_load` | **harvest smoother (ON by default)** — enforce `max_harvest_per_week` as a HARD ceiling + pre-harvest earlier so harvest is flat and biomass stays under cap. Paired with `rebalance_level`, which otherwise spikes harvest (see §4.3). Set `false` for old reactive behavior | **true** |
 | `harvest_smooth_lookahead_weeks` | level-load window K — weeks of coming-due biomass to spread the pre-harvest over | 6 |
 | `harvest_level_target` | flat fish/week floor when level-loading (unset/null = auto from realized growth) | null |
 
@@ -163,12 +163,12 @@ The remaining gap from ~96% to 100% is **natural cohort troughs** (weeks with
 little mature biomass), not controller slack — only the stocking cadence could fill
 those.
 
-### 4.3 Harvest level-loading (opt-in smoother): `harvest_level_load`
+### 4.3 Harvest level-loading (ON by default): `harvest_level_load`
 
-Even with uniform stocking, the default controller produces **lumpy** harvest — it
-builds biomass to the cap then dumps a big harvest, a sawtooth that on config(7)
-**breaches the 55k/week processing cap in 12 weeks (up to 113k fish)**. Level-loading
-fixes this. Set `harvest_level_load: true` (Configure → Control) to:
+A reactive controller produces **lumpy** harvest — it builds biomass to the cap then
+dumps a big harvest, a sawtooth that on config(7) **breaches the 55k/week processing
+cap in 12 weeks (up to 113k fish)**. Level-loading (now **on by default**) fixes this
+— it:
 
 1. **Enforce `max_harvest_per_week` as a HARD weekly ceiling** across *every* harvest
    pass (the default only clamps the main pass; three others — 6N supplemental,
@@ -193,9 +193,13 @@ fixes this. Set `harvest_level_load: true` (Configure → Control) to:
    they compete for the harvest budget or pack tanks fuller so the dump is bigger;
    minimizing the dump itself is what works.)
 
-**Opt-in and safe:** default `false` = today's behavior, byte-identical (same
-conservation, same determinism). Anchored in REALIZED growth (the Phase-A projection
-under-predicts peaks and is unsafe). Measured on config(7):
+**On by default, paired with `rebalance_level`:** feed-leveling spreads fish thinner
+→ fewer free whole tanks → more make-room harvest dumps, so on config(8) it *worsens*
+harvest (11→15 weeks over 55k). Level-loading recovers and beats that: 15→**10** weeks,
+max 119k→**89k**/wk, CV 0.407→**0.251**, biomass over-cap 19→9, with HOG tonnage + avg
+weight unchanged, for a minor **+7 feed system-weeks**. The two travel together — set
+`harvest_level_load: false` for the old reactive behavior. Anchored in REALIZED growth
+(the Phase-A projection under-predicts peaks and is unsafe). Measured on config(7):
 
 | setting | weeks over 55k | harvest CV | peak biomass | mean biomass |
 |---|---|---|---|---|
@@ -455,6 +459,11 @@ leveling gets most of the way, the optimizer tells you how far.
 - The harvest spike and the biomass overage are **two symptoms of one cause** — the
   stocking plan vs the facility's combined hold (cap) + process (55k/week) capacity.
   You can trade one for the other; eliminating both needs a stocking change.
+- **`rebalance_level` and `harvest_level_load` are both ON by default and travel
+  together.** Feed-leveling spreads fish thinner (which would otherwise spike harvest
+  via make-room dumps); the harvest smoother holds the 55k cap. Together they keep
+  feed, biomass *and* harvest near their limits and flat. Turn both off for the old
+  reactive behavior.
 - **Per-system feed/biomass spikes are a *distribution* problem, not a capacity wall.**
   Total OG feed fits capacity every week (≈86% mean / 97% peak); `rebalance_level`
   (on by default) levels load off the hottest system onto the coldest, cutting
