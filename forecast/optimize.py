@@ -339,7 +339,8 @@ def recommend(variants, emphasis=DEFAULT_EMPHASIS, weights=None) -> OptRecommend
                 "knob (see USER_GUIDE). Baseline stands.")
     else:
         text = (f"Best for '{emphasis}': {best.label} (score {best.score:.3f} vs "
-                f"baseline {baseline.score:.3f}). Apply these knobs in Configure, then re-run.")
+                f"baseline {baseline.score:.3f}). Use the Apply & verify panel below "
+                f"to run it now (or paste the knobs into Configure → Control to keep them).")
     return OptRecommendation(best.label, emphasis, best.score, capacity_bound, text)
 
 
