@@ -1205,6 +1205,72 @@ def _opt_table(results) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+# System -> conveyor tier, for the per-batch journey ("how it got there").
+_BATCH_TIER = {
+    "OG1N": "Nursery (OG1/2)", "OG1S": "Nursery (OG1/2)",
+    "OG2N": "Nursery (OG1/2)", "OG2S": "Nursery (OG1/2)",
+    "OG3N": "Grow-out OG3", "OG3S": "Grow-out OG3",
+    "OG4N": "Grow-out OG4", "OG4S": "Grow-out OG4",
+    "OG5N": "Grow-out OG5", "OG5S": "Grow-out OG5",
+    "OG6S": "Finishing OG6", "OG6N": "Finishing/depuration OG6N",
+}
+_BATCH_TIER_ORDER = ["Nursery (OG1/2)", "Grow-out OG3", "Grow-out OG4",
+                     "Grow-out OG5", "Finishing OG6", "Finishing/depuration OG6N"]
+
+
+def _derive_batch_plans(bl_df, he_df):
+    """Per-batch journey from BatchLocations (+ HarvestPlan): a summary header plus
+    the milestone timeline (the tier transitions each batch makes, when, at what
+    weight/tanks, through to harvest). Pure derivation from data already in the
+    output workbook — the 'where each batch is + how it got there' traceability."""
+    plans = []
+    if bl_df is None or bl_df.empty:
+        return plans
+    bl = bl_df.copy()
+    bl["Tier"] = bl["System"].map(lambda s: _BATCH_TIER.get(str(s), str(s)))
+    bl["Week"] = bl["Week"].astype(str)
+    hv = {}
+    if he_df is not None and not he_df.empty:
+        for b, g in he_df.groupby("Batch"):
+            wks = sorted(str(w) for w in g["Week"])
+            hv[str(b)] = {"first": wks[0], "last": wks[-1],
+                          "hog_t": float(g["HOG_kg"].sum()) / 1000.0,
+                          "avg_wt": float(pd.to_numeric(g["Avg_wt_kg"], errors="coerce").mean())}
+    for b, g in bl.groupby("Batch"):
+        g = g.sort_values("Week")
+        weeks = list(dict.fromkeys(g["Week"]))
+        peak_tanks = int(g.groupby("Week")["Tank"].nunique().max())
+        milestones, seen = [], set()
+        for wk in weeks:
+            gw = g[g["Week"] == wk]
+            here = set(gw["Tier"])
+            for tier in _BATCH_TIER_ORDER:
+                if tier in here and tier not in seen:
+                    seen.add(tier)
+                    sub = gw[gw["Tier"] == tier]
+                    avgwt = pd.to_numeric(sub["AvgWt_kg"], errors="coerce").mean()
+                    ev = ("Seawater entry (TranOG)"
+                          if tier.startswith("Nursery") and not milestones else f"→ {tier}")
+                    milestones.append({
+                        "Week": wk, "Event": ev,
+                        "Systems": ", ".join(sorted(set(str(s) for s in sub["System"]))),
+                        "AvgWt (kg)": round(float(avgwt), 2) if pd.notna(avgwt) else None,
+                        "Tanks": int(sub["Tank"].nunique()),
+                    })
+        h = hv.get(str(b))
+        if h:
+            milestones.append({"Week": f"{h['first']}–{h['last']}", "Event": "Harvest",
+                               "Systems": "→ harvest",
+                               "AvgWt (kg)": round(h["avg_wt"], 2), "Tanks": None})
+        plans.append({"Batch": str(b), "SW_entry": weeks[0] if weeks else "—",
+                      "Peak_tanks": peak_tanks,
+                      "Harvest_window": (f"{h['first']}–{h['last']}" if h else "—"),
+                      "HOG_t": round(h["hog_t"], 0) if h else 0.0,
+                      "milestones": milestones})
+    plans.sort(key=lambda p: p["SW_entry"])
+    return plans
+
+
 def _harvest_mode_label(config_dir) -> str:
     """Short description of the harvest controller mode in a config dir, so the
     Results view can always say WHICH run is on screen (keeping the correct data)."""
@@ -2122,6 +2188,37 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
                                   annotation_text="density cap")
                     fig.update_layout(height=360, yaxis_title="× cap", xaxis_title="")
                     st.plotly_chart(fig, use_container_width=True)
+
+        # ---- Per-batch plan: where each batch is + how it got there ----
+        st.divider()
+        st.subheader("Per-batch plan — journey + milestones")
+        bplans = _derive_batch_plans(bl_df, he_df)
+        if not bplans:
+            st.info("No batch-location data to build per-batch plans.")
+        else:
+            st.caption("Each batch's planned journey through the conveyor — a summary "
+                       "header (entry, peak tanks, harvest window, HOG) plus the "
+                       "milestone timeline (when it enters each tier, at what weight, "
+                       "through to harvest). Pick a batch to review; download all to share.")
+            hdr_df = pd.DataFrame([{k: p[k] for k in
+                                    ("Batch", "SW_entry", "Peak_tanks", "Harvest_window", "HOG_t")}
+                                   for p in bplans])
+            st.dataframe(hdr_df, hide_index=True, use_container_width=True)
+            pick = st.selectbox("Batch", [p["Batch"] for p in bplans], key="batchplan_pick")
+            bp = next(p for p in bplans if p["Batch"] == pick)
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("SW entry", bp["SW_entry"])
+            m2.metric("Peak tanks", bp["Peak_tanks"])
+            m3.metric("Harvest window", bp["Harvest_window"])
+            m4.metric("HOG (t)", f"{bp['HOG_t']:.0f}")
+            st.dataframe(pd.DataFrame(bp["milestones"]), hide_index=True,
+                         use_container_width=True)
+            # Flat export (one row per batch-milestone) for sharing/review.
+            rows = [{"Batch": p["Batch"], **m} for p in bplans for m in p["milestones"]]
+            st.download_button(
+                "⬇ Download all batch plans (CSV)",
+                data=pd.DataFrame(rows).to_csv(index=False).encode(),
+                file_name="batch_plans.csv", mime="text/csv")
 
     # ---- Run log (collapsed) ----
     with st.expander("Run log (console output)"):
