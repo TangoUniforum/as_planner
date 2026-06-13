@@ -388,6 +388,19 @@ over-cap excursions — see §7.3), *Balanced*; plus advanced custom weights. In
 **changing the emphasis re-scores instantly** without re-running the sweep — explore
 the trade-offs live.
 
+**The sweep grid spans the FEED↔HARVEST trade.** The strongest single lever is
+`tran_og_default_tanks`: 3 tanks/arrival spreads feed thinner (fewer feed breaches)
+but tightens the facility → bigger make-room harvest dumps; 2 is the reverse. The
+grid tests **both endpoints explicitly** (plus density, the harvest setpoint/K, and
+the two `density-only` / `reactive-harvest` controls), so the optimizer *finds* the
+trade instead of you discovering it after a run.
+
+**The trade-off map (Pareto view):** under the score table, every variant is plotted
+by its two competing pressures — per-system feed/biomass over-cap (x) vs weeks over
+the 55k harvest cap (y). **Lower-left is best (both held);** the lower-left envelope
+is the Pareto frontier, and your operating point is a *choice* along it. This is how
+you SEE that `tran_og=3` slid left-and-up (feed for harvest) before committing to it.
+
 **The transfer/density trade is real and is why it's selectable, not auto:** the
 rebalancer cuts biomass variability by *adding* transfers, so there's no single
 optimum — you choose. **Conservation is a hard gate:** any variant with dropped or

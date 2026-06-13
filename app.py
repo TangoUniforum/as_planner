@@ -213,6 +213,100 @@ def _frames_to_biology(growth_df, mort_df, feed_df, cull_df, models):
     )
 
 
+# Per-parameter explanations shown as the hover-"?" tooltip on each Control
+# widget. Keep in sync with docs/USER_GUIDE.md §3.2 and ControlParams in
+# forecast/models.py (the authoritative descriptions).
+_CONTROL_HELP = {
+    "forecast_start": "Week-0 of the forecast. DERIVED from the ProductionReport's "
+        "closing date at run time — the stored value is an ignored seed.",
+    "horizon_weeks": "Forecast length, in weeks.",
+    "scenario_name": "Label for this run; appears in the reports and the RunConfig "
+        "snapshot.",
+    "max_feed_per_day_kg": "Facility-wide daily feed ceiling (kg/day). Per-week "
+        "overrides come from FacilityLimits.",
+    "max_biomass_kg": "Facility biomass cap (kg). This is the default; per-week "
+        "overrides in FacilityLimits can raise it (e.g. later years).",
+    "max_harvest_per_week": "Weekly harvest / processing ceiling (fish). Enforced as "
+        "a HARD cap when harvest_level_load is on.",
+    "min_harvest_weight_g": "Minimum weight (g) at which a fish may be harvested.",
+    "min_harvest_per_week": "Weekly harvest floor (fish) the controller tries to meet.",
+    "min_tank_control": "Force-empty floor (fish): a harvest/transfer that would leave "
+        "fewer than this many fish empties the tank instead (invariant INV-5).",
+    "default_hog_yield": "Gross→HOG (head-off, gutted) conversion factor. Per-week "
+        "overrides in FacilityLimits.",
+    "facility_biomass_deviation_pct": "± tolerance band around the biomass cap "
+        "(R24). 0.01 = 1%.",
+    "handling_mortality_pct": "Mortality fraction applied to fish on each transfer. "
+        "0.01 = 1%.",
+    "sixn_growth": "Run the OG6N system as a normal grow-out system for the whole "
+        "horizon, instead of depuration/purge rotation.",
+    "sixn_production_start": "Date OG6N flips from purge to production mode "
+        "(ignored if sixn_growth is on).",
+    "sixn_transition_weeks": "Empty/fallow window (weeks) at the 6N purge→production "
+        "switch. 0 = none.",
+    "tran_og_default_tanks": "Minimum number of tanks a new seawater arrival (TranOG) "
+        "is placed into.",
+    "global_buffer_pct": "Safety buffer added when sizing against caps. 0.05 = 5%.",
+    "starvation_period_days": "In-place purge length (days) in 6N production mode. "
+        "7 = one weekly step (clean single-cohort pipeline).",
+    "density_target_pct": "Per-tank density target as a fraction of the cap — how full "
+        "to pack each tank. 0.9 = fill to 90% of the density cap.",
+    "rebalance_varqty_budget": "Variable-quantity rebalancer moves per week: shave a "
+        "PRECISE count of fish off an over-cap system. 0 = off (opt-in; small benefit "
+        "for the extra transfers).",
+    "rebalance_split_budget": "Split-pass moves per week: fan an over-DENSE batch out "
+        "across free tanks (one crowded tank → several).",
+    "rebalance_balance_budget": "Main multi-objective balancer moves per week: relieve "
+        "over-cap tanks into destinations with headroom across density + feed + biomass "
+        "at once. Shared with rebalance_level.",
+    "rebalance_level": "Load-LEVELING (ON by default). Spreads load off the hottest OG "
+        "system onto the coldest, leveling feed + biomass + density together — the fix "
+        "for per-system feed spikes. Set false for the old density-only behavior.",
+    "harvest_setpoint_lookahead_weeks": "Anticipatory harvest margin: hold biomass "
+        "below the cap by ~this many weeks of realized growth. 0.75 = tightest (~95.8% "
+        "utilisation); 0.90 = strict zero-breach (~94.8%); higher = safer/lower.",
+    "harvest_level_load": "Harvest smoother (ON by default). Holds the weekly harvest "
+        "cap as a hard ceiling and pre-harvests earlier so harvest is flat, not a "
+        "sawtooth. Pairs with rebalance_level (which otherwise spikes harvest).",
+    "harvest_smooth_lookahead_weeks": "Level-load window K: how many weeks of "
+        "coming-due biomass to spread the pre-harvest over. Only used when "
+        "harvest_level_load is on; bigger = smoother/earlier.",
+    "harvest_level_target": "Flat fish/week harvest floor when level-loading. Blank = "
+        "auto-computed from realized growth. Only used when harvest_level_load is on.",
+}
+
+# Column tooltips for the tabular editors (shown on the column header in the grid).
+_FACILITY_HELP = {
+    "location_id": "Human label for the tank (free text).",
+    "system_id": "System the tank belongs to (e.g. OG3N) — groups tanks for the "
+        "per-system feed/biomass caps.",
+    "tank_id": "Unique tank number.",
+    "volume_m3": "Tank volume (m³). Drives the biomass cap = volume × max_density.",
+    "max_density_kg_m3": "Max stocking density (kg/m³). Tank biomass cap = volume × "
+        "this (OG tanks are 95).",
+    "max_feed_kg_day": "Max feed the tank can deliver per day (kg/day) — the binding "
+        "constraint for grow-out fish (OG tanks are 1000).",
+    "type": "Tank type: FW (freshwater stages) or OG (seawater grow-out).",
+}
+_BATCH_HELP = {
+    "batch_id": "Unique batch label (e.g. B53).",
+    "input_date": "When the fry are stocked into freshwater (YYYY-MM-DD).",
+    "input_count": "Number of fry stocked.",
+    "tran_sf_date": "Freshwater → start-feed/smolt transition date.",
+    "tran_og_date": "Smolt → seawater (TranOG) date — when the batch enters the OG "
+        "conveyor and the forecast starts tracking it by tank.",
+    "tran_og_count": "Planned number of fish entering seawater.",
+    "tran_og_avg_wt_g": "Planned average weight (g) at seawater entry (pre-cull target).",
+    "tran_og_cv": "Size-distribution CV (%) at entry — drives the big/small grade split.",
+    "fcr_model": "Feed-conversion curve, e.g. FCR_116_Quick → 1.16.",
+    "fw_correction": "Multiplier calibrating freshwater growth/survival (tunes the FW "
+        "projection so the batch lands on its target entry weight).",
+    "sgr_correction": "Multiplier calibrating seawater growth (tunes the SW SGR curve "
+        "for this batch).",
+    "notes": "Free-text notes.",
+}
+
+
 def _edit_control():
     from forecast.config_io import (
         load_control, load_biology_tables, load_facility_config,
@@ -239,13 +333,16 @@ def _edit_control():
                             "value is an ignored seed.")
                 new[k] = v
             elif isinstance(v, bool):
-                new[k] = st.checkbox(k, value=v)
+                new[k] = st.checkbox(k, value=v, help=_CONTROL_HELP.get(k))
             elif isinstance(v, int):
-                new[k] = int(st.number_input(k, value=int(v), step=1))
+                new[k] = int(st.number_input(k, value=int(v), step=1,
+                                             help=_CONTROL_HELP.get(k)))
             elif isinstance(v, float):
-                new[k] = float(st.number_input(k, value=float(v), format="%.5f"))
+                new[k] = float(st.number_input(k, value=float(v), format="%.5f",
+                                               help=_CONTROL_HELP.get(k)))
             else:
-                new[k] = st.text_input(k, value="" if v is None else str(v)) or None
+                new[k] = st.text_input(k, value="" if v is None else str(v),
+                                       help=_CONTROL_HELP.get(k)) or None
         if st.form_submit_button("💾 Save Control"):
             dump_config(CONFIG_DIR, control=control_from_dict(new),
                         tables=load_biology_tables(CONFIG_DIR),
@@ -307,7 +404,9 @@ def _edit_facility():
     base = _persist("fac_df", lambda: pd.DataFrame(
         facility_to_dict(load_facility_config(CONFIG_DIR))["tanks"]))
     edited = st.data_editor(base, num_rows="dynamic", hide_index=True,
-                            use_container_width=True, key="fac_df_w")
+                            use_container_width=True, key="fac_df_w",
+                            column_config={c: st.column_config.Column(help=h)
+                                           for c, h in _FACILITY_HELP.items()})
     b1, b2, _ = st.columns([1, 1, 3])
     if b1.button("💾 Save Facility", key="save_fac"):
         try:
@@ -334,7 +433,9 @@ def _edit_batches():
     base = _persist("batch_df", lambda: pd.DataFrame(
         batches_to_list(load_batches(SCENARIO_DIR))))
     edited = st.data_editor(base, num_rows="dynamic", hide_index=True,
-                            use_container_width=True, key="batch_df_w")
+                            use_container_width=True, key="batch_df_w",
+                            column_config={c: st.column_config.Column(help=h)
+                                           for c, h in _BATCH_HELP.items()})
     b1, b2, _ = st.columns([1, 1, 3])
     if b1.button("💾 Save Batches", key="save_batch"):
         try:
@@ -1183,7 +1284,8 @@ def _optimizer():
             custom = None
 
     depth = st.radio("Sweep depth", ["Quick", "Full"], horizontal=True,
-                     help="Quick: 4 variants. Full: ~11 across the trade space.")
+                     help="Quick: 4 variants (tran_og endpoints + leveling control). "
+                          "Full: ~14 across the feed↔harvest trade space.")
     grid = optimize.opt_grid_for(depth == "Quick")
     n = len(grid)
     st.write(f"**{depth}** sweep — runs the forecast **{n} times** "
@@ -1294,6 +1396,34 @@ def _optimizer():
         return [""] * len(row)
 
     st.dataframe(df.style.apply(_hl, axis=1), use_container_width=True, hide_index=True)
+
+    # ---- Pareto trade-off map: the feed <-> harvest tension across variants ----
+    st.subheader("Trade-off map — feed/biomass vs harvest")
+    st.caption(
+        "Every knob setting plotted by its two competing cap pressures: per-system "
+        "feed/biomass over-cap (x) vs weeks over the 55k harvest cap (y). "
+        "**Lower-left is best** — both caps held. The lower-left envelope is the "
+        "Pareto frontier; your operating point is a choice along it. E.g. "
+        "`tran_og=3` slides left on feed but up on harvest, `baseline` the reverse — "
+        "so you can SEE the trade instead of discovering it after a run."
+    )
+    pdf = df.copy()
+    pdf["Kind"] = [
+        "Recommended" if v == rec.best_label
+        else ("Rejected" if "FAIL" in str(c) else "Variant")
+        for v, c in zip(pdf["Variant"], pdf["Conservation"])
+    ]
+    fig = px.scatter(
+        pdf, x="Sys_over-cap", y="Wks_over_55k", text="Variant", color="Kind",
+        color_discrete_map={"Recommended": "#2e7d32", "Rejected": "#bbbbbb",
+                            "Variant": "#1f77b4"},
+        title="Operating-point trade-off (lower-left = both caps held)",
+    )
+    fig.update_traces(textposition="top center", marker=dict(size=11))
+    fig.update_layout(height=430,
+                      xaxis_title="Per-system feed/biomass over-cap (fraction)",
+                      yaxis_title="Weeks over 55k harvest cap")
+    st.plotly_chart(fig, use_container_width=True)
 
     best = next((v for v in results if v.label == rec.best_label), results[0])
     c1, c2 = st.columns(2)

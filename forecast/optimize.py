@@ -36,40 +36,48 @@ import yaml
 from . import tuning
 
 # Knob grid: (label, {control-knob: value}); baseline first. Every variant
-# inherits the caller's config (incl. rebalance_level, ON by default) and changes
-# only the listed knobs. Spans BOTH ends of the transfer/density trade and the
-# level-load knobs so the emphasis has real spread to choose between — including
-# `density-only` (rebalance_level: False), the control that lets the sweep VERIFY
-# leveling earns its per-tank-density cost rather than assuming it.
+# inherits the caller's config (both leveling defaults — rebalance_level +
+# harvest_level_load — ON) and changes only the listed knobs. Built to span the
+# real FEED<->HARVEST trade so the emphasis has spread to choose between:
+#   - tran_og_default_tanks is the strongest single lever (3 tanks/arrival spreads
+#     feed thinner -> fewer feed breaches, but tightens the facility -> bigger
+#     make-room harvest dumps; 2 is the reverse). The sweep MUST carry it.
+#   - density_target_pct (packing) and the harvest setpoint/K knobs tune each side.
+#   - the two CONTROLS — `density-only` (rebalance_level off) and `reactive-harvest`
+#     (harvest_level_load off) — let the sweep VERIFY each leveling default earns
+#     its keep rather than assuming it.
+# NOTE: variants set knobs EXPLICITLY (both endpoints of a lever), never relying
+# on the baseline's current value — else if config already sits at one end the
+# trade is invisible (e.g. a config at tran_og=3 makes a "tran_og=3" variant a
+# no-op duplicate of baseline). baseline = "where your config is now".
 OPT_QUICK_GRID = [
     ("baseline", {}),
-    ("levelload:K10,sp2.0", {"harvest_level_load": True,
-                             "harvest_smooth_lookahead_weeks": 10,
-                             "harvest_setpoint_lookahead_weeks": 2.0}),
+    ("tran_og=2", {"tran_og_default_tanks": 2}),   # harvest-favoring end
+    ("tran_og=3", {"tran_og_default_tanks": 3}),   # feed-favoring end
     ("density-only", {"rebalance_level": False}),
-    ("handling:balance=0", {"rebalance_balance_budget": 0}),
 ]
 OPT_FULL_GRID = [
     ("baseline", {}),
-    ("levelload:K6", {"harvest_level_load": True,
-                      "harvest_smooth_lookahead_weeks": 6}),
-    ("levelload:K10,sp2.0", {"harvest_level_load": True,
-                             "harvest_smooth_lookahead_weeks": 10,
-                             "harvest_setpoint_lookahead_weeks": 2.0}),
-    ("levelload:K12,sp3.0", {"harvest_level_load": True,
-                             "harvest_smooth_lookahead_weeks": 12,
-                             "harvest_setpoint_lookahead_weeks": 3.0}),
-    ("density=0.90", {"density_target_pct": 0.90}),
+    # tran_og — the strongest feed<->harvest lever; test BOTH ends explicitly,
+    # plus 3 paired with a tighter harvest setpoint to try to claw harvest back.
+    ("tran_og=2", {"tran_og_default_tanks": 2}),
+    ("tran_og=3", {"tran_og_default_tanks": 3}),
+    ("tran_og=3,setpoint=0.9", {"tran_og_default_tanks": 3,
+                                "harvest_setpoint_lookahead_weeks": 0.9}),
+    # packing density
+    ("density=0.85", {"density_target_pct": 0.85}),
+    ("density=0.95", {"density_target_pct": 0.95}),
+    # harvest controller — anticipation margin + smoothing window
+    ("setpoint=0.90", {"harvest_setpoint_lookahead_weeks": 0.90}),
+    ("setpoint=1.50", {"harvest_setpoint_lookahead_weeks": 1.50}),
+    ("smooth:K12,sp3.0", {"harvest_smooth_lookahead_weeks": 12,
+                          "harvest_setpoint_lookahead_weeks": 3.0}),
+    # rebalancer effort
     ("balance=60", {"rebalance_balance_budget": 60}),
-    ("balance=90", {"rebalance_balance_budget": 90}),
     ("varqty=20", {"rebalance_varqty_budget": 20}),
-    ("split=12", {"rebalance_split_budget": 12}),
-    ("setpoint=1.20", {"harvest_setpoint_lookahead_weeks": 1.20}),
+    # controls — turn each leveling default OFF to prove it earns its keep
     ("density-only", {"rebalance_level": False}),
-    ("density-only:bud60", {"rebalance_level": False, "rebalance_balance_budget": 60}),
-    ("density-only+levelload", {"rebalance_level": False, "harvest_level_load": True,
-                                "harvest_smooth_lookahead_weeks": 12,
-                                "harvest_setpoint_lookahead_weeks": 3.0}),
+    ("reactive-harvest", {"harvest_level_load": False}),
     ("handling:balance=0", {"rebalance_balance_budget": 0}),
 ]
 
