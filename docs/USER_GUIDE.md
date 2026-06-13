@@ -537,3 +537,43 @@ harvest plan** (`harvest_scheduler.py`) → **Phase-D realized engine** (`placem
 names match the narration. The `config/` + `scenario/` dirs are the working config a
 direct run reads; load a different `config_template (N).xlsx` into them via
 **Configure → upload** in the app.
+
+---
+
+## 10. Data flow — how it all ties together (and why no information is lost)
+
+There is **one pipeline** and **one output workbook (24 sheets)**, and that workbook
+is the **single source of truth**. Every visualization, export, report, and the
+optimizer's "apply" all derive from it — so nothing is lost between stages.
+
+```
+  Inputs                         One run                   One workbook (source of truth)
+  ──────                         ───────                   ──────────────────────────────
+  ProductionReport ─┐                                      ┌─ where each batch is ───────────
+  (current state)   ├─► run.py ─► precalc ─► placement ─►  │   BatchLocations, FacilityMap
+  config/ + scenario┘            (engine, deterministic)   ├─ how it got there ──────────────
+  (plan + knobs)                                           │   TransferPlan, TransferTemplate,
+                                                           │   per-batch plan (Plan tab)
+                                                           ├─ outcome ───────────────────────
+                                                           │   HarvestPlan/Report, Feed, Yearly
+                                                           └─ proof ─────────────────────────
+                                                               Conservation/Continuity audits
+                                       │
+            ┌──────────────────────────┼───────────────────────────┐
+            ▼                          ▼                           ▼
+      App viz tabs              ⬇ Download .xlsm              Optimizer (grid / deep search)
+   (Overview, Per-Batch,       (all 24 sheets — the          picks a CONFIG → re-runs the SAME
+    Period, Harvest, Yearly,    Excel deliverable)           pipeline → SAME workbook → feeds
+    Plan + per-batch plan)                                   every tab + the download again
+```
+
+**Where each batch is, at any point** → `BatchLocations` (per-tank, per-week) and the
+`FacilityMap` grid. **How it got there** → `TransferPlan` (every move/grade) and the
+**per-batch plan** (Plan tab: tier-by-tier milestone timeline + summary header,
+exportable as CSV). **What it produced** → `HarvestPlan`/`HarvestReport`. **That it's
+all conserved** → the audit sheets (0 drift / 0 dropped).
+
+**The optimizer doesn't break the chain.** Grid *and* deep search only choose a
+**config**; that config re-runs the *same* pipeline into the *same* workbook, which
+feeds the *same* tabs/export. So an optimized plan is as fully traceable as a normal
+run — no separate, lossy path.
