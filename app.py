@@ -1283,28 +1283,45 @@ def _optimizer():
         else:
             custom = None
 
-    depth = st.radio("Sweep depth", ["Quick", "Full"], horizontal=True,
-                     help="Quick: 4 variants (tran_og endpoints + leveling control). "
-                          "Full: ~14 across the feed↔harvest trade space.")
-    grid = optimize.opt_grid_for(depth == "Quick")
-    n = len(grid)
-    st.write(f"**{depth}** sweep — runs the forecast **{n} times** "
-             f"(~{n * 90 // 60}–{max(1, n * 100 // 60)} min). Config never modified.")
-    if st.button("▶ Run optimization sweep", type="primary"):
+    method = st.radio(
+        "Search method", ["Quick grid", "Full grid", "Deep search (finds combos)"],
+        horizontal=True,
+        help="Quick/Full GRID enumerate hand-picked configs (fast, but test mostly "
+             "one knob at a time — they miss COMBINATIONS). DEEP SEARCH is a greedy "
+             "coordinate descent: it tunes one knob at a time toward the best score, "
+             "looping until nothing improves — so it finds knob combinations the grid "
+             "can't (slower, ~15–30 runs). The selected emphasis GUIDES the deep search.")
+    deep = method.startswith("Deep")
+    if deep:
+        st.write(f"**Deep search** — greedy local search guided by the **{emphasis}** "
+                 f"emphasis (~15–30 runs). Finds knob COMBINATIONS. Config never modified.")
+    else:
+        grid = optimize.opt_grid_for(method == "Quick grid")
+        n = len(grid)
+        st.write(f"**{method}** — runs the forecast **{n} times** "
+                 f"(~{n * 90 // 60}–{max(1, n * 100 // 60)} min). Config never modified.")
+    if st.button("▶ Run optimization", type="primary"):
         work = Path(tempfile.mkdtemp(prefix="as_opt_in_"))
         in_path = work / (uploaded.name or "input.xlsm")
         in_path.write_bytes(uploaded.getvalue())
-        bar = st.progress(0.0, text="Starting sweep…")
+        bar = st.progress(0.0, text="Starting…")
         try:
-            results = optimize.sweep(
-                str(in_path), str(CONFIG_DIR), str(SCENARIO_DIR), grid=grid,
-                progress=lambda i, m, label: bar.progress(i / m, text=f"[{i+1}/{m}] {label} …"))
+            if deep:
+                results = optimize.coordinate_descent(
+                    str(in_path), str(CONFIG_DIR), str(SCENARIO_DIR),
+                    emphasis=emphasis, weights=optimize.weights_for(emphasis, custom),
+                    progress=lambda i, m, label: bar.progress(
+                        min(0.95, i / 25.0), text=f"[{i}] {label} …"))
+            else:
+                results = optimize.sweep(
+                    str(in_path), str(CONFIG_DIR), str(SCENARIO_DIR), grid=grid,
+                    progress=lambda i, m, label: bar.progress(i / m, text=f"[{i+1}/{m}] {label} …"))
         except Exception as e:  # noqa: BLE001
             bar.empty()
-            st.error(f"Sweep failed: {e}")
+            st.error(f"Optimization failed: {e}")
             st.code(traceback.format_exc())
             return
-        bar.progress(1.0, text="Sweep complete")
+        bar.progress(1.0, text="Done")
         st.session_state["_opt_results"] = results
 
     results = st.session_state.get("_opt_results")

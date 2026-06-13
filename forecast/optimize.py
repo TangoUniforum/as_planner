@@ -93,6 +93,7 @@ COMPONENTS = [
     "transfers_per_fish",
     "system_overshoot",    # per-system feed+biomass over-cap (compliance)
     "density_overshoot",   # per-tank density over-cap (compliance)
+    "system_peak",         # hottest single (system, week) load — the HOT SPOT
 ]
 
 # Selectable emphasis presets (component -> weight; 0 drops out).
@@ -126,6 +127,16 @@ EMPHASIS_PRESETS = {
                      "biomass_var": 1, "harvest_var": 1,
                      "feed_load": 0.5, "feed_var": 0.5,
                      "biomass_util_gap": 0.5, "transfers_per_fish": 0.5},
+    # Minimize loads / no hot spots: keep every system's biomass+feed as LOW and
+    # EVEN as possible (minimize the peak per-system load + all CVs), minimize feed
+    # and handling — and explicitly DROP biomass_util_gap, the "press to the cap"
+    # reward, because the goal here is the opposite (run cool, lots of headroom).
+    "Minimize loads": {"system_peak": 3, "system_overshoot": 2,
+                       "feed_load": 2, "feed_var": 2,
+                       "biomass_var": 2, "transfers_per_fish": 2,
+                       "harvest_var": 1, "harvest_overshoot": 1,
+                       "biomass_overshoot": 1, "density_overshoot": 1,
+                       "biomass_util_gap": 0},
     "Balanced": {c: 1 for c in COMPONENTS},
 }
 DEFAULT_EMPHASIS = "Walk the line"
@@ -144,6 +155,7 @@ class Metrics:
     transfers_per_fish: float
     system_overshoot: float
     density_overshoot: float
+    system_peak: float
     # display-only context
     overall_peak_biomass: float
     overall_mean_biomass: float
@@ -322,6 +334,30 @@ def _density_overshoot(wb):
     return (over / tot) if tot else 0.0
 
 
+def _system_peak(wb):
+    """The single HOTTEST (system, week) load across biomass AND feed, as a
+    fraction of cap (OG6N depuration excluded). Minimizing this = no hot spots —
+    keep every system's load as low as possible, evenly. Unlike system_overshoot
+    (a COUNT of breaches), this is the worst peak, so the optimizer can drive the
+    tallest spike down even while it stays under cap."""
+    if "SystemLimitsAudit" not in wb.sheetnames:
+        return 0.0
+    peak = 0.0
+    for d in _table(
+            wb["SystemLimitsAudit"],
+            lambda r: r and r[0] == "Week" and len(r) > 1 and r[1] == "System",
+            lambda r: _is_week(r[0])):
+        if d.get("System") == "OG6N":
+            continue
+        b = d.get("Biomass_kg"); bc = d.get("Biomass_cap")
+        f = d.get("Feed_kg_day"); fc = d.get("Feed_cap")
+        if isinstance(bc, (int, float)) and bc > 0 and isinstance(b, (int, float)):
+            peak = max(peak, b / bc)
+        if isinstance(fc, (int, float)) and fc > 0 and isinstance(f, (int, float)):
+            peak = max(peak, f / fc)
+    return peak
+
+
 def metrics_from_workbook(out_path, harvest_cap) -> tuple["Metrics", int, int]:
     wb = openpyxl.load_workbook(out_path, data_only=True)
     bio, feed, bcap, fcap, per = _biomass_and_feed(wb)
@@ -363,6 +399,7 @@ def metrics_from_workbook(out_path, harvest_cap) -> tuple["Metrics", int, int]:
         transfers_per_fish=tpf,
         system_overshoot=_system_overshoot(wb),
         density_overshoot=_density_overshoot(wb),
+        system_peak=_system_peak(wb),
         overall_peak_biomass=peak_b,
         overall_mean_biomass=mean_b,
         biomass_cap=bcap,
@@ -502,3 +539,76 @@ def sweep(input_path, config_dir, scenario_dir, grid=None, progress=None) -> lis
             progress(i, n, label)
         results.append(run_variant(label, overrides, config_dir, scenario_dir, input_path))
     return results
+
+
+# Knob search space for the deep (coordinate-descent) search: each knob + the
+# candidate values to try. Spans the levers that move the Minimize-loads objective
+# — placement (tran_og), the harvest controller (setpoint/K), packing density, and
+# the rebalancer budgets. Edit here to widen/narrow the search.
+CD_KNOB_SPACE = [
+    ("tran_og_default_tanks", [2, 3]),
+    ("harvest_setpoint_lookahead_weeks", [0.75, 1.5, 3.0]),
+    ("harvest_smooth_lookahead_weeks", [6, 12]),
+    ("density_target_pct", [0.85, 0.90, 0.95]),
+    ("rebalance_balance_budget", [30, 60]),
+    ("rebalance_split_budget", [8, 12]),
+]
+
+
+def coordinate_descent(input_path, config_dir, scenario_dir, emphasis=DEFAULT_EMPHASIS,
+                       weights=None, knob_space=None, max_rounds=3,
+                       progress=None) -> list[OptVariant]:
+    """Greedy local search that finds COMBINATIONS the grid can't.
+
+    From the current config (baseline), improve ONE knob at a time: try each
+    candidate value for a knob (holding the others at the current best), keep the
+    value that scores best, move to the next knob. Loop over all knobs each round;
+    stop when a full round makes no improvement (local optimum) or max_rounds.
+
+    Deterministic (fixed knob/value order; the pipeline is deterministic), so it's
+    reproducible. Conservation-OK variants only ever win (the gate). Reuses
+    run_variant + score_variants, and returns ALL evaluated variants — the SAME
+    shape sweep() returns, so recommend()/the score table/Pareto/apply-verify all
+    consume it with no changes. Nothing mutates the caller's config."""
+    knob_space = knob_space or CD_KNOB_SPACE
+    w = weights or weights_for(emphasis)
+    cache: dict = {}
+    evaluated: list = []
+
+    def _key(ov):
+        return tuple(sorted(ov.items()))
+
+    def _eval(ov, label):
+        k = _key(ov)
+        if k in cache:
+            return cache[k]
+        v = run_variant(label, dict(ov), config_dir, scenario_dir, input_path)
+        cache[k] = v
+        evaluated.append(v)
+        if progress is not None:
+            progress(len(evaluated), None, label)
+        return v
+
+    def _best_overrides():
+        # Re-score the whole evaluated set (consistent normalization over all OK
+        # variants) and return the lowest-scoring conservation-OK config.
+        score_variants(evaluated, w)
+        ok = [v for v in evaluated if v.conservation_ok]
+        return dict((min(ok, key=lambda v: v.score) if ok else evaluated[0]).overrides)
+
+    _eval({}, "baseline")                 # seed = current config
+    current = _best_overrides()
+    for _ in range(max_rounds):
+        improved = False
+        for knob, values in knob_space:
+            for val in values:
+                ov = dict(current); ov[knob] = val
+                if _key(ov) != _key(current):
+                    _eval(ov, f"{knob}={val}")
+            nb = _best_overrides()
+            if _key(nb) != _key(current):
+                current = nb
+                improved = True
+        if not improved:
+            break
+    return evaluated

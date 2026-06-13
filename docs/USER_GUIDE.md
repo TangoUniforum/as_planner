@@ -381,12 +381,24 @@ limit AND flat, not minimized:
 | `transfers_per_fish` | avg tank-to-tank moves a fish sees | minimize handling |
 | `system_overshoot` | per-system feed+biomass over-cap fraction (compliance, §7.3) | no breach |
 | `density_overshoot` | per-tank density over-cap fraction (compliance, §7.3) | no breach |
+| `system_peak` | the single **hottest** (system, week) load — biomass *or* feed, as a fraction of cap | **no hot spots** |
 
 **Emphasis presets:** *Walk the line* (default — flatness + no-breach dominate),
 *Flatten biomass*, *Minimize feed*, *Minimize handling*, *Respect caps* (minimize all
-over-cap excursions — see §7.3), *Balanced*; plus advanced custom weights. In the app,
-**changing the emphasis re-scores instantly** without re-running the sweep — explore
-the trade-offs live.
+over-cap excursions — see §7.3), **_Minimize loads_** (keep every system's biomass+feed
+as LOW and EVEN as possible — minimizes `system_peak` + all CVs + feed + handling, and
+DROPS the press-to-cap reward; the "no hot spots" objective), *Balanced*; plus advanced
+custom weights. In the app, **changing the emphasis re-scores instantly** without
+re-running the sweep — explore the trade-offs live.
+
+**Search method (Quick/Full grid vs Deep search).** The grids *enumerate* hand-picked
+configs and mostly vary one knob at a time, so they miss **combinations** (e.g. the
+`tran_og=2` + `setpoint=3.0` + `K=12` combo had to be found by hand). **Deep search**
+is a greedy **coordinate descent**: from the current config it tunes one knob at a time
+toward the best score under the chosen emphasis, looping until nothing improves — so it
+**finds combinations the grid can't** (~15–30 runs, deterministic, conservation-gated).
+The emphasis *guides* the deep search, so pick it first. Both methods return the same
+ranked variants, Pareto map, and apply/verify panel.
 
 **The sweep grid spans the FEED↔HARVEST trade.** The strongest single lever is
 `tran_og_default_tanks`: 3 tanks/arrival spreads feed thinner (fewer feed breaches)
