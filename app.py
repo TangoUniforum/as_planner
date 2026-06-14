@@ -1249,8 +1249,12 @@ def _derive_batch_plans(bl_df, he_df):
                     seen.add(tier)
                     sub = gw[gw["Tier"] == tier]
                     avgwt = pd.to_numeric(sub["AvgWt_kg"], errors="coerce").mean()
-                    ev = ("Seawater entry (TranOG)"
-                          if tier.startswith("Nursery") and not milestones else f"→ {tier}")
+                    if not milestones:   # first appearance: real entry vs in-flight
+                        ev = ("Seawater entry (TranOG)"
+                              if pd.notna(avgwt) and avgwt < 0.6
+                              else "In-flight at forecast start")
+                    else:
+                        ev = f"→ {tier}"
                     milestones.append({
                         "Week": wk, "Event": ev,
                         "Systems": ", ".join(sorted(set(str(s) for s in sub["System"]))),
@@ -1350,15 +1354,23 @@ def _optimizer():
             custom = None
 
     method = st.radio(
-        "Search method", ["Quick grid", "Full grid", "Deep search (finds combos)"],
+        "Search method",
+        ["Quick grid", "Full grid", "Deep search (finds combos)",
+         "Grid + Deep (best of both)"],
         horizontal=True,
-        help="Quick/Full GRID enumerate hand-picked configs (fast, but test mostly "
+        help="Quick/Full GRID enumerate hand-picked configs (fast, broad, but mostly "
              "one knob at a time — they miss COMBINATIONS). DEEP SEARCH is a greedy "
-             "coordinate descent: it tunes one knob at a time toward the best score, "
-             "looping until nothing improves — so it finds knob combinations the grid "
-             "can't (slower, ~15–30 runs). The selected emphasis GUIDES the deep search.")
+             "coordinate descent that tunes one knob at a time and FINDS combinations "
+             "(~15–30 runs). GRID + DEEP runs the grid, then deep-searches FROM the "
+             "grid's best, and returns the global best of both — grid explores, descent "
+             "exploits (most thorough, ~30–45 runs). The emphasis guides deep/combined.")
+    combined = method.startswith("Grid +")
     deep = method.startswith("Deep")
-    if deep:
+    if combined:
+        st.write(f"**Grid + Deep** — the full grid, then coordinate descent from its "
+                 f"best, guided by the **{emphasis}** emphasis (~30–45 runs). Returns "
+                 f"the best of both methods. Config never modified.")
+    elif deep:
         st.write(f"**Deep search** — greedy local search guided by the **{emphasis}** "
                  f"emphasis (~15–30 runs). Finds knob COMBINATIONS. Config never modified.")
     else:
@@ -1371,17 +1383,23 @@ def _optimizer():
         in_path = work / (uploaded.name or "input.xlsm")
         in_path.write_bytes(uploaded.getvalue())
         bar = st.progress(0.0, text="Starting…")
+        _prog = lambda i, m, label: bar.progress(  # noqa: E731
+            min(0.98, i / m) if m else min(0.95, i / 40.0),
+            text=f"[{i}{'/' + str(m) if m else ''}] {label} …")
+        _w = optimize.weights_for(emphasis, custom)
         try:
-            if deep:
+            if combined:
+                results = optimize.deep_search_combined(
+                    str(in_path), str(CONFIG_DIR), str(SCENARIO_DIR),
+                    emphasis=emphasis, weights=_w, progress=_prog)
+            elif deep:
                 results = optimize.coordinate_descent(
                     str(in_path), str(CONFIG_DIR), str(SCENARIO_DIR),
-                    emphasis=emphasis, weights=optimize.weights_for(emphasis, custom),
-                    progress=lambda i, m, label: bar.progress(
-                        min(0.95, i / 25.0), text=f"[{i}] {label} …"))
+                    emphasis=emphasis, weights=_w, progress=_prog)
             else:
                 results = optimize.sweep(
                     str(in_path), str(CONFIG_DIR), str(SCENARIO_DIR), grid=grid,
-                    progress=lambda i, m, label: bar.progress(i / m, text=f"[{i+1}/{m}] {label} …"))
+                    progress=_prog)
         except Exception as e:  # noqa: BLE001
             bar.empty()
             st.error(f"Optimization failed: {e}")

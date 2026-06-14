@@ -556,11 +556,12 @@ CD_KNOB_SPACE = [
 
 
 def coordinate_descent(input_path, config_dir, scenario_dir, emphasis=DEFAULT_EMPHASIS,
-                       weights=None, knob_space=None, max_rounds=3,
+                       weights=None, knob_space=None, max_rounds=3, seed=None,
                        progress=None) -> list[OptVariant]:
     """Greedy local search that finds COMBINATIONS the grid can't.
 
-    From the current config (baseline), improve ONE knob at a time: try each
+    From the `seed` config (default = current config / baseline), improve ONE knob
+    at a time: try each
     candidate value for a knob (holding the others at the current best), keep the
     value that scores best, move to the next knob. Loop over all knobs each round;
     stop when a full round makes no improvement (local optimum) or max_rounds.
@@ -596,7 +597,8 @@ def coordinate_descent(input_path, config_dir, scenario_dir, emphasis=DEFAULT_EM
         ok = [v for v in evaluated if v.conservation_ok]
         return dict((min(ok, key=lambda v: v.score) if ok else evaluated[0]).overrides)
 
-    _eval({}, "baseline")                 # seed = current config
+    seed = dict(seed or {})
+    _eval(seed, "seed" if seed else "baseline")   # start point (warm-start from grid best)
     current = _best_overrides()
     for _ in range(max_rounds):
         improved = False
@@ -612,3 +614,27 @@ def coordinate_descent(input_path, config_dir, scenario_dir, emphasis=DEFAULT_EM
         if not improved:
             break
     return evaluated
+
+
+def deep_search_combined(input_path, config_dir, scenario_dir, emphasis=DEFAULT_EMPHASIS,
+                         weights=None, grid=None, max_rounds=3,
+                         progress=None) -> list[OptVariant]:
+    """Best-of-both for ANY emphasis: run the full GRID (broad, diverse coverage —
+    incl. the off-by-default controls), then coordinate descent SEEDED FROM the
+    grid's best (local refinement that finds combinations around the broadly-best
+    point). Pool every evaluated variant, dedup by overrides, and return the lot —
+    recommend() then picks the GLOBAL best across both methods. Grid explores,
+    descent exploits; the winner is whichever wins. Same OptVariant list shape, so
+    the app/score-table/Pareto/apply-verify consume it unchanged."""
+    w = weights or weights_for(emphasis)
+    gvars = sweep(input_path, config_dir, scenario_dir,
+                  grid=grid or OPT_FULL_GRID, progress=progress)
+    score_variants(gvars, w)
+    ok = [v for v in gvars if v.conservation_ok]
+    seed = dict((min(ok, key=lambda v: v.score) if ok else gvars[0]).overrides)
+    dvars = coordinate_descent(input_path, config_dir, scenario_dir, emphasis=emphasis,
+                               weights=w, seed=seed, max_rounds=max_rounds, progress=progress)
+    pool = {}
+    for v in gvars + dvars:        # dedup by overrides; identical configs collapse
+        pool[tuple(sorted(v.overrides.items()))] = v
+    return list(pool.values())

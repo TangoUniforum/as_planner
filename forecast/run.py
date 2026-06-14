@@ -44,6 +44,7 @@ from .excel_io import (
     write_system_limits_audit,
     write_transfer_plan_output,
     write_transfer_template,
+    write_batch_plan,
     write_weekly_report,
 )
 from .caps import METRIC_HOG_YIELD
@@ -559,6 +560,12 @@ def main(
     write_transfer_template(
         wb, placement.batch_locations, placement.harvest_events,
         placement.tranog_events, control, facility,
+    )
+    # Per-batch plan: the 'where each batch is + how it got there' journey
+    # (summary header + tier-by-tier milestones), as a shareable sheet.
+    write_batch_plan(
+        wb, placement.batch_locations, placement.harvest_events,
+        default_hog_yield=control.default_hog_yield,
     )
     write_advisory(
         wb, placement.batch_locations, placement.harvest_events,

@@ -69,6 +69,98 @@ def write_batch_locations(wb, batch_locations, sheet_name: str = "BatchLocations
         ws.column_dimensions[get_column_letter(c)].width = w
 
 
+_BP_TIER = {
+    "OG1N": "Nursery (OG1/2)", "OG1S": "Nursery (OG1/2)",
+    "OG2N": "Nursery (OG1/2)", "OG2S": "Nursery (OG1/2)",
+    "OG3N": "Grow-out OG3", "OG3S": "Grow-out OG3",
+    "OG4N": "Grow-out OG4", "OG4S": "Grow-out OG4",
+    "OG5N": "Grow-out OG5", "OG5S": "Grow-out OG5",
+    "OG6S": "Finishing OG6", "OG6N": "Finishing/depuration OG6N",
+}
+_BP_ORDER = ["Nursery (OG1/2)", "Grow-out OG3", "Grow-out OG4", "Grow-out OG5",
+             "Finishing OG6", "Finishing/depuration OG6N"]
+
+
+def write_batch_plan(wb, batch_locations, harvest_events, default_hog_yield: float = 0.81,
+                     sheet_name: str = "Batch Plan") -> None:
+    """Per-batch journey: a summary header + the milestone timeline (each conveyor
+    tier the batch enters — SW entry → grow-out → finishing → harvest — with week,
+    systems, weight, tank count), derived from BatchLocations + harvest events. The
+    'where each batch is + how it got there' as a shareable Excel sheet; mirrors the
+    app's Plan-tab per-batch plan."""
+    import collections
+    if sheet_name in wb.sheetnames:
+        del wb[sheet_name]
+    ws = wb.create_sheet(sheet_name)
+    ws.append(["BATCH PLAN"])
+    ws.append(["Per-batch journey: summary header + milestone timeline (each conveyor "
+               "tier entered, at week/weight, through to harvest). Auto-generated."])
+    ws.append([])
+
+    by_batch = collections.defaultdict(list)
+    for r in batch_locations:
+        by_batch[r.batch_id].append(r)
+    hv = collections.defaultdict(lambda: {"weeks": [], "hog": 0.0, "wt": []})
+    for ev in harvest_events:
+        h = hv[ev.batch_id]
+        h["weeks"].append(iso_week_label(ev.event_date))
+        h["hog"] += ev.count * (ev.avg_wt_g / 1000.0) * default_hog_yield
+        h["wt"].append(ev.avg_wt_g / 1000.0)
+
+    plans = []
+    for bid, recs in by_batch.items():
+        recs = sorted(recs, key=lambda r: r.week_label)
+        weeks = list(dict.fromkeys(r.week_label for r in recs))
+        wk_tanks = collections.defaultdict(set)
+        by_week = collections.defaultdict(list)
+        for r in recs:
+            wk_tanks[r.week_label].add(r.tank_id)
+            by_week[r.week_label].append(r)
+        peak = max((len(s) for s in wk_tanks.values()), default=0)
+        milestones, seen = [], set()
+        for wk in weeks:
+            tiers_here = collections.defaultdict(list)
+            for r in by_week[wk]:
+                tiers_here[_BP_TIER.get(r.system_id, r.system_id)].append(r)
+            for tier in _BP_ORDER:
+                if tier in tiers_here and tier not in seen:
+                    seen.add(tier)
+                    sub = tiers_here[tier]
+                    avgwt = sum(r.avg_wt_g for r in sub) / len(sub) / 1000.0
+                    if not milestones:   # first appearance: real entry vs in-flight
+                        label = ("Seawater entry (TranOG)" if avgwt < 0.6
+                                 else "In-flight at forecast start")
+                    else:
+                        label = f"-> {tier}"
+                    milestones.append((wk, label,
+                                       ", ".join(sorted({r.system_id for r in sub})),
+                                       round(avgwt, 2), len({r.tank_id for r in sub})))
+        h = hv.get(bid)
+        hw = (f"{min(h['weeks'])}-{max(h['weeks'])}" if h and h["weeks"] else "-")
+        hog_t = (h["hog"] / 1000.0) if h else 0.0
+        if h and h["weeks"]:
+            milestones.append((hw, "Harvest", "-> harvest",
+                               round(sum(h["wt"]) / len(h["wt"]), 2), ""))
+        plans.append({"batch": bid, "sw": weeks[0] if weeks else "-",
+                      "peak": peak, "hw": hw, "hog_t": hog_t, "ms": milestones})
+    plans.sort(key=lambda p: p["sw"])
+
+    ws.append(["SUMMARY - one row per batch"])
+    ws.append(["Batch", "SW_entry", "Peak_tanks", "Harvest_window", "HOG_tonnes"])
+    for p in plans:
+        ws.append([p["batch"], p["sw"], p["peak"], p["hw"], round(p["hog_t"], 0)])
+    ws.append([])
+    ws.append(["MILESTONES - the journey per batch"])
+    ws.append(["Batch", "Week", "Event", "Systems", "AvgWt (kg)", "Tanks"])
+    for p in plans:
+        for (wk, label, systems, avgwt, tanks) in p["ms"]:
+            ws.append([p["batch"], wk, label, systems, avgwt, tanks])
+        ws.append([])
+    widths = {1: 8, 2: 13, 3: 26, 4: 18, 5: 11, 6: 8}
+    for c, w in widths.items():
+        ws.column_dimensions[get_column_letter(c)].width = w
+
+
 def write_harvest_plan_output(
     wb,
     harvest_events,
