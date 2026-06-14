@@ -922,6 +922,15 @@ def _run_with_workbook_bytes(
     # Read parsed outputs for visualization.
     output_bytes = out_path.read_bytes()
     parsed = _parse_output_workbook(out_path)
+    # Capture the EFFECTIVE config this run used (config_dir includes any optimizer
+    # overrides for applied runs), so the result can always show what produced it.
+    config_used = {}
+    if config_dir:
+        try:
+            from forecast.config_io import load_control, control_to_dict
+            config_used = control_to_dict(load_control(config_dir))
+        except Exception:  # noqa: BLE001
+            config_used = {}
     parsed.update({
         "ok": True,
         "elapsed": elapsed,
@@ -929,6 +938,7 @@ def _run_with_workbook_bytes(
         "output_bytes": output_bytes,
         "output_name": out_name,
         "output_path": str(out_path),
+        "config_used": config_used,
     })
     return parsed
 
@@ -1386,6 +1396,11 @@ def _optimizer():
         st.info("Upload a valid **ProductionReport** in the sidebar first.")
         return
 
+    from forecast.config_io import load_control, control_to_dict
+    _render_active_config(
+        control_to_dict(load_control(CONFIG_DIR)),
+        "ℹ️ Base configuration — the search tunes knobs ON TOP of this")
+
     emphasis = st.radio("Objective emphasis", list(optimize.EMPHASIS_PRESETS.keys()),
                         horizontal=True,
                         help="Re-scoring is instant — change this after a sweep "
@@ -1663,6 +1678,9 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
 
     # Provenance — always show WHICH run is on screen (keep the correct data).
     st.caption(f"📋 Showing: **{r.get('_run_label', 'forecast run')}**")
+    if r.get("config_used"):
+        _render_active_config(r["config_used"],
+                              "ℹ️ Configuration this run used")
 
     # ---- KPIs + prominent download button ----
     top_kpi, top_dl = st.columns([3, 1])
