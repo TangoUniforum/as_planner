@@ -95,6 +95,7 @@ Facility-wide knobs read into `ControlParams`:
 | `harvest_level_load` | **harvest smoother (ON by default)** — enforce `max_harvest_per_week` as a HARD ceiling + pre-harvest earlier so harvest is flat and biomass stays under cap. Paired with `rebalance_level`, which otherwise spikes harvest (see §4.3). Set `false` for old reactive behavior | **true** |
 | `harvest_smooth_lookahead_weeks` | level-load window K — weeks of coming-due biomass to spread the pre-harvest over | 6 |
 | `harvest_level_target` | flat fish/week floor when level-loading (unset/null = auto from realized growth) | null |
+| `placement_method` | placement engine: `greedy` (default heuristic + rebalancer) or `lns` (opt-in LP-guided optimal-layout refinement — *scaffold only today, identical to greedy until the solver phases land*; see `docs/LP_GUIDED_LNS_PLACEMENT.md`) | `greedy` |
 
 ### 3.3 Scenario batches + per-batch models (`scenario/batches.yaml` / BatchRegistry)
 Each batch row carries its stocking AND its **growth models**:
@@ -240,6 +241,15 @@ matters.
 > The `ProductionReport` sheet stays the **historical** input month only — the
 > *forecast* is in the sheets above (same as the reference workbook). Skipped vs the
 > reference: AccumulatedReport, AccumulatedOutput, MonthlyTargets, RunComparison.
+
+### Knowing what the app is doing
+Run mode, the Optimize tab, and every result show a collapsible **"Active
+configuration"** panel — plain-language label / value / *effect* for the settings
+that actually shape a run (feed leveling, harvest smoother, TranOG tanks, setpoint,
+density target, rebalancer budget, placement engine, caps). Run mode shows *what this
+run will do*, a result shows *the config it used* (incl. optimizer overrides), and
+Optimize shows *the base the search tunes on top of* — so you can always see what's
+selected and what it does.
 
 ### The app tabs
 - **Overview** — advisory issues + tank-occupancy heatmap + per-system biomass + **realized** per-system feed (read from `SystemLimitsAudit`, with the per-system feed-cap line). This is the *fed plan after harvest/FIFO* — **not** the `BiologyProjection` per-batch feed, which is the unharvested projection (fish growing along the curve, ignoring harvest/caps) and runs far higher (10k+ vs a realized ~3–4k). If a feed line looks like it spikes to 5–10× the cap, you're looking at projection feed, not the plan.
