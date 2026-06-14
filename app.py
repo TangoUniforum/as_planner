@@ -47,6 +47,54 @@ def _scenario_ready() -> bool:
     return (SCENARIO_DIR / "batches.yaml").exists()
 
 
+def _active_config_summary(cd: dict) -> list[tuple]:
+    """Plain-language (label, value, what-it-does) for the settings that actually
+    shape a run — so the operator can always see WHAT the app is doing. Reads a
+    control dict (from the live config, or a run's RunConfig)."""
+    def g(k, default=None):
+        return cd.get(k, default)
+    lv, hl = bool(g("rebalance_level")), bool(g("harvest_level_load"))
+    pm = str(g("placement_method", "greedy"))
+    dt = g("density_target_pct", 0) or 0
+    return [
+        ("Feed leveling", "ON" if lv else "OFF",
+         "spreads load off the hottest system → no per-system feed spikes"
+         if lv else "density-only → per-system feed can spike"),
+        ("Harvest smoother", "ON" if hl else "OFF",
+         "holds the weekly harvest cap hard + pre-harvests → flat harvest"
+         if hl else "reactive → harvest can be lumpy"),
+        ("TranOG tanks / arrival", g("tran_og_default_tanks"),
+         "more tanks = lower per-system feed but a tighter facility (spikier harvest)"),
+        ("Harvest setpoint", f"{g('harvest_setpoint_lookahead_weeks')} wk",
+         "holds biomass ~this many weeks of growth below the cap (higher = safer, "
+         "lower utilisation)"),
+        ("Density target", f"{dt * 100:.0f}%",
+         "packs each tank to this % of its density cap (lower = more headroom, "
+         "fewer hot spots)"),
+        ("Rebalancer budget", f"{g('rebalance_balance_budget')} moves/wk",
+         "max fish-moves per week to relieve over-cap systems"),
+        ("Placement engine", pm.upper(),
+         "greedy heuristic + rebalancer (default)" if pm == "greedy"
+         else "LP-guided LNS optimal-layout refinement"),
+        ("Caps", f"biomass {g('max_biomass_kg', 0):,.0f} kg · "
+                 f"feed {g('max_feed_per_day_kg', 0):,.0f} kg/day · "
+                 f"harvest {g('max_harvest_per_week', 0):,.0f} fish/wk",
+         "the hard limits the plan must respect"),
+    ]
+
+
+def _render_active_config(cd: dict, title: str):
+    """Render the active-config summary as a collapsible panel (informs without
+    clutter)."""
+    import streamlit as _st
+    with _st.expander(title, expanded=False):
+        if not cd:
+            _st.caption("No config loaded yet.")
+            return
+        for label, value, effect in _active_config_summary(cd):
+            _st.markdown(f"**{label}: {value}** — {effect}")
+
+
 def _ingest_pr(uploaded):
     """Parse + validate the uploaded ProductionReport (cached by file identity).
 
@@ -763,6 +811,11 @@ with st.sidebar:
         st.info("No config yet — set it up in **Configure**.")
 
     st.header("Run")
+    if _cfg_ok:
+        from forecast.config_io import load_control, control_to_dict
+        _render_active_config(
+            control_to_dict(load_control(CONFIG_DIR)),
+            "ℹ️ Active configuration — what this run will do")
     run_clicked = st.button(
         "▶ Run forecast",
         type="primary",
