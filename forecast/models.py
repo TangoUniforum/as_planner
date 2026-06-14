@@ -85,6 +85,13 @@ class ControlParams:
     harvest_level_load: bool = True
     harvest_smooth_lookahead_weeks: int = 6
     harvest_level_target: Optional[float] = None
+    # Placement engine selector (OPT-IN, additive). "greedy" (default) = the current
+    # heuristic placement + rebalancer, byte-identical to today. "lns" = run greedy as
+    # a WARM START, then an LP-guided LNS pass refines the tank layout toward fewer
+    # hot spots (greedy is also the FALLBACK, so it can never lose anything). See
+    # docs/LP_GUIDED_LNS_PLACEMENT.md. Phase 1 = a no-op scaffold: selecting "lns" is
+    # currently identical to "greedy" until the solver phases land.
+    placement_method: str = "greedy"
 
 
 @dataclass
