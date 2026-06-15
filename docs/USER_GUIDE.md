@@ -445,15 +445,24 @@ To keep the knobs permanently, paste the snippet into **Configure → Control** 
 `config/control.yaml`); every later run then uses them. The CLI prints the same
 snippet at the end of a sweep.
 
-**Auto-optimize (find AND use, in one shot).** When you don't want the manual
-find→apply→run loop, **🤖 Auto-optimize & run** (the button beside *Run optimization*)
-does it all: it runs the selected method + emphasis, takes the conservation-validated
-best config, runs the **full forecast** with it, and loads it into the tabs — plus, if
-the *"save the winning knobs to config"* box is checked, it persists them. The CLI
-equivalent is `python -m tools.auto_optimize --emphasis "Minimize loads" --method
-combined [--save-config]`. **Use the `combined` (Grid + Deep) method** so the knobs are
-validated *together* as a set — auto-optimize never stacks two separately-measured
-single-knob recs (the thing that can interact badly; see the note below).
+**Two buttons — same search, different ending.** Both run the identical search
+(method + emphasis); they differ only in what happens *after* the recommendation:
+
+- **▶ Run optimization** runs the search and **stops at the recommendation.** You read
+  the score table + the trade-off map, switch emphases (instant re-score), then
+  *manually* apply via the **Apply & verify** panel above (▶ Run full forecast / 💾 Save
+  to config). Use it to **explore and decide** — you control every step.
+- **🤖 Auto-optimize & run** runs the *same* search, then **acts on the recommendation
+  for you**: it takes the conservation-validated best config, runs the **full forecast**
+  with it, loads it into the tabs, and — if *"save the winning knobs to config"* is
+  checked — persists them. One click. Use it to **commit** once you trust the objective.
+  (The score table + map still render, so you can always see what it chose.)
+
+The CLI equivalent of auto-optimize is `python -m tools.auto_optimize --emphasis
+"Minimize loads" --method combined [--save-config]`. **Use the `combined` (Grid + Deep)
+method** so the knobs are validated *together* as a set — auto-optimize never stacks
+two separately-measured single-knob recs (the thing that can interact badly; see the
+note below).
 
 > **Don't hand-stack single-knob recommendations.** Each recommendation is measured
 > against *one* baseline; applying two of them at once is unvalidated and can be worse
