@@ -100,6 +100,14 @@ def main(argv=None):
     else:
         print("(config/control.yaml NOT changed — pass --save-config to persist)")
 
+    # Log this run (settings + results) to optimize_history.jsonl.
+    from datetime import datetime
+    optimize.append_run_log(optimize.make_run_record(
+        best, args.method, "custom" if weights else emphasis,
+        ts=datetime.now().isoformat(timespec="seconds"),
+        saved=args.save_config, source="auto_optimize (cli)"))
+    print("logged to optimize_history.jsonl")
+
 
 if __name__ == "__main__":
     main()

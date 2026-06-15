@@ -509,6 +509,60 @@ def save_overrides_to_config(config_dir, overrides) -> None:
         yaml.safe_dump(cfg, f, sort_keys=False)
 
 
+# --------------------------------------------------------------------------- #
+# Run log — a durable record of WHAT was run and WHAT it produced
+# --------------------------------------------------------------------------- #
+DEFAULT_RUN_LOG = "optimize_history.jsonl"
+
+
+def make_run_record(best, method, emphasis, *, ts, saved, source,
+                    dropped=None, overprod=None) -> dict:
+    """Build one optimize/auto-optimize log record: the SETTINGS used (method,
+    emphasis, the winning knobs) + the RESULTS (key metrics + conservation). `ts` is
+    an ISO timestamp the caller supplies (so this stays import-light)."""
+    m = best.metrics if best else None
+    return {
+        "ts": ts,
+        "source": source,
+        "method": method,
+        "emphasis": emphasis,
+        "winning_knobs": dict(best.overrides) if best and best.overrides else {},
+        "saved_to_config": bool(saved),
+        "dropped": dropped if dropped is not None else (best.dropped if best else None),
+        "overprod": overprod if overprod is not None else (best.overprod if best else None),
+        "metrics": {
+            "system_peak": round(m.system_peak, 3),
+            "feed_load": round(m.feed_load),
+            "weeks_over_harvest_cap": m.weeks_over_harvest_cap,
+            "harvest_cv": round(m.harvest_var, 3),
+            "system_overshoot": round(m.system_overshoot, 3),
+        } if m else {},
+    }
+
+
+def append_run_log(record: dict, log_path: str = DEFAULT_RUN_LOG) -> None:
+    """Append one run record as a JSON line — a durable, reviewable history of what
+    the optimizer was asked to do and what it produced. Best-effort: a logging
+    failure never breaks the run."""
+    import json
+    try:
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record) + "\n")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def read_run_log(log_path: str = DEFAULT_RUN_LOG, n: int = 20) -> list:
+    """Return the last `n` run records (oldest→newest), or [] if no log yet."""
+    import json
+    try:
+        with open(log_path, encoding="utf-8") as f:
+            lines = [ln for ln in f if ln.strip()]
+        return [json.loads(ln) for ln in lines[-n:]]
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def config_dir_with_overrides(config_dir, overrides) -> str:
     """Return a TEMP copy of `config_dir` with `overrides` merged into
     control.yaml — so a caller (e.g. the app) can run the full pipeline against

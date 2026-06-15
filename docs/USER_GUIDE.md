@@ -464,6 +464,13 @@ method** so the knobs are validated *together* as a set — auto-optimize never 
 two separately-measured single-knob recs (the thing that can interact badly; see the
 note below).
 
+**Every auto-optimize run is logged** (app *and* CLI) to `optimize_history.jsonl` —
+timestamp, method, emphasis, the winning knobs, key results (hot spot / feed / weeks
+over 55k / dropped), and whether it was saved to config. The app shows the recent runs
+in a **📜 Recent auto-optimize runs** panel at the top of Optimize mode, so you always
+have a durable record of *what settings were used and what they produced*, kept across
+sessions.
+
 > **Don't hand-stack single-knob recommendations.** Each recommendation is measured
 > against *one* baseline; applying two of them at once is unvalidated and can be worse
 > than either alone (knob interactions are real). Let **Grid + Deep** (or auto-optimize

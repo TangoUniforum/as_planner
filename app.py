@@ -1401,6 +1401,29 @@ def _optimizer():
         control_to_dict(load_control(CONFIG_DIR)),
         "ℹ️ Base configuration — the search tunes knobs ON TOP of this")
 
+    _hist = optimize.read_run_log(n=15)
+    if _hist:
+        with st.expander(f"📜 Recent auto-optimize runs ({len(_hist)}) — settings used + results",
+                         expanded=False):
+            _rows = []
+            for h in reversed(_hist):   # newest first
+                mt = h.get("metrics", {}) or {}
+                kb = h.get("winning_knobs") or {}
+                _rows.append({
+                    "When": h.get("ts", ""),
+                    "Method": h.get("method", ""),
+                    "Emphasis": h.get("emphasis", ""),
+                    "Winning knobs": ", ".join(f"{k}={v}" for k, v in kb.items()) or "(baseline)",
+                    "Hot spot": mt.get("system_peak"),
+                    "Feed": mt.get("feed_load"),
+                    "Wks>55k": mt.get("weeks_over_harvest_cap"),
+                    "Saved": "✓" if h.get("saved_to_config") else "",
+                    "Dropped": h.get("dropped"),
+                })
+            st.dataframe(pd.DataFrame(_rows), hide_index=True, use_container_width=True)
+            st.caption("Each Auto-optimize run is logged to `optimize_history.jsonl` — "
+                       "the settings used and what it produced, kept across sessions.")
+
     emphasis = st.radio("Objective emphasis", list(optimize.EMPHASIS_PRESETS.keys()),
                         horizontal=True,
                         help="Re-scoring is instant — change this after a sweep "
@@ -1509,10 +1532,17 @@ def _optimizer():
                 if _saved:
                     optimize.save_overrides_to_config(str(CONFIG_DIR), _best0.overrides)
                     _clear_all_editor_state()
+                # Log this run (settings + results) to optimize_history.jsonl so
+                # there's a durable record of what was run and what it produced.
+                from datetime import datetime as _dt
+                optimize.append_run_log(optimize.make_run_record(
+                    _best0, method, emphasis,
+                    ts=_dt.now().isoformat(timespec="seconds"),
+                    saved=_saved, source="auto-optimize (app)"))
                 st.success(
                     f"🤖 Auto-optimized → **{_best0.label}** ({_knobs})"
                     + (" · **saved to config**" if _saved else " · config unchanged")
-                    + ". Loaded into the **Run forecast** tabs.")
+                    + ". Loaded into the **Run forecast** tabs. *(logged to history)*")
 
     results = st.session_state.get("_opt_results")
     if not results:

@@ -25,3 +25,4 @@ scripts/*_output.txt
 scripts/_*.txt
 *.tmp
 _exp_*.xlsm
+optimize_history.jsonl
