@@ -59,19 +59,21 @@ OPT_QUICK_GRID = [
 OPT_FULL_GRID = [
     ("baseline", {}),
     # tran_og — the strongest feed<->harvest lever; test BOTH ends explicitly,
-    # plus 3 paired with a tighter harvest setpoint to try to claw harvest back.
+    # plus 3 paired with a tighter cap band to try to claw harvest back.
     ("tran_og=2", {"tran_og_default_tanks": 2}),
     ("tran_og=3", {"tran_og_default_tanks": 3}),
-    ("tran_og=3,setpoint=0.9", {"tran_og_default_tanks": 3,
-                                "harvest_setpoint_lookahead_weeks": 0.9}),
+    ("tran_og=3,dev=0.005", {"tran_og_default_tanks": 3,
+                             "facility_biomass_deviation_pct": 0.005}),
     # packing density
     ("density=0.85", {"density_target_pct": 0.85}),
     ("density=0.95", {"density_target_pct": 0.95}),
-    # harvest controller — anticipation margin + smoothing window
-    ("setpoint=0.90", {"harvest_setpoint_lookahead_weeks": 0.90}),
-    ("setpoint=1.50", {"harvest_setpoint_lookahead_weeks": 1.50}),
-    ("smooth:K12,sp3.0", {"harvest_smooth_lookahead_weeks": 12,
-                          "harvest_setpoint_lookahead_weeks": 3.0}),
+    # harvest controller — facility_biomass_deviation_pct is now THE "how close to the
+    # cap" knob (the dual-limit setpoint runs one band below the binding cap): a TIGHT
+    # band runs closer to the cap (more breach risk), a LOOSE one keeps more headroom.
+    # harvest_setpoint_lookahead_weeks is vestigial post-redesign, so it is not swept.
+    ("dev=0.005 (tight)", {"facility_biomass_deviation_pct": 0.005}),
+    ("dev=0.02 (loose)", {"facility_biomass_deviation_pct": 0.02}),
+    ("smooth:K12", {"harvest_smooth_lookahead_weeks": 12}),
     # rebalancer effort
     ("balance=60", {"rebalance_balance_budget": 60}),
     ("varqty=20", {"rebalance_varqty_budget": 20}),
@@ -656,7 +658,7 @@ def sweep(input_path, config_dir, scenario_dir, grid=None, progress=None,
 # the rebalancer budgets. Edit here to widen/narrow the search.
 CD_KNOB_SPACE = [
     ("tran_og_default_tanks", [2, 3]),
-    ("harvest_setpoint_lookahead_weeks", [0.75, 1.5, 3.0]),
+    ("facility_biomass_deviation_pct", [0.005, 0.01, 0.02]),
     ("harvest_smooth_lookahead_weeks", [6, 12]),
     ("density_target_pct", [0.85, 0.90, 0.95]),
     ("rebalance_balance_budget", [30, 60]),
