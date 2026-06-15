@@ -120,51 +120,72 @@ this is a safe way to stress-test or re-plan.
 
 ## 4. The closed-loop harvest controller (and how to tune it)
 
-The controller decides how much to harvest each week to hold facility biomass
-under the cap **without** spiking past the 55k/week processing ceiling.
+The controller decides how much to harvest each week to hold the facility at **both**
+its caps — biomass *and* feed — **without** spiking past the 55k/week processing
+ceiling, and to **build toward** the caps when below them.
 
 ### 4.1 How it works
-- **Setpoint = cap − anticipatory margin.** The margin is ~`harvest_setpoint_lookahead_weeks`
-  weeks of the facility's **realized** weekly growth, clamped to [0.5%, 4%] of the
-  cap. It is *self-adapting*: it widens when the facility is climbing toward a peak
-  (pre-sheds across the calm run-up weeks) and shrinks when flat (full utilization).
-  Anchored in realized growth — **not** a forward projection (the Phase-A projection
-  under-predicts realized peaks ~3% and would breach the hard cap).
-- **Predictive move-in + reactive supplement** drive harvest toward the setpoint;
-  harvest is capped per week (partial-tank harvest lands exactly on target instead
-  of overshooting a whole tank).
-- In 6N production mode, harvest flows through an **in-place purge**: a mature tank
-  enters STARVE (no growth/feed, weight frozen) and is harvested
-  `starvation_period_days` later — pre-staged during the 6N wind-down so there is no
-  harvest gap at the purge→production handoff.
+- **Dual-limit, control-driven setpoint.** The setpoint sits one
+  `facility_biomass_deviation_pct` band below the **effective ceiling** — the *lower*
+  of (a) the biomass cap and (b) the biomass at which facility **feed** would reach its
+  cap (feed scales ~linearly with biomass at the current size mix). So whichever limit
+  binds drives the harvest, and the controller works the facility toward **both** caps.
+  There is **no hidden margin** — `facility_biomass_deviation_pct` is your single knob
+  for *how close to the cap to run* (§4.3).
+- **Build-then-maintain.** When biomass + feed are **below** the band, the predictive
+  move-in floors to `min_harvest_per_week` — harvest is minimal so growth **fills the
+  facility up toward the caps**. As they reach the band, harvest **ramps between min and
+  max to maintain** them (without breaching). `min_harvest_weight_g` is an **eligibility
+  gate** (which fish *may* be harvested), not a mandate — only the count needed to hold
+  the caps is taken, not every fish that hits weight.
+- **In 6N purge mode, harvest flows ONLY through 6N** (§4.2) — the facility **never
+  harvests a production tank directly** while purging. In 6N *production* mode (after
+  `sixn_production_start`), harvest flows through an **in-place purge**: a mature tank
+  enters STARVE (weight frozen) and is harvested `starvation_period_days` later.
 
-### 4.2 The one tuning knob: `harvest_setpoint_lookahead_weeks`
-A **Control parameter** (config/control.yaml, or the app's Configure → Control
-editor). Default **0.75**. Measured on config(7) — *biomass-over-cap weeks / mean
-facility utilization*:
+### 4.2 The 6N purge rotation (everything routes through it)
+While 6N is in **purge mode**, depuration is a **3-pair fallow rotation** on the sister
+pairs **61/67, 63/69, 65/71**:
+- **Fixed cyclic order 61 → 63 → 65**, entered just *after* the empty (resting) pair —
+  the empty slot marks where the rotation sits, so no fish-age data is needed. Two pairs
+  purge while one rests; each week the front pair is harvested and the resting pair is
+  restocked from the oldest mature production fish (Wed-fill / Fri-harvest).
+- **Same batch mixes** across a pair's two tanks; **different batches** use the main +
+  sister tank so they never mix. The harvest limit applies to the pair's **combined** drain.
+- **Make-room routes through 6N too.** When a TranOG arrival needs an empty OG tank, the
+  freed tank's fish are **moved into 6N to purge** — freeing the tank *and* staging them
+  for harvest — never harvested in place. If 6N has no room, the run **warns** (a real
+  capacity signal) rather than bypass.
 
-| K | over-cap weeks | worst breach | util mean | when to use |
-|---|---|---|---|---|
-| 0.50 | 3 | +1.8% | 96.1% | — too loose |
-| 0.60 | 2 | +0.6% | 96.2% | aggressive |
-| **0.75** | **1** | **+0.4%** | **95.8%** | **default** — touch is inside the ±1% tolerance band |
-| 0.90 | 0 | 0 | 94.8% | strict zero-breach of a hard regulatory cap |
+Holding the make-room fish in 6N for the ~2-week purge keeps them in the facility longer,
+so standing biomass **builds to the cap** instead of being dumped early. Verified: **0
+direct production harvest across the whole purge period**, biomass utilisation ~95% mean
+/ ~99.8% peak (right at the cap, no breach).
 
-**Recommendation:** default **0.75** (tightest walk of the line with a touch inside
-tolerance). Use **0.90** when the cap is a hard ceiling that must never be crossed.
-Below ~0.6 the breaches grow faster than the utilization gain.
+### 4.3 The tuning knob: `facility_biomass_deviation_pct`
+A **Control parameter** (config/control.yaml, or the app's Configure → Control). It is
+the **± tolerance band around the cap**, and it now sets how close the setpoint runs:
+- **Smaller** (e.g. 0.01 = ±1% ≈ ±39 t on the 3.9M cap) → runs **tighter** to the cap
+  (higher utilisation), more risk of a brief touch above it.
+- **Larger** → more headroom (safer, lower utilisation).
 
-> **These numbers are config(7)-specific.** The *shape* (more margin = safer, lower
-> utilization) always holds, but the exact breach/utilization figures shift with a
-> different stocking cadence or cap schedule. A faster-growth scenario needs a
-> larger K. **Re-run the K sweep to re-anchor this table for a new scenario.** The
-> controller logic is config-agnostic; only the tuning value changes.
+To run **within ±X tons** of the cap, set it to `X_tons / cap` — e.g. ±50 t → `≈ 0.013`.
+If a setting touches the hard cap more than you want, **widen** the band; to run closer,
+**tighten** it. (`harvest_setpoint_lookahead_weeks` is now vestigial — superseded by this
+band; the level-load floor in §4.4 still provides peak anticipation.)
 
-The remaining gap from ~96% to 100% is **natural cohort troughs** (weeks with
-little mature biomass), not controller slack — only the stocking cadence could fill
-those.
+> **Utilisation is also a stocking question.** If standing biomass sits well *below* the
+> band no matter how tight you set it, the pipeline isn't being fed enough fish — that's
+> a **stocking** decision (more/heavier batches), not a controller one. The per-system
+> caps have headroom (they sum to >100% of the facility caps), so the capacity is there;
+> the stocking cadence is what fills it.
 
-### 4.3 Harvest level-loading (ON by default): `harvest_level_load`
+### 4.4 Harvest level-loading (ON by default): `harvest_level_load`
+
+> Applies mainly to **6N production mode** (after `sixn_production_start`). In **purge
+> mode**, harvest routes through the 6N rotation and make-room **moves** fish into 6N
+> rather than dumping a whole tank (§4.2), so the make-room-spike discussion below is
+> about the production-mode harvest.
 
 A reactive controller produces **lumpy** harvest — it builds biomass to the cap then
 dumps a big harvest, a sawtooth that on config(7) **breaches the 55k/week processing
@@ -172,8 +193,8 @@ cap in 12 weeks (up to 113k fish)**. Level-loading (now **on by default**) fixes
 — it:
 
 1. **Enforce `max_harvest_per_week` as a HARD weekly ceiling** across *every* harvest
-   pass (the default only clamps the main pass; three others — 6N supplemental,
-   make-room, production — bypassed it). The one allowed exception is make-room
+   pass (the default only clamps the main pass; make-room and production bypassed
+   it). The one allowed exception is make-room
    freeing a tank for a TranOG arrival: dropping a stocked batch is a worse,
    unrecoverable conservation breach, so that pass may exceed the cap for one week
    and the overage is **borrowed from next week's ceiling** (the multi-week total
