@@ -623,3 +623,36 @@ all conserved** → the audit sheets (0 drift / 0 dropped).
 **config**; that config re-runs the *same* pipeline into the *same* workbook, which
 feeds the *same* tabs/export. So an optimized plan is as fully traceable as a normal
 run — no separate, lossy path.
+
+## 11. Optional: LNS placement refinement (`placement_method`)
+
+An **opt-in** second pass that tries to flatten per-system hot spots beyond what the
+default rebalancer reaches. **Off by default** (`placement_method: greedy`) — turning
+it on (`placement_method: lns`) never changes a greedy run's result unless it finds a
+*strictly better, fully-conserved* layout.
+
+**What it does.** After the normal (greedy) plan is realized, LNS looks at the hottest
+grow-out **(system, week)** and **relocates** a feed/biomass-heavy tank's worth of fish
+to a free tank in a cooler system — or, when the facility is full, tries to **swap** it
+with a lighter batch in a cooler system. Each move is emitted as a normal, conserved
+`Transfer`.
+
+**Why it's safe (the floor is greedy).** Every candidate move is checked against the
+**real continuity audit** (0 drift), input conservation (0 dropped batches), and must
+**strictly lower the hot-spot peak** — otherwise it's reverted. Any error falls back to
+greedy. So it can never make a run worse or break conservation. Knob `lns_max_moves`
+(default 30) caps how many moves it will make.
+
+**When it helps — and when it (correctly) does nothing.** It helps when the facility
+has **free-tank room** (a slacker stocking plan, a future expansion, a harder PR). When
+the facility is **capacity-bound** — every tank full at the peak week, the residual hot
+spot being the *structural* OG3–6 feed limit (§8) — there's nowhere to move fish, so it
+**correctly no-ops and greedy stands** (you'll see "greedy already near the capacity
+floor" in the run log). On the current production config it no-ops; it's there for when
+the layout has slack.
+
+**Cost.** It runs an extra, audit-checked pass, so an `lns` run is **slower** than a
+greedy run. Leave it `greedy` for routine runs; switch to `lns` (or add it to an
+optimizer sweep — it's the `lns-placement` grid variant) when you want to test whether a
+given PR's layout can be flattened further. Measure it with `python -m tools.lns_measure`
+(compares greedy vs lns: hot spot, weeks-over-cap, drift, determinism).

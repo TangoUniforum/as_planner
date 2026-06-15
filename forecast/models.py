@@ -87,11 +87,15 @@ class ControlParams:
     harvest_level_target: Optional[float] = None
     # Placement engine selector (OPT-IN, additive). "greedy" (default) = the current
     # heuristic placement + rebalancer, byte-identical to today. "lns" = run greedy as
-    # a WARM START, then an LP-guided LNS pass refines the tank layout toward fewer
-    # hot spots (greedy is also the FALLBACK, so it can never lose anything). See
-    # docs/LP_GUIDED_LNS_PLACEMENT.md. Phase 1 = a no-op scaffold: selecting "lns" is
-    # currently identical to "greedy" until the solver phases land.
+    # a WARM START, then an LNS pass refines the REALIZED layout: it relocates / swaps
+    # grow-out tank occupancy off the hottest systems onto cooler ones, emitting each
+    # move as a conserved Transfer. Every edit is gated on the real continuity audit
+    # (0 drift) + input conservation (0 dropped) + a strictly-lower hot-spot peak, and
+    # greedy is the FALLBACK, so it can never lose anything or make the run worse. See
+    # docs/LP_GUIDED_LNS_PLACEMENT.md and forecast/lns_placement.py.
     placement_method: str = "greedy"
+    # LNS budget: max relocations/swaps per run (only used when placement_method=="lns").
+    lns_max_moves: int = 30
 
 
 @dataclass

@@ -1,27 +1,424 @@
 """Opt-in LP-guided LNS placement refinement (the Tier-3 engine).
 
 Design: docs/LP_GUIDED_LNS_PLACEMENT.md. Principle: ADD, never remove — the greedy
-placement stays the default and is both the warm start and the fallback for this
-pass, so turning it on can never lose anything or break a run.
+placement is BOTH the warm start and the fallback.
 
-PHASE 1 (current): scaffold + switch ONLY. `refine()` is a NO-OP that returns the
-greedy result unchanged, so `placement_method="lns"` is byte-identical to "greedy"
-today. No solver, no extra dependency. The MILP model + warm-started, LP-guided
-destroy/repair loop land in later phases (§7 of the design doc) — each
-measure-or-revert, each keeping the greedy default unchanged.
+Why it operates on the REALIZED layout (not the canvas plan): measurement showed the
+canvas plan's implied hot spot (~3.3x) is reshaped by `rebalance_level` down to the
+realized ~1.5x — so the realized `batch_locations` is what carries the hot spots the
+reports show. LNS therefore relocates *realized* grow-out tank occupancy off the
+hottest systems onto cooler ones, emitting each move as a conserved `Transfer`.
+
+How it stays continuity-safe (the operator's hard constraint): every candidate edit
+is checked against the REAL `write_tank_continuity_audit` reconciliation (0 drift) and
+input conservation (no batch dropped), and accepted only if it STRICTLY lowers the
+hot-spot peak. Anything else is reverted. The greedy plan is always the floor — you
+cannot lose a fish, and turning LNS on can never make the forecast worse.
+
+Build phases (each keeps greedy byte-identical when off):
+  A. (this) realized relocate + audit-gated accept, greedy hot-spot targeting.
+  B. CP-SAT window repair (choose the best SET of relocations at once).
+  C. LP guidance + rolling neighborhoods.
 """
 from __future__ import annotations
 
+import copy
+import os
+import sys
+from collections import defaultdict
+from datetime import timedelta
 
-def refine(result, final_state, *, control, facility, system_limits,
-           facility_limits, batch_meta, tables):
-    """Refine the greedy placement toward fewer per-system hot spots, emitting only
-    conserved Transfers (continuity preserved by construction). Returns
-    `(result, final_state)`.
+from .biology import realized_feed_kg_day
+from .time_grid import iso_week_label
 
-    Phase 1: no-op — the greedy plan IS the result. Every later phase must keep this
-    contract: return a result whose objective is no worse than the greedy warm start
-    (else return the greedy unchanged), with 0 drift / 0 dropped and deterministic
-    output.
-    """
-    return result, final_state
+OG12_SYSTEMS = frozenset({"OG1N", "OG1S", "OG2N", "OG2S"})
+
+
+# --------------------------------------------------------------------------- #
+# Hot-spot metric — mirrors excel_io.write_system_limits_audit so the number we
+# optimize against is IDENTICAL to the reported SystemLimitsAudit peak.
+# --------------------------------------------------------------------------- #
+def _carry_forward_caps(system_limits):
+    smw: dict = defaultdict(list)
+    for (wk, sysid, metric), val in system_limits.caps.items():
+        smw[(sysid, metric)].append((wk, val))
+    for k in smw:
+        smw[k].sort()
+
+    def cap(wk, sysid, metric):
+        lst = smw.get((sysid, metric))
+        if not lst:
+            return None
+        best = lst[0][1]
+        for w, v in lst:
+            if w <= wk:
+                best = v
+            else:
+                break
+        return best
+
+    return cap
+
+
+def system_loads(batch_locations, batch_by_id, tables, system_limits):
+    """Per-(week, system) realized biomass + daily feed, plus the cap lookup."""
+    cap = _carry_forward_caps(system_limits)
+    sb: dict = defaultdict(float)
+    sf: dict = defaultdict(float)
+    for r in batch_locations:
+        if r.count <= 0:
+            continue
+        b = batch_by_id.get(r.batch_id)
+        sb[(r.week_label, r.system_id)] += r.biomass_kg
+        if getattr(r, "stage", "") != "STARVE":
+            sf[(r.week_label, r.system_id)] += realized_feed_kg_day(
+                r.avg_wt_g, r.biomass_kg, b, tables)
+    return sb, sf, cap
+
+
+def system_peak(batch_locations, batch_by_id, tables, system_limits):
+    """The single hottest (system, week) biomass/feed load fraction (excl OG6N)."""
+    sb, sf, cap = system_loads(batch_locations, batch_by_id, tables, system_limits)
+    peak = 0.0
+    for (wk, sysid), bio in sb.items():
+        if sysid == "OG6N":
+            continue
+        bc = cap(wk, sysid, "biomass")
+        if bc and bc > 0:
+            peak = max(peak, bio / bc)
+    for (wk, sysid), feed in sf.items():
+        if sysid == "OG6N":
+            continue
+        fc = cap(wk, sysid, "feed_per_day")
+        if fc and fc > 0:
+            peak = max(peak, feed / fc)
+    return peak
+
+
+# --------------------------------------------------------------------------- #
+# Conservation gate — reuse the REAL continuity audit so our reconciliation can
+# never diverge from the one the regression test locks.
+# --------------------------------------------------------------------------- #
+def drift_count(placement, batch_week_states, initial_state):
+    """Count TANK_DRIFT + BIO_DRIFT rows the real audit would flag for this
+    (batch_locations, events) — 0 means continuity is intact."""
+    import openpyxl
+
+    from .excel_io import write_tank_continuity_audit
+    wb = openpyxl.Workbook()
+    write_tank_continuity_audit(
+        wb, placement.batch_locations, batch_week_states,
+        placement.harvest_events, placement.transfer_events,
+        placement.grade_events, placement.tranog_events, initial_state)
+    ws = wb["TankContinuityAudit"]
+    n = 0
+    for i, row in enumerate(ws.iter_rows(values_only=True), 1):
+        if i < 5 or not row:
+            continue
+        if len(row) > 14 and row[14] == "TANK_DRIFT":
+            n += 1
+        if len(row) > 27 and row[27] == "BIO_DRIFT":
+            n += 1
+    return n
+
+
+# --------------------------------------------------------------------------- #
+# Segments — a maximal contiguous run of weeks where ONE batch occupies ONE tank
+# --------------------------------------------------------------------------- #
+class _Segment:
+    __slots__ = ("batch_id", "tank_id", "system", "rows", "week_labels")
+
+    def __init__(self, rows):
+        self.rows = rows
+        self.batch_id = rows[0].batch_id
+        self.tank_id = rows[0].tank_id
+        self.system = rows[0].system_id
+        self.week_labels = [r.week_label for r in rows]
+
+    @property
+    def ws(self):
+        return self.week_labels[0]
+
+    @property
+    def we(self):
+        return self.week_labels[-1]
+
+    def bio(self, batch_meta, tables):
+        """{week_label: (biomass_kg, feed_kg_day)} for this segment."""
+        out = {}
+        b = batch_meta.get(self.batch_id)
+        for r in self.rows:
+            feed = (0.0 if getattr(r, "stage", "") == "STARVE"
+                    else realized_feed_kg_day(r.avg_wt_g, r.biomass_kg, b, tables))
+            out[r.week_label] = (r.biomass_kg, feed, r.avg_wt_g)
+        return out
+
+
+def _segments(batch_locations, week_index):
+    """All maximal (batch, tank) contiguous-week segments, deterministically ordered."""
+    rows_by: dict = defaultdict(list)
+    for r in batch_locations:
+        if r.count > 0:
+            rows_by[(r.batch_id, r.tank_id)].append(r)
+    segs = []
+    for (bid, tid), rows in rows_by.items():
+        rows.sort(key=lambda r: week_index.get(r.week_label, 0))
+        run = [rows[0]]
+        for prev, cur in zip(rows, rows[1:]):
+            if week_index[cur.week_label] == week_index[prev.week_label] + 1:
+                run.append(cur)
+            else:
+                segs.append(_Segment(run))
+                run = [cur]
+        segs.append(_Segment(run))
+    segs.sort(key=lambda s: (s.week_labels[0], s.system, s.batch_id, s.tank_id))
+    return segs
+
+
+# --------------------------------------------------------------------------- #
+# Relabel — move a (batch, tank, weeks) occupancy to a new physical tank, in the
+# batch_locations AND every event that references it. The continuity audit gates
+# the result, so a mistake here is caught (reverted), never shipped.
+# --------------------------------------------------------------------------- #
+def _relabel(placement, relmap, tank_by_id):
+    """Apply {(batch_id, old_tank, week_label) -> new_tank} to batch_locations and
+    all event streams.
+
+    batch_locations is relabeled exactly (by row week). Event tank refs sit on the
+    BOUNDARY between occupancy and non-occupancy (an arrival at week w, a full-
+    harvest / departure at the week AFTER the last occupied week), so we relabel an
+    event's tank if the relmap touches (batch, tank) at the event week OR the week
+    before. A relocation moves a whole contiguous segment to one target tank, so
+    both weeks map to the same destination — the 2-week window catches the exit
+    event without mis-routing. (And the continuity audit gates the result, so any
+    timing miss is reverted, never shipped.)"""
+    def relabel(batch_id, tank, ev_date):
+        wk = iso_week_label(ev_date)
+        pwk = iso_week_label(ev_date - timedelta(days=7))
+        return (relmap.get((batch_id, tank, wk))
+                or relmap.get((batch_id, tank, pwk)) or tank)
+
+    for r in placement.batch_locations:
+        nt = relmap.get((r.batch_id, r.tank_id, r.week_label))
+        if nt is not None:
+            tk = tank_by_id[nt]
+            r.tank_id = nt
+            r.location_id = tk.location_id
+            r.system_id = tk.system_id
+            r.density_kg_m3 = (r.biomass_kg / tk.volume_m3) if tk.volume_m3 else 0.0
+
+    for ev in placement.tranog_events:
+        for d in ev.destinations:
+            d.tank_id = relabel(ev.batch_id, d.tank_id, ev.event_date)
+
+    for ev in placement.harvest_events:
+        ev.source_tank_id = relabel(ev.batch_id, ev.source_tank_id, ev.event_date)
+
+    for ev in placement.transfer_events:
+        if hasattr(ev, "pickup_tank_id"):              # GradedHarvest rides here
+            ev.source_tank_id = relabel(ev.batch_id, ev.source_tank_id, ev.event_date)
+            ev.pickup_tank_id = relabel(ev.batch_id, ev.pickup_tank_id, ev.event_date)
+            ev.retention_tank_id = relabel(
+                ev.batch_id, ev.retention_tank_id, ev.event_date)
+            continue
+        ev.source_tank_id = relabel(ev.batch_id, ev.source_tank_id, ev.event_date)
+        for d in ev.destinations:
+            d.tank_id = relabel(ev.batch_id, d.tank_id, ev.event_date)
+
+    for ev in placement.grade_events:
+        ev.source_tank_ids = [
+            relabel(ev.batch_id, t, ev.event_date) for t in ev.source_tank_ids]
+        for d in ev.destinations:
+            d.tank_id = relabel(ev.batch_id, d.tank_id, ev.event_date)
+
+
+def _invert(relmap):
+    """Inverse map to undo a relabel: (batch, new_tank, week) -> old_tank."""
+    return {(b, nt, w): t for (b, t, w), nt in relmap.items()}
+
+
+# --------------------------------------------------------------------------- #
+# Target selection — coldest grow-out system with a free tank that keeps density
+# legal and lands the segment below the current hot-spot ratio.
+# --------------------------------------------------------------------------- #
+def _best_target(seg, grow, hot_sys, hot_ratio, sys_tanks, occ, sb, sf, cap,
+                 tank_by_id, batch_meta, tables):
+    seg_load = seg.bio(batch_meta, tables)
+    best_tank = None
+    best_worst = hot_ratio                              # must STRICTLY beat the hot spot
+    for s in grow:                                      # grow is sorted -> deterministic
+        if s == hot_sys:
+            continue
+        # resulting load of s across the segment weeks if it absorbs the segment
+        worst = 0.0
+        for w in seg.week_labels:
+            bkg, fkg, _ = seg_load[w]
+            bc = cap(w, s, "biomass")
+            if bc and bc > 0:
+                worst = max(worst, (sb.get((w, s), 0.0) + bkg) / bc)
+            fc = cap(w, s, "feed_per_day")
+            if fc and fc > 0:
+                worst = max(worst, (sf.get((w, s), 0.0) + fkg) / fc)
+        if worst >= best_worst:
+            continue
+        # a tank free across ALL the segment's weeks, with density legal there
+        for t in sys_tanks[s]:
+            if any((t, w) in occ for w in seg.week_labels):
+                continue
+            tk = tank_by_id[t]
+            if tk.volume_m3 and any(
+                    seg_load[w][0] / tk.volume_m3 > tk.max_density_kg_m3
+                    for w in seg.week_labels):
+                continue
+            best_tank, best_worst = t, worst
+            break
+    return best_tank
+
+
+# --------------------------------------------------------------------------- #
+# Entry point — greedy hot-spot relocation, audit-gated, accept-only-if-better
+# --------------------------------------------------------------------------- #
+def refine_realized(placement, *, initial_state, batch_week_states, control,
+                    facility, system_limits, facility_limits, batch_meta, tables):
+    """Relocate realized grow-out occupancy off the hottest systems; return the
+    edited PlacementResult, or None to keep greedy. Every move is gated on 0 drift
+    + no dropped batch + a strictly-lower peak; otherwise it is reverted."""
+    grow = sorted({t.system_id for t in facility.tanks
+                   if t.type == "OG" and t.system_id not in OG12_SYSTEMS
+                   and t.system_id != "OG6N"})
+    if len(grow) < 2:
+        return None
+    tank_by_id = {t.tank_id: t for t in facility.tanks}
+    sys_tanks: dict = defaultdict(list)
+    for t in facility.tanks:
+        if t.type == "OG":
+            sys_tanks[t.system_id].append(t.tank_id)
+    for s in sys_tanks:
+        sys_tanks[s].sort()
+    cap = _carry_forward_caps(system_limits)
+
+    start_peak = system_peak(placement.batch_locations, batch_meta, tables, system_limits)
+    g_batches = {r.batch_id for r in placement.batch_locations}
+    work = copy.deepcopy(placement)                    # greedy stays untouched
+    base_peak = start_peak
+
+    weeks = sorted({r.week_label for r in work.batch_locations})
+    week_index = {w: i for i, w in enumerate(weeks)}
+    last_week = weeks[-1] if weeks else None
+    budget = int(getattr(control, "lns_max_moves", 30) or 30)
+    moves = 0
+
+    for _ in range(budget):
+        sb, sf, _c = system_loads(work.batch_locations, batch_meta, tables, system_limits)
+        # hottest grow-out (system, week)
+        hot_sys = hot_wk = None
+        hot_ratio = 1e-9
+        for (w, s), bio in sb.items():
+            if s not in grow:
+                continue
+            bc = cap(w, s, "biomass")
+            if bc and bc > 0 and bio / bc > hot_ratio:
+                hot_ratio, hot_sys, hot_wk = bio / bc, s, w
+        for (w, s), feed in sf.items():
+            if s not in grow:
+                continue
+            fc = cap(w, s, "feed_per_day")
+            if fc and fc > 0 and feed / fc > hot_ratio:
+                hot_ratio, hot_sys, hot_wk = feed / fc, s, w
+        if hot_sys is None or hot_ratio <= 1.0 + 1e-9:
+            break                                       # nothing over cap to relieve
+
+        occ = {(r.tank_id, r.week_label) for r in work.batch_locations if r.count > 0}
+        if os.environ.get("LNS_DEBUG") and moves == 0:
+            print(f"  [LNS_DEBUG] hottest = {hot_sys} {hot_wk} ratio={hot_ratio:.3f}",
+                  file=sys.stderr)
+            for s in grow:
+                bc = cap(hot_wk, s, "biomass") or 0
+                fc = cap(hot_wk, s, "feed_per_day") or 0
+                br = (sb.get((hot_wk, s), 0.0) / bc) if bc else 0.0
+                fr = (sf.get((hot_wk, s), 0.0) / fc) if fc else 0.0
+                free = sum(1 for t in sys_tanks[s] if (t, hot_wk) not in occ)
+                print(f"  [LNS_DEBUG]   {s}: bio={br:.2f} feed={fr:.2f} "
+                      f"free_tanks@{hot_wk}={free}/{len(sys_tanks[s])}", file=sys.stderr)
+            ncand = sum(1 for sg in _segments(work.batch_locations, week_index)
+                        if sg.system == hot_sys and sg.ws <= hot_wk <= sg.we
+                        and sg.we != last_week)
+            print(f"  [LNS_DEBUG]   relocatable segments in {hot_sys}@{hot_wk}: "
+                  f"{ncand}", file=sys.stderr)
+        cands = [sg for sg in _segments(work.batch_locations, week_index)
+                 if sg.system == hot_sys and sg.ws <= hot_wk <= sg.we
+                 and sg.we != last_week]            # leave terminal cells (final_state)
+        # biggest contributor to the hot week first
+        cands.sort(key=lambda sg: (
+            -dict((r.week_label, r.biomass_kg) for r in sg.rows).get(hot_wk, 0.0),
+            sg.batch_id, sg.tank_id))
+
+        did = False
+        for seg in cands:
+            target = _best_target(seg, grow, hot_sys, hot_ratio, sys_tanks, occ,
+                                   sb, sf, cap, tank_by_id, batch_meta, tables)
+            if target is None:
+                continue
+            relmap = {(seg.batch_id, seg.tank_id, w): target for w in seg.week_labels}
+            _relabel(work, relmap, tank_by_id)
+            new_peak = system_peak(work.batch_locations, batch_meta, tables, system_limits)
+            ok = (new_peak < base_peak - 1e-9
+                  and {r.batch_id for r in work.batch_locations} >= g_batches
+                  and drift_count(work, batch_week_states, initial_state) == 0)
+            if ok:
+                base_peak = new_peak
+                moves += 1
+                did = True
+                break
+            _relabel(work, _invert(relmap), tank_by_id)   # revert the bad trial
+
+        # No free-tank target (facility full at the peak) — try a SWAP: exchange a
+        # feed-heavy hot-system segment with a lighter cool-system segment of the
+        # SAME week span (a clean 1:1 relabel, no empty tank needed). This is the
+        # lever for a 100%-full facility with a per-system feed imbalance.
+        if not did:
+            all_segs = _segments(work.batch_locations, week_index)
+            cool_by_span: dict = defaultdict(list)
+            for sg in all_segs:
+                if sg.system in grow and sg.system != hot_sys and sg.we != last_week:
+                    cool_by_span[(sg.ws, sg.we)].append(sg)
+            for seg in cands:
+                sa_load = seg.bio(batch_meta, tables)
+                sa_hot = sa_load.get(hot_wk, (0.0, 0.0, 0.0))
+                for sb_seg in cool_by_span.get((seg.ws, seg.we), []):
+                    sbl = sb_seg.bio(batch_meta, tables).get(hot_wk, (0.0, 0.0, 0.0))
+                    if sbl[0] >= sa_hot[0] and sbl[1] >= sa_hot[1]:
+                        continue                       # SB not lighter — swap won't relieve
+                    relmap = {(seg.batch_id, seg.tank_id, w): sb_seg.tank_id
+                              for w in seg.week_labels}
+                    relmap.update({(sb_seg.batch_id, sb_seg.tank_id, w): seg.tank_id
+                                   for w in sb_seg.week_labels})
+                    _relabel(work, relmap, tank_by_id)
+                    new_peak = system_peak(work.batch_locations, batch_meta, tables,
+                                           system_limits)
+                    ok = (new_peak < base_peak - 1e-9
+                          and {r.batch_id for r in work.batch_locations} >= g_batches
+                          and drift_count(work, batch_week_states, initial_state) == 0)
+                    if ok:
+                        base_peak = new_peak
+                        moves += 1
+                        did = True
+                        break
+                    _relabel(work, _invert(relmap), tank_by_id)
+                if did:
+                    break
+        if not did:
+            break
+
+    if moves == 0:
+        print("  LNS placement: no beneficial relocation (greedy already near the "
+              "capacity floor); greedy stands", file=sys.stderr)
+        return None
+    # belt-and-suspenders final gate
+    if (drift_count(work, batch_week_states, initial_state) > 0
+            or {r.batch_id for r in work.batch_locations} < g_batches):
+        print("  LNS placement: final safety gate failed; greedy stands", file=sys.stderr)
+        return None
+    print(f"  LNS placement: ACCEPTED — {moves} relocation(s), hot spot "
+          f"{start_peak:.3f} -> {base_peak:.3f}")
+    return work

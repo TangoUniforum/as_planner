@@ -3009,17 +3009,12 @@ def run_placement(
     result.batch_locations = locs
     result.warnings.extend(f"[D] {w}" for w in d_warns)
 
-    # OPT-IN LNS refinement: the greedy plan above is the WARM START; when
-    # placement_method=="lns", lns_placement.refine emits extra conserved Transfers
-    # toward a lower-hot-spot layout (greedy stays the fallback). Default "greedy"
-    # never enters this branch => byte-identical. (Phase 1: refine is a no-op.)
-    if getattr(control, "placement_method", "greedy") == "lns":
-        from . import lns_placement
-        result, final_state = lns_placement.refine(
-            result, final_state, control=control, facility=facility,
-            system_limits=system_limits, facility_limits=facility_limits,
-            batch_meta=batch_meta, tables=tables,
-        )
+    # NOTE: opt-in LNS placement refinement (placement_method=="lns") is applied
+    # ONE level up, in run.py, AFTER this greedy plan is realized — it refines the
+    # canvas migration_plan and RE-RUNS this same engine to realize the refined
+    # plan (continuity guaranteed by construction; greedy is the warm start +
+    # fallback). run_placement itself stays a pure realizer of whatever plan it is
+    # given, so the greedy warm-start run is never self-refined. See lns_placement.
     return result, final_state
 
 

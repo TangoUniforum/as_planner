@@ -293,7 +293,10 @@ _CONTROL_HELP = {
     "sixn_transition_weeks": "Empty/fallow window (weeks) at the 6N purge→production "
         "switch. 0 = none.",
     "tran_og_default_tanks": "Minimum number of tanks a new seawater arrival (TranOG) "
-        "is placed into.",
+        "is spread across — the strongest feed↔harvest lever. More (3, default) spreads "
+        "feed thinner (fewer feed-cap breaches) but tightens the facility (bigger "
+        "make-room harvest dumps); fewer (2) is the reverse (harvest-friendly, hotter "
+        "feed).",
     "global_buffer_pct": "Safety buffer added when sizing against caps. 0.05 = 5%.",
     "starvation_period_days": "In-place purge length (days) in 6N production mode. "
         "7 = one weekly step (clean single-cohort pipeline).",
@@ -321,6 +324,16 @@ _CONTROL_HELP = {
         "harvest_level_load is on; bigger = smoother/earlier.",
     "harvest_level_target": "Flat fish/week harvest floor when level-loading. Blank = "
         "auto-computed from realized growth. Only used when harvest_level_load is on.",
+    "placement_method": "Tank-placement engine. 'greedy' (default) is the production "
+        "engine. 'lns' runs greedy first, then an LNS pass that relocates/swaps grow-out "
+        "tank occupancy off the hottest systems onto cooler ones (each move a conserved "
+        "Transfer). Every edit is gated on the continuity audit (0 drift) + 0 dropped + a "
+        "strictly-lower hot spot, and greedy is the fallback — so it never makes a run "
+        "worse. Helps most when the facility has free-tank room; correctly no-ops when "
+        "capacity-bound. Adds runtime (a second, audit-checked pass).",
+    "lns_max_moves": "LNS budget: the most relocations/swaps the 'lns' placement engine "
+        "will make per run (only used when placement_method = lns). Higher = chases more "
+        "hot spots but slower.",
 }
 
 # Column tooltips for the tabular editors (shown on the column header in the grid).
@@ -1449,12 +1462,14 @@ def _optimizer():
         ["Quick grid", "Full grid", "Deep search (finds combos)",
          "Grid + Deep (best of both)"],
         horizontal=True,
-        help="Quick/Full GRID enumerate hand-picked configs (fast, broad, but mostly "
-             "one knob at a time — they miss COMBINATIONS). DEEP SEARCH is a greedy "
-             "coordinate descent that tunes one knob at a time and FINDS combinations "
-             "(~15–30 runs). GRID + DEEP runs the grid, then deep-searches FROM the "
-             "grid's best, and returns the global best of both — grid explores, descent "
-             "exploits (most thorough, ~30–45 runs). The emphasis guides deep/combined.")
+        help="TWO search algorithms, offered as FOUR choices. GRID (Quick = 4 configs, "
+             "Full = 14) enumerates a hand-picked list — fast and broad, but mostly one "
+             "knob at a time, so it misses COMBINATIONS. DEEP SEARCH is a coordinate "
+             "descent that tunes one knob at a time and FINDS combinations (~15–30 runs). "
+             "GRID + DEEP runs the full grid, then deep-searches FROM the grid's best and "
+             "keeps the global best of both — grid explores, descent exploits (most "
+             "thorough, ~30–45 runs; what Auto-optimize uses). The emphasis above guides "
+             "deep/combined.")
     combined = method.startswith("Grid +")
     deep = method.startswith("Deep")
     if combined:

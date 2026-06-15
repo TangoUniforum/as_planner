@@ -79,6 +79,10 @@ OPT_FULL_GRID = [
     ("density-only", {"rebalance_level": False}),
     ("reactive-harvest", {"harvest_level_load": False}),
     ("handling:balance=0", {"rebalance_balance_budget": 0}),
+    # LNS placement refinement (opt-in) — lets the optimizer decide, per PR, whether
+    # the realized relocate/swap pass beats greedy on the chosen emphasis. No-ops
+    # (== greedy) when the facility is capacity-bound; helps when there's tank room.
+    ("lns-placement", {"placement_method": "lns"}),
 ]
 
 

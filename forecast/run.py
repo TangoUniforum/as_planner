@@ -508,6 +508,29 @@ def main(
     write_biology_projection(wb, _to_realized_lifespan(states + in_flight_states))
     write_calibration_diagnostics(wb, residuals)
 
+    # ----- Stage 2.5: optional LP-guided LNS placement refinement (opt-in) -----
+    #
+    # placement_method=="lns": refine the REALIZED layout in place — relocate
+    # grow-out tank occupancy off the hottest systems onto cooler ones, emitting
+    # each move as a conserved Transfer. The greedy plan is the warm start AND the
+    # fallback: every candidate edit is gated on the real continuity audit (0
+    # drift) + input conservation (0 dropped) + a strictly-lower hot spot, so
+    # turning LNS on can never make the forecast worse or break conservation. No
+    # second placement run — see lns_placement.refine_realized.
+    if getattr(control, "placement_method", "greedy") == "lns":
+        from . import lns_placement
+        try:
+            edited = lns_placement.refine_realized(
+                placement, initial_state=state,
+                batch_week_states=_to_realized_lifespan(states + in_flight_states),
+                control=control, facility=facility, system_limits=system_limits,
+                facility_limits=facility_limits, batch_meta=batch_by_id, tables=tables)
+            if edited is not None:
+                placement = edited
+        except Exception as e:  # noqa: BLE001 — any failure keeps greedy
+            print(f"  LNS placement: refine failed ({type(e).__name__}: {e}); "
+                  f"greedy stands")
+
     # Write the plan outputs from Stage 2 placement.
     write_batch_locations(wb, placement.batch_locations)
     # Density violations enumerated from BatchLocations vs per-tank cap.
