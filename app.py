@@ -1446,7 +1446,19 @@ def _optimizer():
         n = len(grid)
         st.write(f"**{method}** — runs the forecast **{n} times** "
                  f"(~{n * 90 // 60}–{max(1, n * 100 // 60)} min). Config never modified.")
-    if st.button("▶ Run optimization", type="primary"):
+    _c1, _c2 = st.columns(2)
+    _run_opt = _c1.button("▶ Run optimization", type="primary", use_container_width=True)
+    _auto_opt = _c2.button(
+        "🤖 Auto-optimize & run", use_container_width=True,
+        help="One click: find the best config (this method + emphasis), then run the "
+             "FULL forecast with it and load it into the tabs. The winning knobs are "
+             "validated TOGETHER, so it's safe to apply them as a set.")
+    _auto_save = st.checkbox(
+        "When auto-optimizing, save the winning knobs to config", value=True,
+        key="auto_save_cfg",
+        help="Writes the best knobs into config/control.yaml so future normal runs use "
+             "them. Uncheck to just produce the optimized run without changing config.")
+    if _run_opt or _auto_opt:
         work = Path(tempfile.mkdtemp(prefix="as_opt_in_"))
         in_path = work / (uploaded.name or "input.xlsm")
         in_path.write_bytes(uploaded.getvalue())
@@ -1475,6 +1487,32 @@ def _optimizer():
             return
         bar.progress(1.0, text="Done")
         st.session_state["_opt_results"] = results
+        if _auto_opt:
+            # AUTO: pick the validated best, run the FULL forecast with it, load it
+            # into the viz tabs, and (optionally) persist the winning knobs.
+            _rec0 = optimize.recommend(results, emphasis=emphasis, weights=_w)
+            _best0 = next((v for v in results if v.label == _rec0.best_label), results[0])
+            _knobs = optimize.overrides_yaml(_best0.overrides).replace("\n", " · ") or "baseline"
+            with st.spinner(f"Auto-optimize — running the full forecast with {_knobs} …"):
+                try:
+                    _tmpcfg = optimize.config_dir_with_overrides(str(CONFIG_DIR), _best0.overrides)
+                    _res = _run_with_workbook_bytes(
+                        uploaded.getvalue(), uploaded.name,
+                        config_dir=_tmpcfg, scenario_dir=str(SCENARIO_DIR))
+                except Exception as e:  # noqa: BLE001
+                    st.error(f"Auto-optimize run failed: {e}")
+                    _res = {"ok": False}
+            if _res.get("ok"):
+                _res["_run_label"] = "Auto-optimized — " + _knobs
+                st.session_state.result = _res
+                _saved = bool(_auto_save and _best0.overrides)
+                if _saved:
+                    optimize.save_overrides_to_config(str(CONFIG_DIR), _best0.overrides)
+                    _clear_all_editor_state()
+                st.success(
+                    f"🤖 Auto-optimized → **{_best0.label}** ({_knobs})"
+                    + (" · **saved to config**" if _saved else " · config unchanged")
+                    + ". Loaded into the **Run forecast** tabs.")
 
     results = st.session_state.get("_opt_results")
     if not results:

@@ -445,6 +445,21 @@ To keep the knobs permanently, paste the snippet into **Configure → Control** 
 `config/control.yaml`); every later run then uses them. The CLI prints the same
 snippet at the end of a sweep.
 
+**Auto-optimize (find AND use, in one shot).** When you don't want the manual
+find→apply→run loop, **🤖 Auto-optimize & run** (the button beside *Run optimization*)
+does it all: it runs the selected method + emphasis, takes the conservation-validated
+best config, runs the **full forecast** with it, and loads it into the tabs — plus, if
+the *"save the winning knobs to config"* box is checked, it persists them. The CLI
+equivalent is `python -m tools.auto_optimize --emphasis "Minimize loads" --method
+combined [--save-config]`. **Use the `combined` (Grid + Deep) method** so the knobs are
+validated *together* as a set — auto-optimize never stacks two separately-measured
+single-knob recs (the thing that can interact badly; see the note below).
+
+> **Don't hand-stack single-knob recommendations.** Each recommendation is measured
+> against *one* baseline; applying two of them at once is unvalidated and can be worse
+> than either alone (knob interactions are real). Let **Grid + Deep** (or auto-optimize
+> with `--method combined`) find the *combination* — that's validated as a whole.
+
 ### 7.3 Load-leveling (`rebalance_level`) + the compliance objective
 
 **Symptom:** the per-system utilization maps (density / biomass / feed) show a wide
@@ -536,6 +551,11 @@ python -m tools.tune_sweep --quick [--config-template "C:\path\config_template (
 
 # Multi-objective optimizer (§7.2) — prints the recommended knobs at the end
 python -m tools.optimize_sweep --emphasis "Walk the line" [--quick] [--weights bvar=3,...]
+
+# Auto-optimize (§7.2) — FIND the best knobs and USE them: search, then run the full
+# forecast with the validated-best config and write it. --save-config also persists them.
+python -m tools.auto_optimize --emphasis "Minimize loads" --method combined `
+    --input Forecast.xlsm --output optimized.xlsm [--save-config]
 ```
 
 **The narration maps to the pipeline stages** (`forecast/run.py` orchestrates):
