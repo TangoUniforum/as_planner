@@ -91,25 +91,29 @@ def pair_combined_count(state: FacilityState, pair: tuple[int, int]) -> float:
 def initial_purge_pair_queue(state: FacilityState) -> list[tuple[int, int]]:
     """Forecast-startup ordering of stocked 6N pairs for the purge pipeline.
 
-    Only pairs with **at least one fish at forecast start** are included
-    (an empty pair has nothing to harvest — it joins the pipeline only
-    when a move-in restocks it). Returned in ascending combined-count
-    order, so the lowest-count pair is harvested first (per user H10).
-
-    Raises if two stocked pairs tie on count.
+    FIXED cyclic harvest order 61 -> 63 -> 65 (the SIXN_PAIRS sequence), entered
+    just AFTER the empty (resting/fallow) pair — the empty slot marks where the
+    rotation sits, so no PR purge-age is needed. Examples (stocked -> harvest order):
+      61,63 (65 empty) -> 61, 63   (next after 65 is 61)
+      63,65 (61 empty) -> 63, 65   (next after 61 is 63)
+      65,61 (63 empty) -> 65, 61   (next after 63 is 65)
+    If every pair is stocked (no fallow slot), start at the first pair (61). Only
+    stocked pairs (>=1 fish) are included; an empty pair joins when a move-in
+    restocks it.
     """
-    counts = [(p, pair_combined_count(state, p)) for p in SIXN_PAIRS]
-    stocked = [(p, c) for p, c in counts if c > 0]
-    stocked.sort(key=lambda x: x[1])
-    for i in range(1, len(stocked)):
-        if stocked[i][1] == stocked[i - 1][1]:
-            raise RuntimeError(
-                f"Two 6N pairs have equal combined count "
-                f"({stocked[i - 1][0]} and {stocked[i][0]} both at "
-                f"{stocked[i][1]:.0f}); operator must resolve before forecast "
-                "can proceed"
-            )
-    return [p for p, _ in stocked]
+    n = len(SIXN_PAIRS)
+    stocked_flags = [pair_combined_count(state, p) > 0 for p in SIXN_PAIRS]
+    if not any(stocked_flags):
+        return []
+    if all(stocked_flags):
+        return list(SIXN_PAIRS)                 # no fallow slot -> fixed order from 61
+    empty_idx = next(i for i, ok in enumerate(stocked_flags) if not ok)
+    order = []
+    for k in range(1, n + 1):                   # walk the cycle starting after the empty
+        idx = (empty_idx + k) % n
+        if stocked_flags[idx]:
+            order.append(SIXN_PAIRS[idx])
+    return order
 
 
 # Kept for back-compat where a single initial pair is wanted.

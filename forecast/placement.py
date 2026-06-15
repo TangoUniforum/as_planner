@@ -957,57 +957,13 @@ def _run_sixn_purge_week(
         if budget is not None:
             budget.record(ev.count)
 
-    # 1b. Supplemental harvest from FIFO production tanks to top the weekly
-    # total up to the CLOSED-LOOP target. `harvest_target` is the realized-
-    # biomass controller's decision for this week (clamped to
-    # [min_hv, max_hv]); when biomass is over band it equals max_hv, so the
-    # supplement pulls biomass down immediately rather than waiting two purge
-    # cycles for the move-in to flow through. Falls back to the operational
-    # floor (min_harvest_per_week) when no target is supplied. The 6N pair
-    # drain may fall short (e.g. pair was thin from a small earlier move-in);
-    # the deficit is harvested directly from the oldest mature production
-    # batch's largest tank.
-    floor = harvest_target if (harvest_target and harvest_target > 0) else 0.0
-    min_h = max(control.min_harvest_per_week or 0, floor)
-    if min_h > 0 and pair_drain_count < min_h:
-        deficit = min_h - pair_drain_count
-        supp_batches = _pick_fifo_move_in_batches(state, batch_meta, control)
-        for supp_bid in supp_batches:
-            if deficit <= 0:
-                break
-            supp_tanks = [
-                t for t in state.tanks_by_id.values()
-                if t.batch_id == supp_bid and not t.is_empty
-                and t.system_id not in _SIXN_SYSTEMS
-                and t.avg_wt_g >= control.min_harvest_weight_g
-            ]
-            # Biggest avg_wt first: harvest mature/big-class fish ahead of
-            # smaller ones. Big-class tanks drain → free for size-class
-            # migration (small class moves up via grade-split).
-            supp_tanks.sort(key=lambda t: t.avg_wt_g, reverse=True)
-            for src in supp_tanks:
-                if deficit <= 0:
-                    break
-                take = min(deficit, src.count)
-                if budget is not None:
-                    if budget.remaining() <= 0:
-                        break              # HARD weekly ceiling reached
-                    take = budget.take(take)
-                if take <= 0:
-                    continue
-                ev = Harvest(
-                    batch_id=supp_bid,
-                    event_date=week_start_date,
-                    source_tank_id=src.tank_id,
-                    count=take,
-                    avg_wt_g=src.avg_wt_g,
-                    min_tank_control=control.min_tank_control,
-                )
-                warnings.extend(ev.apply(state))
-                harvest_events.append(ev)
-                if budget is not None:
-                    budget.record(ev.count)
-                deficit -= take
+    # 1b. NO supplemental direct-production harvest in purge mode (operator rule:
+    # never harvest a production tank without purging it through 6N first). If the
+    # harvested pair drains short of this week's target, that is by design — the
+    # shortfall lets biomass BUILD toward the caps, and the predictive move-in
+    # (sized to the controller's demand, below) tops up the pairs so the rotation
+    # delivers the demand a purge-cycle later. All harvest flows through the 6N
+    # pair drain (path 1 above); production fish reach harvest only via the move-in.
 
     # Wind-down (transition): harvest the front pair but do NOT restock — 6N
     # drains over the rotation while production harvest takes over via in-place
@@ -2259,22 +2215,26 @@ def phase_d_emit_events(
                 state, batch_meta, tables, control.min_harvest_weight_g)
         )
         bio_cap = resolve_facility_cap(METRIC_BIOMASS, week_label, facility_limits, control)
+        feed_cap = resolve_facility_cap(METRIC_FEED_DAY, week_label, facility_limits, control)
         max_hv = resolve_facility_cap(METRIC_MAX_HARVEST, week_label, facility_limits, control)
         min_hv = resolve_facility_cap(METRIC_MIN_HARVEST, week_label, facility_limits, control)
         weekly_max = max_hv if max_hv else float("inf")
         if bio_cap is not None:
-            # ANTICIPATORY setpoint: pre-position biomass below the cap by ~one
-            # lookahead-week of the facility's REALIZED growth, so the upcoming
-            # growth fills the headroom up to (not over) the cap and the harvest
-            # pre-sheds each peak across the calm run-up weeks instead of spiking
-            # in the peak week. Self-adapting (bigger margin when growing fast
-            # toward a peak, smaller when flat) and anchored in realized growth.
-            _la_weeks = getattr(control, "harvest_setpoint_lookahead_weeks",
-                                _SETPOINT_LOOKAHEAD_WEEKS)
-            _margin = min(max(_la_weeks * max(0.0, fac_growth_kg),
-                              bio_cap * _MARGIN_MIN_FRAC),
-                          bio_cap * _MARGIN_MAX_FRAC)
-            setpoint = bio_cap - _margin
+            # DUAL-LIMIT, control-driven setpoint (no hardcoded margin). The harvest
+            # controller works the facility toward BOTH facility caps at once: the
+            # effective biomass ceiling is the LOWER of (a) the biomass cap and (b) the
+            # biomass at which facility FEED would reach its cap (feed scales ~linearly
+            # with biomass at the current size mix), so whichever limit binds drives
+            # harvest. The setpoint sits one R24 deviation-band below that ceiling —
+            # facility_biomass_deviation_pct is the operator's Control knob for how
+            # close to the cap to run (no hidden margin). Below the band the predictive
+            # move-in floors to min_harvest, so biomass + feed BUILD toward the caps;
+            # near it, harvest ramps between min and max to MAINTAIN them.
+            eff_cap = bio_cap
+            if feed_cap and _fac_feed_kg_day > 0 and fac_bio > 0:
+                eff_cap = min(bio_cap, feed_cap * fac_bio / _fac_feed_kg_day)
+            _dev = control.facility_biomass_deviation_pct or 0.0
+            setpoint = eff_cap * (1.0 - _dev)
         else:
             setpoint = None
 
@@ -2674,12 +2634,52 @@ def phase_d_emit_events(
                     else:
                         _cands.sort(key=lambda t: (-t.avg_wt_g, t.tank_id))
                     _src = _cands[0]
-                    # Make-room harvests the WHOLE tank (a partial wouldn't free
-                    # it), so under level-load this is the one pass that may exceed
-                    # the weekly harvest ceiling: dropping a stocked TranOG batch
-                    # (a conservation breach) is worse and unrecoverable. The
-                    # overage is recorded and borrowed from next week's ceiling
-                    # (_carry_debt), so the multi-week total stays within cap.
+                    # PURGE MODE — the operator rule is absolute: never harvest a
+                    # production tank directly. MOVE its fish into 6N to purge, which
+                    # both frees the tank for the arrival AND routes the fish to harvest
+                    # via the rotation. Prefer the resting pair (same batch, or an empty
+                    # 6N tank); if 6N is full, leave the tank and warn — a real 6N
+                    # capacity signal (the lookahead should have pre-staged earlier),
+                    # never a bypass.
+                    if purge_this_week:
+                        _dest = None
+                        _sixn_pref = list(sixn_resting_pair or ()) + sorted(
+                            t.tank_id for t in state.tanks_by_id.values()
+                            if t.system_id in _SIXN_SYSTEMS)
+                        for _tid in _sixn_pref:
+                            _tk = state.tanks_by_id.get(_tid)
+                            if _tk is not None and (_tk.is_empty
+                                                    or _tk.batch_id == _src.batch_id):
+                                _dest = _tk
+                                break
+                        if _dest is None:
+                            warnings.append(
+                                f"{week_label}: make-room CANNOT free "
+                                f"{_src.location_id} for a TranOG arrival — 6N is full "
+                                f"and direct production harvest is forbidden in purge "
+                                f"mode (6N capacity signal)")
+                            break
+                        _mv = Transfer(
+                            batch_id=_src.batch_id, event_date=ws_date,
+                            source_tank_id=_src.tank_id,
+                            destinations=[TankAllocation(
+                                tank_id=_dest.tank_id, count=_src.count,
+                                avg_wt_g=_src.avg_wt_g, cv_pct=_src.cv_pct)],
+                            leaves_source_empty=True,
+                        )
+                        warnings.extend(_mv.apply(state))
+                        transfer_events.append(_mv)
+                        warnings.append(
+                            f"{week_label}: make-room MOVED {_src.location_id} "
+                            f"(batch {_src.batch_id}, {_src.count:.0f} fish) into 6N "
+                            f"{_dest.location_id} to purge — freeing a tank for a "
+                            f"TranOG arrival (no direct harvest in purge mode)")
+                        _deficit -= 1
+                        continue
+                    # PRODUCTION MODE — harvest the WHOLE tank directly (a partial
+                    # wouldn't free it). This pass may exceed the weekly ceiling:
+                    # dropping a stocked TranOG batch is worse and unrecoverable; the
+                    # overage is borrowed from next week's ceiling (_carry_debt).
                     _over = max(0.0, _budget.used + _src.count - _budget.cap)
                     _ev = Harvest(
                         batch_id=_src.batch_id, event_date=ws_date,
