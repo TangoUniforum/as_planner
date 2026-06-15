@@ -410,6 +410,14 @@ toward the best score under the chosen emphasis, looping until nothing improves 
 The emphasis *guides* the deep search, so pick it first. Both methods return the same
 ranked variants, Pareto map, and apply/verify panel.
 
+**It runs in parallel.** Each grid variant is an independent full forecast, so the sweep
+runs them across a process pool (up to 8 at once) — typically **3–5× faster** than
+one-at-a-time, with **byte-identical** results (they're sorted back to grid order and
+re-scored). Deep search is inherently sequential (each knob depends on the previous
+best), so it parallelizes only the candidate values within a knob — a smaller win. If a
+restricted environment blocks process spawning, it falls back to sequential
+automatically. Nothing about the *result* changes — only the wall-clock.
+
 **The sweep grid spans the FEED↔HARVEST trade.** The strongest single lever is
 `tran_og_default_tanks`: 3 tanks/arrival spreads feed thinner (fewer feed breaches)
 but tightens the facility → bigger make-room harvest dumps; 2 is the reverse. The

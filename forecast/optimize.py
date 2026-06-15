@@ -585,17 +585,63 @@ def config_dir_with_overrides(config_dir, overrides) -> str:
     return dst
 
 
-def sweep(input_path, config_dir, scenario_dir, grid=None, progress=None) -> list[OptVariant]:
+def _default_workers(n_tasks: int) -> int:
+    """Process-pool size for the sweep: leave a core for the UI, never more workers
+    than tasks, capped at 8 (each worker runs a full pipeline — memory + diminishing
+    returns past that)."""
+    try:
+        cpu = os.cpu_count() or 2
+    except Exception:  # noqa: BLE001
+        cpu = 2
+    return max(1, min(n_tasks, cpu - 1, 8))
+
+
+def sweep(input_path, config_dir, scenario_dir, grid=None, progress=None,
+          parallel=True, max_workers=None) -> list[OptVariant]:
     """Run every grid row and return per-variant results (unscored — call
     recommend()/score_variants() with an emphasis). Nothing mutates the caller's
-    config; each variant runs in a temp copy."""
+    config; each variant runs in its own temp copy.
+
+    Each variant is an INDEPENDENT full forecast, so by default they run across a
+    PROCESS POOL — the pipeline is CPU-bound + deterministic, so parallel execution
+    yields IDENTICAL results (sorted back to grid order), just N× faster. Falls back
+    to sequential automatically if a pool can't start (restricted env). Pass
+    parallel=False to force the old one-at-a-time path."""
     grid = grid or OPT_FULL_GRID
-    results = []
     n = len(grid)
-    for i, (label, overrides) in enumerate(grid):
-        if progress is not None:
-            progress(i, n, label)
-        results.append(run_variant(label, overrides, config_dir, scenario_dir, input_path))
+    if max_workers is None:
+        max_workers = _default_workers(n)
+
+    if not parallel or max_workers <= 1 or n <= 1:
+        results = []
+        for i, (label, overrides) in enumerate(grid):
+            if progress is not None:
+                progress(i, n, label)
+            results.append(run_variant(label, overrides, config_dir, scenario_dir,
+                                       input_path))
+        return results
+
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+    order = {label: i for i, (label, _) in enumerate(grid)}
+    results: list = []
+    done = 0
+    try:
+        with ProcessPoolExecutor(max_workers=max_workers) as ex:
+            futs = {ex.submit(run_variant, label, ov, config_dir, scenario_dir,
+                              input_path): label for label, ov in grid}
+            for fut in as_completed(futs):
+                done += 1
+                if progress is not None:
+                    progress(done, n, futs[fut])
+                results.append(fut.result())
+    except Exception:  # noqa: BLE001
+        # A pool that can't even start (sandboxed env) -> sequential. But if some
+        # variants already ran, a failure is a real variant error -> surface it.
+        if results:
+            raise
+        return sweep(input_path, config_dir, scenario_dir, grid=grid,
+                     progress=progress, parallel=False)
+    results.sort(key=lambda v: order.get(v.label, 1 << 30))   # deterministic order
     return results
 
 
@@ -613,22 +659,30 @@ CD_KNOB_SPACE = [
 ]
 
 
+def _overrides_key(ov):
+    """Deterministic, order-independent sort key for an overrides dict — so a tie on
+    score breaks the SAME way regardless of evaluation order (needed once variants
+    are evaluated in parallel)."""
+    return tuple(sorted((str(k), str(v)) for k, v in ov.items()))
+
+
 def coordinate_descent(input_path, config_dir, scenario_dir, emphasis=DEFAULT_EMPHASIS,
                        weights=None, knob_space=None, max_rounds=3, seed=None,
-                       progress=None) -> list[OptVariant]:
+                       progress=None, parallel=True) -> list[OptVariant]:
     """Greedy local search that finds COMBINATIONS the grid can't.
 
     From the `seed` config (default = current config / baseline), improve ONE knob
-    at a time: try each
-    candidate value for a knob (holding the others at the current best), keep the
-    value that scores best, move to the next knob. Loop over all knobs each round;
-    stop when a full round makes no improvement (local optimum) or max_rounds.
+    at a time: try each candidate value for a knob (holding the others at the current
+    best), keep the value that scores best, move to the next knob. Loop over all knobs
+    each round; stop when a full round makes no improvement (local optimum) or
+    max_rounds.
 
-    Deterministic (fixed knob/value order; the pipeline is deterministic), so it's
-    reproducible. Conservation-OK variants only ever win (the gate). Reuses
-    run_variant + score_variants, and returns ALL evaluated variants — the SAME
-    shape sweep() returns, so recommend()/the score table/Pareto/apply-verify all
-    consume it with no changes. Nothing mutates the caller's config."""
+    The candidate VALUES of one knob are independent, so they're evaluated across a
+    PROCESS POOL (one pool reused for the whole descent). The cyclic knob order +
+    accept-best-per-knob trajectory is UNCHANGED, and ties break by a deterministic
+    override key, so the result is identical to (and as reproducible as) the
+    sequential version — just faster. Conservation-OK variants only ever win. Returns
+    ALL evaluated variants (same shape as sweep()). Nothing mutates the caller's config."""
     knob_space = knob_space or CD_KNOB_SPACE
     w = weights or weights_for(emphasis)
     cache: dict = {}
@@ -637,40 +691,74 @@ def coordinate_descent(input_path, config_dir, scenario_dir, emphasis=DEFAULT_EM
     def _key(ov):
         return tuple(sorted(ov.items()))
 
+    pool = None
+    if parallel and _default_workers(8) > 1:
+        from concurrent.futures import ProcessPoolExecutor
+        try:
+            pool = ProcessPoolExecutor(max_workers=_default_workers(8))
+        except Exception:  # noqa: BLE001 — restricted env -> sequential
+            pool = None
+
+    def _record(k, v):
+        cache[k] = v
+        evaluated.append(v)
+        if progress is not None:
+            progress(len(evaluated), None, v.label)
+
     def _eval(ov, label):
         k = _key(ov)
         if k in cache:
             return cache[k]
-        v = run_variant(label, dict(ov), config_dir, scenario_dir, input_path)
-        cache[k] = v
-        evaluated.append(v)
-        if progress is not None:
-            progress(len(evaluated), None, label)
-        return v
+        _record(k, run_variant(label, dict(ov), config_dir, scenario_dir, input_path))
+        return cache[k]
+
+    def _eval_many(items):
+        """Evaluate a list of (key, overrides, label) — all uncached — in parallel."""
+        if not items:
+            return
+        if pool is None or len(items) == 1:
+            for k, ov, label in items:
+                _eval(ov, label)
+            return
+        from concurrent.futures import as_completed
+        futs = {pool.submit(run_variant, label, dict(ov), config_dir, scenario_dir,
+                            input_path): k for k, ov, label in items}
+        for fut in as_completed(futs):
+            _record(futs[fut], fut.result())
 
     def _best_overrides():
         # Re-score the whole evaluated set (consistent normalization over all OK
-        # variants) and return the lowest-scoring conservation-OK config.
+        # variants) and return the lowest-scoring conservation-OK config; ties break
+        # deterministically so parallel == sequential.
         score_variants(evaluated, w)
         ok = [v for v in evaluated if v.conservation_ok]
-        return dict((min(ok, key=lambda v: v.score) if ok else evaluated[0]).overrides)
+        best = (min(ok, key=lambda v: (v.score, _overrides_key(v.overrides)))
+                if ok else evaluated[0])
+        return dict(best.overrides)
 
-    seed = dict(seed or {})
-    _eval(seed, "seed" if seed else "baseline")   # start point (warm-start from grid best)
-    current = _best_overrides()
-    for _ in range(max_rounds):
-        improved = False
-        for knob, values in knob_space:
-            for val in values:
-                ov = dict(current); ov[knob] = val
-                if _key(ov) != _key(current):
-                    _eval(ov, f"{knob}={val}")
-            nb = _best_overrides()
-            if _key(nb) != _key(current):
-                current = nb
-                improved = True
-        if not improved:
-            break
+    try:
+        seed = dict(seed or {})
+        _eval(seed, "seed" if seed else "baseline")   # warm-start (seq: it's evaluated[0])
+        current = _best_overrides()
+        for _ in range(max_rounds):
+            improved = False
+            for knob, values in knob_space:
+                todo = []
+                for val in values:
+                    ov = dict(current); ov[knob] = val
+                    k = _key(ov)
+                    if k != _key(current) and k not in cache:
+                        todo.append((k, ov, f"{knob}={val}"))
+                _eval_many(todo)
+                nb = _best_overrides()
+                if _key(nb) != _key(current):
+                    current = nb
+                    improved = True
+            if not improved:
+                break
+    finally:
+        if pool is not None:
+            pool.shutdown()
     return evaluated
 
 
