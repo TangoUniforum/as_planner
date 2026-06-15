@@ -75,9 +75,14 @@ OPT_FULL_GRID = [
     # rebalancer effort
     ("balance=60", {"rebalance_balance_budget": 60}),
     ("varqty=20", {"rebalance_varqty_budget": 20}),
-    # controls — turn each leveling default OFF to prove it earns its keep
-    ("density-only", {"rebalance_level": False}),
+    # leveling controls — test BOTH endpoints explicitly so the trade shows up no
+    # matter where the baseline config sits (else, if the config already has
+    # rebalance_level off, "density-only" is a no-op duplicate of baseline and the
+    # genuinely-different ON case is never tried — same lesson as tran_og's two ends).
+    ("density-only", {"rebalance_level": False}),     # OFF endpoint
+    ("level-rebalance", {"rebalance_level": True}),    # ON endpoint (feed-leveling)
     ("reactive-harvest", {"harvest_level_load": False}),
+    ("level-harvest", {"harvest_level_load": True}),
     ("handling:balance=0", {"rebalance_balance_budget": 0}),
     # LNS placement refinement (opt-in) — lets the optimizer decide, per PR, whether
     # the realized relocate/swap pass beats greedy on the chosen emphasis. No-ops
