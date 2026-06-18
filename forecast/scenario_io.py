@@ -26,6 +26,7 @@ import yaml
 
 from .caps import FacilityLimits, SystemLimits
 from .models import BatchInput
+from .yaml_atomic import read_text_resilient, write_text_atomic
 
 BATCHES_FILE = "batches.yaml"
 LIMITS_FILE = "limits.yaml"
@@ -138,26 +139,30 @@ def dump_scenario(
     d = Path(scenario_dir)
     d.mkdir(parents=True, exist_ok=True)
 
-    with (d / BATCHES_FILE).open("w", encoding="utf-8") as fh:
-        fh.write("# Forward batch schedule + batch metadata (input/TranOG dates,\n"
-                 "# counts, FCR model, corrections). In-flight state comes from the\n"
-                 "# ProductionReport; this is the planning/metadata layer.\n")
-        yaml.safe_dump({"batches": batches_to_list(batches)}, fh,
-                       sort_keys=False, allow_unicode=True, default_flow_style=False)
+    batches_text = (
+        "# Forward batch schedule + batch metadata (input/TranOG dates,\n"
+        "# counts, FCR model, corrections). In-flight state comes from the\n"
+        "# ProductionReport; this is the planning/metadata layer.\n"
+        + yaml.safe_dump({"batches": batches_to_list(batches)},
+                         sort_keys=False, allow_unicode=True,
+                         default_flow_style=False)
+    )
+    write_text_atomic(d / BATCHES_FILE, batches_text)
 
-    with (d / LIMITS_FILE).open("w", encoding="utf-8") as fh:
-        fh.write("# Per-week caps. facility: one row per (week, metric); system:\n"
-                 "# one row per (week, system, metric). Weeks are absolute ISO\n"
-                 "# labels. Blank/absent = use Control default (facility) / no cap.\n")
-        yaml.safe_dump({
+    limits_text = (
+        "# Per-week caps. facility: one row per (week, metric); system:\n"
+        "# one row per (week, system, metric). Weeks are absolute ISO\n"
+        "# labels. Blank/absent = use Control default (facility) / no cap.\n"
+        + yaml.safe_dump({
             "facility": facility_limits_to_list(facility_limits),
             "system": system_limits_to_list(system_limits),
-        }, fh, sort_keys=False, allow_unicode=True, default_flow_style=False)
+        }, sort_keys=False, allow_unicode=True, default_flow_style=False)
+    )
+    write_text_atomic(d / LIMITS_FILE, limits_text)
 
 
 def _load_yaml(path) -> dict:
-    with Path(path).open("r", encoding="utf-8") as fh:
-        return yaml.safe_load(fh) or {}
+    return yaml.safe_load(read_text_resilient(path)) or {}
 
 
 def load_batches(scenario_dir) -> list[BatchInput]:

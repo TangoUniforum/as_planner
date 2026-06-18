@@ -26,6 +26,7 @@ from typing import Optional
 import yaml
 
 from .models import BiologyTables, ControlParams, FacilityConfig, TankConfig
+from .yaml_atomic import read_text_resilient, write_text_atomic
 
 CONTROL_FILE = "control.yaml"
 BIOLOGY_FILE = "biology.yaml"
@@ -131,11 +132,9 @@ def dump_config(
     d.mkdir(parents=True, exist_ok=True)
 
     def _write(name, obj, header):
-        path = d / name
-        with path.open("w", encoding="utf-8") as fh:
-            fh.write(header)
-            yaml.safe_dump(obj, fh, sort_keys=False, allow_unicode=True,
-                           default_flow_style=False)
+        text = header + yaml.safe_dump(
+            obj, sort_keys=False, allow_unicode=True, default_flow_style=False)
+        write_text_atomic(d / name, text)
 
     _write(CONTROL_FILE, control_to_dict(control),
            "# Control parameters (caps defaults, horizon, planner knobs).\n"
@@ -149,8 +148,7 @@ def dump_config(
 
 
 def _load_yaml(path) -> dict:
-    with Path(path).open("r", encoding="utf-8") as fh:
-        return yaml.safe_load(fh) or {}
+    return yaml.safe_load(read_text_resilient(path)) or {}
 
 
 def load_control(config_dir) -> ControlParams:
