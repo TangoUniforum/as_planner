@@ -137,6 +137,26 @@ def label_for_date(d, forecast_start) -> str:
     return week_label(week_index(d, forecast_start), forecast_start)
 
 
+def og_entry_week_start(tran_og_date, forecast_start) -> date:
+    """First forecast-week start on/after TranOG_Date — the OG-transfer week.
+
+    Mirrors the legacy VBA OG-transfer trigger `wS >= TranOGDate`
+    (ForecastFW.bas): a batch crossing TranOG mid-week stays in the FW
+    pool through the week that *contains* the date — where the
+    reconciliation cull fires (`wE >= TranOGDate`) — and only transfers
+    into OG tanks at the next forecast-week boundary. Keeping the OG-entry
+    week distinct from the cull week is what stops forward TranOG entries
+    from landing one week early. For a TranOG_Date that is itself a week
+    start, the transfer happens that same week (wS == date).
+    """
+    d = _as_date(tran_og_date)
+    wi = week_index(d, forecast_start)
+    ws = week_start(wi, forecast_start)
+    if ws < d:
+        ws = week_start(wi + 1, forecast_start)
+    return ws
+
+
 def mon_fri_in_week(i: int, forecast_start) -> list[date]:
     """Calendar Mon-Fri dates that fall within forecast week i."""
     start, end = week_range(i, forecast_start)

@@ -1407,31 +1407,30 @@ def write_reconciliation_report(
             # STARVE fish this week neither grow nor take mortality.
             st_b = starve_biomass.get((batch, wk), 0.0)
             st_c = starve_count.get((batch, wk), 0.0)
-            mort = max(0.0, prev_count - st_c) * (m_pct / 100.0)
             cull = cull_count.get((batch, wk), 0.0) or 0.0
             cull_b = cull_biomass.get((batch, wk), 0.0) or 0.0
             hv_c = harv_count.get((batch, wk), 0.0)
             hv_b = harv_biomass.get((batch, wk), 0.0)
             in_c = tin_count.get((batch, wk), 0.0)
             in_b = tin_biomass.get((batch, wk), 0.0)
+            # TranOG entries land on the OG-entry WEEK START, so the entered
+            # fish are present the full week and take full-week growth +
+            # mortality (modelled like fish present at week-open).
+            mort = max(0.0, prev_count + in_c - st_c) * (m_pct / 100.0)
             # OG-side balance: cull is FW-side (input is already post-cull),
             # so cull is shown as informational but not subtracted.
             expected_c = prev_count - mort - hv_c + in_c
             # Biomass timing (matches Phase D order):
             #   pre-biology: harvest
-            #   biology: growth + mortality + TranOG (mid-week arrival)
-            # TranOG fish only get partial-week growth (~half).
+            #   biology: growth + mortality + TranOG (week-start arrival)
             sgr = sgr_pct_day.get((batch, wk), 0.0)
             growth_factor = (1.0 + sgr / 100.0) ** 7
-            partial_factor = 1.0 + (growth_factor - 1.0) * 0.5
-            bio_full_growth = prev_biomass - hv_b
+            bio_full_growth = prev_biomass - hv_b + in_b
             # Only the NON-starve biomass grows / takes mortality.
             grow_bio = max(0.0, bio_full_growth - st_b)
-            growth_full = grow_bio * (growth_factor - 1.0)
-            growth_tnin = in_b * (partial_factor - 1.0)
-            growth_kg = growth_full + growth_tnin
+            growth_kg = grow_bio * (growth_factor - 1.0)
             mort_kg = grow_bio * (m_pct / 100.0)
-            expected_b = bio_full_growth + growth_full - mort_kg + in_b + growth_tnin
+            expected_b = bio_full_growth + growth_kg - mort_kg
             delta_c = actual_c - expected_c
             delta_b = actual_b - expected_b
             flag = ""
@@ -1649,14 +1648,20 @@ def write_tank_continuity_audit(
             is_starve = tank_wk_starve.get((tid, wk), False)
 
             # ---- Count balance ----
-            m_pct = mort_pct.get((prev_batch, wk), 0.0) if prev_batch else 0.0
-            mort = 0.0 if is_starve else prev_count * (m_pct / 100.0)
+            # The batch driving this week's biology: the current occupant,
+            # or the prior one if the tank emptied. TranOG entries land on
+            # the OG-entry WEEK START, so entered fish are present the full
+            # week and take full-week mortality + growth — modelled exactly
+            # like fish present at week-open (and like pre-biology transfers).
+            bio_batch = cur_batch or prev_batch
+            m_pct = mort_pct.get((bio_batch, wk), 0.0) if bio_batch else 0.0
+            tn_in = tranog_in.get((tid, wk), 0.0)
+            mort = 0.0 if is_starve else (prev_count + tn_in) * (m_pct / 100.0)
             h_out = harvest_out.get((tid, wk), 0.0)
             t_out = transfer_out.get((tid, wk), 0.0)
             t_in = transfer_in.get((tid, wk), 0.0)
             g_out = grade_out.get((tid, wk), 0.0)
             g_in = grade_in.get((tid, wk), 0.0)
-            tn_in = tranog_in.get((tid, wk), 0.0)
             expected_count = prev_count - mort - h_out - t_out + t_in - g_out + g_in + tn_in
             delta_count = cur_count - expected_count
             flag = ""
@@ -1675,22 +1680,19 @@ def write_tank_continuity_audit(
             g_out_kg = grade_out_kg.get((tid, wk), 0.0)
             g_in_kg = grade_in_kg.get((tid, wk), 0.0)
             tn_in_kg = tranog_in_kg.get((tid, wk), 0.0)
-            # Use the batch present in tank DURING biology for SGR.
-            bio_batch = cur_batch or prev_batch
+            # Use the batch present in tank DURING biology for SGR (bio_batch
+            # computed above for the count balance).
             sgr = sgr_pct_day.get((bio_batch, wk), 0.0) if bio_batch else 0.0
             growth_factor = (1.0 + sgr / 100.0) ** 7
-            # TranOG entries fire MID-WEEK (the TranOG date can fall any
-            # day in the ISO week), so they only get partial-week growth.
-            # Approximate as half-week growth for tn_in fish.
-            partial_factor = 1.0 + (growth_factor - 1.0) * 0.5
-            # Biomass that grew the FULL week (in tank at start of biology):
-            bio_full_growth = prev_biomass - h_out_kg - t_out_kg + t_in_kg
-            growth_full = 0.0 if is_starve else bio_full_growth * (growth_factor - 1.0)
-            growth_tnin = tn_in_kg * (partial_factor - 1.0)
-            growth_kg = growth_full + growth_tnin
+            # TranOG entries now land on the OG-entry WEEK START, so the
+            # entered biomass is present for the full week — full-week growth
+            # + mortality, exactly like pre-biology transfers (t_in). Fold it
+            # into the at-week-open bucket.
+            bio_full_growth = prev_biomass - h_out_kg - t_out_kg + t_in_kg + tn_in_kg
+            growth_kg = 0.0 if is_starve else bio_full_growth * (growth_factor - 1.0)
             mort_kg = 0.0 if is_starve else bio_full_growth * (m_pct / 100.0)
             # Expected close = biomass after biology, then grade events:
-            bio_after_biology = bio_full_growth + growth_full - mort_kg + tn_in_kg + growth_tnin
+            bio_after_biology = bio_full_growth + growth_kg - mort_kg
             expected_bio = bio_after_biology - g_out_kg + g_in_kg
             delta_bio = cur_biomass - expected_bio
             bio_flag = ""

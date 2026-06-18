@@ -77,7 +77,12 @@ from .sixn import (
     is_purge_mode,
 )
 from .state import FacilityState, TankState, STAGE_STARVE
-from .time_grid import forecast_week_labels, iso_week_label, week_range
+from .time_grid import (
+    forecast_week_labels,
+    iso_week_label,
+    og_entry_week_start,
+    week_range,
+)
 
 
 # Per the lock record §5: all six pipeline tanks (61/63/65 main,
@@ -319,7 +324,6 @@ def phase_a_precalc(
 ) -> list[BatchWeekLoad]:
     """Compute per-(batch, week) load + tank-count demand + eligibility."""
     max_kg = _max_kg_per_og_tank(facility)
-    tranog_dates = {s.batch_id: _as_date(s.tran_og_date) for s in splits}
     tranog_default_tanks = (control.tran_og_default_tanks if control else 3) or 3
 
     # Harvest demands by batch, summed per week.
@@ -337,7 +341,22 @@ def phase_a_precalc(
     for batch_id, states in biology_states_by_batch.items():
         states_sorted = sorted(states, key=lambda s: s.week_label)
         cum_harvested = 0.0
-        tranog_date = tranog_dates.get(batch_id)
+        # OG arrival = the batch's FIRST SW week, but only when it crosses
+        # TranOG *within* the horizon (has an earlier non-SW week). Batches
+        # already SW at forecast_start (PR-hydrated) start SW at week 0 with
+        # no preceding FW week and are NOT arrivals. Biology defers the
+        # FW->SW flip to the OG-entry week (VBA `wS >= TranOGDate`), so the
+        # first SW week IS the correct OG-entry week. See time_grid
+        # .og_entry_week_start / BUG #1.
+        _first_sw_idx = next(
+            (i for i, s in enumerate(states_sorted) if s.stage == "SW"),
+            None,
+        )
+        tranog_week_label = (
+            states_sorted[_first_sw_idx].week_label
+            if _first_sw_idx is not None and _first_sw_idx > 0
+            else None
+        )
         for s in states_sorted:
             cum_harvested += harvest_by_batch_week.get((batch_id, s.week_label), 0.0)
             if s.count <= 0:
@@ -361,8 +380,7 @@ def phase_a_precalc(
 
             ws_date = (s.week_start.date()
                        if hasattr(s.week_start, "date") else s.week_start)
-            is_tranog = (tranog_date is not None
-                         and ws_date <= tranog_date < ws_date + timedelta(days=7))
+            is_tranog = (s.week_label == tranog_week_label)
             # TranOG arrival weeks need >=4 OG1/2 tanks so the SizeClassSplit
             # (big + small) — one tank per class is the working minimum, so 2.
             # The big-first harvest pattern still holds (drain big → small
@@ -2019,16 +2037,19 @@ def phase_d_emit_events(
     splits_by_batch = {s.batch_id: s for s in splits}
 
     # TranOG arrival schedule (kg of biomass entering OG per ISO week). Each
-    # split's post-cull population lands in the facility at its tran_og_date —
-    # a KNOWN disturbance the closed-loop harvest controller feeds forward so
-    # it can pre-draw biomass down before the batch arrives (see
+    # split's post-cull population lands in the facility on its OG-entry week
+    # (the first week boundary on/after TranOG_Date — NOT the raw date, which
+    # falls in the prior transit week; see og_entry_week_start) — a KNOWN
+    # disturbance the closed-loop harvest controller feeds forward so it can
+    # pre-draw biomass down before the batch arrives (see
     # caps.predictive_move_in_count). Approximate; the predictive feedback
     # re-corrects against realized state each week.
     arrivals_by_week: dict[str, float] = {}
     for s in splits:
         if s.tran_og_date is None or s.post_cull_count <= 0:
             continue
-        wk = iso_week_label(_as_date(s.tran_og_date))
+        wk = iso_week_label(
+            og_entry_week_start(_as_date(s.tran_og_date), initial_state.today))
         arrivals_by_week[wk] = arrivals_by_week.get(wk, 0.0) + (
             s.post_cull_count * s.post_cull_avg_wt_g / 1000.0)
 
@@ -2136,6 +2157,18 @@ def phase_d_emit_events(
 
     # Compute forecast_start once for day-by-day biology.
     forecast_start = initial_state.today
+
+    # OG-entry day per crossing batch: the first forecast-week start on/after
+    # TranOG_Date (VBA `wS >= TranOGDate`). The realized TranOG entry + the
+    # proactive make-room harvest both fire on THIS day, not the raw
+    # TranOG_Date — so the entry lands in the same week the plan reserved
+    # tanks for (one week later than the cull). Keeps the realized layer in
+    # lockstep with phase_a/precalc and stops the one-week-early entry that
+    # was dropping forward batches. See time_grid.og_entry_week_start / BUG #1.
+    og_entry_day: dict[str, date] = {
+        s.batch_id: og_entry_week_start(_as_date(s.tran_og_date), forecast_start)
+        for s in splits if s.tran_og_date
+    }
 
     # Map week_label → (start, end) date range.
     week_ranges: dict[str, tuple[date, date]] = {}
@@ -2594,7 +2627,8 @@ def phase_d_emit_events(
             # so it matches the continuity audit's event order (harvest before
             # growth) and stays drift-free. Conserved via Harvest events.
             _arrivals = [s for s in splits
-                         if ws_date <= _as_date(s.tran_og_date) < we_date]
+                         if s.batch_id in og_entry_day
+                         and ws_date <= og_entry_day[s.batch_id] < we_date]
             if _arrivals:
                 _need = 0
                 for s in _arrivals:
@@ -2707,9 +2741,10 @@ def phase_d_emit_events(
 
             day = ws_date
             while day < we_date:
-                # Apply TranOG entries scheduled for this day.
+                # Apply TranOG entries scheduled for this day (the OG-entry
+                # week start, not the raw TranOG_Date — see og_entry_day).
                 for split in splits:
-                    if _as_date(split.tran_og_date) != day:
+                    if og_entry_day.get(split.batch_id) != day:
                         continue
                     # Find this batch's Phase C tank assignment for THIS week.
                     ta = next(

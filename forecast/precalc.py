@@ -404,7 +404,6 @@ def _build_batch_week_facts(
 ) -> dict[tuple[str, str], BatchWeekFact]:
     """Compute per-(batch, week) precalc facts."""
     cv_by_batch = {b.batch_id: b.tran_og_cv for b in batches}
-    tranog_dates = {s.batch_id: _as_date(s.tran_og_date) for s in splits}
 
     harvest_by_bw: dict[tuple[str, str], float] = {}
     for d in harvest_demands:
@@ -424,7 +423,22 @@ def _build_batch_week_facts(
     for batch_id, states in biology_states_by_batch.items():
         states_sorted = sorted(states, key=lambda s: s.week_label)
         cv = cv_by_batch.get(batch_id, 16.0)
-        tranog_date = tranog_dates.get(batch_id)
+        # OG arrival = the batch's FIRST SW week, but only when the batch
+        # actually crosses TranOG *within* the horizon (it has an earlier
+        # FW/EGG week). Batches already in SW at forecast_start (hydrated
+        # from the PR) have their first SW week at week 0 with no preceding
+        # FW week — they are NOT TranOG arrivals (already placed). Biology
+        # now defers the FW->SW flip to the OG-entry week (VBA `wS >=
+        # TranOGDate`), so this lands the arrival in the correct week.
+        first_sw_idx = next(
+            (i for i, s in enumerate(states_sorted) if s.stage == "SW"),
+            None,
+        )
+        tranog_week_label = (
+            states_sorted[first_sw_idx].week_label
+            if first_sw_idx is not None and first_sw_idx > 0
+            else None
+        )
         cum = 0.0
         for s in states_sorted:
             cum += harvest_by_bw.get((batch_id, s.week_label), 0.0)
@@ -434,10 +448,7 @@ def _build_batch_week_facts(
             feed_post = s.feed_kg_day * survive_ratio
 
             ws_date = _as_date(s.week_start)
-            is_tranog = (
-                tranog_date is not None
-                and ws_date <= tranog_date < ws_date + timedelta(days=7)
-            )
+            is_tranog = (s.week_label == tranog_week_label)
             if s.stage == "SW":
                 # System-progression law: sub-1 kg fish live in the OG1/2
                 # nursery; at 1 kg they MUST exit to the OG3-6 grow-out

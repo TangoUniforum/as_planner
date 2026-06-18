@@ -50,6 +50,7 @@ from .models import (
 from .time_grid import (
     day_offset,
     iso_week_label,
+    og_entry_week_start as _og_entry_date,
     week_label as _week_label_for_index,
     week_range,
     week_start,
@@ -262,6 +263,11 @@ def project_batch(
     input_date = _as_date(batch.input_date)
     tran_sf_date = _as_date(batch.tran_sf_date) if batch.tran_sf_date else None
     tran_og_date = _as_date(batch.tran_og_date) if batch.tran_og_date else None
+    # OG transfer lands on the first forecast-week boundary on/after
+    # TranOG_Date; the reconciliation cull still fires on the date itself
+    # (in the containing week). See _og_entry_date / BUG #1.
+    og_entry_date = (_og_entry_date(tran_og_date, forecast_start)
+                     if tran_og_date else None)
 
     if input_date >= forecast_end:
         return [], None, None
@@ -277,7 +283,8 @@ def project_batch(
     cur_weight = 0.0
     stage = "EGG"
     transferred_to_fw = False
-    crossed_tran_og = False
+    crossed_tran_og = False     # reconciliation cull fired (containing week)
+    og_transferred = False      # flipped to SW / entered OG (snapped week)
     residual: Optional[CalibrationResidual] = None
     split: Optional[SizeClassSplit] = None
     fired_culls: set[int] = set()
@@ -314,8 +321,11 @@ def project_batch(
             stage = "FW"
             transferred_to_fw = True
 
-        # FW -> SW (TranOG): handling mort, residual, reconciliation cull,
-        # then emit SizeClassSplit metadata for placement.
+        # TranOG reconciliation cull — fires in the week CONTAINING
+        # TranOG_Date (VBA `wE >= TranOGDate`). Handling mort, residual,
+        # final cull to TranOG_Count, then SizeClassSplit metadata. The
+        # fish stay in the FW pool here; the OG transfer (stage flip) is
+        # deferred to og_entry_date below so it lands in the right week.
         if not crossed_tran_og and tran_og_date and cur_date >= tran_og_date:
             _pre = cur_count
             cur_count *= (1.0 - handling_frac)
@@ -347,6 +357,18 @@ def project_batch(
                     )
                     cull_count_today += _c_n
                     cull_biomass_today += _c_b
+            crossed_tran_og = True
+
+        # FW -> SW (OG transfer): flips to SW on the first forecast-week
+        # boundary on/after TranOG_Date (VBA `wS >= TranOGDate`). Until
+        # then the (already-culled) batch grows on the FW curve in the
+        # FW pool, exactly as the legacy tool models the transit week. The
+        # SizeClassSplit is emitted HERE (not at the cull) so its count +
+        # weight reflect the state at OG entry — placement seeds the OG
+        # tanks from it, so it must match the biology's first SW week or
+        # the continuity audit sees a biomass drift the size of the
+        # transit week's growth/mortality.
+        if not og_transferred and og_entry_date and cur_date >= og_entry_date:
             split = compute_size_class_split(
                 batch_id=batch.batch_id,
                 tran_og_date=batch.tran_og_date,
@@ -355,7 +377,7 @@ def project_batch(
                 cv_pct=batch.tran_og_cv,
             )
             stage = "SW"
-            crossed_tran_og = True
+            og_transferred = True
 
         # ----- Scheduled bottom culls (FW only). Fire once per DSI threshold. -----
         for thresh_dsi, pct in cull_thresh_dsi:
@@ -693,6 +715,8 @@ def project_in_flight_fw_batch(
     forecast_start = _as_date(control.forecast_start)
     forecast_end = forecast_start + timedelta(weeks=control.horizon_weeks)
     tran_og_date = _as_date(batch.tran_og_date) if batch.tran_og_date else None
+    og_entry_date = (_og_entry_date(tran_og_date, forecast_start)
+                     if tran_og_date else None)
     pr_close = _as_date(pr_closing_date)
     handling_frac = control.handling_mortality_pct / 100.0
     fcr_key = _fcr_model_key(batch.fcr_model)
@@ -714,6 +738,7 @@ def project_in_flight_fw_batch(
     # (operator's PR may straddle the date in edge cases).
     stage = "SW" if (tran_og_date and pr_close >= tran_og_date) else "FW"
     crossed_tran_og = (stage == "SW")
+    og_transferred = (stage == "SW")
 
     residuals: list[CalibrationResidual] = []
     splits: list[SizeClassSplit] = []
@@ -725,7 +750,9 @@ def project_in_flight_fw_batch(
         cull_biomass_today = 0.0
         cull_pct_today = 0.0
 
-        # FW → SW transition (TranOG) during forecast horizon.
+        # TranOG reconciliation cull — week CONTAINING TranOG_Date (VBA
+        # `wE >= TranOGDate`). Fish stay in the FW pool; OG transfer is
+        # deferred to og_entry_date below (see project_batch / BUG #1).
         if not crossed_tran_og and tran_og_date and cur_date >= tran_og_date:
             _pre = cur_count
             cur_count *= (1.0 - handling_frac)
@@ -751,6 +778,13 @@ def project_in_flight_fw_batch(
                 )
                 cull_count_today += _c_n
                 cull_biomass_today += _c_b
+            crossed_tran_og = True
+
+        # FW -> SW (OG transfer): first forecast-week boundary on/after
+        # TranOG_Date (VBA `wS >= TranOGDate`). Split emitted here (not at
+        # the cull) so its count + weight match the OG-entry state that
+        # placement seeds from. See project_batch for the rationale.
+        if not og_transferred and og_entry_date and cur_date >= og_entry_date:
             splits.append(compute_size_class_split(
                 batch_id=batch.batch_id,
                 tran_og_date=batch.tran_og_date,
@@ -759,7 +793,7 @@ def project_in_flight_fw_batch(
                 cv_pct=batch.tran_og_cv,
             ))
             stage = "SW"
-            crossed_tran_og = True
+            og_transferred = True
 
         # Scheduled FW bottom culls — fire if DSI threshold reached AND
         # not already fired (incl. pre-PR threshold tracking).
