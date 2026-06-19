@@ -117,6 +117,12 @@ class Transfer:
     destinations: list[TankAllocation]
     leaves_source_empty: bool = False  # True if source is fully drained
     count_transferred: float = 0.0     # populated by apply()
+    # Source week-open avg weight (g), set only for 6N purge-mode move-ins where
+    # the destination carries the GROWN (mid-week transfer) weight but the source
+    # is drained by count at its week-open weight. The continuity audit debits the
+    # source at THIS weight (not the grown dest avg) so the source balances; the
+    # 4-day growth then shows as real injected biomass on the frozen 6N tank.
+    source_avg_wt_g: Optional[float] = None
 
     def apply(self, state: FacilityState) -> list[str]:
         """Atomic: source is drained ONLY by the count of destinations that

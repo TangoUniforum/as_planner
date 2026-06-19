@@ -56,7 +56,8 @@ from .caps import (
     system_cap_with_buffer,
 )
 from .biology import (
-    _fcr_model_key, _interp, realized_feed_kg_day, upper_truncated_split,
+    _fcr_model_key, _feed_type_for_size, _interp, realized_feed_kg_day,
+    upper_truncated_split,
 )
 from .events import Grade, GradedHarvest, Harvest, OG12_SYSTEMS, OG12_MOVE_LOCK_WT_G, TankAllocation, Transfer, TranOGEntry
 from .harvest_scheduler import HarvestDemand
@@ -90,6 +91,38 @@ from .time_grid import (
 # grow-out system, NOT pipeline-owned, so it is a valid move-in source
 # for the 6N purge pipeline (and is allocatable by Phase A/B/C).
 _SIXN_SYSTEMS = frozenset({"OG6N"})
+
+# 6N PURGE-mode move-in modeling. Operationally a cohort is TRANSFERRED into a
+# 6N depuration tank mid-week (~Friday) and then held OFF-FEED for the rest of
+# the ~2-week purge (no growth, no feed) before harvest. Two consequences:
+#   1) The weight placed into 6N is the source tank's week-open avg grown by the
+#      4 days (Mon→Fri) it kept growing in the source before the transfer.
+#   2) On entry the 6N tank is FROZEN (stage=STARVE): the daily biology loop then
+#      neither grows nor feeds it, so it is harvested at the frozen entry weight
+#      and eats nothing during depuration.
+# The 4 pre-transfer days of feed are still real and are recorded as an explicit
+# move-in feed entry (see PlacementResult.sixn_move_in_feed) the feed reports add
+# in; the STARVE purge weeks themselves are excluded from realized feed.
+PURGE_TRANSFER_GROWTH_DAYS = 4
+
+
+def _grow_weight_days(avg_wt_g: float, batch: Optional[BatchInput],
+                      tables: BiologyTables, days: int) -> float:
+    """Advance an avg weight by `days` of the batch's SW daily growth.
+
+    Weight only — same daily SW SGR math as `advance_tank_one_day` (SGR-curve
+    lookup × the batch's sgr_correction, compounded per day); NO mortality. Used
+    to land the 6N move-in weight at the mid-week (Friday) transfer point.
+    """
+    if avg_wt_g <= 0 or batch is None or days <= 0:
+        return avg_wt_g
+    w = float(avg_wt_g)
+    for _ in range(days):
+        sgr_base = _interp(w, tables.sgr_size_g, tables.sgr_sw_pct_day)
+        sgr_eff = sgr_base * batch.sgr_correction
+        w = w * (1.0 + sgr_eff / 100.0)
+    return w
+
 
 # Closed-loop harvest controller tuning (placement #2).
 #   _SETPOINT_FRACTION — biomass setpoint as a fraction of the facility cap.
@@ -294,6 +327,11 @@ class PlacementResult:
     grade_events: list = field(default_factory=list)
     batch_locations: list[BatchLocationRow] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    # 6N purge-mode pre-transfer feed: (batch_id, week_label, feed_type) -> kg.
+    # The 4 feed-days each move-in cohort eats in the source tank before the
+    # mid-week transfer into off-feed (STARVE) 6N depuration. The feed reports
+    # add these in; the STARVE 6N tank-weeks are excluded from realized feed.
+    sixn_move_in_feed: dict = field(default_factory=dict)
 
 
 # ============================================================
@@ -817,6 +855,8 @@ def _try_graded_move_in(
     warnings: list[str],
     min_fraction: float = 0.10,
     reserved=frozenset(),
+    tables: Optional[BiologyTables] = None,
+    sixn_move_in_feed: Optional[dict] = None,
 ) -> float:
     """Graded harvest fallback (DESIGN §5a) when no batch's avg_wt is
     above min_harvest_weight.
@@ -892,13 +932,23 @@ def _try_graded_move_in(
     small_count = chosen.count - big_count
     big_avg, small_avg = upper_truncated_split(chosen.avg_wt_g, cv, min_hv)
 
+    # PURGE move-in: the big (pickup) portion lands in the 6N main tank at the
+    # mid-week transfer weight (its upper-tail mean grown 4 SW days) and is
+    # frozen below; the retention tail stays in production at its week-open
+    # weight. _try_graded_move_in is only reached from the 6N purge pipeline,
+    # so this path is always purge mode.
+    _bm = batch_meta.get(chosen.batch_id)
+    pickup_xfer_wt = (_grow_weight_days(big_avg, _bm, tables,
+                                        PURGE_TRANSFER_GROWTH_DAYS)
+                      if tables is not None else big_avg)
+
     ev = GradedHarvest(
         batch_id=chosen.batch_id,
         event_date=week_start_date,
         source_tank_id=chosen.tank_id,
         pickup_tank_id=pair[0],
         pickup_count=big_count,
-        pickup_avg_wt_g=big_avg,
+        pickup_avg_wt_g=pickup_xfer_wt,
         retention_tank_id=retention.tank_id,
         retention_count=small_count,
         retention_avg_wt_g=small_avg,
@@ -906,6 +956,12 @@ def _try_graded_move_in(
     )
     warns = ev.apply(state)
     warnings.extend(warns)
+    # Freeze the 6N pickup tank (off-feed depuration) and book its 4 pre-
+    # transfer feed-days; the retention tank keeps growing/feeding normally.
+    _freeze_6n_dest(state, pair[0])
+    if tables is not None:
+        _book_move_in_feed(sixn_move_in_feed, chosen.batch_id, week_label,
+                           pickup_xfer_wt, big_count, tables, _bm)
     warnings.append(
         f"{week_label}: graded move-in for {chosen.batch_id} "
         f"{chosen.location_id} (avg {chosen.avg_wt_g:.0f}g, "
@@ -934,6 +990,8 @@ def _run_sixn_purge_week(
     refill: bool = True,
     budget: Optional["_HarvestBudget"] = None,
     reserved=frozenset(),
+    tables: Optional[BiologyTables] = None,
+    sixn_move_in_feed: Optional[dict] = None,
 ) -> Optional[tuple[int, int]]:
     """Run one week of the 6N purge pipeline (3-pair fallow rotation).
 
@@ -1005,6 +1063,7 @@ def _run_sixn_purge_week(
         moved = _try_graded_move_in(
             state, batch_meta, control, week_label, week_start_date,
             fill_pair, transfer_events, warnings, reserved=reserved,
+            tables=tables, sixn_move_in_feed=sixn_move_in_feed,
         )
         if moved <= 0:
             warnings.append(
@@ -1067,18 +1126,30 @@ def _run_sixn_purge_week(
                 dest_tank_id = fill_pair[1]  # sister tank for second+ batch
             else:
                 dest_tank_id = main_tank_id
+            # PURGE move-in: land the cohort at the mid-week (Friday) transfer
+            # weight = source week-open avg grown 4 SW days, then FREEZE the 6N
+            # destination (STARVE) so the daily loop neither grows nor feeds it
+            # for the rest of the purge. The 4 pre-transfer feed-days are booked
+            # separately into the move-in feed accumulator below.
+            _bm = batch_meta.get(move_in_batch)
+            _xfer_wt = _grow_weight_days(src.avg_wt_g, _bm, tables,
+                                         PURGE_TRANSFER_GROWTH_DAYS)
             ev = Transfer(
                 batch_id=move_in_batch,
                 event_date=week_start_date,
                 source_tank_id=src.tank_id,
                 destinations=[TankAllocation(
                     tank_id=dest_tank_id, count=take,
-                    avg_wt_g=src.avg_wt_g, cv_pct=src.cv_pct,
+                    avg_wt_g=_xfer_wt, cv_pct=src.cv_pct,
                 )],
+                source_avg_wt_g=src.avg_wt_g,  # debit source at week-open weight
             )
             warns = ev.apply(state)
             warnings.extend(warns)
             transfer_events.append(ev)
+            _freeze_6n_dest(state, dest_tank_id)
+            _book_move_in_feed(sixn_move_in_feed, move_in_batch, week_label,
+                               _xfer_wt, take, tables, _bm)
             count_moved += take
             moved_this_batch += take
         if moved_this_batch > 0:
@@ -2044,6 +2115,44 @@ def _free_6n_slots(state: FacilityState, resting_pair) -> list[int]:
     return pref
 
 
+def _freeze_6n_dest(state: FacilityState, dest_tank_id: int) -> None:
+    """Freeze a 6N depuration destination after a purge-mode move-in.
+
+    Sets the tank to STARVE so the daily biology loop neither grows nor feeds
+    it for the rest of the ~2-week purge; it is harvested at the frozen entry
+    weight (the mid-week transfer weight the move-in event already placed —
+    source week-open avg grown PURGE_TRANSFER_GROWTH_DAYS). Only the 6N pipeline
+    tanks are touched. No-op if the tank is empty (a fully refused transfer) so
+    we never flag an empty tank as starving.
+    """
+    t = state.tanks_by_id.get(dest_tank_id)
+    if t is not None and not t.is_empty and t.system_id in _SIXN_SYSTEMS:
+        t.stage = STAGE_STARVE
+
+
+def _book_move_in_feed(accum: dict, batch_id: str, week_label: str,
+                       transfer_avg_wt_g: float, moved_count: float,
+                       tables: BiologyTables, batch: Optional[BatchInput]) -> None:
+    """Record the 4 pre-transfer feed-days for a 6N purge move-in cohort.
+
+    The cohort fed normally for PURGE_TRANSFER_GROWTH_DAYS in the source tank
+    before the mid-week transfer, then goes off-feed (STARVE) in 6N. The feed
+    reports exclude the STARVE 6N tank-weeks, so those 4 days would otherwise be
+    lost; book them here keyed by (batch, move-in week, feed-type-at-transfer-wt)
+    for the feed writers to add back in. moved_biomass uses the TRANSFER weight.
+    """
+    if accum is None or moved_count <= 0 or transfer_avg_wt_g <= 0:
+        return
+    moved_kg = moved_count * transfer_avg_wt_g / 1000.0
+    feed_kg = (realized_feed_kg_day(transfer_avg_wt_g, moved_kg, batch, tables)
+               * PURGE_TRANSFER_GROWTH_DAYS)
+    if feed_kg <= 0:
+        return
+    ftype = _feed_type_for_size(tables, transfer_avg_wt_g)
+    accum[(batch_id, week_label, ftype)] = (
+        accum.get((batch_id, week_label, ftype), 0.0) + feed_kg)
+
+
 def _make_room_into_6n(
     state: FacilityState,
     src,
@@ -2053,6 +2162,10 @@ def _make_room_into_6n(
     warnings: list[str],
     week_label: str,
     reason: str,
+    sixn_move_in_feed: Optional[dict] = None,
+    tables: Optional[BiologyTables] = None,
+    batch_meta: Optional[dict] = None,
+    is_purge: bool = False,
 ) -> bool:
     """PURGE-mode make-room: MOVE one growout tank's fish into a free 6N tank.
 
@@ -2070,16 +2183,35 @@ def _make_room_into_6n(
         # Empty slot, OR a 6N tank already holding this same batch (top-up,
         # INV-1-safe). Empty is the common case here.
         if _tk is not None and (_tk.is_empty or _tk.batch_id == src.batch_id):
+            # PURGE move-in: land at the mid-week (Friday) transfer weight
+            # (week-open avg grown 4 SW days) and FREEZE the 6N destination so
+            # it neither grows nor feeds for the rest of the purge. Book the 4
+            # pre-transfer feed-days. In production mode (is_purge False) keep
+            # the legacy week-open weight and SW stage — unchanged behaviour.
+            _bm = (batch_meta or {}).get(src.batch_id)
+            _xfer_wt = (_grow_weight_days(src.avg_wt_g, _bm, tables,
+                                          PURGE_TRANSFER_GROWTH_DAYS)
+                        if (is_purge and tables is not None) else src.avg_wt_g)
             _mv = Transfer(
                 batch_id=src.batch_id, event_date=event_date,
                 source_tank_id=src.tank_id,
                 destinations=[TankAllocation(
                     tank_id=_tk.tank_id, count=src.count,
-                    avg_wt_g=src.avg_wt_g, cv_pct=src.cv_pct)],
+                    avg_wt_g=_xfer_wt, cv_pct=src.cv_pct)],
                 leaves_source_empty=True,
+                # In purge mode debit the source at its week-open weight (the
+                # dest carries the grown transfer weight); in production mode
+                # both are week-open so this is the same value (no-op).
+                source_avg_wt_g=(src.avg_wt_g if is_purge else None),
             )
             warnings.extend(_mv.apply(state))
             transfer_events.append(_mv)
+            if is_purge:
+                _freeze_6n_dest(state, _tk.tank_id)
+                if sixn_move_in_feed is not None and tables is not None:
+                    _book_move_in_feed(sixn_move_in_feed, src.batch_id,
+                                       week_label, _xfer_wt, src.count,
+                                       tables, _bm)
             warnings.append(
                 f"{week_label}: {reason} — MOVED {src.location_id} "
                 f"(batch {src.batch_id}, {src.count:.0f} fish) into 6N "
@@ -2112,6 +2244,8 @@ def phase_d_emit_events(
     harvest_events: list[Harvest] = []
     grade_events: list[Grade] = []
     locations: list[BatchLocationRow] = []
+    # 6N purge-mode pre-transfer feed accumulator (see PlacementResult).
+    sixn_move_in_feed: dict[tuple[str, str, str], float] = {}
     if facility_limits is None:
         facility_limits = FacilityLimits()
 
@@ -2536,6 +2670,8 @@ def phase_d_emit_events(
                 refill=sixn_refill,
                 budget=_budget,
                 reserved=_reserved_og,
+                tables=tables,
+                sixn_move_in_feed=sixn_move_in_feed,
             )
             # PRE-STAGE the in-place purge during WINDDOWN (sixn_refill is False
             # only in winddown). Depuration takes purge_days, so if the first
@@ -2852,7 +2988,9 @@ def phase_d_emit_events(
                             transfer_events, warnings, week_label,
                             reason=(f"anticipatory purge pacing — holding a tank "
                                     f"for TranOG arrival in {_wk} (needs "
-                                    f"{_need_wk})")):
+                                    f"{_need_wk})"),
+                            sixn_move_in_feed=sixn_move_in_feed, tables=tables,
+                            batch_meta=batch_meta, is_purge=True):
                         break  # 6N full this week — rotation frees a slot soon
                     # The fish have left the production layer (into 6N), so strip
                     # this tank from EVERY batch's PLAN until the arrival — else the
@@ -2937,7 +3075,9 @@ def phase_d_emit_events(
                         if not _make_room_into_6n(
                                 state, _src, ws_date, sixn_resting_pair,
                                 transfer_events, warnings, week_label,
-                                reason="reactive make-room for a TranOG arrival"):
+                                reason="reactive make-room for a TranOG arrival",
+                                sixn_move_in_feed=sixn_move_in_feed, tables=tables,
+                                batch_meta=batch_meta, is_purge=True):
                             warnings.append(
                                 f"{week_label}: make-room CANNOT free "
                                 f"{_src.location_id} for a TranOG arrival — 6N is full "
@@ -3239,7 +3379,8 @@ def phase_d_emit_events(
         # stays within cap x weeks. 0.0 in the common case.
         _carry_debt = _budget.overdraw
 
-    return state, tranog_events, transfer_events, harvest_events, grade_events, locations, warnings
+    return (state, tranog_events, transfer_events, harvest_events,
+            grade_events, locations, warnings, sixn_move_in_feed)
 
 
 # ============================================================
@@ -3286,7 +3427,8 @@ def run_placement(
     result.tank_assignments = tank_assigns
     result.warnings.extend(f"[C] {w}" for w in c_warns)
 
-    final_state, tranog, transfers, harvests, grades, locs, d_warns = phase_d_emit_events(
+    (final_state, tranog, transfers, harvests, grades, locs, d_warns,
+     sixn_feed) = phase_d_emit_events(
         result.load_table, result.tank_assignments, harvest_demands,
         splits, initial_state, facility, control, batch_meta, tables,
         facility_limits=facility_limits,
@@ -3297,6 +3439,7 @@ def run_placement(
     result.harvest_events = harvests
     result.grade_events = grades
     result.batch_locations = locs
+    result.sixn_move_in_feed = sixn_feed
     result.warnings.extend(f"[D] {w}" for w in d_warns)
 
     # NOTE: opt-in LNS placement refinement (placement_method=="lns") is applied

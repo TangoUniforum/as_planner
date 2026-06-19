@@ -620,9 +620,11 @@ def main(
         b: _to_realized_lifespan(sl) for b, sl in states_by_batch.items()
     }
     write_feed_forecast_weekly(
-        wb, placement.batch_locations, rl_states_by_batch, fs_date, tables, batch_by_id)
+        wb, placement.batch_locations, rl_states_by_batch, fs_date, tables, batch_by_id,
+        sixn_move_in_feed=getattr(placement, "sixn_move_in_feed", None))
     write_feed_forecast_monthly(
-        wb, placement.batch_locations, rl_states_by_batch, fs_date, tables, batch_by_id)
+        wb, placement.batch_locations, rl_states_by_batch, fs_date, tables, batch_by_id,
+        sixn_move_in_feed=getattr(placement, "sixn_move_in_feed", None))
     all_states = _to_realized_lifespan(states + in_flight_states)
     write_weekly_report(
         wb, placement.batch_locations, placement.harvest_events, all_states,

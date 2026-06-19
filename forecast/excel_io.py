@@ -553,7 +553,9 @@ def write_yearly_summary(
         wk_bio[r.week_label] += r.biomass_kg
         if r.week_label not in wk_year and hasattr(r.week_start, "year"):
             wk_year[r.week_label] = r.week_start.year
-        if tables is not None:
+        # STARVE tank-weeks (6N depuration) eat nothing — biomass counts, feed
+        # does not (mirrors the SystemLimitsAudit + FeedForecast treatment).
+        if tables is not None and getattr(r, "stage", "") != "STARVE":
             b = (batches or {}).get(r.batch_id)
             wk_feed[r.week_label] += realized_feed_kg_day(r.avg_wt_g, r.biomass_kg, b, tables)
 
@@ -718,7 +720,8 @@ def write_harvest_report(
         ws.column_dimensions[get_column_letter(c)].width = w
 
 
-def _feed_by_type_week(batch_locations, biology_states_by_batch, tables, batches=None):
+def _feed_by_type_week(batch_locations, biology_states_by_batch, tables,
+                       batches=None, sixn_move_in_feed=None):
     """(feed_name, week_label) -> kg/week, plus a week_label -> week_start map.
 
     OG/SW feed comes from REALIZED batch_locations via realized_feed_kg_day, so
@@ -726,6 +729,11 @@ def _feed_by_type_week(batch_locations, biology_states_by_batch, tables, batches
     feed comes from the projection (FW fish live in FW tanks, which are absent
     from batch_locations). Phantom unharvested SW projection fish are excluded —
     they never appear in batch_locations — so later-year feed no longer balloons.
+
+    STARVE tank-weeks (6N purge-mode depuration) eat nothing, so they are
+    excluded from realized feed; the 4 pre-transfer feed-days each 6N move-in
+    cohort ate in its source tank are added back from `sixn_move_in_feed`
+    ((batch, week, feed_type) -> kg).
     """
     from collections import defaultdict
     from .biology import realized_feed_kg_day, _feed_type_for_size
@@ -733,11 +741,16 @@ def _feed_by_type_week(batch_locations, biology_states_by_batch, tables, batches
     wk_start: dict[str, object] = {}
     for r in batch_locations:
         wk_start.setdefault(r.week_label, r.week_start)
+        if getattr(r, "stage", "") == "STARVE":
+            continue  # off-feed depuration tank-week
         if tables is not None:
             b = (batches or {}).get(r.batch_id)
             fkg = realized_feed_kg_day(r.avg_wt_g, r.biomass_kg, b, tables) * 7.0
             if fkg:
                 ftw[(_feed_type_for_size(tables, r.avg_wt_g), r.week_label)] += fkg
+    for (bid, wk, ftype), kg in (sixn_move_in_feed or {}).items():
+        if kg:
+            ftw[(ftype, wk)] += kg
     for states in (biology_states_by_batch or {}).values():
         for s in states:
             if s.stage in ("FW", "EGG") and s.feed_kg_week:
@@ -746,13 +759,16 @@ def _feed_by_type_week(batch_locations, biology_states_by_batch, tables, batches
     return ftw, wk_start
 
 
-def _feed_by_batch_type_week(batch_locations, biology_states_by_batch, tables, batches=None):
+def _feed_by_batch_type_week(batch_locations, biology_states_by_batch, tables,
+                             batches=None, sixn_move_in_feed=None):
     """(batch_id, feed_name, week_label) -> kg/week, plus week_label -> week_start.
 
     Same realized-OG/SW + projected-FW feed sourcing as `_feed_by_type_week`
     (so per-batch totals reconcile to the by-type block), but keyed by batch
     so the operator can see feed per batch (the legacy "FEED BY BATCH & TYPE"
-    block). FW/EGG projection rows are keyed by their owning batch.
+    block). FW/EGG projection rows are keyed by their owning batch. STARVE 6N
+    depuration tank-weeks are excluded; the 4 pre-transfer move-in feed-days are
+    added back from `sixn_move_in_feed`.
     """
     from collections import defaultdict
     from .biology import realized_feed_kg_day, _feed_type_for_size
@@ -760,12 +776,17 @@ def _feed_by_batch_type_week(batch_locations, biology_states_by_batch, tables, b
     wk_start: dict[str, object] = {}
     for r in batch_locations:
         wk_start.setdefault(r.week_label, r.week_start)
+        if getattr(r, "stage", "") == "STARVE":
+            continue  # off-feed depuration tank-week
         if tables is not None:
             b = (batches or {}).get(r.batch_id)
             fkg = realized_feed_kg_day(r.avg_wt_g, r.biomass_kg, b, tables) * 7.0
             if fkg:
                 fbtw[(r.batch_id, _feed_type_for_size(tables, r.avg_wt_g),
                       r.week_label)] += fkg
+    for (bid, wk, ftype), kg in (sixn_move_in_feed or {}).items():
+        if kg:
+            fbtw[(bid, ftype, wk)] += kg
     for batch_id, states in (biology_states_by_batch or {}).items():
         for s in states:
             if s.stage in ("FW", "EGG") and s.feed_kg_week:
@@ -782,6 +803,7 @@ def write_feed_forecast_weekly(
     tables=None,
     batches=None,
     sheet_name: str = "FeedForecastWeekly",
+    sixn_move_in_feed=None,
 ) -> None:
     """Per-week feed forecast as a Feed Type x Week matrix (kg/week).
 
@@ -794,7 +816,9 @@ def write_feed_forecast_weekly(
         del wb[sheet_name]
     ws = wb.create_sheet(sheet_name)
 
-    ftw, wk_start = _feed_by_type_week(batch_locations, biology_states_by_batch, tables, batches)
+    ftw, wk_start = _feed_by_type_week(
+        batch_locations, biology_states_by_batch, tables, batches,
+        sixn_move_in_feed=sixn_move_in_feed)
     weeks = sorted(wk_start.keys())
     # Feed-type row order (by Max Size) from biology tables; fall back to the
     # feed_type values present if tables weren't passed.
@@ -828,6 +852,7 @@ def write_feed_forecast_monthly(
     tables=None,
     batches=None,
     sheet_name: str = "FeedForecastMonthly",
+    sixn_move_in_feed=None,
 ) -> None:
     """Per-month feed forecast as a Feed Type x Month matrix (kg/month).
 
@@ -843,7 +868,9 @@ def write_feed_forecast_monthly(
     from collections import defaultdict
     from datetime import date as _date
     from .time_grid import calendar_day_month_split
-    ftw, wk_start = _feed_by_type_week(batch_locations, biology_states_by_batch, tables, batches)
+    ftw, wk_start = _feed_by_type_week(
+        batch_locations, biology_states_by_batch, tables, batches,
+        sixn_move_in_feed=sixn_move_in_feed)
     # Feed is a DAILY flow, so a week straddling a month boundary is split
     # between the two months by calendar-day fraction (not dumped into the
     # week-start's month). Pure calendar attribution — totals are unchanged.
@@ -881,7 +908,8 @@ def write_feed_forecast_monthly(
     # month columns identical to the by-type block above. Same feed source,
     # so per-batch totals reconcile to the by-type grand total.
     fbtw, _ = _feed_by_batch_type_week(
-        batch_locations, biology_states_by_batch, tables, batches)
+        batch_locations, biology_states_by_batch, tables, batches,
+        sixn_move_in_feed=sixn_move_in_feed)
     fbtm: dict[tuple[str, str, str], float] = defaultdict(float)  # (batch, type, month)
     for (bid, name, wk), v in fbtw.items():
         ws_ = wk_start.get(wk)
@@ -964,7 +992,8 @@ def _build_batch_week_ledger(
         e["bio"] += r.biomass_kg
         e["wt_sum"] += r.avg_wt_g * r.count
         e["week_start"] = r.week_start
-        if tables is not None:
+        # STARVE tank-weeks (6N depuration) eat nothing.
+        if tables is not None and getattr(r, "stage", "") != "STARVE":
             b = (batches or {}).get(r.batch_id)
             feed[key] += realized_feed_kg_day(r.avg_wt_g, r.biomass_kg, b, tables) * 7.0
 
@@ -1674,10 +1703,16 @@ def write_tank_continuity_audit(
         wk = iso_week_label(ev.event_date)
         # Split count_transferred proportionally across destinations.
         total_planned = sum(d.count for d in ev.destinations) or 1.0
-        # Weighted-average avg_wt across destinations (~source avg_wt).
+        # Weighted-average DEST avg_wt (~source avg_wt for a normal transfer).
         avg_wt_g = sum(d.count * d.avg_wt_g for d in ev.destinations) / total_planned
+        # 6N purge move-ins place the GROWN (mid-week) weight on the destination
+        # but drain the source by count at its WEEK-OPEN weight; debit the source
+        # at that source weight so it balances (the 4-day growth then shows as
+        # real injected biomass on the frozen 6N tank, not a source over-debit).
+        src_wt_g = getattr(ev, "source_avg_wt_g", None)
+        out_wt_g = src_wt_g if src_wt_g is not None else avg_wt_g
         transfer_out[(ev.source_tank_id, wk)] += ct
-        transfer_out_kg[(ev.source_tank_id, wk)] += ct * avg_wt_g / 1000.0
+        transfer_out_kg[(ev.source_tank_id, wk)] += ct * out_wt_g / 1000.0
         for d in ev.destinations:
             share = d.count / total_planned
             transfer_in[(d.tank_id, wk)] += ct * share
@@ -1958,7 +1993,8 @@ def write_advisory(
     for r in batch_locations:
         bio[r.week_label] += r.biomass_kg
         wk_start.setdefault(r.week_label, r.week_start)
-        if tables is not None:
+        # STARVE tank-weeks (6N depuration) eat nothing.
+        if tables is not None and getattr(r, "stage", "") != "STARVE":
             b = (batches or {}).get(r.batch_id)
             feed[r.week_label] += realized_feed_kg_day(r.avg_wt_g, r.biomass_kg, b, tables)
 
