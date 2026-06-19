@@ -189,6 +189,25 @@ def working_day_month_split(event_date, forecast_start=None) -> dict[tuple[int, 
     return out
 
 
+def calendar_day_month_split(week_start, days: int = 7) -> dict[tuple[int, int], float]:
+    """(year, month) -> fraction of a weekly DAILY flow in that calendar month.
+
+    For flows consumed every day — feed, growth, mortality, culls — a weekly
+    quantity is spread evenly over all `days` calendar days from `week_start`
+    (default 7) and each day credited to its own month. A week wholly inside a
+    month yields `{month: 1.0}`; a boundary week splits by calendar-day count
+    (e.g. 3 days in July, 4 in August -> 3/7, 4/7). Contrast
+    `working_day_month_split`, used for harvest (a Mon-Fri-only flow).
+    """
+    ws = _as_date(week_start)
+    n = max(1, days)
+    out: dict[tuple[int, int], float] = {}
+    for i in range(n):
+        d = ws + timedelta(days=i)
+        out[(d.year, d.month)] = out.get((d.year, d.month), 0.0) + 1.0 / n
+    return out
+
+
 def mon_fri_in_week(i: int, forecast_start) -> list[date]:
     """Calendar Mon-Fri dates that fall within forecast week i."""
     start, end = week_range(i, forecast_start)

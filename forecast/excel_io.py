@@ -842,14 +842,19 @@ def write_feed_forecast_monthly(
 
     from collections import defaultdict
     from datetime import date as _date
+    from .time_grid import calendar_day_month_split
     ftw, wk_start = _feed_by_type_week(batch_locations, biology_states_by_batch, tables, batches)
+    # Feed is a DAILY flow, so a week straddling a month boundary is split
+    # between the two months by calendar-day fraction (not dumped into the
+    # week-start's month). Pure calendar attribution — totals are unchanged.
     ftm: dict[tuple[str, str], float] = defaultdict(float)  # (feed_type, month) -> kg
     months: set[str] = set()
     for (name, wk), v in ftw.items():
         ws_ = wk_start.get(wk)
-        mo = (ws_.strftime("%Y-%m") if hasattr(ws_, "strftime") else str(ws_)[:7])
-        months.add(mo)
-        ftm[(name, mo)] += v
+        for (yr, mon), frac in calendar_day_month_split(ws_).items():
+            mo = f"{yr}-{mon:02d}"
+            months.add(mo)
+            ftm[(name, mo)] += v * frac
     months_sorted = sorted(months)
     mo_dates = [_date(int(m[:4]), int(m[5:7]), 1) for m in months_sorted]
     if tables is not None and getattr(tables, "feed_types", None):
@@ -880,8 +885,8 @@ def write_feed_forecast_monthly(
     fbtm: dict[tuple[str, str, str], float] = defaultdict(float)  # (batch, type, month)
     for (bid, name, wk), v in fbtw.items():
         ws_ = wk_start.get(wk)
-        mo = (ws_.strftime("%Y-%m") if hasattr(ws_, "strftime") else str(ws_)[:7])
-        fbtm[(bid, name, mo)] += v
+        for (yr, mon), frac in calendar_day_month_split(ws_).items():
+            fbtm[(bid, name, f"{yr}-{mon:02d}")] += v * frac
     # Max-size order for feed types (same ordering basis as the by-type block).
     size_of = {name: (ms if ms is not None else 0.0) for ms, name in ftypes}
 
