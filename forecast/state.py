@@ -129,6 +129,14 @@ class FacilityState:
         self._by_system: dict[str, list[TankState]] = {}
         for t in tanks:
             self._by_system.setdefault(t.system_id, []).append(t)
+        # Empty tanks HELD for an imminent, known TranOG arrival by the
+        # anticipatory purge-pacing pass (placement.py). While a tank id is in
+        # this set, Transfer.apply refuses to stock it as a destination, so the
+        # held slot survives every rebalancing/even-out path (which diverge from
+        # the plan in purge mode) until the cohort lands. Empty by default — only
+        # the anticipatory pass populates it, so production / committed-config
+        # behaviour is unchanged.
+        self.reserved_tanks: set[int] = set()
 
     # ---- Builders ----
     @classmethod

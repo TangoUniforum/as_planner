@@ -161,6 +161,20 @@ class Transfer:
                 )
                 continue
 
+            # RESERVED hold: an empty tank held for an imminent TranOG arrival
+            # (anticipatory purge pacing) must not be re-stocked by any rebalancing
+            # path. Refuse like an INV violation — the source's share stays put
+            # (continuity-safe; the caller retains the residual in place). Only
+            # blocks stocking an EMPTY reserved tank; reserved tanks are empty by
+            # construction, so this never blocks a same-batch top-up. No-op unless
+            # the anticipatory pass populated state.reserved_tanks.
+            if tgt.is_empty and dest.tank_id in state.reserved_tanks:
+                warns.append(
+                    f"Transfer {self.batch_id}: dest {tgt.location_id} is RESERVED "
+                    f"for an imminent TranOG arrival; refused (held empty)"
+                )
+                continue
+
             if tgt.is_empty:
                 tgt.assign(
                     batch_id=self.batch_id,

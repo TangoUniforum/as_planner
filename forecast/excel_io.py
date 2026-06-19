@@ -1252,6 +1252,18 @@ def write_input_conservation_audit(
     fs = control.forecast_start
     fs = fs.date() if hasattr(fs, "date") else fs
     horizon_end = fs + timedelta(weeks=control.horizon_weeks)
+    # A batch only enters OG at the first forecast-week boundary ON/AFTER its
+    # TranOG_Date (the OG-entry week — see time_grid.og_entry_week_start). The
+    # placement engine can only place a cohort in a week it actually generates,
+    # i.e. weeks [0, horizon_weeks). A TranOG_Date that is < horizon_end but
+    # whose OG-ENTRY week is week `horizon_weeks` (the boundary one past the last
+    # forecast week) lands beyond the plannable window — the engine never sees
+    # it, so it is "future", NOT dropped. Use the last plannable week start as
+    # the real cutoff so this horizon-edge off-by-one isn't mis-reported as a
+    # silent fish loss. (horizon_weeks-1 is the last week index; its start is the
+    # latest week a cohort can enter and still be placed.)
+    from .time_grid import og_entry_week_start, week_start as _wk_start
+    last_week_start = _wk_start(control.horizon_weeks - 1, fs)
 
     placed_first = {}
     placed_last = {}
@@ -1293,12 +1305,19 @@ def write_input_conservation_audit(
         # CREATION — the opposite of a drop, a different conservation breach.
         if (bt.input_count or 0) > 0 and hv + _st > (bt.input_count or 0) * 1.001:
             over_produced.append(bid)
-        in_h = togd is not None and fs <= togd <= horizon_end
+        # OG-entry week start for this batch: the week it can first be placed.
+        og_entry = og_entry_week_start(togd, fs) if togd is not None else None
+        beyond_plannable = og_entry is not None and og_entry > last_week_start
+        in_h = (togd is not None and fs <= togd <= horizon_end
+                and not beyond_plannable)
         if is_placed or hv > 0:
             status = "PLACED"
         elif togd is None:
             status = "FW-only (no TranOG)"
-        elif togd > horizon_end:
+        elif togd > horizon_end or beyond_plannable:
+            # TranOG_Date past horizon, OR OG-entry week one past the last
+            # forecast week (horizon-edge): the engine never gets a week to
+            # place it — outside the plannable window, not a dropped fish.
             status = "future (TranOG beyond horizon)"
         elif togd < fs:
             status = "pre-start"
