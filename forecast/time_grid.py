@@ -157,6 +157,38 @@ def og_entry_week_start(tran_og_date, forecast_start) -> date:
     return ws
 
 
+def working_day_month_split(event_date, forecast_start=None) -> dict[tuple[int, int], float]:
+    """(year, month) -> fraction of a weekly Mon-Fri harvest in that month.
+
+    A weekly harvest is reported at its week-start date but is actually
+    worked across the Mon-Fri operating days of that ISO week (this mirrors
+    the Daily Harvest Schedule's even Mon-Fri split). For monthly rollups,
+    a week that sits wholly inside one calendar month yields `{month: 1.0}`;
+    a week straddling a month boundary is split by WORKING-DAY count — e.g.
+    a week with 3 weekdays in July and 2 in August splits 0.6/0.4. This is
+    pure calendar attribution: it moves which month a harvest is reported
+    in, never the totals or the fish (cf. the legacy "Target" rule, which
+    chased MonthlyTargets and mis-credited boundary weeks).
+
+    `forecast_start`, when given, clips Mon-Fri days before the horizon
+    (matching write_daily_harvest_schedule) so a partial first week is
+    attributed only over its in-horizon working days.
+    """
+    d = _as_date(event_date)
+    monday = d - timedelta(days=d.weekday())
+    days = [monday + timedelta(days=i) for i in range(5)]
+    if forecast_start is not None:
+        fs = _as_date(forecast_start)
+        days = [x for x in days if x >= fs]
+    if not days:
+        days = [d]
+    frac = 1.0 / len(days)
+    out: dict[tuple[int, int], float] = {}
+    for x in days:
+        out[(x.year, x.month)] = out.get((x.year, x.month), 0.0) + frac
+    return out
+
+
 def mon_fri_in_week(i: int, forecast_start) -> list[date]:
     """Calendar Mon-Fri dates that fall within forecast week i."""
     start, end = week_range(i, forecast_start)

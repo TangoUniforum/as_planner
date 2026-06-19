@@ -435,6 +435,7 @@ def write_harvest_plan_report(
     scenario_name: str,
     default_hog_yield: float,
     facility_limits_hog: dict,
+    forecast_start=None,
     sheet_name: str = "HarvestPlan Report",
 ) -> None:
     """Annual per-batch harvest summary (matches reference format).
@@ -443,9 +444,15 @@ def write_harvest_plan_report(
     header row (12 month-start columns + "TOTAL <year>"), then three rows per
     batch — Units, Av Weight - Kg HOG, Biomass - Tons HOG — with monthly values
     and a year total. Blank cells for months with no harvest.
+
+    Boundary weeks (a week straddling a month boundary) are split between the
+    two months by WORKING-DAY fraction (see time_grid.working_day_month_split),
+    so a smooth weekly harvest maps to its true ~21-22 working-day share per
+    month instead of dumping the whole week into the week-start's month.
     """
     from collections import defaultdict
     from datetime import date as _date
+    from .time_grid import working_day_month_split
 
     if sheet_name in wb.sheetnames:
         del wb[sheet_name]
@@ -456,13 +463,16 @@ def write_harvest_plan_report(
     years: set[int] = set()
     batches_by_year: dict[int, set] = defaultdict(set)
     for ev in harvest_events:
-        d = ev.event_date.date() if hasattr(ev.event_date, "date") else ev.event_date
         hog_yield = facility_limits_hog.get(iso_week_label(ev.event_date), default_hog_yield)
-        e = agg[(d.year, ev.batch_id, d.month)]
-        e["count"] += ev.count
-        e["hog_kg"] += ev.count * ev.avg_wt_g / 1000.0 * hog_yield
-        years.add(d.year)
-        batches_by_year[d.year].add(ev.batch_id)
+        hog_kg = ev.count * ev.avg_wt_g / 1000.0 * hog_yield
+        # Split the week's harvest across the months its Mon-Fri working days
+        # fall into (boundary weeks split by working-day fraction).
+        for (yr, mo), frac in working_day_month_split(ev.event_date, forecast_start).items():
+            e = agg[(yr, ev.batch_id, mo)]
+            e["count"] += ev.count * frac
+            e["hog_kg"] += hog_kg * frac
+            years.add(yr)
+            batches_by_year[yr].add(ev.batch_id)
 
     for year in sorted(years):
         ws.append([f"{scenario_name} {year}"])
