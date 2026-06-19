@@ -246,9 +246,18 @@ def read_facility(ws) -> FacilityConfig:
         sysid = _norm(ws.cell(r, c_sys).value)
         typ = _norm(ws.cell(r, c_type).value).upper()
         vol = _num(ws.cell(r, c_vol).value)
-        if not sysid or vol is None or typ not in ("FW", "OG"):
-            # Skip blank rows / the Summary side-block (no SystemID/Type).
+        if not sysid or vol is None:
+            # Skip blank rows / the Summary side-block (no SystemID/Volume).
             continue
+        if typ not in ("FW", "OG"):
+            # A row with a real SystemID + Volume is a tank even if its Type
+            # cell is blank. The May workbooks leave the 6N depuration sisters
+            # 67/69/71 Type-blank (template artifact) though they are real OG
+            # purge tanks the VBA tool uses — dropping them halves the 6N
+            # purge throughput and (in purge mode, 6N-only harvest) forces
+            # incoming TranOG batches to be dropped. Infer Type from the
+            # SystemID: an OG* system is an OG tank, otherwise FW.
+            typ = "OG" if sysid.upper().startswith("OG") else "FW"
         # OG system-id normalization: ensure an "OG" prefix on OG systems.
         if typ == "OG" and not sysid.upper().startswith("OG"):
             sysid = "OG" + sysid
