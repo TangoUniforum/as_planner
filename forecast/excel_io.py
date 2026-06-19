@@ -736,6 +736,34 @@ def _feed_by_type_week(batch_locations, biology_states_by_batch, tables, batches
     return ftw, wk_start
 
 
+def _feed_by_batch_type_week(batch_locations, biology_states_by_batch, tables, batches=None):
+    """(batch_id, feed_name, week_label) -> kg/week, plus week_label -> week_start.
+
+    Same realized-OG/SW + projected-FW feed sourcing as `_feed_by_type_week`
+    (so per-batch totals reconcile to the by-type block), but keyed by batch
+    so the operator can see feed per batch (the legacy "FEED BY BATCH & TYPE"
+    block). FW/EGG projection rows are keyed by their owning batch.
+    """
+    from collections import defaultdict
+    from .biology import realized_feed_kg_day, _feed_type_for_size
+    fbtw: dict[tuple[str, str, str], float] = defaultdict(float)
+    wk_start: dict[str, object] = {}
+    for r in batch_locations:
+        wk_start.setdefault(r.week_label, r.week_start)
+        if tables is not None:
+            b = (batches or {}).get(r.batch_id)
+            fkg = realized_feed_kg_day(r.avg_wt_g, r.biomass_kg, b, tables) * 7.0
+            if fkg:
+                fbtw[(r.batch_id, _feed_type_for_size(tables, r.avg_wt_g),
+                      r.week_label)] += fkg
+    for batch_id, states in (biology_states_by_batch or {}).items():
+        for s in states:
+            if s.stage in ("FW", "EGG") and s.feed_kg_week:
+                wk_start.setdefault(s.week_label, s.week_start)
+                fbtw[(batch_id, s.feed_type, s.week_label)] += s.feed_kg_week
+    return fbtw, wk_start
+
+
 def write_feed_forecast_weekly(
     wb,
     batch_locations,
@@ -831,8 +859,46 @@ def write_feed_forecast_monthly(
             totals[i] += v
         ws.append(row)
     ws.append(["Grand Total", ""] + [round(t, 0) for t in totals])
+
+    # ----- FEED BY BATCH & TYPE block (matches the legacy layout) -----
+    # One row per (batch, feed-type) the batch consumes, grouped by batch
+    # (batch label on the first row of each group), feed types in size order,
+    # month columns identical to the by-type block above. Same feed source,
+    # so per-batch totals reconcile to the by-type grand total.
+    fbtw, _ = _feed_by_batch_type_week(
+        batch_locations, biology_states_by_batch, tables, batches)
+    fbtm: dict[tuple[str, str, str], float] = defaultdict(float)  # (batch, type, month)
+    for (bid, name, wk), v in fbtw.items():
+        ws_ = wk_start.get(wk)
+        mo = (ws_.strftime("%Y-%m") if hasattr(ws_, "strftime") else str(ws_)[:7])
+        fbtm[(bid, name, mo)] += v
+    # Max-size order for feed types (same ordering basis as the by-type block).
+    size_of = {name: (ms if ms is not None else 0.0) for ms, name in ftypes}
+
+    def _batch_sort_key(b):
+        # Order B41, B42, ... numerically; non-standard ids sort after, by name.
+        s = str(b)
+        if s[:1] == "B" and s[1:].isdigit():
+            return (0, int(s[1:]), "")
+        return (1, 0, s)
+
+    batch_ids = sorted({bid for (bid, _n, _m) in fbtm}, key=_batch_sort_key)
+    ws.append([])
+    ws.append(["FEED BY BATCH & TYPE (kg)"])
+    ws.append(["Batch", "Feed Type"] + mo_dates)
+    for bid in batch_ids:
+        names = sorted({n for (b, n, _m) in fbtm if b == bid},
+                       key=lambda n: (size_of.get(n, 0.0), n))
+        first = True
+        for name in names:
+            row = [bid if first else None, name]
+            for m in months_sorted:
+                row.append(round(fbtm.get((bid, name, m), 0.0), 0))
+            ws.append(row)
+            first = False
+
     ws.column_dimensions["A"].width = 18
-    ws.column_dimensions["B"].width = 12
+    ws.column_dimensions["B"].width = 16
 
 
 # Open/Close ledger column headers (shared by Weekly + Monthly reports).
