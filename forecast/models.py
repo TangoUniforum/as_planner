@@ -247,3 +247,22 @@ class BatchWeekState:
     cull_event_pct: float = 0.0    # >0 if a culling event landed in this week
     cull_count_week: float = 0.0   # absolute fish removed by culls in this week
     cull_biomass_kg_week: float = 0.0  # biomass of fish removed by culls in this week
+    # End-of-week (close) state — the last simulated day's values. `count` etc.
+    # above are weekly MEANS (for feed/density); these are the closing balance so
+    # the Weekly/Monthly ledger can chain open->close consistently across a week
+    # where a mid-week cull fires (esp. the FW->OG TranOG reconciliation cull),
+    # instead of the mean under-counting the drop. Default 0 (filled by the
+    # projectors; the ledger falls back to the mean when unset).
+    open_count: float = 0.0        # start-of-week balance (before the week's
+    open_avg_weight_g: float = 0.0  # losses) — used as the ledger's open on the
+    open_biomass_kg: float = 0.0    # FIRST forecast week (week 0), where there is
+    #                                 no prior-week close to chain from and the
+    #                                 weekly mean would mis-state the open.
+    close_count: float = 0.0
+    close_avg_weight_g: float = 0.0
+    close_biomass_kg: float = 0.0
+    # Realized fish lost to MORTALITY this week (the daily geometric survival,
+    # summed). The Weekly/Monthly ledger uses this instead of open*weekly_rate%
+    # so Count_Check reconciles across weeks where the mortality table steps
+    # mid-week (early FW) — the end-of-week rate over/under-counts the real loss.
+    mort_count_week: float = 0.0

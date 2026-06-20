@@ -1017,17 +1017,23 @@ def _build_batch_week_ledger(
     # Cull / mortality% / input / biology fallback, keyed by (batch, week).
     cull: dict[tuple, dict] = defaultdict(lambda: {"count": 0.0, "bio": 0.0})
     mortpct: dict[tuple, float] = {}
+    mortc: dict[tuple, float] = {}   # realized mortality count (fish) per week
     inputc: dict[tuple, float] = defaultdict(float)
     bio_state: dict[tuple, object] = {}
     for s in batch_week_states or ():
         key = (s.batch_id, s.week_label)
         bio_state[key] = s
         mortpct[key] = s.mortality_pct_weekly
+        mortc[key] = getattr(s, "mort_count_week", 0.0)
         if s.cull_count_week > 0:
             cull[key]["count"] += s.cull_count_week
             cull[key]["bio"] += s.cull_biomass_kg_week
         if s.week_from_input == 0:
-            inputc[key] += s.count
+            # STOCKING week: the input flow is the count that was STOCKED =
+            # the closing balance plus this week's mortality + culls (open is 0).
+            # Using the weekly-mean count instead left a residual in Count_Check.
+            inputc[key] += (getattr(s, "close_count", 0.0) or s.count) \
+                + getattr(s, "mort_count_week", 0.0) + s.cull_count_week
         # FW (pre-TranOG) feed: FW fish live in FW tanks, which are NOT in
         # batch_locations (OG-only). Pull their feed from the projection so the
         # ledger + FeedForecast cover small-fish feed. SW/OG feed always comes
@@ -1046,7 +1052,14 @@ def _build_batch_week_ledger(
         # else facility totals balloon far past the real ~4M kg.
         s = bio_state.get(key)
         if s and s.stage in ("FW", "EGG"):
-            return s.count, s.avg_weight_g, s.biomass_kg, s.week_start
+            # Close = END-of-week balance (post mid-week cull), not the weekly
+            # mean, so the FW ledger chains open->close consistently across the
+            # FW->OG TranOG reconciliation-cull week (mean under-counts the drop
+            # and leaks a ~cull-sized Count_Check residual into the next week).
+            cc = s.close_count if s.close_count > 0 else s.count
+            cw = s.close_avg_weight_g if s.close_avg_weight_g > 0 else s.avg_weight_g
+            cb = s.close_biomass_kg if s.close_biomass_kg > 0 else s.biomass_kg
+            return cc, cw, cb, s.week_start
         return 0.0, 0.0, 0.0, None
 
     # All (batch, week) cells: union of realized + projected weeks.
@@ -1070,14 +1083,34 @@ def _build_batch_week_ledger(
                     # on every batch's first week). Open is 0 before stocking.
                     oc, owt, obio = 0.0, 0.0, 0.0
                 elif s0:
-                    oc, owt, obio = s0.count, s0.avg_weight_g, s0.biomass_kg
+                    # Start-of-week balance (before the week's losses), not the
+                    # weekly mean — the mean mis-states the open on week 0 (no
+                    # prior-week close to chain from), leaving a ~half-week
+                    # mortality residual in Count_Check. Fall back to mean if the
+                    # open fields aren't populated.
+                    oc = s0.open_count if getattr(s0, "open_count", 0.0) > 0 else s0.count
+                    owt = (s0.open_avg_weight_g if getattr(s0, "open_avg_weight_g", 0.0) > 0
+                           else s0.avg_weight_g)
+                    obio = (s0.open_biomass_kg if getattr(s0, "open_biomass_kg", 0.0) > 0
+                            else s0.biomass_kg)
                 else:
                     oc, owt, obio = cc, cwt, cbio
             else:
                 oc, owt, obio, _ = close_vals((b, weeks[i - 1]))
             h = harv.get((b, wk), {"count": 0.0, "gross": 0.0, "wt_sum": 0.0})
             cu = cull.get((b, wk), {"count": 0.0, "bio": 0.0})
-            mort_count = oc * mortpct.get((b, wk), 0.0) / 100.0
+            # Mortality count: for a FW/EGG PROJECTION week (close comes from the
+            # biology, not realized BatchLocations) use the REALIZED mortality the
+            # daily sim actually applied — open*weekly_rate% mis-counts when the
+            # mortality table steps mid-week (early FW). Realized OG weeks keep the
+            # rate-based estimate (their close is the realized placement).
+            _s_st = bio_state.get((b, wk))
+            _rlz = rl.get((b, wk))
+            if (_s_st is not None and _s_st.stage in ("FW", "EGG")
+                    and not (_rlz and _rlz.get("count", 0) > 0)):
+                mort_count = mortc.get((b, wk), oc * mortpct.get((b, wk), 0.0) / 100.0)
+            else:
+                mort_count = oc * mortpct.get((b, wk), 0.0) / 100.0
             mort_bio = mort_count * owt / 1000.0
             input_count = inputc.get((b, wk), 0.0)
             input_bio = input_count * owt / 1000.0

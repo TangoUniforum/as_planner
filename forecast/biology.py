@@ -393,7 +393,9 @@ def project_batch(
         # ----- Daily mortality (geometric, compounds to weekly) -----
         wfi = dsi // 7
         m_weekly = _mortality_weekly_pct(tables, wfi)
+        _pre_mort = cur_count
         cur_count *= _daily_survival_factor(m_weekly)
+        mort_count_today = _pre_mort - cur_count
 
         # ----- Daily growth -----
         if stage == "EGG":
@@ -417,7 +419,7 @@ def project_batch(
         days.append((
             cur_date, dsi, stage, cur_count, cur_weight, sgr_eff, fcr,
             m_weekly, cull_pct_today, feed_kg_day, feed_type, biomass_kg,
-            cull_count_today, cull_biomass_today,
+            cull_count_today, cull_biomass_today, mort_count_today,
         ))
 
         cur_date = cur_date + timedelta(days=1)
@@ -465,6 +467,14 @@ def project_batch(
             cull_event_pct=cull_pct_week,
             cull_count_week=cull_count_week,
             cull_biomass_kg_week=cull_biomass_kg_week,
+            open_count=days_in_w[0][3] + days_in_w[0][12] + days_in_w[0][14],
+            open_avg_weight_g=days_in_w[0][4],
+            open_biomass_kg=(days_in_w[0][3] + days_in_w[0][12]
+                             + days_in_w[0][14]) * days_in_w[0][4] / 1000.0,
+            close_count=last[3],
+            close_avg_weight_g=last[4],
+            close_biomass_kg=last[11],
+            mort_count_week=sum(d[14] for d in days_in_w),
         ))
 
     return out, residual, split
@@ -625,7 +635,9 @@ def project_in_flight_batch(
         dsi = (cur_date - input_date).days
         wfi = max(0, dsi // 7)
         m_weekly = _mortality_weekly_pct(tables, wfi)
+        _pre_mort = cur_count
         cur_count *= _daily_survival_factor(m_weekly)
+        mort_count_today = _pre_mort - cur_count
 
         sgr_base = _interp(cur_weight, tables.sgr_size_g, tables.sgr_sw_pct_day)
         sgr_eff = sgr_base * batch.sgr_correction
@@ -639,7 +651,7 @@ def project_in_flight_batch(
         days.append((
             cur_date, dsi, "SW", cur_count, cur_weight, sgr_eff, fcr,
             m_weekly, 0.0, feed_kg_day, feed_type, biomass_kg,
-            0.0, 0.0,
+            0.0, 0.0, mort_count_today,
         ))
         cur_date = cur_date + timedelta(days=1)
 
@@ -673,6 +685,14 @@ def project_in_flight_batch(
             feed_type=last[10],
             mortality_pct_weekly=last[7],
             cull_event_pct=0.0,
+            open_count=days_in_w[0][3] + days_in_w[0][12] + days_in_w[0][14],
+            open_avg_weight_g=days_in_w[0][4],
+            open_biomass_kg=(days_in_w[0][3] + days_in_w[0][12]
+                             + days_in_w[0][14]) * days_in_w[0][4] / 1000.0,
+            close_count=last[3],
+            close_avg_weight_g=last[4],
+            close_biomass_kg=last[11],
+            mort_count_week=sum(d[14] for d in days_in_w),
         ))
     return out
 
@@ -810,7 +830,9 @@ def project_in_flight_fw_batch(
         # Daily mortality.
         wfi = max(0, dsi // 7)
         m_weekly = _mortality_weekly_pct(tables, wfi)
+        _pre_mort = cur_count
         cur_count *= _daily_survival_factor(m_weekly)
+        mort_count_today = _pre_mort - cur_count
 
         # Daily growth — FW vs SW SGR curve.
         if stage == "FW":
@@ -829,7 +851,7 @@ def project_in_flight_fw_batch(
         days.append((
             cur_date, dsi, stage, cur_count, cur_weight, sgr_eff, fcr,
             m_weekly, cull_pct_today, feed_kg_day, feed_type, biomass_kg,
-            cull_count_today, cull_biomass_today,
+            cull_count_today, cull_biomass_today, mort_count_today,
         ))
         cur_date = cur_date + timedelta(days=1)
 
@@ -867,6 +889,14 @@ def project_in_flight_fw_batch(
             cull_event_pct=sum(d[8] for d in days_in_w),
             cull_count_week=cull_count_week,
             cull_biomass_kg_week=cull_biomass_week,
+            open_count=days_in_w[0][3] + days_in_w[0][12] + days_in_w[0][14],
+            open_avg_weight_g=days_in_w[0][4],
+            open_biomass_kg=(days_in_w[0][3] + days_in_w[0][12]
+                             + days_in_w[0][14]) * days_in_w[0][4] / 1000.0,
+            close_count=last[3],
+            close_avg_weight_g=last[4],
+            close_biomass_kg=last[11],
+            mort_count_week=sum(d[14] for d in days_in_w),
         ))
     return out, residuals, splits
 
