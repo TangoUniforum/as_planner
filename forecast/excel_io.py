@@ -1198,54 +1198,95 @@ def write_monthly_report(
         batch_locations, harvest_events, batch_week_states,
         transfer_events, batches, tables, hog_yield, hog_overrides)
 
-    # Group weekly rows into (batch, month); preserve week order for open/close.
+    # Roll the weekly ledger up to calendar months, splitting any week that
+    # straddles a month boundary by CALENDAR-DAY fraction (flows are daily). A
+    # month's Open/Close are the LINEARLY-INTERPOLATED state at the month
+    # boundary (open + f*(close-open)). Because each weekly row already balances
+    # (close = open + flows), the day-split balances exactly, so the monthly
+    # Count_Check / Bio_Check stay ~0 (the ledger remains internally consistent)
+    # while boundary-week flows land in their true month instead of the
+    # week-start month. Mirrors the HarvestPlan Report / FeedForecastMonthly
+    # proration; the lone difference is harvest here is split by calendar day
+    # (one fraction for the whole ledger) rather than Mon-Fri working days, so
+    # the boundary balance is exact.
+    from .time_grid import calendar_day_month_split
     from datetime import date as _date
-    def _month_key(d):
-        ws_d = d["week_start"]
-        if hasattr(ws_d, "strftime"):
-            return ws_d.strftime("%Y-%m")
-        # Fallback: derive the month from the ISO week label (NOT a raw slice —
-        # d["week"][6:8] is the week NUMBER, which produced bogus "2027-20" keys).
-        try:
-            yy, wwk = int(d["week"][:4]), int(d["week"][6:8])
-            return _date.fromisocalendar(yy, wwk, 1).strftime("%Y-%m")
-        except Exception:
-            return str(ws_d)[:7]
-    grouped: dict[tuple, list] = defaultdict(list)
-    for d in weekly:
-        grouped[(_month_key(d), d["batch"])].append(d)
+    FLOW_KEYS = ("gross_growth", "net_prod", "feed", "mort_count", "mort_bio",
+                 "harv_count", "harv_gross", "harv_hog", "cull_count", "cull_bio",
+                 "input_count", "xfer_in", "xfer_out", "count_check", "bio_check")
 
-    for (mo, b) in sorted(grouped):
-        wks = sorted(grouped[(mo, b)], key=lambda x: x["week"])
-        first, last = wks[0], wks[-1]
-        def s(key):
-            return sum(w[key] for w in wks)
-        gross_growth = s("gross_growth")
-        net_prod = s("net_prod")
-        f = s("feed")
-        open_bio, close_bio = first["open_bio"], last["close_bio"]
-        open_wt, close_wt = first["open_wt"], last["close_wt"]
+    def _wk_date(w):
+        # Week-start date for proration. Some ledger rows (e.g. harvest-only)
+        # carry no week_start; fall back to the ISO week label's Monday (matches
+        # the prior _month_key fallback — d["week"][6:8] is the week NUMBER).
+        d = w["week_start"]
+        if d is not None and not isinstance(d, str):
+            return d.date() if hasattr(d, "date") else d
+        try:
+            return _date.fromisocalendar(int(w["week"][:4]), int(w["week"][6:8]), 1)
+        except Exception:
+            return None
+
+    by_batch: dict[str, list] = defaultdict(list)
+    for d in weekly:
+        by_batch[d["batch"]].append(d)
+
+    rows_out: list[tuple] = []  # (month, batch, agg-accumulator)
+    for b, wks in by_batch.items():
+        acc: dict[str, dict] = {}
+        for w in sorted(wks, key=lambda x: x["week"]):
+            wkd = _wk_date(w)
+            if wkd is None:
+                continue  # unparseable week — cannot attribute, skip (rare)
+            split = calendar_day_month_split(wkd)  # (yr,mon)->frac
+            oc, ob = w["open_count"], w["open_bio"]
+            dc, db = w["close_count"] - oc, w["close_bio"] - ob
+            cum = 0.0
+            for (yr, mon) in sorted(split):
+                frac = split[(yr, mon)]
+                mo = f"{yr}-{mon:02d}"
+                a = acc.get(mo)
+                if a is None:
+                    a = {k: 0.0 for k in FLOW_KEYS}
+                    a["days"] = 0.0
+                    a["open_count"] = oc + cum * dc      # interp at month start
+                    a["open_bio"] = ob + cum * db
+                    acc[mo] = a
+                a["close_count"] = oc + (cum + frac) * dc  # interp at month end
+                a["close_bio"] = ob + (cum + frac) * db
+                a["days"] += frac * 7.0
+                for k in FLOW_KEYS:
+                    a[k] += w[k] * frac
+                cum += frac
+        for mo, a in acc.items():
+            rows_out.append((mo, b, a))
+
+    for mo, b, a in sorted(rows_out, key=lambda x: (x[0], x[1])):
+        open_count, open_bio = a["open_count"], a["open_bio"]
+        close_count, close_bio = a["close_count"], a["close_bio"]
+        open_wt = (open_bio / open_count * 1000.0) if open_count > 0 else 0.0
+        close_wt = (close_bio / close_count * 1000.0) if close_count > 0 else 0.0
+        gross_growth, net_prod, f = a["gross_growth"], a["net_prod"], a["feed"]
         avg_bio = (open_bio + close_bio) / 2.0
-        days = 7.0 * len(wks)
+        days = a["days"] or 7.0
         sgr = (log(close_wt / open_wt) / days * 100.0) if open_wt > 0 and close_wt > 0 else 0.0
         sfr = (f / avg_bio / days * 100.0) if avg_bio > 0 else 0.0
-        harv_count = s("harv_count")
-        harv_gross = s("harv_gross")
+        harv_count = a["harv_count"]
         agg = {
             "batch": b, "week": mo, "week_start": None,
-            "open_count": first["open_count"], "open_wt": open_wt, "open_bio": open_bio,
-            "close_count": last["close_count"], "close_wt": close_wt, "close_bio": close_bio,
+            "open_count": open_count, "open_wt": open_wt, "open_bio": open_bio,
+            "close_count": close_count, "close_wt": close_wt, "close_bio": close_bio,
             "sgr": sgr, "gross_growth": gross_growth, "net_prod": net_prod,
             "feed": f, "sfr": sfr,
             "bio_fcr": (f / gross_growth) if gross_growth > 0 else 0.0,
             "econ_fcr": (f / net_prod) if net_prod > 0 else 0.0,
-            "mort_count": s("mort_count"), "mort_bio": s("mort_bio"),
-            "harv_count": harv_count, "harv_gross": harv_gross,
-            "harv_hog": s("harv_hog"),
-            "harv_avg_hog": (s("harv_hog") * 1000.0 / harv_count) if harv_count > 0 else 0.0,
-            "cull_count": s("cull_count"), "cull_bio": s("cull_bio"),
-            "input_count": s("input_count"), "xfer_in": s("xfer_in"), "xfer_out": s("xfer_out"),
-            "count_check": s("count_check"), "bio_check": s("bio_check"),
+            "mort_count": a["mort_count"], "mort_bio": a["mort_bio"],
+            "harv_count": harv_count, "harv_gross": a["harv_gross"],
+            "harv_hog": a["harv_hog"],
+            "harv_avg_hog": (a["harv_hog"] * 1000.0 / harv_count) if harv_count > 0 else 0.0,
+            "cull_count": a["cull_count"], "cull_bio": a["cull_bio"],
+            "input_count": a["input_count"], "xfer_in": a["xfer_in"], "xfer_out": a["xfer_out"],
+            "count_check": a["count_check"], "bio_check": a["bio_check"],
         }
         ws.append([scenario_name, mo, b] + _ledger_value_cells(agg))
     for c in range(1, 4 + len(_LEDGER_COLS)):
