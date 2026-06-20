@@ -399,6 +399,12 @@ class GradedHarvest:
     retention_count: float
     retention_avg_wt_g: float
     cv_pct: float = 0.0
+    # Pre-growth pickup weight (g). When the pickup is grown a few SW days before
+    # the mid-week transfer (6N purge move-in), pickup_avg_wt_g carries the GROWN
+    # weight but the SOURCE held the fish at this pre-growth weight. The continuity
+    # audit debits the source at this weight so the +N-day growth shows as injected
+    # biomass on the (frozen) pickup tank instead of over-debiting the source.
+    pickup_source_avg_wt_g: Optional[float] = None
 
     def apply(self, state: FacilityState) -> list[str]:
         warns: list[str] = []

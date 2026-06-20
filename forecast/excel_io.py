@@ -1742,9 +1742,18 @@ def write_tank_continuity_audit(
         # tank-weeks silently mis-reconcile.
         if hasattr(ev, "pickup_tank_id"):
             wk = iso_week_label(ev.event_date)
+            # Debit the SOURCE at the pickup's PRE-GROWTH weight (when the pickup
+            # was grown a few SW days for the 6N transfer, pickup_avg_wt_g is the
+            # grown weight but the source held it lighter). The grown weight is
+            # credited to the (frozen) pickup tank, so the few-day growth shows
+            # as injected biomass there, not an over-debit on the source — same
+            # accounting as a Transfer's source_avg_wt_g.
+            pk_src_wt = getattr(ev, "pickup_source_avg_wt_g", None)
+            if pk_src_wt is None:
+                pk_src_wt = ev.pickup_avg_wt_g
             transfer_out[(ev.source_tank_id, wk)] += ev.pickup_count + ev.retention_count
             transfer_out_kg[(ev.source_tank_id, wk)] += (
-                ev.pickup_count * ev.pickup_avg_wt_g
+                ev.pickup_count * pk_src_wt
                 + ev.retention_count * ev.retention_avg_wt_g) / 1000.0
             transfer_in[(ev.pickup_tank_id, wk)] += ev.pickup_count
             transfer_in_kg[(ev.pickup_tank_id, wk)] += ev.pickup_count * ev.pickup_avg_wt_g / 1000.0

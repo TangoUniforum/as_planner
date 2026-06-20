@@ -955,6 +955,7 @@ def _try_graded_move_in(
         pickup_tank_id=pair[0],
         pickup_count=big_count,
         pickup_avg_wt_g=pickup_xfer_wt,
+        pickup_source_avg_wt_g=big_avg,  # pre-growth: debit source at this wt
         retention_tank_id=retention.tank_id,
         retention_count=small_count,
         retention_avg_wt_g=small_avg,
