@@ -332,6 +332,12 @@ class PlacementResult:
     # mid-week transfer into off-feed (STARVE) 6N depuration. The feed reports
     # add these in; the STARVE 6N tank-weeks are excluded from realized feed.
     sixn_move_in_feed: dict = field(default_factory=dict)
+    # Realized biology per (tank_id, week_label, batch_id) -> [bio_delta_kg,
+    # mort_count]: the growth-minus-mortality biomass change and mortality count
+    # the daily walker actually applied. The continuity audit reconciles against
+    # these (ground truth) instead of re-estimating growth from a coarse weekly
+    # SGR, so split-off sub-populations no longer false-positive a BIO_DRIFT.
+    realized_biology: dict = field(default_factory=dict)
 
 
 # ============================================================
@@ -2246,6 +2252,12 @@ def phase_d_emit_events(
     locations: list[BatchLocationRow] = []
     # 6N purge-mode pre-transfer feed accumulator (see PlacementResult).
     sixn_move_in_feed: dict[tuple[str, str, str], float] = {}
+    # Realized biology per (tank_id, week_label, batch_id) -> [bio_delta_kg,
+    # mort_count]: the actual growth-minus-mortality biomass change and the
+    # mortality count the daily walker applied, so the continuity audit can
+    # reconcile against ground truth (see write_tank_continuity_audit).
+    from collections import defaultdict as _dd
+    realized_biology: dict[tuple[int, str, str], list] = _dd(lambda: [0.0, 0.0])
     if facility_limits is None:
         facility_limits = FacilityLimits()
 
@@ -3270,14 +3282,23 @@ def phase_d_emit_events(
                     )
                     warnings.extend(ev.apply(state))
                     tranog_events.append(ev)
-                # Apply continuous biology.
+                # Apply continuous biology. Record the REALIZED biomass delta
+                # (growth - mortality) and mortality count per (tank, week, batch)
+                # so the continuity audit can reconcile against ground truth
+                # instead of independently re-estimating growth from a coarse
+                # weekly SGR (which false-positives for split-off sub-populations).
                 for tank in state.tanks_by_id.values():
                     if tank.is_empty:
                         continue
                     bm = batch_meta.get(tank.batch_id)
                     if bm is None:
                         continue
+                    _bid = tank.batch_id
+                    _c0, _b0 = tank.count, tank.count * tank.avg_wt_g / 1000.0
                     advance_tank_one_day(tank, bm, tables, day)
+                    _rb = realized_biology[(tank.tank_id, week_label, _bid)]
+                    _rb[0] += (tank.count * tank.avg_wt_g / 1000.0) - _b0  # bio delta
+                    _rb[1] += _c0 - tank.count                            # mort count
                 day = day + timedelta(days=1)
 
         # (Harvest demands were already applied at the start of this week,
@@ -3380,7 +3401,8 @@ def phase_d_emit_events(
         _carry_debt = _budget.overdraw
 
     return (state, tranog_events, transfer_events, harvest_events,
-            grade_events, locations, warnings, sixn_move_in_feed)
+            grade_events, locations, warnings, sixn_move_in_feed,
+            dict(realized_biology))
 
 
 # ============================================================
@@ -3428,7 +3450,7 @@ def run_placement(
     result.warnings.extend(f"[C] {w}" for w in c_warns)
 
     (final_state, tranog, transfers, harvests, grades, locs, d_warns,
-     sixn_feed) = phase_d_emit_events(
+     sixn_feed, realized_bio) = phase_d_emit_events(
         result.load_table, result.tank_assignments, harvest_demands,
         splits, initial_state, facility, control, batch_meta, tables,
         facility_limits=facility_limits,
@@ -3440,6 +3462,7 @@ def run_placement(
     result.grade_events = grades
     result.batch_locations = locs
     result.sixn_move_in_feed = sixn_feed
+    result.realized_biology = realized_bio
     result.warnings.extend(f"[D] {w}" for w in d_warns)
 
     # NOTE: opt-in LNS placement refinement (placement_method=="lns") is applied

@@ -657,6 +657,7 @@ def main(
         placement.grade_events,
         placement.tranog_events,
         state,
+        realized_biology=placement.realized_biology,
     )
     # Realized per-system biomass + feed vs the SystemLimits caps. The engine
     # checks tank density but never checked the SYSTEM caps against the realized

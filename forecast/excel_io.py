@@ -1649,6 +1649,7 @@ def write_tank_continuity_audit(
     grade_events,
     tranog_events,
     initial_state,
+    realized_biology=None,
     sheet_name: str = "TankContinuityAudit",
 ) -> None:
     """Per-(tank, week, batch) reconciliation.
@@ -1702,12 +1703,24 @@ def write_tank_continuity_audit(
             if not tank.is_empty:
                 pr_tank[tid] = (tank.batch_id, tank.count)
 
-    # Per-batch per-week mortality % + SGR (from BatchWeekState).
+    # Per-batch per-week mortality % + SGR (from BatchWeekState). Used only as a
+    # FALLBACK growth estimate when realized biology isn't available.
     mort_pct: dict[tuple[str, str], float] = {}
     sgr_pct_day: dict[tuple[str, str], float] = {}
     for s in (batch_week_states or []):
         mort_pct[(s.batch_id, s.week_label)] = s.mortality_pct_weekly
         sgr_pct_day[(s.batch_id, s.week_label)] = s.sgr_pct_day
+
+    # Realized biology biomass delta + mortality count per (tank, week) — the
+    # GROUND TRUTH growth-minus-mortality the daily walker actually applied
+    # (summed across any batches that shared the tank that week). The audit
+    # reconciles against this instead of re-estimating growth from the coarse
+    # weekly SGR, so split-off sub-populations don't false-positive a BIO_DRIFT.
+    rbio_tw: dict[tuple[int, str], float] = defaultdict(float)
+    rmort_tw: dict[tuple[int, str], float] = defaultdict(float)
+    for (tid_, wk_, _b), v in (realized_biology or {}).items():
+        rbio_tw[(tid_, wk_)] += v[0]
+        rmort_tw[(tid_, wk_)] += v[1]
 
     # Per-(tank, week) event aggregates — counts AND biomass (kg).
     harvest_out: dict[tuple[int, str], float] = defaultdict(float)
@@ -1856,19 +1869,27 @@ def write_tank_continuity_audit(
             g_out_kg = grade_out_kg.get((tid, wk), 0.0)
             g_in_kg = grade_in_kg.get((tid, wk), 0.0)
             tn_in_kg = tranog_in_kg.get((tid, wk), 0.0)
-            # Use the batch present in tank DURING biology for SGR (bio_batch
-            # computed above for the count balance).
-            sgr = sgr_pct_day.get((bio_batch, wk), 0.0) if bio_batch else 0.0
-            growth_factor = (1.0 + sgr / 100.0) ** 7
-            # TranOG entries now land on the OG-entry WEEK START, so the
-            # entered biomass is present for the full week — full-week growth
-            # + mortality, exactly like pre-biology transfers (t_in). Fold it
-            # into the at-week-open bucket.
+            # Biomass after the pre-biology events (harvest/transfer/TranOG).
             bio_full_growth = prev_biomass - h_out_kg - t_out_kg + t_in_kg + tn_in_kg
-            growth_kg = 0.0 if is_starve else bio_full_growth * (growth_factor - 1.0)
-            mort_kg = 0.0 if is_starve else bio_full_growth * (m_pct / 100.0)
-            # Expected close = biomass after biology, then grade events:
-            bio_after_biology = bio_full_growth + growth_kg - mort_kg
+            rb = rbio_tw.get((tid, wk))
+            if rb is not None and not is_starve:
+                # GROUND TRUTH: the net growth-minus-mortality biomass the daily
+                # walker actually applied to this tank-week. Split into Growth/Mort
+                # display columns via the recorded mortality count at the open
+                # weight (growth = net + mort, so growth - mort == the recorded
+                # net and the close reconciles exactly).
+                open_wt_g = (prev_biomass / prev_count * 1000.0) if prev_count > 0 else 0.0
+                mort_kg = rmort_tw.get((tid, wk), 0.0) * open_wt_g / 1000.0
+                growth_kg = rb + mort_kg
+                bio_after_biology = bio_full_growth + rb
+            else:
+                # Fallback (STARVE = no biology, or no recorded biology): coarse
+                # weekly-SGR estimate on the at-week-open biomass.
+                sgr = sgr_pct_day.get((bio_batch, wk), 0.0) if bio_batch else 0.0
+                growth_factor = (1.0 + sgr / 100.0) ** 7
+                growth_kg = 0.0 if is_starve else bio_full_growth * (growth_factor - 1.0)
+                mort_kg = 0.0 if is_starve else bio_full_growth * (m_pct / 100.0)
+                bio_after_biology = bio_full_growth + growth_kg - mort_kg
             expected_bio = bio_after_biology - g_out_kg + g_in_kg
             delta_bio = cur_biomass - expected_bio
             bio_flag = ""
