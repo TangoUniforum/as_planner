@@ -1061,8 +1061,18 @@ def _build_batch_week_ledger(
             cc, cwt, cbio, ws_date = close_vals((b, wk))
             if i == 0:
                 s0 = bio_state.get((b, wk))
-                oc, owt, obio = ((s0.count, s0.avg_weight_g, s0.biomass_kg)
-                                 if s0 else (cc, cwt, cbio))
+                if s0 and getattr(s0, "week_from_input", -1) == 0:
+                    # STOCKING week: the batch had no opening balance — the
+                    # input_count flow CREATES the fish (open 0 -> close). Using
+                    # the post-input biology count as the open would double-count
+                    # the input in Count_Check (open already includes the input
+                    # AND input_count adds it again -> a spurious ~input residual
+                    # on every batch's first week). Open is 0 before stocking.
+                    oc, owt, obio = 0.0, 0.0, 0.0
+                elif s0:
+                    oc, owt, obio = s0.count, s0.avg_weight_g, s0.biomass_kg
+                else:
+                    oc, owt, obio = cc, cwt, cbio
             else:
                 oc, owt, obio, _ = close_vals((b, weeks[i - 1]))
             h = harv.get((b, wk), {"count": 0.0, "gross": 0.0, "wt_sum": 0.0})
