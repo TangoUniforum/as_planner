@@ -91,7 +91,7 @@ Facility-wide knobs read into `ControlParams`:
 | `rebalance_level` | **load-LEVELING (ON by default)** — cap-agnostic balancer that spreads load off the hottest system onto the COLDEST (vs concentrating); levels feed+biomass+density together. Cuts per-system feed/biomass over-cap ~90% at the cost of more marginal-density tank-weeks (see §7.3). Set `false` for the old density-only behavior | **true** |
 | `rebalance_split_budget` | split over-dense batches into free tanks (moves/week) | 8 |
 | `rebalance_varqty_budget` | precise-count shaving of over-cap systems (opt-in) | 0 |
-| `harvest_setpoint_lookahead_weeks` | **anticipatory harvest margin** = weeks of realized growth held below the cap (see §4.2) | **0.75** |
+| `harvest_setpoint_lookahead_weeks` | **VESTIGIAL** — superseded by the dual-limit setpoint (§4.1/§4.3); kept for config back-compat but **not read** by the engine. Use `facility_biomass_deviation_pct` to set how close to the cap to run | 0.75 (ignored) |
 | `harvest_level_load` | **harvest smoother (ON by default)** — enforce `max_harvest_per_week` as a HARD ceiling + pre-harvest earlier so harvest is flat and biomass stays under cap. Paired with `rebalance_level`, which otherwise spikes harvest (see §4.3). Set `false` for old reactive behavior | **true** |
 | `harvest_smooth_lookahead_weeks` | level-load window K — weeks of coming-due biomass to spread the pre-harvest over | 6 |
 | `harvest_level_target` | flat fish/week floor when level-loading (unset/null = auto from realized growth) | null |
@@ -227,10 +227,11 @@ weight unchanged, for a minor **+7 feed system-weeks**. The two travel together 
 |---|---|---|---|---|
 | OFF (default) | 12 | 0.359 | 4.29M | 3.87M |
 | ON, K=6 | 10 | 0.293 | 4.24M | 3.85M |
-| **ON, K=10 + setpoint_lookahead=2.0** | **8** | **0.247** | **4.20M** | 3.81M |
+| **ON, K=10** | **8** | **0.247** | **4.20M** | 3.81M |
 
-Higher K / setpoint-lookahead = flatter + fewer breaches, at slightly lower mean
-utilization. **The residual (8 weeks, biomass still ~8% over cap) is a stocking/
+Higher K = flatter + fewer breaches, at slightly lower mean utilization. (These are
+historical config(7) measurements; the setpoint-lookahead lever once tested here is
+now vestigial — §4.3.) **The residual (8 weeks, biomass still ~8% over cap) is a stocking/
 capacity limit** — this config is over-stocked (it wants >55k/week in burst weeks),
 which no controller setting can fully fix. Use the **Optimizer (§7.2)** to find the
 best level-load + knob combination for your scenario, and re-stock if the residual
@@ -338,9 +339,10 @@ may need re-calibrating — but it can't tell you the model's *absolute* truth.
    **both** incoming batches *and* in-flight ones already in FW at the forecast
    start, where it solves the correction on the remaining growth to TranOG) if you
    want it to hit your plan.
-3. **Check `Advisory`** for over-cap weeks. If biomass runs over the cap, either
-   raise `harvest_setpoint_lookahead_weeks` toward 0.90 (tighter walk) or accept the touch
-   if it's within your deviation band.
+3. **Check `Advisory`** for over-cap weeks. If biomass runs over the cap, **widen**
+   `facility_biomass_deviation_pct` (more headroom below the cap); to run tighter,
+   narrow it. (This replaced the old `harvest_setpoint_lookahead_weeks` walk, now
+   vestigial — see §4.3.)
 4. **Check the `Plan` tab / `TransferTemplate` §B for per-batch density.** See
    §7.1 — read the *distribution*, not the raw OVER CAP count.
 5. **Check `YearlySummary` / HarvestPlan Report monthly totals** for the production
@@ -375,11 +377,11 @@ same engine (`forecast/tuning.py`):
   `--quick` for the cheap subset).
 
 **Quick vs full.** *Quick* (3 runs: baseline + the dominant lever on each axis —
-`density_target_pct` and `harvest_setpoint_lookahead_weeks`) is a fast read.
-*Full* (7 runs) sweeps both directions of every relevant knob.
+`density_target_pct` and `facility_biomass_deviation_pct`) is a fast read.
+*Full* sweeps both directions of every relevant knob.
 
 Both run the forecast across a grid of `density_target_pct`, the rebalancer
-budgets, and `harvest_setpoint_lookahead_weeks`, and report the peak-density
+budgets, and `facility_biomass_deviation_pct`, and report the peak-density
 distribution + conservation for each. Pick the row that **minimises severe
 (>1.3×) while conservation holds** (must always be 0 dropped / 0 over-produced).
 Edit `DEFAULT_GRID` in `forecast/tuning.py` to sweep other knobs/values.
@@ -390,8 +392,11 @@ obvious moves backfire:
   per batch. There aren't any, so placement crams the survivors **harder** —
   over-cap gets *worse*. On config(7), `0.99` (tight packing) is the **best**
   setting, beating 0.90/0.85.
-- *Raising* `harvest_setpoint_lookahead_weeks` frees finishing tanks but not the
-  grow-out tanks where mid-life peaks happen — over-cap got worse (worst 1.42→1.92).
+- *Widening* `facility_biomass_deviation_pct` (more headroom below the cap) lowers
+  standing biomass but frees finishing tanks, not the grow-out tanks where mid-life
+  density peaks happen — so per-batch density over-cap isn't relieved by it. (The
+  old `harvest_setpoint_lookahead_weeks` lever this bullet used to cite is now
+  vestigial — see §4.3.)
 - More `rebalance_*` budget had **no effect** on the severe peaks: the rebalancer
   can only move fish into a tank with room, and at peak there are none.
 
@@ -440,8 +445,8 @@ custom weights. In the app, **changing the emphasis re-scores instantly** withou
 re-running the sweep — explore the trade-offs live.
 
 **Search method (Quick/Full grid vs Deep search).** The grids *enumerate* hand-picked
-configs and mostly vary one knob at a time, so they miss **combinations** (e.g. the
-`tran_og=2` + `setpoint=3.0` + `K=12` combo had to be found by hand). **Deep search**
+configs and mostly vary one knob at a time, so they miss **combinations** (e.g. a
+`tran_og=2` + `deviation=0.005` + `K=12` combo has to be found by hand). **Deep search**
 is a greedy **coordinate descent**: from the current config it tunes one knob at a time
 toward the best score under the chosen emphasis, looping until nothing improves — so it
 **finds combinations the grid can't** (~15–30 runs, deterministic, conservation-gated).

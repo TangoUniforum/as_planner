@@ -49,13 +49,15 @@ FULL_GRID: list[tuple[str, dict]] = [
     ("density=0.85", {"density_target_pct": 0.85}),
     ("varqty=20", {"rebalance_varqty_budget": 20}),
     ("balance=60", {"rebalance_balance_budget": 60}),
-    ("setpoint=0.90", {"harvest_setpoint_lookahead_weeks": 0.90}),
-    ("setpoint=1.20", {"harvest_setpoint_lookahead_weeks": 1.20}),
+    # facility_biomass_deviation_pct is the live harvest-tightness knob (it
+    # superseded harvest_setpoint_lookahead_weeks, which is now vestigial).
+    ("deviation=0.005", {"facility_biomass_deviation_pct": 0.005}),
+    ("deviation=0.02", {"facility_biomass_deviation_pct": 0.02}),
 ]
 QUICK_GRID: list[tuple[str, dict]] = [
     ("baseline", {}),
     ("density=0.85", {"density_target_pct": 0.85}),
-    ("setpoint=0.90", {"harvest_setpoint_lookahead_weeks": 0.90}),
+    ("deviation=0.005", {"facility_biomass_deviation_pct": 0.005}),
 ]
 # Back-compat default.
 DEFAULT_GRID = FULL_GRID
