@@ -252,7 +252,7 @@ matters.
 | **WeeklyReport / MonthlyReport** | per-(batch, week/month) open/close ledger (count, weight, biomass, SGR, feed, FCR, mortality, harvest, transfers, checks) | detailed batch accounting |
 | **FeedForecastWeekly / Monthly** | feed by feed-type × period matrix | feed ordering |
 | **Advisory** | per-week capacity table: biomass/feed vs caps + excess + OK/REDUCE | capacity headroom + over-cap weeks |
-| **FacilityMap** | tank × week grid; cell = "Batch# AvgWt/Density" | occupancy at a glance |
+| **FacilityMap** | tank × week grid (cell = "Batch# AvgWt/Density"); **below it**: per-system × week **feed (kg/day)** and **biomass (kg)** blocks, each with a FACILITY total row | occupancy at a glance + per-system load vs caps |
 | **BatchLocations** | per-(week, batch, tank) occupancy | raw realized placement |
 | **ValidationLog** | numbered warnings (# / Category / Detail), incl. FW-calibration + bottleneck (annotated with resolution) | diagnostics |
 | **InputConservationAudit** | per batch: placed/dropped, harvested, standing, **FW reconciliation** (planned vs realized seawater entry) | conservation + FW calibration gaps |

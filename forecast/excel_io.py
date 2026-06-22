@@ -2165,6 +2165,8 @@ def write_facility_map(
     wb,
     batch_locations,
     facility,
+    batches=None,
+    tables=None,
     sheet_name: str = "FacilityMap",
 ) -> None:
     """Tank × Week matrix showing which batch occupies each tank each week.
@@ -2172,6 +2174,10 @@ def write_facility_map(
     Cell value is the batch_id (or blank if empty). Rows are tanks
     ordered by system then tank_id; columns are forecast weeks in
     chronological order.
+
+    Below the tank grid: two per-SYSTEM × week summaries — total planned feed
+    (kg/day) and total biomass (kg) per system — each with a FACILITY total row
+    so the operator can read system loads and check them against the caps.
     """
     if sheet_name in wb.sheetnames:
         del wb[sheet_name]
@@ -2211,7 +2217,36 @@ def write_facility_map(
             else:
                 row.append("")
         ws.append(row)
-    ws.column_dimensions[get_column_letter(1)].width = 6
+
+    # ---- Per-system summaries below the tank grid ----
+    from collections import defaultdict
+    systems = sorted({t.system_id for t in og_tanks})
+    sys_feed: dict[tuple[str, str], float] = defaultdict(float)
+    sys_bio: dict[tuple[str, str], float] = defaultdict(float)
+    for r in batch_locations:
+        if r.system_id in systems:
+            sys_feed[(r.system_id, r.week_label)] += _row_feed_kg_day(r, batches, tables)
+            sys_bio[(r.system_id, r.week_label)] += r.biomass_kg
+
+    def _sys_label(sysid):
+        return sysid[2:] if sysid.startswith("OG") else sysid
+
+    def _block(title, data, fmt):
+        ws.append([])
+        ws.append([title])
+        ws.append(["System", ""] + weeks)
+        for sysid in systems:
+            ws.append([_sys_label(sysid), ""]
+                      + [fmt(data.get((sysid, w), 0.0)) for w in weeks])
+        ws.append(["FACILITY", ""]
+                  + [fmt(sum(data.get((s, w), 0.0) for s in systems)) for w in weeks])
+
+    _block("TOTAL PLANNED FEED PER DAY (kg/day) — per system (STARVE/6N-purge = 0)",
+           sys_feed, lambda v: round(v, 0))
+    _block("BIOMASS (kg) — per system per week (the daily average held)",
+           sys_bio, lambda v: round(v, 0))
+
+    ws.column_dimensions[get_column_letter(1)].width = 9
     ws.column_dimensions[get_column_letter(2)].width = 6
     for c in range(3, 3 + len(weeks)):
         ws.column_dimensions[get_column_letter(c)].width = 12

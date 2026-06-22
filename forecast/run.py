@@ -676,7 +676,8 @@ def main(
           f"{worst_bio:.2f}x), feed over-cap {n_feed_over} (worst {worst_feed:.2f}x) "
           f"-> SystemLimitsAudit sheet")
 
-    write_facility_map(wb, placement.batch_locations, facility)
+    write_facility_map(wb, placement.batch_locations, facility,
+                       batches=batch_by_id, tables=tables)
 
     # Config snapshot: embed the exact app-managed config + scenario this
     # run used into the output workbook, so the saved file is a complete,
