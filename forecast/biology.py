@@ -535,37 +535,33 @@ def _simulate_fw_avg_weight_at_tran_og(
     return cur_weight
 
 
-def solve_fw_correction(
-    batch: BatchInput,
-    tables: BiologyTables,
-    lo: float = 0.10,
-    hi: float = 3.00,
-    tol_rel: float = 1e-4,
-    max_iter: int = 60,
+def _bisect_fw_correction(
+    sim_fn, target: float,
+    lo: float = 0.10, hi: float = 3.00, tol_rel: float = 1e-4, max_iter: int = 60,
 ) -> Optional[float]:
-    """Bisection: find FW_Correction landing pre-cull avg wt at TranOG on TranOG_AvgWt."""
-    target = batch.tran_og_avg_wt_g
+    """Bisect FW_Correction so `sim_fn(correction)` (the simulated pre-cull avg wt
+    at TranOG) lands on `target`. Shared by the incoming and in-flight solvers."""
     if not target or target <= 0:
         return None
-    wt_lo = _simulate_fw_avg_weight_at_tran_og(batch, tables, lo)
-    wt_hi = _simulate_fw_avg_weight_at_tran_og(batch, tables, hi)
+    wt_lo = sim_fn(lo)
+    wt_hi = sim_fn(hi)
     if wt_lo is None or wt_hi is None:
         return None
     while wt_hi < target and hi < 10.0:
         hi *= 1.5
-        wt_hi = _simulate_fw_avg_weight_at_tran_og(batch, tables, hi)
+        wt_hi = sim_fn(hi)
         if wt_hi is None:
             return None
     while wt_lo > target and lo > 0.001:
         lo *= 0.5
-        wt_lo = _simulate_fw_avg_weight_at_tran_og(batch, tables, lo)
+        wt_lo = sim_fn(lo)
         if wt_lo is None:
             return None
     if wt_lo > target or wt_hi < target:
         return None
     for _ in range(max_iter):
         mid = 0.5 * (lo + hi)
-        wt = _simulate_fw_avg_weight_at_tran_og(batch, tables, mid)
+        wt = sim_fn(mid)
         if wt is None:
             return None
         if abs(wt - target) / target < tol_rel:
@@ -575,6 +571,60 @@ def solve_fw_correction(
         else:
             hi = mid
     return 0.5 * (lo + hi)
+
+
+def solve_fw_correction(
+    batch: BatchInput,
+    tables: BiologyTables,
+) -> Optional[float]:
+    """FW_Correction landing pre-cull avg wt at TranOG on TranOG_AvgWt, for an
+    INCOMING batch simulated from TranSF (egg-up)."""
+    return _bisect_fw_correction(
+        lambda c: _simulate_fw_avg_weight_at_tran_og(batch, tables, c),
+        batch.tran_og_avg_wt_g)
+
+
+def _simulate_inflight_fw_weight_at_tran_og(
+    batch: BatchInput, tables: BiologyTables,
+    start_date, start_weight: float, dsi_at_close: int, fw_correction: float,
+) -> Optional[float]:
+    """Pre-cull avg wt at TranOG for an IN-FLIGHT batch: walk the FW daily grid
+    from `start_date`/`start_weight` (the PR-measured state) to TranOG under a
+    candidate fw_correction, applying only the bottom culls NOT already fired by
+    `dsi_at_close`. Mirrors project_in_flight_fw_batch's weight path so the
+    back-solved correction lands the same projection on target."""
+    if not batch.tran_og_date or not batch.input_date or start_weight <= 0:
+        return None
+    input_date = _as_date(batch.input_date)
+    tran_og_date = _as_date(batch.tran_og_date)
+    cur_weight = float(start_weight)
+    cur_date = _as_date(start_date)
+    fired = {int(d) for d, _p in tables.culling if int(d) <= dsi_at_close}
+    while cur_date < tran_og_date:
+        dsi = (cur_date - input_date).days
+        for thresh, pct in tables.culling:
+            if dsi >= thresh and thresh not in fired:
+                _, cur_weight, _, _ = _apply_bottom_cull(
+                    1.0, cur_weight, batch.tran_og_cv, pct / 100.0)
+                fired.add(thresh)
+        sgr_base = _interp(cur_weight, tables.sgr_size_g, tables.sgr_fw_pct_day)
+        cur_weight = cur_weight * (1.0 + sgr_base * fw_correction / 100.0)
+        cur_date = cur_date + timedelta(days=1)
+    return cur_weight
+
+
+def solve_inflight_fw_correction(
+    batch: BatchInput, tables: BiologyTables,
+    start_date, start_weight: float, dsi_at_close: int,
+) -> Optional[float]:
+    """FW_Correction for an IN-FLIGHT batch: the correction applied to its
+    REMAINING FW growth (from its current PR weight/date to TranOG) that lands the
+    pre-cull avg wt on TranOG_AvgWt. So a running batch gets a recalibration target
+    just like a not-yet-input one."""
+    return _bisect_fw_correction(
+        lambda c: _simulate_inflight_fw_weight_at_tran_og(
+            batch, tables, start_date, start_weight, dsi_at_close, c),
+        batch.tran_og_avg_wt_g)
 
 
 # ---------- per-tank one-day biology step (used by placement walker) ----------
@@ -803,6 +853,11 @@ def project_in_flight_fw_batch(
                     projected_pre_cull_avg_wt_g=cur_weight,
                     residual_pct=(cur_weight - batch.tran_og_avg_wt_g)
                                  / batch.tran_og_avg_wt_g * 100.0,
+                    # Back-solve the correction on the REMAINING FW growth (from
+                    # the PR state at forecast_start to TranOG) so a running batch
+                    # gets a recalibration target too, not just incoming ones.
+                    suggested_fw_correction=solve_inflight_fw_correction(
+                        batch, tables, forecast_start, initial_avg_wt_g, dsi_at_close),
                 ))
             target_count = float(batch.tran_og_count or 0)
             if target_count > 0 and cur_count > target_count:
