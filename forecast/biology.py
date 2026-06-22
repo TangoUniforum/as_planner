@@ -129,6 +129,29 @@ def _fcr_model_key(fcr_model_str: str) -> str:
     return digits
 
 
+def sgr_pct_per_day(
+    avg_wt_g: float, stage: str, batch: Optional[BatchInput],
+    tables: BiologyTables,
+) -> float:
+    """Effective SGR (%/day) at a weight: the size-interpolated FW or SW growth
+    curve scaled by the batch's stage correction (`fw_correction` in FW, else
+    `sgr_correction`; 1.0 when no batch).
+
+    Single source for the growth rate used by every daily projector,
+    `advance_tank_one_day`, `realized_feed_kg_day`, and the placement
+    growth/feed helpers — so the formula can't drift between copies. (The
+    FW-correction SOLVER in `project_batch_fw_residual` uses a CANDIDATE
+    correction, not the batch's, so it deliberately does not call this.)
+    """
+    if stage == "FW":
+        base = _interp(avg_wt_g, tables.sgr_size_g, tables.sgr_fw_pct_day)
+        corr = batch.fw_correction if batch else 1.0
+    else:
+        base = _interp(avg_wt_g, tables.sgr_size_g, tables.sgr_sw_pct_day)
+        corr = batch.sgr_correction if batch else 1.0
+    return base * corr
+
+
 def realized_feed_kg_day(
     avg_wt_g: float, biomass_kg: float, batch: Optional[BatchInput],
     tables: BiologyTables,
@@ -143,8 +166,7 @@ def realized_feed_kg_day(
     """
     if biomass_kg <= 0 or avg_wt_g <= 0:
         return 0.0
-    corr = batch.sgr_correction if batch else 1.0
-    sgr_eff = _interp(avg_wt_g, tables.sgr_size_g, tables.sgr_sw_pct_day) * corr
+    sgr_eff = sgr_pct_per_day(avg_wt_g, "SW", batch, tables)
     fcr_curve = tables.fcr_by_model.get(
         _fcr_model_key(batch.fcr_model) if batch else "", [])
     fcr = _interp(avg_wt_g, tables.fcr_size_g, fcr_curve) if fcr_curve else 1.2
@@ -402,13 +424,11 @@ def project_batch(
             sgr_eff = 0.0
             fcr = 0.0
         elif stage == "FW":
-            sgr_base = _interp(cur_weight, tables.sgr_size_g, tables.sgr_fw_pct_day)
-            sgr_eff = sgr_base * batch.fw_correction
+            sgr_eff = sgr_pct_per_day(cur_weight, "FW", batch, tables)
             fcr = _interp(cur_weight, tables.fcr_size_g, fcr_curve)
             cur_weight = cur_weight * (1.0 + sgr_eff / 100.0)
         else:  # SW
-            sgr_base = _interp(cur_weight, tables.sgr_size_g, tables.sgr_sw_pct_day)
-            sgr_eff = sgr_base * batch.sgr_correction
+            sgr_eff = sgr_pct_per_day(cur_weight, "SW", batch, tables)
             fcr = _interp(cur_weight, tables.fcr_size_g, fcr_curve)
             cur_weight = cur_weight * (1.0 + sgr_eff / 100.0)
 
@@ -586,12 +606,7 @@ def advance_tank_one_day(tank, batch: BatchInput, tables: BiologyTables, today) 
         return  # no growth for empty / pre-FW / starving tanks
 
     fcr_key = _fcr_model_key(batch.fcr_model)
-    if stage == "FW":
-        sgr_base = _interp(tank.avg_wt_g, tables.sgr_size_g, tables.sgr_fw_pct_day)
-        sgr_eff = sgr_base * batch.fw_correction
-    else:  # SW
-        sgr_base = _interp(tank.avg_wt_g, tables.sgr_size_g, tables.sgr_sw_pct_day)
-        sgr_eff = sgr_base * batch.sgr_correction
+    sgr_eff = sgr_pct_per_day(tank.avg_wt_g, stage, batch, tables)
     tank.apply_daily_growth(sgr_eff)
 
 
@@ -639,8 +654,7 @@ def project_in_flight_batch(
         cur_count *= _daily_survival_factor(m_weekly)
         mort_count_today = _pre_mort - cur_count
 
-        sgr_base = _interp(cur_weight, tables.sgr_size_g, tables.sgr_sw_pct_day)
-        sgr_eff = sgr_base * batch.sgr_correction
+        sgr_eff = sgr_pct_per_day(cur_weight, "SW", batch, tables)
         fcr = _interp(cur_weight, tables.fcr_size_g, fcr_curve)
         cur_weight = cur_weight * (1.0 + sgr_eff / 100.0)
 
@@ -834,13 +848,8 @@ def project_in_flight_fw_batch(
         cur_count *= _daily_survival_factor(m_weekly)
         mort_count_today = _pre_mort - cur_count
 
-        # Daily growth — FW vs SW SGR curve.
-        if stage == "FW":
-            sgr_base = _interp(cur_weight, tables.sgr_size_g, tables.sgr_fw_pct_day)
-            sgr_eff = sgr_base * batch.fw_correction
-        else:
-            sgr_base = _interp(cur_weight, tables.sgr_size_g, tables.sgr_sw_pct_day)
-            sgr_eff = sgr_base * batch.sgr_correction
+        # Daily growth — FW vs SW SGR curve (via the shared SGR helper).
+        sgr_eff = sgr_pct_per_day(cur_weight, stage, batch, tables)
         fcr = _interp(cur_weight, tables.fcr_size_g, fcr_curve)
         cur_weight = cur_weight * (1.0 + sgr_eff / 100.0)
 

@@ -57,7 +57,7 @@ from .caps import (
 )
 from .biology import (
     _fcr_model_key, _feed_type_for_size, _interp, realized_feed_kg_day,
-    upper_truncated_split,
+    sgr_pct_per_day, upper_truncated_split,
 )
 from .events import Grade, GradedHarvest, Harvest, OG12_SYSTEMS, OG12_MOVE_LOCK_WT_G, TankAllocation, Transfer, TranOGEntry
 from .harvest_scheduler import HarvestDemand
@@ -118,8 +118,7 @@ def _grow_weight_days(avg_wt_g: float, batch: Optional[BatchInput],
         return avg_wt_g
     w = float(avg_wt_g)
     for _ in range(days):
-        sgr_base = _interp(w, tables.sgr_size_g, tables.sgr_sw_pct_day)
-        sgr_eff = sgr_base * batch.sgr_correction
+        sgr_eff = sgr_pct_per_day(w, "SW", batch, tables)
         w = w * (1.0 + sgr_eff / 100.0)
     return w
 
@@ -1519,8 +1518,7 @@ def _realized_facility_metrics(
         fac_bio += bio
         batch = batch_meta.get(t.batch_id)
         if t.stage == "SW":
-            sgr_base = _interp(t.avg_wt_g, tables.sgr_size_g, tables.sgr_sw_pct_day)
-            sgr_eff = sgr_base * (batch.sgr_correction if batch else 1.0)
+            sgr_eff = sgr_pct_per_day(t.avg_wt_g, "SW", batch, tables)
             fac_growth_kg += bio * (sgr_eff / 100.0) * 7.0
             fcr_curve = tables.fcr_by_model.get(
                 _fcr_model_key(batch.fcr_model) if batch else "", [])
