@@ -334,8 +334,10 @@ may need re-calibrating — but it can't tell you the model's *absolute* truth.
 2. **Check `InputConservationAudit`**: 0 dropped, 0 over-produced, and review the
    **FW_Flag** column — any "FW UNDER/OVER plan" batch reached seawater off its
    planned `tran_og_count`. Adjust that batch's `fw_correction` (the
-   ValidationLog's FW-Calibration warning suggests a corrected value) if you want it
-   to hit your plan.
+   **Diagnostics** tab's FW-Calibration table back-solves a suggested value — for
+   **both** incoming batches *and* in-flight ones already in FW at the forecast
+   start, where it solves the correction on the remaining growth to TranOG) if you
+   want it to hit your plan.
 3. **Check `Advisory`** for over-cap weeks. If biomass runs over the cap, either
    raise `harvest_setpoint_lookahead_weeks` toward 0.90 (tighter walk) or accept the touch
    if it's within your deviation band.
