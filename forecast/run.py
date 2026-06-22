@@ -635,7 +635,7 @@ def main(
         wb, placement.batch_locations, placement.harvest_events, all_states,
         transfer_events=placement.transfer_events, batches=batch_by_id, tables=tables,
         scenario_name=control.scenario_name, hog_yield=control.default_hog_yield,
-        hog_overrides=facility_hog_overrides)
+        hog_overrides=facility_hog_overrides, forecast_start=control.forecast_start)
     write_reconciliation_report(
         wb,
         placement.batch_locations,

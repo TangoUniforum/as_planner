@@ -1217,6 +1217,7 @@ def write_monthly_report(
     scenario_name: str = "",
     hog_yield: float = 0.0,
     hog_overrides=None,
+    forecast_start=None,
     sheet_name: str = "MonthlyReport",
 ) -> None:
     """Per-(month, batch) open/close production ledger (matches reference format).
@@ -1242,21 +1243,22 @@ def write_monthly_report(
         transfer_events, batches, tables, hog_yield, hog_overrides)
 
     # Roll the weekly ledger up to calendar months, splitting any week that
-    # straddles a month boundary by CALENDAR-DAY fraction (flows are daily). A
-    # month's Open/Close are the LINEARLY-INTERPOLATED state at the month
-    # boundary (open + f*(close-open)). Because each weekly row already balances
-    # (close = open + flows), the day-split balances exactly, so the monthly
-    # Count_Check / Bio_Check stay ~0 (the ledger remains internally consistent)
-    # while boundary-week flows land in their true month instead of the
-    # week-start month. Mirrors the HarvestPlan Report / FeedForecastMonthly
-    # proration; the lone difference is harvest here is split by calendar day
-    # (one fraction for the whole ledger) rather than Mon-Fri working days, so
-    # the boundary balance is exact.
-    from .time_grid import calendar_day_month_split
+    # straddles a month boundary into its true month. CONTINUOUS flows (growth,
+    # feed, mortality, cull, input, transfers) happen every calendar day, so they
+    # split by CALENDAR-DAY fraction. HARVEST happens only Mon-Fri, so it splits
+    # by WORKING-DAY fraction -- identical to the HarvestPlan Report, so the two
+    # sheets' monthly harvest now tie out exactly. The two fractions differ on
+    # boundary weeks, so the month-boundary Open/Close is advanced by the harvest
+    # part and the non-harvest part SEPARATELY, each at its own cumulative
+    # fraction. Close is therefore exactly open + (the month's actual flows), so
+    # the monthly Count_Check / Bio_Check stay ~0 (the ledger stays internally
+    # consistent) even though harvest and the daily flows attribute differently.
+    from .time_grid import calendar_day_month_split, working_day_month_split
     from datetime import date as _date
     FLOW_KEYS = ("gross_growth", "net_prod", "feed", "mort_count", "mort_bio",
                  "harv_count", "harv_gross", "harv_hog", "cull_count", "cull_bio",
                  "input_count", "xfer_in", "xfer_out", "count_check", "bio_check")
+    HARVEST_KEYS = ("harv_count", "harv_gross", "harv_hog")
 
     def _wk_date(w):
         # Week-start date for proration. Some ledger rows (e.g. harvest-only)
@@ -1281,26 +1283,34 @@ def write_monthly_report(
             wkd = _wk_date(w)
             if wkd is None:
                 continue  # unparseable week — cannot attribute, skip (rare)
-            split = calendar_day_month_split(wkd)  # (yr,mon)->frac
+            split_c = calendar_day_month_split(wkd)               # daily flows
+            split_w = working_day_month_split(wkd, forecast_start)  # harvest
             oc, ob = w["open_count"], w["open_bio"]
+            hc, hg = w["harv_count"], w["harv_gross"]
             dc, db = w["close_count"] - oc, w["close_bio"] - ob
-            cum = 0.0
-            for (yr, mon) in sorted(split):
-                frac = split[(yr, mon)]
+            dc_h, db_h = -hc, -hg              # harvest part of the net delta
+            dc_n, db_n = dc - dc_h, db - db_h  # everything-else part of the delta
+            cum_c = cum_w = 0.0
+            for (yr, mon) in sorted(set(split_c) | set(split_w)):
+                fc = split_c.get((yr, mon), 0.0)   # calendar-day fraction
+                fw = split_w.get((yr, mon), 0.0)   # working-day fraction
                 mo = f"{yr}-{mon:02d}"
                 a = acc.get(mo)
                 if a is None:
                     a = {k: 0.0 for k in FLOW_KEYS}
                     a["days"] = 0.0
-                    a["open_count"] = oc + cum * dc      # interp at month start
-                    a["open_bio"] = ob + cum * db
+                    # state at month START: advance harvest + non-harvest deltas
+                    # each by its own cumulative fraction
+                    a["open_count"] = oc + cum_c * dc_n + cum_w * dc_h
+                    a["open_bio"] = ob + cum_c * db_n + cum_w * db_h
                     acc[mo] = a
-                a["close_count"] = oc + (cum + frac) * dc  # interp at month end
-                a["close_bio"] = ob + (cum + frac) * db
-                a["days"] += frac * 7.0
+                a["close_count"] = oc + (cum_c + fc) * dc_n + (cum_w + fw) * dc_h
+                a["close_bio"] = ob + (cum_c + fc) * db_n + (cum_w + fw) * db_h
+                a["days"] += fc * 7.0
                 for k in FLOW_KEYS:
-                    a[k] += w[k] * frac
-                cum += frac
+                    a[k] += w[k] * (fw if k in HARVEST_KEYS else fc)
+                cum_c += fc
+                cum_w += fw
         for mo, a in acc.items():
             rows_out.append((mo, b, a))
 
