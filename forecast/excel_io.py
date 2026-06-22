@@ -136,9 +136,13 @@ def write_batch_plan(wb, batch_locations, harvest_events, default_hog_yield: flo
                                  else "In-flight at forecast start")
                     else:
                         label = f"-> {tier}"
+                    # Tank count = the batch's TOTAL concurrent footprint that
+                    # week (not just tanks in the newly-entered tier) — so the
+                    # column grows with biomass as expected, instead of reading
+                    # "1" at every tier entry.
                     milestones.append((wk, label,
                                        ", ".join(sorted({r.system_id for r in sub})),
-                                       round(avgwt, 2), len({r.tank_id for r in sub})))
+                                       round(avgwt, 2), len(wk_tanks[wk])))
         h = hv.get(bid)
         hw = (f"{min(h['weeks'])}-{max(h['weeks'])}" if h and h["weeks"] else "-")
         hog_t = (h["hog"] / 1000.0) if h else 0.0
@@ -155,7 +159,7 @@ def write_batch_plan(wb, batch_locations, harvest_events, default_hog_yield: flo
         ws.append([p["batch"], p["sw"], p["peak"], p["hw"], round(p["hog_t"], 0)])
     ws.append([])
     ws.append(["MILESTONES - the journey per batch"])
-    ws.append(["Batch", "Week", "Event", "Systems", "AvgWt (kg)", "Tanks"])
+    ws.append(["Batch", "Week", "Event", "Systems", "AvgWt (kg)", "Total_Tanks (that week)"])
     for p in plans:
         for (wk, label, systems, avgwt, tanks) in p["ms"]:
             ws.append([p["batch"], wk, label, systems, avgwt, tanks])
