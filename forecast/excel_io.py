@@ -521,6 +521,22 @@ def write_harvest_plan_report(
         ws.column_dimensions[get_column_letter(c)].width = 11
 
 
+def _row_feed_kg_day(r, batches, tables):
+    """Realized feed/day (kg) for one BatchLocation row — 0 for STARVE (6N
+    depuration), empty, or when tables is absent.
+
+    Single source for the per-row feed every feed accumulator sums; it was
+    hand-inlined with subtly different guards in ~6 writers (the SystemLimitsAudit
+    copy even omitted the `tables is not None` guard). Callers add the FW/EGG
+    projected feed and the 6N move-in add-back themselves (those aren't per-row).
+    """
+    from .biology import realized_feed_kg_day
+    if tables is None or getattr(r, "stage", "") == "STARVE":
+        return 0.0
+    return realized_feed_kg_day(
+        r.avg_wt_g, r.biomass_kg, (batches or {}).get(r.batch_id), tables)
+
+
 def write_yearly_summary(
     wb,
     batch_locations,
@@ -564,11 +580,9 @@ def write_yearly_summary(
         wk_bio[r.week_label] += r.biomass_kg
         if r.week_label not in wk_year and hasattr(r.week_start, "year"):
             wk_year[r.week_label] = r.week_start.year
-        # STARVE tank-weeks (6N depuration) eat nothing — biomass counts, feed
-        # does not (mirrors the SystemLimitsAudit + FeedForecast treatment).
-        if tables is not None and getattr(r, "stage", "") != "STARVE":
-            b = (batches or {}).get(r.batch_id)
-            wk_feed[r.week_label] += realized_feed_kg_day(r.avg_wt_g, r.biomass_kg, b, tables)
+        # STARVE tank-weeks (6N depuration) eat nothing — handled by the helper
+        # (biomass still counts above; feed does not).
+        wk_feed[r.week_label] += _row_feed_kg_day(r, batches, tables)
 
     # 6N purge move-in fish ate 4 pre-transfer days in their source tank (shown
     # in 6N = STARVE above) — add that real feed (already weekly kg) per week so
@@ -778,11 +792,9 @@ def _feed_by_type_week(batch_locations, biology_states_by_batch, tables,
         wk_start.setdefault(r.week_label, r.week_start)
         if getattr(r, "stage", "") == "STARVE":
             continue  # off-feed depuration tank-week
-        if tables is not None:
-            b = (batches or {}).get(r.batch_id)
-            fkg = realized_feed_kg_day(r.avg_wt_g, r.biomass_kg, b, tables) * 7.0
-            if fkg:
-                ftw[(_feed_type_for_size(tables, r.avg_wt_g), r.week_label)] += fkg
+        fkg = _row_feed_kg_day(r, batches, tables) * 7.0
+        if fkg:
+            ftw[(_feed_type_for_size(tables, r.avg_wt_g), r.week_label)] += fkg
     for (bid, wk, ftype), kg in (sixn_move_in_feed or {}).items():
         if kg:
             ftw[(ftype, wk)] += kg
@@ -813,12 +825,10 @@ def _feed_by_batch_type_week(batch_locations, biology_states_by_batch, tables,
         wk_start.setdefault(r.week_label, r.week_start)
         if getattr(r, "stage", "") == "STARVE":
             continue  # off-feed depuration tank-week
-        if tables is not None:
-            b = (batches or {}).get(r.batch_id)
-            fkg = realized_feed_kg_day(r.avg_wt_g, r.biomass_kg, b, tables) * 7.0
-            if fkg:
-                fbtw[(r.batch_id, _feed_type_for_size(tables, r.avg_wt_g),
-                      r.week_label)] += fkg
+        fkg = _row_feed_kg_day(r, batches, tables) * 7.0
+        if fkg:
+            fbtw[(r.batch_id, _feed_type_for_size(tables, r.avg_wt_g),
+                  r.week_label)] += fkg
     for (bid, wk, ftype), kg in (sixn_move_in_feed or {}).items():
         if kg:
             fbtw[(bid, ftype, wk)] += kg
@@ -1027,10 +1037,8 @@ def _build_batch_week_ledger(
         e["bio"] += r.biomass_kg
         e["wt_sum"] += r.avg_wt_g * r.count
         e["week_start"] = r.week_start
-        # STARVE tank-weeks (6N depuration) eat nothing.
-        if tables is not None and getattr(r, "stage", "") != "STARVE":
-            b = (batches or {}).get(r.batch_id)
-            feed[key] += realized_feed_kg_day(r.avg_wt_g, r.biomass_kg, b, tables) * 7.0
+        # STARVE tank-weeks (6N depuration) eat nothing (helper returns 0).
+        feed[key] += _row_feed_kg_day(r, batches, tables) * 7.0
     # 6N purge move-in fish ate 4 pre-transfer days in their source tank (now
     # shown in 6N = STARVE, excluded above) — add that real feed back so the
     # ledger Feed column matches the FeedForecast / YearlySummary totals.
@@ -2201,13 +2209,11 @@ def write_advisory(
     for r in batch_locations:
         bio[r.week_label] += r.biomass_kg
         wk_start.setdefault(r.week_label, r.week_start)
-        # STARVE tank-weeks (6N depuration) eat nothing. NOTE: this is a per-DAY
-        # feed-rate cap check, so it uses the steady realized rate only — the 6N
-        # move-in's 4-day pre-transfer feed is a TOTAL-feed accounting item (in
-        # the FeedForecast / ledger / YearlySummary totals), not a per-day rate.
-        if tables is not None and getattr(r, "stage", "") != "STARVE":
-            b = (batches or {}).get(r.batch_id)
-            feed[r.week_label] += realized_feed_kg_day(r.avg_wt_g, r.biomass_kg, b, tables)
+        # STARVE eats nothing (helper returns 0). NOTE: this is a per-DAY feed-rate
+        # cap check, so it uses the steady realized rate only — the 6N move-in's
+        # 4-day pre-transfer feed is a TOTAL-feed accounting item (in the
+        # FeedForecast / ledger / YearlySummary totals), not a per-day rate.
+        feed[r.week_label] += _row_feed_kg_day(r, batches, tables)
 
     harv_c: dict[str, float] = defaultdict(float)
     harv_b: dict[str, float] = defaultdict(float)
@@ -2510,15 +2516,12 @@ def write_system_limits_audit(
     for r in batch_locations:
         if r.count <= 0:
             continue
-        b = batch_by_id.get(r.batch_id)
         sb[(r.week_label, r.system_id)] += r.biomass_kg
-        # STARVE = in-place purge: biomass counts to the system, but no feed.
-        # Per-DAY feed-rate cap check -> steady realized rate only; the 6N move-in
-        # 4-day pre-transfer feed is a total-feed accounting item (FeedForecast /
-        # ledger / YearlySummary), not a per-day rate, and isn't keyed by system.
-        if getattr(r, "stage", "") != "STARVE":
-            sf[(r.week_label, r.system_id)] += realized_feed_kg_day(
-                r.avg_wt_g, r.biomass_kg, b, tables)
+        # STARVE = in-place purge: biomass counts to the system, but no feed
+        # (helper returns 0). Per-DAY feed-rate cap check -> steady realized rate
+        # only; the 6N move-in 4-day pre-transfer feed is a total-feed accounting
+        # item (FeedForecast / ledger / YearlySummary), not a per-day rate.
+        sf[(r.week_label, r.system_id)] += _row_feed_kg_day(r, batch_by_id, tables)
 
     if sheet_name in wb.sheetnames:
         del wb[sheet_name]
