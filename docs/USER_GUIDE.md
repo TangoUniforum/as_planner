@@ -256,12 +256,19 @@ matters.
 | **ValidationLog** | numbered warnings (# / Category / Detail), incl. FW-calibration + bottleneck (annotated with resolution) | diagnostics |
 | **InputConservationAudit** | per batch: placed/dropped, harvested, standing, **FW reconciliation** (planned vs realized seawater entry) | conservation + FW calibration gaps |
 | **TankContinuityAudit** | per-(tank, week) balance + **facility conservation summary** | 0-drift proof |
-| **ReconciliationReport / SystemLimitsAudit** | per-batch balance / per-system cap usage | deeper audits |
+| **ReconciliationReport / SystemLimitsAudit** | per-batch open/close balance (count reconciles **exactly** via recorded realized biology; biomass within tolerance) / per-system cap usage | deeper audits — *TankContinuityAudit is the authoritative 0-drift biomass check* |
 | **RunConfig** | the exact config + scenario embedded in the output | reproducibility |
 
 > The `ProductionReport` sheet stays the **historical** input month only — the
 > *forecast* is in the sheets above (same as the reference workbook). Skipped vs the
 > reference: AccumulatedReport, AccumulatedOutput, MonthlyTargets, RunComparison.
+>
+> **Monthly harvest attribution:** harvest is a Mon–Fri activity, so the **HarvestPlan
+> Report** and the **MonthlyReport** ledger both attribute each week's harvest to
+> months by **working-day** fraction (a boundary week splits by its Mon–Fri days) —
+> so the two sheets' monthly HOG tie out. Continuous flows (feed, growth, mortality)
+> split by calendar-day. The per-event **HarvestReport** is unprorated detail (each
+> row keeps its event-date month).
 
 ### Knowing what the app is doing
 Run mode, the Optimize tab, and every result show a collapsible **"Active

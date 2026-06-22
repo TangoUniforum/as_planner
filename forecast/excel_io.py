@@ -1526,6 +1526,7 @@ def write_reconciliation_report(
     harvest_events,
     tranog_events,
     initial_state,
+    realized_biology=None,
     sheet_name: str = "ReconciliationReport",
 ) -> None:
     """Per-(batch, week) count + biomass balance check (OG side).
@@ -1534,6 +1535,22 @@ def write_reconciliation_report(
     (Cull is FW-side: applied before fish reach OG; the `input` count
     is already POST-cull, so cull doesn't enter this OG-side balance.
     Shown in the output for transparency only.)
+
+    Growth + mortality use the RECORDED realized biology (the net
+    growth-minus-mortality biomass and mortality count the daily walker
+    actually applied, summed over the batch's tanks) -- the SAME ground
+    truth as TankContinuityAudit -- so the COUNT close reconciles EXACTLY
+    instead of drifting on a coarse weekly-SGR re-estimate. A coarse SGR
+    estimate is used only as a fallback when no realized biology is given.
+
+    Biomass reconciles to within a small unflagged residual (<~0.5%) on the
+    grow-out batches that FEED 6N purge: a purge move-in debits the source
+    at the week-open weight but credits 6N at the +4-day grown weight, so a
+    tiny biomass injection rides on the transfer. That is weight-neutral and
+    fully accounted PER-TANK by TankContinuityAudit (via its transfer_in/out
+    terms); this per-BATCH ledger has no transfer term (intra-batch moves
+    net out), so the injection shows here as a sub-tolerance Biomass_Delta.
+    TankContinuityAudit is the authoritative 0-drift biomass check.
 
     Open for first week = PR-hydrated initial count (in-flight batches)
     or 0 (incoming batches arrive via TranOG events).
@@ -1600,6 +1617,17 @@ def write_reconciliation_report(
         cull_count[(s.batch_id, s.week_label)] = s.cull_count_week or 0
         cull_biomass[(s.batch_id, s.week_label)] = s.cull_biomass_kg_week or 0
 
+    # Recorded realized biology, aggregated over the batch's tanks:
+    # (batch, week) -> net growth-minus-mortality biomass (kg) + mortality count.
+    # Same source TankContinuityAudit uses, so both reconcile to the same truth.
+    rbio_bw: dict[tuple[str, str], float] = defaultdict(float)
+    rmort_bw: dict[tuple[str, str], float] = defaultdict(float)
+    _have_rbio: set[tuple[str, str]] = set()
+    for (tid_, wk_, b_), v in (realized_biology or {}).items():
+        rbio_bw[(b_, wk_)] += v[0]
+        rmort_bw[(b_, wk_)] += v[1]
+        _have_rbio.add((b_, wk_))
+
     # Per-(batch, week) harvest count + biomass from events.
     from .time_grid import iso_week_label
     harv_count: dict[tuple[str, str], float] = defaultdict(float)
@@ -1640,24 +1668,35 @@ def write_reconciliation_report(
             hv_b = harv_biomass.get((batch, wk), 0.0)
             in_c = tin_count.get((batch, wk), 0.0)
             in_b = tin_biomass.get((batch, wk), 0.0)
-            # TranOG entries land on the OG-entry WEEK START, so the entered
-            # fish are present the full week and take full-week growth +
-            # mortality (modelled like fish present at week-open).
-            mort = max(0.0, prev_count + in_c - st_c) * (m_pct / 100.0)
+            # Biomass after the pre-biology events (harvest out, TranOG in).
+            # TranOG entries land on the OG-entry WEEK START, so the entered fish
+            # are present the full week and take full-week growth + mortality.
+            bio_full_growth = prev_biomass - hv_b + in_b
+            if (batch, wk) in _have_rbio:
+                # GROUND TRUTH: realized growth-minus-mortality biomass + mortality
+                # count the daily walker actually applied (summed over the batch's
+                # tanks) -- so the close reconciles exactly. Growth/Mort display
+                # columns are split via the recorded mort count at the open weight
+                # (growth = net + mort), matching TankContinuityAudit.
+                mort = rmort_bw[(batch, wk)]
+                rb = rbio_bw[(batch, wk)]
+                open_wt_g = (prev_biomass / prev_count * 1000.0) if prev_count > 0 else 0.0
+                mort_kg = mort * open_wt_g / 1000.0
+                growth_kg = rb + mort_kg
+                expected_b = bio_full_growth + rb
+            else:
+                # Fallback (no recorded biology): coarse weekly-SGR estimate on the
+                # at-week-open biomass; only the NON-starve biomass grows / dies.
+                mort = max(0.0, prev_count + in_c - st_c) * (m_pct / 100.0)
+                sgr = sgr_pct_day.get((batch, wk), 0.0)
+                growth_factor = (1.0 + sgr / 100.0) ** 7
+                grow_bio = max(0.0, bio_full_growth - st_b)
+                growth_kg = grow_bio * (growth_factor - 1.0)
+                mort_kg = grow_bio * (m_pct / 100.0)
+                expected_b = bio_full_growth + growth_kg - mort_kg
             # OG-side balance: cull is FW-side (input is already post-cull),
             # so cull is shown as informational but not subtracted.
             expected_c = prev_count - mort - hv_c + in_c
-            # Biomass timing (matches Phase D order):
-            #   pre-biology: harvest
-            #   biology: growth + mortality + TranOG (week-start arrival)
-            sgr = sgr_pct_day.get((batch, wk), 0.0)
-            growth_factor = (1.0 + sgr / 100.0) ** 7
-            bio_full_growth = prev_biomass - hv_b + in_b
-            # Only the NON-starve biomass grows / takes mortality.
-            grow_bio = max(0.0, bio_full_growth - st_b)
-            growth_kg = grow_bio * (growth_factor - 1.0)
-            mort_kg = grow_bio * (m_pct / 100.0)
-            expected_b = bio_full_growth + growth_kg - mort_kg
             delta_c = actual_c - expected_c
             delta_b = actual_b - expected_b
             flag = ""

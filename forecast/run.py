@@ -643,6 +643,7 @@ def main(
         placement.harvest_events,
         placement.tranog_events,
         state,
+        realized_biology=getattr(placement, "realized_biology", None),
     )
     write_input_conservation_audit(
         wb, batches, placement.batch_locations, placement.harvest_events, control,
