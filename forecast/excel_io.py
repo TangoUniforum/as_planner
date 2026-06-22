@@ -139,16 +139,22 @@ def write_batch_plan(wb, batch_locations, harvest_events, default_hog_yield: flo
                     # Tank count = the batch's TOTAL concurrent footprint that
                     # week (not just tanks in the newly-entered tier) — so the
                     # column grows with biomass as expected, instead of reading
-                    # "1" at every tier entry.
+                    # "1" at every tier entry. Biomass + peak density (over all
+                    # the batch's tanks that week) let the operator sanity-check
+                    # the density at each milestone.
+                    wk_recs = by_week[wk]
+                    tot_bio = sum(r.biomass_kg for r in wk_recs)
+                    peak_dens = max((r.density_kg_m3 for r in wk_recs), default=0.0)
                     milestones.append((wk, label,
                                        ", ".join(sorted({r.system_id for r in sub})),
-                                       round(avgwt, 2), len(wk_tanks[wk])))
+                                       round(avgwt, 2), len(wk_tanks[wk]),
+                                       round(tot_bio, 0), round(peak_dens, 1)))
         h = hv.get(bid)
         hw = (f"{min(h['weeks'])}-{max(h['weeks'])}" if h and h["weeks"] else "-")
         hog_t = (h["hog"] / 1000.0) if h else 0.0
         if h and h["weeks"]:
             milestones.append((hw, "Harvest", "-> harvest",
-                               round(sum(h["wt"]) / len(h["wt"]), 2), ""))
+                               round(sum(h["wt"]) / len(h["wt"]), 2), "", "", ""))
         plans.append({"batch": bid, "sw": weeks[0] if weeks else "-",
                       "peak": peak, "hw": hw, "hog_t": hog_t, "ms": milestones})
     plans.sort(key=lambda p: p["sw"])
@@ -159,12 +165,13 @@ def write_batch_plan(wb, batch_locations, harvest_events, default_hog_yield: flo
         ws.append([p["batch"], p["sw"], p["peak"], p["hw"], round(p["hog_t"], 0)])
     ws.append([])
     ws.append(["MILESTONES - the journey per batch"])
-    ws.append(["Batch", "Week", "Event", "Systems", "AvgWt (kg)", "Total_Tanks (that week)"])
+    ws.append(["Batch", "Week", "Event", "Systems", "AvgWt (kg)",
+               "Total_Tanks (that week)", "Total_Biomass (kg)", "Peak_Density (kg/m3)"])
     for p in plans:
-        for (wk, label, systems, avgwt, tanks) in p["ms"]:
-            ws.append([p["batch"], wk, label, systems, avgwt, tanks])
+        for (wk, label, systems, avgwt, tanks, bio_kg, dens) in p["ms"]:
+            ws.append([p["batch"], wk, label, systems, avgwt, tanks, bio_kg, dens])
         ws.append([])
-    widths = {1: 8, 2: 13, 3: 26, 4: 18, 5: 11, 6: 8}
+    widths = {1: 8, 2: 13, 3: 26, 4: 18, 5: 11, 6: 22, 7: 18, 8: 18}
     for c, w in widths.items():
         ws.column_dimensions[get_column_letter(c)].width = w
 
