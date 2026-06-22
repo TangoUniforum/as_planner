@@ -220,6 +220,27 @@ def _table(ws, is_header, is_data):
             yield {hdr[i]: row[i] for i in range(min(len(hdr), len(row)))}
 
 
+def _col_map(ws, is_header):
+    """{header_name: col_index} from the first row matching is_header, else {}."""
+    for row in ws.iter_rows(values_only=True):
+        if is_header(row):
+            return {str(c).strip(): i for i, c in enumerate(row) if c is not None}
+    return {}
+
+
+def _find_col(colmap, *prefixes, default=None):
+    """Index of the first column whose header starts with any prefix (case-insens).
+
+    Lets the workbook parsers locate columns BY NAME instead of a hard-coded
+    position, so a report-writer column reorder doesn't silently feed the
+    optimizer the wrong metric. Falls back to `default` if not found."""
+    for name, idx in colmap.items():
+        low = name.lower()
+        if any(low.startswith(p.lower()) for p in prefixes):
+            return idx
+    return default
+
+
 def _cv(xs):
     xs = [x for x in xs if isinstance(x, (int, float))]
     m = statistics.mean(xs) if xs else 0.0
@@ -272,10 +293,14 @@ def _biomass_and_feed(wb):
 
 
 def _harvest_weekly_fish(wb):
+    ws = wb["HarvestPlan"]
+    cols = _col_map(ws, lambda r: r and str(r[0]).strip() == "Week"
+                    and any(str(c).strip() == "Batch" for c in r if c))
+    ci = _find_col(cols, "Count", default=3)   # "Count (fish)"
     weekly = {}
-    for row in wb["HarvestPlan"].iter_rows(values_only=True):
-        if _is_week(row[0]) and len(row) > 3 and isinstance(row[3], (int, float)):
-            weekly[row[0]] = weekly.get(row[0], 0.0) + row[3]
+    for row in ws.iter_rows(values_only=True):
+        if _is_week(row[0]) and len(row) > ci and isinstance(row[ci], (int, float)):
+            weekly[row[0]] = weekly.get(row[0], 0.0) + row[ci]
     return [weekly[w] for w in sorted(weekly)]
 
 
@@ -333,11 +358,15 @@ def _density_overshoot(wb):
     density compliance — the trade leveling can create)."""
     if "BatchLocations" not in wb.sheetnames:
         return 0.0
+    ws = wb["BatchLocations"]
+    cols = _col_map(ws, lambda r: r and str(r[0]).strip() == "Week"
+                    and any(str(c).strip().startswith("Density") for c in r if c))
+    di = _find_col(cols, "Density", default=8)   # "Density (kg/m3)"
     over = tot = 0
-    for i, row in enumerate(wb["BatchLocations"].iter_rows(values_only=True), 1):
+    for i, row in enumerate(ws.iter_rows(values_only=True), 1):
         if i < 5 or not row or row[0] is None:
             continue
-        dens = row[8] if len(row) > 8 else None
+        dens = row[di] if len(row) > di else None
         if isinstance(dens, (int, float)):
             tot += 1
             if dens > 95:
