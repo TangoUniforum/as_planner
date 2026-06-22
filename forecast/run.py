@@ -571,11 +571,6 @@ def main(
         facility_limits_hog=facility_hog_overrides,
         forecast_start=fs_date,
     )
-    write_yearly_summary(
-        wb, placement.batch_locations, placement.harvest_events,
-        facility_limits, control, batches=batch_by_id, tables=tables,
-        default_hog_yield=control.default_hog_yield, hog_overrides=facility_hog_overrides,
-    )
     write_transfer_plan_output(
         wb, placement.transfer_events, placement.tranog_events,
         grade_events=placement.grade_events,
@@ -619,6 +614,13 @@ def main(
     rl_states_by_batch = {
         b: _to_realized_lifespan(sl) for b, sl in states_by_batch.items()
     }
+    write_yearly_summary(
+        wb, placement.batch_locations, placement.harvest_events,
+        facility_limits, control, batches=batch_by_id, tables=tables,
+        default_hog_yield=control.default_hog_yield, hog_overrides=facility_hog_overrides,
+        sixn_move_in_feed=getattr(placement, "sixn_move_in_feed", None),
+        biology_states_by_batch=rl_states_by_batch,
+    )
     write_feed_forecast_weekly(
         wb, placement.batch_locations, rl_states_by_batch, fs_date, tables, batch_by_id,
         sixn_move_in_feed=getattr(placement, "sixn_move_in_feed", None))
@@ -630,12 +632,14 @@ def main(
         wb, placement.batch_locations, placement.harvest_events, all_states,
         transfer_events=placement.transfer_events, batches=batch_by_id, tables=tables,
         scenario_name=control.scenario_name, hog_yield=control.default_hog_yield,
-        hog_overrides=facility_hog_overrides)
+        hog_overrides=facility_hog_overrides,
+        sixn_move_in_feed=getattr(placement, "sixn_move_in_feed", None))
     write_monthly_report(
         wb, placement.batch_locations, placement.harvest_events, all_states,
         transfer_events=placement.transfer_events, batches=batch_by_id, tables=tables,
         scenario_name=control.scenario_name, hog_yield=control.default_hog_yield,
-        hog_overrides=facility_hog_overrides, forecast_start=control.forecast_start)
+        hog_overrides=facility_hog_overrides, forecast_start=control.forecast_start,
+        sixn_move_in_feed=getattr(placement, "sixn_move_in_feed", None))
     write_reconciliation_report(
         wb,
         placement.batch_locations,

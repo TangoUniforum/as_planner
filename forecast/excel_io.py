@@ -531,6 +531,8 @@ def write_yearly_summary(
     tables=None,
     default_hog_yield: float = 0.0,
     hog_overrides=None,
+    sixn_move_in_feed=None,
+    biology_states_by_batch=None,
     sheet_name: str = "YearlySummary",
 ) -> None:
     """Facility-wide per-year rollup for at-a-glance yearly trends.
@@ -540,6 +542,11 @@ def write_yearly_summary(
     mean utilisation vs the per-week cap). Aggregates the same realized data the
     other sheets use (HarvestReport harvest, realized_feed_kg_day feed,
     BatchLocations biomass) so it reconciles with them.
+
+    Feed (realized tonnes) = OG/SW realized feed + the 6N purge move-in 4-day
+    feed + FW/EGG projected feed -- the SAME three sources FeedForecast and the
+    Weekly/Monthly ledger sum, so the annual feed total ties out across all of
+    them (FW feed is hatchery feed, part of total facility feed ordered).
     """
     from collections import defaultdict
     from .caps import resolve_facility_cap, METRIC_BIOMASS
@@ -562,6 +569,24 @@ def write_yearly_summary(
         if tables is not None and getattr(r, "stage", "") != "STARVE":
             b = (batches or {}).get(r.batch_id)
             wk_feed[r.week_label] += realized_feed_kg_day(r.avg_wt_g, r.biomass_kg, b, tables)
+
+    # 6N purge move-in fish ate 4 pre-transfer days in their source tank (shown
+    # in 6N = STARVE above) — add that real feed (already weekly kg) per week so
+    # the yearly feed tonnes match the FeedForecast / ledger totals.
+    wk_movein: dict[str, float] = defaultdict(float)
+    for (_bid, wk_, _ftype), kg in (sixn_move_in_feed or {}).items():
+        if kg:
+            wk_movein[wk_] += kg
+
+    # FW/EGG projected feed (hatchery — FW fish live in FW tanks, absent from
+    # batch_locations) per week, so the annual total includes hatchery feed too.
+    wk_fwfeed: dict[str, float] = defaultdict(float)
+    for states in (biology_states_by_batch or {}).values():
+        for s in states:
+            if s.stage in ("FW", "EGG") and s.feed_kg_week:
+                wk_fwfeed[s.week_label] += s.feed_kg_week
+                wk_year.setdefault(s.week_label,
+                                   s.week_start.year if hasattr(s.week_start, "year") else None)
 
     # Harvest per year (HOG via per-week override or default).
     hog_overrides = hog_overrides or {}
@@ -586,10 +611,16 @@ def write_yearly_summary(
         if y is None:
             continue
         yr_bio[y].append(bio)
-        yr_feed[y] += wk_feed.get(wk, 0.0) * 7.0
+        yr_feed[y] += wk_feed.get(wk, 0.0) * 7.0 + wk_movein.get(wk, 0.0)
         cap = resolve_facility_cap(METRIC_BIOMASS, wk, facility_limits, control)
         if cap:
             yr_util[y].append(100.0 * bio / cap)
+    # FW/EGG feed in a separate pass so FW-only weeks (no OG biomass, absent from
+    # wk_bio) still contribute their hatchery feed to the annual total.
+    for wk, fw in wk_fwfeed.items():
+        y = wk_year.get(wk)
+        if y is not None:
+            yr_feed[y] += fw
 
     years = sorted(set(yr_hc) | set(yr_bio))
     ws.append(["YEARLY SUMMARY (facility-wide)"])
@@ -966,7 +997,7 @@ _LEDGER_COLS = [
 def _build_batch_week_ledger(
     batch_locations, harvest_events, batch_week_states,
     transfer_events=None, batches=None, tables=None, hog_yield=0.0,
-    hog_overrides=None,
+    hog_overrides=None, sixn_move_in_feed=None,
 ):
     """Assemble a per-(batch, week) open/close production ledger.
 
@@ -1000,6 +1031,12 @@ def _build_batch_week_ledger(
         if tables is not None and getattr(r, "stage", "") != "STARVE":
             b = (batches or {}).get(r.batch_id)
             feed[key] += realized_feed_kg_day(r.avg_wt_g, r.biomass_kg, b, tables) * 7.0
+    # 6N purge move-in fish ate 4 pre-transfer days in their source tank (now
+    # shown in 6N = STARVE, excluded above) — add that real feed back so the
+    # ledger Feed column matches the FeedForecast / YearlySummary totals.
+    for (bid, _wk, _ftype), kg in (sixn_move_in_feed or {}).items():
+        if kg:
+            feed[(bid, _wk)] += kg
 
     # Harvest per (batch, week).
     harv: dict[tuple, dict] = defaultdict(lambda: {"count": 0.0, "gross": 0.0, "wt_sum": 0.0})
@@ -1184,6 +1221,7 @@ def write_weekly_report(
     scenario_name: str = "",
     hog_yield: float = 0.0,
     hog_overrides=None,
+    sixn_move_in_feed=None,
     sheet_name: str = "WeeklyReport",
 ) -> None:
     """Per-(week, batch) open/close production ledger (matches reference format).
@@ -1202,7 +1240,8 @@ def write_weekly_report(
 
     rows = _build_batch_week_ledger(
         batch_locations, harvest_events, batch_week_states,
-        transfer_events, batches, tables, hog_yield, hog_overrides)
+        transfer_events, batches, tables, hog_yield, hog_overrides,
+        sixn_move_in_feed=sixn_move_in_feed)
     for d in rows:
         ws.append([scenario_name, d["week"], d["week_start"], d["batch"]]
                   + _ledger_value_cells(d))
@@ -1222,6 +1261,7 @@ def write_monthly_report(
     hog_yield: float = 0.0,
     hog_overrides=None,
     forecast_start=None,
+    sixn_move_in_feed=None,
     sheet_name: str = "MonthlyReport",
 ) -> None:
     """Per-(month, batch) open/close production ledger (matches reference format).
@@ -1244,7 +1284,8 @@ def write_monthly_report(
 
     weekly = _build_batch_week_ledger(
         batch_locations, harvest_events, batch_week_states,
-        transfer_events, batches, tables, hog_yield, hog_overrides)
+        transfer_events, batches, tables, hog_yield, hog_overrides,
+        sixn_move_in_feed=sixn_move_in_feed)
 
     # Roll the weekly ledger up to calendar months, splitting any week that
     # straddles a month boundary into its true month. CONTINUOUS flows (growth,
@@ -2160,7 +2201,10 @@ def write_advisory(
     for r in batch_locations:
         bio[r.week_label] += r.biomass_kg
         wk_start.setdefault(r.week_label, r.week_start)
-        # STARVE tank-weeks (6N depuration) eat nothing.
+        # STARVE tank-weeks (6N depuration) eat nothing. NOTE: this is a per-DAY
+        # feed-rate cap check, so it uses the steady realized rate only — the 6N
+        # move-in's 4-day pre-transfer feed is a TOTAL-feed accounting item (in
+        # the FeedForecast / ledger / YearlySummary totals), not a per-day rate.
         if tables is not None and getattr(r, "stage", "") != "STARVE":
             b = (batches or {}).get(r.batch_id)
             feed[r.week_label] += realized_feed_kg_day(r.avg_wt_g, r.biomass_kg, b, tables)
@@ -2469,6 +2513,9 @@ def write_system_limits_audit(
         b = batch_by_id.get(r.batch_id)
         sb[(r.week_label, r.system_id)] += r.biomass_kg
         # STARVE = in-place purge: biomass counts to the system, but no feed.
+        # Per-DAY feed-rate cap check -> steady realized rate only; the 6N move-in
+        # 4-day pre-transfer feed is a total-feed accounting item (FeedForecast /
+        # ledger / YearlySummary), not a per-day rate, and isn't keyed by system.
         if getattr(r, "stage", "") != "STARVE":
             sf[(r.week_label, r.system_id)] += realized_feed_kg_day(
                 r.avg_wt_g, r.biomass_kg, b, tables)

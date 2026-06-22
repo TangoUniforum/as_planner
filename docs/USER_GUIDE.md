@@ -269,6 +269,14 @@ matters.
 > so the two sheets' monthly HOG tie out. Continuous flows (feed, growth, mortality)
 > split by calendar-day. The per-event **HarvestReport** is unprorated detail (each
 > row keeps its event-date month).
+>
+> **Total feed is one number:** the **FeedForecast** sheets, the **WeeklyReport/
+> MonthlyReport** Feed column, and the **YearlySummary** Feed total all sum the same
+> three sources — OG/SW realized feed + FW (hatchery) projected feed + the 6N purge
+> move-in's 4-day pre-transfer feed — so they reconcile. The per-day cap-check sheets
+> (**Advisory**, **SystemLimitsAudit**) instead show the steady realized feed *rate*
+> vs cap, so they intentionally exclude the move-in (a total-accounting item, not a
+> per-day rate).
 
 ### Knowing what the app is doing
 Run mode, the Optimize tab, and every result show a collapsible **"Active
