@@ -25,7 +25,11 @@ def write_biology_projection(wb, states: Iterable[BatchWeekState], sheet_name: s
         "Cull_Biomass_kg", "Feed_kg_day", "Feed_kg_week",
     ]
     ws.append(headers)
-    for s in states:
+    # Sort deterministically (batch, then chronological week) so the sheet is
+    # byte-reproducible run-to-run. The incoming `states` order depends on dict
+    # iteration, which PYTHONHASHSEED randomizes across processes — leaving the
+    # rows shuffled (identical data, different order), which breaks output diffs.
+    for s in sorted(states, key=lambda s: (s.batch_id, s.week_label)):
         ws.append([
             s.batch_id, s.week_label, s.week_start, s.days_since_input,
             s.week_from_input, s.stage, round(s.count, 1), round(s.avg_weight_g, 3),
