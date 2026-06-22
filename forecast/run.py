@@ -648,6 +648,8 @@ def main(
         placement.tranog_events,
         state,
         realized_biology=getattr(placement, "realized_biology", None),
+        transfer_events=placement.transfer_events,
+        grade_events=placement.grade_events,
     )
     write_input_conservation_audit(
         wb, batches, placement.batch_locations, placement.harvest_events, control,

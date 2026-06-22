@@ -1576,6 +1576,8 @@ def write_reconciliation_report(
     tranog_events,
     initial_state,
     realized_biology=None,
+    transfer_events=None,
+    grade_events=None,
     sheet_name: str = "ReconciliationReport",
 ) -> None:
     """Per-(batch, week) count + biomass balance check (OG side).
@@ -1592,14 +1594,14 @@ def write_reconciliation_report(
     instead of drifting on a coarse weekly-SGR re-estimate. A coarse SGR
     estimate is used only as a fallback when no realized biology is given.
 
-    Biomass reconciles to within a small unflagged residual (<~0.5%) on the
-    grow-out batches that FEED 6N purge: a purge move-in debits the source
-    at the week-open weight but credits 6N at the +4-day grown weight, so a
-    tiny biomass injection rides on the transfer. That is weight-neutral and
-    fully accounted PER-TANK by TankContinuityAudit (via its transfer_in/out
-    terms); this per-BATCH ledger has no transfer term (intra-batch moves
-    net out), so the injection shows here as a sub-tolerance Biomass_Delta.
-    TankContinuityAudit is the authoritative 0-drift biomass check.
+    The balance includes the NET transfer + grade biomass for the batch (intra-
+    batch moves net to ~0, EXCEPT a 6N purge move-in, which debits the source at
+    the week-open weight but credits 6N at the +4-day grown weight — a real
+    biomass injection that rides on the transfer). Without that term the injection
+    showed up as a spurious ~0.5% Biomass_Delta on grow-out batches feeding 6N;
+    with it, BOTH the count and biomass balances reconcile to 0 (the per-batch
+    realized-biology + transfer terms are exact). TankContinuityAudit remains the
+    authoritative per-tank check.
 
     Open for first week = PR-hydrated initial count (in-flight batches)
     or 0 (incoming batches arrive via TranOG events).
@@ -1696,6 +1698,39 @@ def write_reconciliation_report(
         tin_count[(ev.batch_id, wk)] += total_c
         tin_biomass[(ev.batch_id, wk)] += total_b
 
+    # Per-(batch, week) NET transfer + grade biomass (kg). Transfers/grades are
+    # intra-batch, so in == out (net 0) for an ordinary move; the exception is a
+    # 6N purge move-in, which debits the source at the week-open weight but
+    # credits 6N at the +4-day grown weight, leaving a real biomass injection.
+    # Mirrors TankContinuityAudit's per-tank transfer/grade kg (source_avg_wt_g /
+    # pickup_source_avg_wt_g), summed to the batch. (TranOG is NOT included here —
+    # it's already the `input` term above.)
+    xfer_net_kg: dict[tuple[str, str], float] = defaultdict(float)
+    for ev in (transfer_events or []):
+        wk = iso_week_label(ev.event_date)
+        if hasattr(ev, "pickup_tank_id"):                 # GradedHarvest
+            pk_src = getattr(ev, "pickup_source_avg_wt_g", None) or ev.pickup_avg_wt_g
+            out_kg = (ev.pickup_count * pk_src + ev.retention_count * ev.retention_avg_wt_g) / 1000.0
+            in_kg = (ev.pickup_count * ev.pickup_avg_wt_g
+                     + ev.retention_count * ev.retention_avg_wt_g) / 1000.0
+            xfer_net_kg[(ev.batch_id, wk)] += in_kg - out_kg
+            continue
+        ct = getattr(ev, "count_transferred", None)
+        if ct is None or ct <= 0:
+            continue
+        total_planned = sum(d.count for d in ev.destinations) or 1.0
+        avg_wt_g = sum(d.count * d.avg_wt_g for d in ev.destinations) / total_planned
+        src_wt = getattr(ev, "source_avg_wt_g", None)
+        out_wt = src_wt if src_wt is not None else avg_wt_g
+        xfer_net_kg[(ev.batch_id, wk)] += ct * (avg_wt_g - out_wt) / 1000.0
+    for ev in (grade_events or []):
+        wk = iso_week_label(ev.event_date)
+        total_dest = sum(d.count for d in ev.destinations)
+        avg_wt_g = (sum(d.count * d.avg_wt_g for d in ev.destinations) / total_dest
+                    if total_dest > 0 else 0.0)
+        in_kg = sum(d.count * d.avg_wt_g for d in ev.destinations) / 1000.0
+        xfer_net_kg[(ev.batch_id, wk)] += in_kg - total_dest * avg_wt_g / 1000.0
+
     # Walk batches × weeks, write rows + flag mismatches.
     TOLERANCE = 100.0   # fish; below this absolute, treat as numerical noise
     all_batches = sorted({b for (b, _) in loc_count} | set(pr_count.keys()))
@@ -1743,6 +1778,9 @@ def write_reconciliation_report(
                 growth_kg = grow_bio * (growth_factor - 1.0)
                 mort_kg = grow_bio * (m_pct / 100.0)
                 expected_b = bio_full_growth + growth_kg - mort_kg
+            # Net transfer + grade biomass (intra-batch ~0 except the 6N move-in
+            # grown-weight injection); without this the injection reads as drift.
+            expected_b += xfer_net_kg.get((batch, wk), 0.0)
             # OG-side balance: cull is FW-side (input is already post-cull),
             # so cull is shown as informational but not subtracted.
             expected_c = prev_count - mort - hv_c + in_c
