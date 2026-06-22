@@ -358,6 +358,24 @@ def _max_kg_per_og_tank(facility: FacilityConfig) -> float:
     return min(caps)
 
 
+def _tranog_tank_need(cohort_kg, facility, control, plan_n=0):
+    """OG tanks a TranOG cohort needs: max(plan tanks, the R28 config floor,
+    the density-driven need = ceil(cohort_kg / smallest-OG-tank-cap)).
+
+    Single source for the THREE sites that must agree or the no-drop invariant
+    can trip: the anticipatory purge pacing (which passes plan_n=0 — plan tanks
+    are resolved per-week elsewhere), the reactive make-room, and the actual
+    TranOG placement. Uses the raw (undiscounted) tank cap, matching all three
+    prior copies. (NOTE: Phase A sizes with the density-discounted cap, so this
+    floor can differ from Phase A's by the density_target_pct factor — a known,
+    pre-existing behaviour preserved here, not introduced by the extraction.)
+    """
+    cap = _max_kg_per_og_tank(facility) or (95.0 * 1720.0)
+    density_n = max(1, math.ceil(cohort_kg / cap))
+    cfg_floor = max(2, (control.tran_og_default_tanks or 2) if control else 2)
+    return max(plan_n, cfg_floor, density_n)
+
+
 def phase_a_precalc(
     biology_states_by_batch: dict[str, list[BatchWeekState]],
     harvest_demands: list[HarvestDemand],
@@ -2309,8 +2327,6 @@ def phase_d_emit_events(
     # pass below frees these tanks gradually across the lookahead window,
     # spread across systems and paced to the biomass cap. Mirrors the
     # _need calculation in the reactive make-room so the two agree.
-    _og12_tank_cap = _max_kg_per_og_tank(facility) or (95.0 * 1720.0)
-    _cfg_tank_floor = max(2, (control.tran_og_default_tanks or 2) if control else 2)
     arrival_tank_need: dict[str, int] = {}
     for s in splits:
         if s.tran_og_date is None or s.post_cull_count <= 0:
@@ -2318,11 +2334,10 @@ def phase_d_emit_events(
         wk = iso_week_label(
             og_entry_week_start(_as_date(s.tran_og_date), initial_state.today))
         _cohort_kg = s.post_cull_count * (s.post_cull_avg_wt_g / 1000.0)
-        _density_n = max(1, math.ceil(_cohort_kg / _og12_tank_cap))
         # plan tanks resolved per-week below (tank_assignments); the config +
         # density floors are the schedule-time lower bound and are enough to pace.
-        arrival_tank_need[wk] = arrival_tank_need.get(wk, 0) + max(
-            _cfg_tank_floor, _density_n)
+        arrival_tank_need[wk] = arrival_tank_need.get(wk, 0) + _tranog_tank_need(
+            _cohort_kg, facility, control)
 
     # Active batches per week (set of batch_ids).
     active_by_week: dict[str, set[str]] = {}
@@ -3044,11 +3059,7 @@ def phase_d_emit_events(
                                 and a.batch_id == s.batch_id), None)
                     _plan_n = len(_ta.tank_ids) if _ta and _ta.tank_ids else 0
                     _cohort_kg = s.post_cull_count * (s.post_cull_avg_wt_g / 1000.0)
-                    _og12_cap = _max_kg_per_og_tank(facility) or (95.0 * 1720.0)
-                    _density_n = max(1, math.ceil(_cohort_kg / _og12_cap))
-                    _cfg_floor = max(2, (control.tran_og_default_tanks or 2)
-                                     if control else 2)
-                    _need += max(_plan_n, _cfg_floor, _density_n)
+                    _need += _tranog_tank_need(_cohort_kg, facility, control, _plan_n)
                 _empty_og = [t for t in state.tanks_by_id.values()
                              if t.is_empty and t.type == "OG"
                              and t.system_id not in _SIXN_SYSTEMS]
@@ -3161,11 +3172,7 @@ def phase_d_emit_events(
                     cohort_kg = split.post_cull_count * (
                         split.post_cull_avg_wt_g / 1000.0
                     )
-                    og12_cap_kg = _max_kg_per_og_tank(facility) or (95.0 * 1720.0)
-                    density_n = max(1, math.ceil(cohort_kg / og12_cap_kg))
-                    cfg_floor = max(2, (control.tran_og_default_tanks or 2)
-                                    if control else 2)
-                    n_needed = max(plan_n, cfg_floor, density_n)
+                    n_needed = _tranog_tank_need(cohort_kg, facility, control, plan_n)
                     if len(tanks_obj) < n_needed:
                         already_ids = {t.tank_id for t in tanks_obj}
                         # Stage 1 fallback: any empty OG1/2 tank.
