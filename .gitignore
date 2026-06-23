@@ -26,3 +26,5 @@ scripts/_*.txt
 *.tmp
 _exp_*.xlsm
 optimize_history.jsonl
+_golden/
+_*_out.xlsx
