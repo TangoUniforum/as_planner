@@ -436,6 +436,7 @@ def plan(
     arrival_lead_weeks: int = 2,
     max_grade_fraction: float = 0.5,
     reserve_fraction: float = 0.05,
+    harvest_tank_density_pct: float = 1.25,
 ) -> PlannerResult:
     """Run the tankless L1 planner. See module docstring for the algorithm.
 
@@ -448,7 +449,10 @@ def plan(
     feed_cap = control.max_feed_per_day_kg
     min_wt = control.min_harvest_weight_g
     max_harvest_fish = control.max_harvest_per_week
-    og_ceiling = smallest_og_tank_kg(facility)
+    # The staged harvest tank can be packed to harvest_tank_density_pct of the
+    # normal control density (operator allowance: fish about to be harvested can
+    # exceed the running production density). This sets the one-tank/week ceiling.
+    og_ceiling = smallest_og_tank_kg(facility) * harvest_tank_density_pct
 
     seeds = build_seeds(batches, tables, control, inflight_og=inflight_og)
     # FIFO order: oldest batch (earliest input_date) drawn first.
