@@ -622,7 +622,7 @@ def plan(
     harvest_tank_density_pct: float = 1.25,
     record_standing: bool = False,
     biomass_ceiling: Optional[dict[str, float]] = None,
-    model_purge_hold: bool = False,
+    model_purge_hold: bool = True,
     model_full_facility: bool = False,
     fw_inflight: Optional[dict[str, tuple[float, float, "date"]]] = None,
 ) -> PlannerResult:
@@ -640,9 +640,12 @@ def plan(
     ceiling drives the biomass/arrival need + the legality verdict; the feed cap
     is untouched (the loop only constrains biomass).
 
-    `model_purge_hold` (ADDITIVE, opt-in; default False == byte-identical
-    instant-removal) models the production pipeline's 6N flow-to-harvest instead
-    of removing the harvest envelope instantly:
+    `model_purge_hold` (DEFAULT True — the CORRECT facility behavior) models the
+    production pipeline's 6N flow-to-harvest instead of removing the harvest
+    envelope instantly. It is data-dependency-free (no PR inputs needed beyond
+    what L1 already consumes), so it is safe as the default. Pass False to
+    recover the old byte-identical instant-removal POC (the `run_*_poc`
+    diagnostics + `run_purge_compare_poc` do so explicitly):
 
       * PURGE mode (`forecast.sixn.is_purge_mode`): the kg drawn in a week are not
         removed at once. They are MOVED OUT of grow-out into a 6N PURGE HOLD
@@ -667,10 +670,17 @@ def plan(
     (zero feed) so L3 places it into the 6N staging pool, not the 33-tank
     grow-out pool. Per-week 6N accounting lands in `PlannerResult.purge_trace`.
 
-    `model_full_facility` (ADDITIVE, opt-in; default False == byte-identical to
-    the OG-only model) makes L1 a TRUE whole-facility biomass/feed model. The
-    production controller checks the facility cap against OG (grow-out) biomass
-    ONLY, but the real limit covers the ENTIRE farm:
+    `model_full_facility` (default False here at the `plan()` entry, but the
+    CORRECT facility behavior — the loop / tool entry point MUST pass it True
+    together with `fw_inflight`). It is left False as the `plan()` default ONLY
+    because it is correct exclusively when `fw_inflight` (the PR-measured
+    in-flight FW units) is ALSO passed; without `fw_inflight` it under-counts the
+    FW phase. So `plan()`'s default stays the safe OG-only model, and the
+    data-aware callers (`run_loop` below — DEFAULT True; the
+    `tools/run_global_forecast.py` entry point) hydrate `fw_inflight` and pass
+    `model_full_facility=True`. When True it makes L1 a TRUE whole-facility
+    biomass/feed model. The production controller checks the facility cap against
+    OG (grow-out) biomass ONLY, but the real limit covers the ENTIRE farm:
 
         facility standing = FW-phase (smolt/egg, pre-TranOG) + OG grow-out
                             + 6N purge-hold

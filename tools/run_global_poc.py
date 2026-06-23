@@ -114,7 +114,12 @@ def main() -> int:
           f"max_harvest={control.max_harvest_per_week:,.0f} fish/wk, "
           f"min_harvest_wt={control.min_harvest_weight_g:,.0f} g")
 
-    res = gpp.plan(batches, tables, control, facility, inflight_og=inflight)
+    # OG-ONLY instant-removal diagnostic: this runner intentionally exercises
+    # the original L1 envelope (no 6N purge hold, OG-only cap). Pass both flags
+    # explicitly False so the new whole-facility defaults do not silently change
+    # this diagnostic (and avoid under-counting FW without fw_inflight).
+    res = gpp.plan(batches, tables, control, facility, inflight_og=inflight,
+                   model_purge_hold=False, model_full_facility=False)
     print(f"  OG-tank weekly draw ceiling (smallest OG tank): "
           f"{res.og_tank_ceiling_kg:,.0f} kg")
     print(f"  Seeds (batches entering OG in horizon): {len(res.seeds)}")

@@ -90,10 +90,16 @@ def main() -> int:
     print(f"  forecast_start={fs_date}, horizon={control.horizon_weeks}w")
 
     # ---- L1: envelope + per-(batch, week) standing.
+    # OG-ONLY instant-removal diagnostic: this runner's hardcoded greedy-L2
+    # baseline contrast is calibrated to the OG-only model, so pin both
+    # whole-facility flags False (the new defaults would otherwise shift it and
+    # under-count FW without fw_inflight). The loop entry point is the
+    # whole-facility path.
     l1 = gpp.plan(batches, tables, control, facility,
                   inflight_og=inflight,
                   harvest_tank_density_pct=args.harvest_tank_density_pct,
-                  record_standing=True)
+                  record_standing=True,
+                  model_purge_hold=False, model_full_facility=False)
     peak_bio = max((r.standing_biomass_kg for r in l1.trace), default=0.0)
     print(f"  L1 peak standing biomass: {peak_bio:,.0f} kg "
           f"({100*peak_bio/control.max_biomass_kg:.1f}% of "

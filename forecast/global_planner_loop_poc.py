@@ -198,8 +198,8 @@ def run_loop(
     max_iterations: int = 10,
     margin_frac: float = 0.5,
     l3_kwargs: Optional[dict] = None,
-    model_purge_hold: bool = False,
-    model_full_facility: bool = False,
+    model_purge_hold: bool = True,
+    model_full_facility: bool = True,
     fw_inflight: Optional[dict] = None,
     verbose: bool = True,
 ) -> LoopResult:
@@ -213,6 +213,15 @@ def run_loop(
 
     Returns a LoopResult with every iteration's diagnosis + the converged
     envelope. L3 placement (`plan_l3`) is run as-is each iteration.
+
+    `model_purge_hold` and `model_full_facility` DEFAULT True — the CORRECT
+    whole-facility behavior for the tool (2-week off-feed 6N purge flow +
+    counting FW + OG + purge against the cap). Because `model_full_facility`
+    under-counts the FW phase unless the PR-measured in-flight FW units are
+    supplied, callers MUST pass `fw_inflight` (the entry point
+    `tools/run_global_forecast.py` always hydrates and passes it). Pass both
+    False (e.g. via `tools/run_loop_poc --no-purge-hold`) to recover the old
+    OG-only instant-removal comparison.
     """
     l3_kwargs = dict(l3_kwargs or {})
     l3_kwargs.setdefault("verbose", False)

@@ -39,6 +39,7 @@ from forecast import global_planner_l2_poc as l2
 from forecast import global_planner_l3_poc as l3
 from forecast import global_planner_loop_poc as loop
 from tools.run_global_poc import _hydrate_inflight_og
+from tools.run_full_facility_poc import _hydrate_pr
 
 
 def main() -> int:
@@ -72,12 +73,17 @@ def main() -> int:
     print(f"  Scenario: {len(batches)} batches from {args.scenario_dir}")
 
     inflight = {}
+    fw_inflight = {}
     if not args.no_pr:
-        inflight, derived_start = _hydrate_inflight_og(Path(args.workbook), batches)
+        # Hydrate BOTH OG and FW in-flight units: model_full_facility (now the
+        # default) needs fw_inflight or it under-counts the FW phase.
+        inflight, fw_inflight, derived_start = _hydrate_pr(
+            Path(args.workbook), batches)
         if derived_start is not None:
             control.forecast_start = derived_start
             print(f"  ForecastStart: derived {derived_start.date()} from PR closing +1d")
-        print(f"  In-flight OG batches from PR: {len(inflight)}")
+        print(f"  In-flight OG batches from PR: {len(inflight)}; "
+              f"FW-in-flight batches: {len(fw_inflight)}")
 
     fs = control.forecast_start
     fs_date = fs.date() if hasattr(fs, "date") else fs
@@ -116,6 +122,10 @@ def main() -> int:
         margin_frac=args.margin_frac,
         l3_kwargs=l3_kwargs,
         model_purge_hold=model_purge_hold,
+        # The whole-facility model is the correct default; tie it to the same
+        # toggle so --no-purge-hold recovers the OG-only instant-removal compare.
+        model_full_facility=model_purge_hold,
+        fw_inflight=fw_inflight,
         verbose=True,
     )
 
