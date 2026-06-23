@@ -101,6 +101,8 @@ from .biology import (
     _fcr_model_key,
     _interp,
     _mortality_weekly_pct,
+    project_all_batches,
+    project_in_flight_fw_batch,
     sgr_pct_per_day,
 )
 from .models import BatchInput, BiologyTables, ControlParams, FacilityConfig
@@ -408,6 +410,88 @@ def build_seeds(
 
 
 # ---------------------------------------------------------------------------
+# FW-phase (freshwater / smolt / egg) standing — the whole-facility addend
+# ---------------------------------------------------------------------------
+#
+# The production controller's facility biomass cap is enforced ONLY against OG
+# (grow-out, seawater) biomass. But the real facility limit covers the ENTIRE
+# farm: FW (freshwater/smolt/egg) standing + OG grow-out + 6N purge-hold. FW
+# biomass is a GIVEN — fixed by the stocking cadence, the FW growth curve, and
+# each batch's TranOG date — and it is NOT harvestable. So L1 cannot reduce it;
+# it can only harvest OG harder/earlier so that (FW + OG + purge) stays under
+# the facility cap each week.
+#
+# `fw_phase_biomass_feed_by_week` reuses the EXISTING validated biology — the
+# same projectors `forecast/run.py` drives — to extract, per forecast week, the
+# total FW-phase biomass (kg) and FW-phase feed (kg/day) summed across every
+# batch that is still in its FW/EGG phase that week (i.e. not yet past TranOG /
+# OG entry). It re-implements no biology: it calls `project_all_batches`
+# (incoming batches) and `project_in_flight_fw_batch` (PR-measured FW units),
+# then sums only the FW/EGG-stage `BatchWeekState` rows. The SW rows are exactly
+# the population L1 already seeds at OG entry, so FW-phase and OG are DISJOINT
+# (no double count): a batch contributes to FW until the forecast-week boundary
+# on/after its TranOG, then to OG from that same boundary.
+
+# Stages that count as "FW phase" (pre-OG, not yet seeded into L1's OG model).
+_FW_PHASE_STAGES = ("EGG", "FW")
+
+
+def fw_phase_biomass_feed_by_week(
+    batches: list[BatchInput],
+    tables: BiologyTables,
+    control: ControlParams,
+    *,
+    fw_inflight: Optional[dict[str, tuple[float, float, "date"]]] = None,
+) -> tuple[dict[str, float], dict[str, float]]:
+    """Per-week FW-phase biomass (kg) and feed (kg/day), keyed by week LABEL.
+
+    Reuses the production biology verbatim:
+      * `project_all_batches` projects every INCOMING batch day-by-day from
+        Input_Date (egg/FW growth, scheduled culls, TranOG reconciliation),
+        emitting per-forecast-week `BatchWeekState` rows with a `stage`.
+      * `project_in_flight_fw_batch` does the same for batches the operator
+        measured in FW physical units at PR closing (anchored to PR state).
+
+    We keep only the FW/EGG-stage rows (the pre-OG-entry phase) and sum their
+    `biomass_kg` and `feed_kg_day` into per-week-label totals. The SW rows are
+    the OG population L1 already models, so they are excluded here — FW-phase +
+    OG are disjoint and the cap can be checked against their sum without double
+    counting.
+
+    `fw_inflight` (optional) maps batch_id -> (count, avg_wt_g, pr_closing_date)
+    for FW-in-flight batches; when given those batches are projected from PR
+    state instead of from Input_Date. Incoming batches present in `fw_inflight`
+    are projected only via the in-flight path (no double count).
+    """
+    fw_inflight = fw_inflight or {}
+    bio: dict[str, float] = {}
+    feed: dict[str, float] = {}
+
+    def _accumulate(rows) -> None:
+        for s in rows:
+            if s.stage in _FW_PHASE_STAGES:
+                bio[s.week_label] = bio.get(s.week_label, 0.0) + s.biomass_kg
+                feed[s.week_label] = feed.get(s.week_label, 0.0) + s.feed_kg_day
+
+    # Incoming batches (exclude any that are FW-in-flight to avoid double count).
+    incoming = [b for b in batches if b.batch_id not in fw_inflight]
+    states, _resid, _splits, _warn = project_all_batches(incoming, tables, control)
+    _accumulate(states)
+
+    # FW-in-flight batches: project from PR-measured state.
+    batch_by_id = {b.batch_id: b for b in batches}
+    for bid, (count, avg_wt, pr_close) in fw_inflight.items():
+        b = batch_by_id.get(bid)
+        if b is None or count <= 0:
+            continue
+        fw_states, _r, _s = project_in_flight_fw_batch(
+            b, tables, control, count, avg_wt, pr_close)
+        _accumulate(fw_states)
+
+    return bio, feed
+
+
+# ---------------------------------------------------------------------------
 # Result containers
 # ---------------------------------------------------------------------------
 
@@ -436,6 +520,14 @@ class StandingTraceRow:
     legal: bool
     over_biomass_kg: float
     over_feed_kg: float
+    # Whole-facility breakdown (only meaningful when model_full_facility=True;
+    # 0.0 otherwise so existing callers are byte-identical). standing_biomass_kg
+    # and feed_kg_day ABOVE are the TOTAL facility values (OG + purge + FW) when
+    # full-facility is on; these split out the addends.
+    fw_biomass_kg: float = 0.0       # FW/EGG-phase standing this week (given)
+    fw_feed_kg_day: float = 0.0      # FW/EGG-phase feed this week (given)
+    og_biomass_kg: float = 0.0       # OG grow-out standing (post-harvest)
+    purge_biomass_kg: float = 0.0    # 6N purge-hold standing (off-feed)
 
 
 @dataclass
@@ -531,6 +623,8 @@ def plan(
     record_standing: bool = False,
     biomass_ceiling: Optional[dict[str, float]] = None,
     model_purge_hold: bool = False,
+    model_full_facility: bool = False,
+    fw_inflight: Optional[dict[str, tuple[float, float, "date"]]] = None,
 ) -> PlannerResult:
     """Run the tankless L1 planner. See module docstring for the algorithm.
 
@@ -572,10 +666,45 @@ def plan(
     The purge-hold population is recorded as `in_purge=True` BatchStandingRows
     (zero feed) so L3 places it into the 6N staging pool, not the 33-tank
     grow-out pool. Per-week 6N accounting lands in `PlannerResult.purge_trace`.
+
+    `model_full_facility` (ADDITIVE, opt-in; default False == byte-identical to
+    the OG-only model) makes L1 a TRUE whole-facility biomass/feed model. The
+    production controller checks the facility cap against OG (grow-out) biomass
+    ONLY, but the real limit covers the ENTIRE farm:
+
+        facility standing = FW-phase (smolt/egg, pre-TranOG) + OG grow-out
+                            + 6N purge-hold
+        facility feed     = FW-phase feed + OG feed   (purge = 0, off-feed)
+
+    FW biomass/feed is a GIVEN — fixed by the stocking cadence + FW growth +
+    each batch's TranOG date — pulled from the EXISTING validated biology via
+    `fw_phase_biomass_feed_by_week` (which calls `project_all_batches` +
+    `project_in_flight_fw_batch`, summing only the FW/EGG-stage weeks). FW is
+    NOT harvestable, so L1 cannot shrink it; instead the harvest cascade holds
+    the TOTAL (FW + OG + purge) under the cap, which leaves OG an effective
+    ceiling of (cap - FW(week) - purge(week)). L1 then draws OG harder/earlier
+    to honor it. The biomass + feed caps, the arrival pre-draw, and the legality
+    verdict are all evaluated against the whole-facility totals. When off
+    (default) FW contributes nothing and the behaviour is the OG-only POC,
+    byte-identical for every existing caller.
+
+    `fw_inflight` maps batch_id -> (count, avg_wt_g, pr_closing_date) for
+    FW-in-flight batches (measured in FW units at PR closing); passed through to
+    the FW projector so those batches are anchored to PR state. Only consulted
+    when `model_full_facility` is True.
     """
     fs = _as_date(control.forecast_start)
     horizon = control.horizon_weeks
     biomass_cap = control.max_biomass_kg
+
+    # Whole-facility FW-phase addends: per-week-label biomass (kg) + feed
+    # (kg/day) from the FW/EGG phase of every batch. Empty (zero) unless
+    # model_full_facility is on, keeping the default path byte-identical.
+    fw_bio_by_label: dict[str, float] = {}
+    fw_feed_by_label: dict[str, float] = {}
+    if model_full_facility:
+        fw_bio_by_label, fw_feed_by_label = fw_phase_biomass_feed_by_week(
+            batches, tables, control, fw_inflight=fw_inflight)
 
     def _bio_cap_for(label: str) -> float:
         """Per-week biomass ceiling: the override if present, else the flat cap."""
@@ -711,12 +840,19 @@ def plan(
 
         # 3) Compute facility standing + feed BEFORE this week's draw.
         # Standing INCLUDES the off-feed purge hold (fish are still on-farm);
-        # feed EXCLUDES it (depuration fish eat nothing).
+        # feed EXCLUDES it (depuration fish eat nothing). With
+        # model_full_facility, ALSO include the FW-phase (smolt/egg) standing +
+        # feed — a GIVEN this week (not harvestable). The TOTAL is then what the
+        # facility cap is checked against, so OG gets squeezed to (cap - FW -
+        # purge). When off, fw_bio/fw_feed are 0 and this is the OG-only model.
         grow_biomass = sum(work[s.batch_id].biomass_kg() for s in seeds
                            if entered[s.batch_id])
-        standing = grow_biomass + held_biomass
-        feed = sum(work[s.batch_id].feed_kg_day(s.batch, tables) for s in seeds
-                   if entered[s.batch_id])
+        og_feed = sum(work[s.batch_id].feed_kg_day(s.batch, tables) for s in seeds
+                      if entered[s.batch_id])
+        fw_bio = fw_bio_by_label.get(label, 0.0)
+        fw_feed = fw_feed_by_label.get(label, 0.0)
+        standing = grow_biomass + held_biomass + fw_bio
+        feed = og_feed + fw_feed
 
         # 4) Required draw = max of the three needs. The biomass ceiling is the
         # per-week override when given (else the flat facility cap).
@@ -725,17 +861,31 @@ def plan(
 
         # need_feed: remove top mass until feed/day <= feed_cap. Feed scales
         # ~linearly with biomass at the heavy end; approximate the kg to shed
-        # as (feed - cap)/feed * standing-of-feeding-fish, then refine isn't
-        # needed for the POC — use the proportional estimate.
+        # proportionally. Only OG (grow-out) fish are harvestable — FW-phase +
+        # purge feed cannot be cut by harvesting — so under model_full_facility
+        # the shed is scaled against the OG feed/biomass (shedding kg of OG cuts
+        # og_feed/grow_biomass of feed per kg). When off (default), the original
+        # whole-standing proportional estimate is preserved byte-identical.
         need_feed = 0.0
         if feed > feed_cap and feed > 0:
-            need_feed = (feed - feed_cap) / feed * standing
+            if model_full_facility:
+                if og_feed > 1e-9 and grow_biomass > 0:
+                    need_feed = (feed - feed_cap) / og_feed * grow_biomass
+            else:
+                need_feed = (feed - feed_cap) / feed * standing
 
         # need_arrival: arrivals landing within the lead window must fit under
-        # the cap; pre-draw the overflow now.
-        upcoming = sum(arrivals_by_week.get(w + k, 0.0)
-                       for k in range(1, arrival_lead_weeks + 1))
-        need_arrival = max(0.0, (standing + upcoming) - wk_bio_cap)
+        # the cap; pre-draw the overflow now. Under model_full_facility the
+        # FW->OG transfer is biomass-NEUTRAL at the facility level (the arriving
+        # cohort is already counted as FW standing this week), so adding it again
+        # would double-count — the biomass need already covers it; zero the
+        # lookahead. When off, keep the original OG-arrival pre-draw.
+        if model_full_facility:
+            need_arrival = 0.0
+        else:
+            upcoming = sum(arrivals_by_week.get(w + k, 0.0)
+                           for k in range(1, arrival_lead_weeks + 1))
+            need_arrival = max(0.0, (standing + upcoming) - wk_bio_cap)
 
         required = max(need_biomass, need_feed, need_arrival,
                        pre_draw_debt.get(w, 0.0))
@@ -845,15 +995,21 @@ def plan(
         # 7) Post-harvest standing + feed + feasibility verdict. The draw left
         # grow-out (it is now off-feed in 6N), so subtract this week's MOVE-IN
         # from the grow-out biomass; the held buffer (incl. this week's move-in,
-        # minus this week's release) is added back as standing.
+        # minus this week's release) is added back as standing. Under
+        # model_full_facility the FW-phase standing + feed (a given) are added to
+        # the TOTAL the cap is checked against (FW is not touched by harvest).
         if model_purge_hold:
             grow_post = grow_biomass - drawn_kg
             held_post = held_biomass + moved_in_kg  # release already popped
-            standing_post = grow_post + held_post
+            og_purge_post = grow_post + held_post
         else:
-            standing_post = standing - harvested_kg
-        feed_post = sum(work[s.batch_id].feed_kg_day(s.batch, tables)
-                        for s in seeds if entered[s.batch_id])
+            grow_post = grow_biomass - harvested_kg
+            held_post = held_biomass
+            og_purge_post = standing - harvested_kg - fw_bio  # = grow_post (no FW)
+        standing_post = og_purge_post + fw_bio
+        og_feed_post = sum(work[s.batch_id].feed_kg_day(s.batch, tables)
+                           for s in seeds if entered[s.batch_id])
+        feed_post = og_feed_post + fw_feed
         over_bio = max(0.0, standing_post - wk_bio_cap)
         over_feed = max(0.0, feed_post - feed_cap)
         legal = over_bio <= 1e-3 and over_feed <= 1e-3
@@ -869,6 +1025,8 @@ def plan(
             harvested_kg=harvested_kg, harvested_count=harvested_count,
             required_kg=required, binding=binding, legal=legal,
             over_biomass_kg=over_bio, over_feed_kg=over_feed,
+            fw_biomass_kg=fw_bio, fw_feed_kg_day=fw_feed,
+            og_biomass_kg=grow_post, purge_biomass_kg=held_post,
         ))
 
         # 8) (additive, opt-in) record per-(batch, week) POST-harvest standing

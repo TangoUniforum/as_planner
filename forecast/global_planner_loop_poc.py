@@ -199,6 +199,8 @@ def run_loop(
     margin_frac: float = 0.5,
     l3_kwargs: Optional[dict] = None,
     model_purge_hold: bool = False,
+    model_full_facility: bool = False,
+    fw_inflight: Optional[dict] = None,
     verbose: bool = True,
 ) -> LoopResult:
     """Drive L1's per-week loading down to the tank-realizable envelope.
@@ -237,6 +239,8 @@ def run_loop(
             record_standing=True,
             biomass_ceiling=bc,
             model_purge_hold=model_purge_hold,
+            model_full_facility=model_full_facility,
+            fw_inflight=fw_inflight,
         )
         res = l3.plan_l3(l1, control, facility, system_limits, **l3_kwargs)
         last_l1, last_l3 = l1, res
