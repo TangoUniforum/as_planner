@@ -61,12 +61,31 @@ Grading only fires when required > 0. A configurable `max_grade_fraction` caps
 how much of a batch may be skimmed per week, and a `reserve_fraction` keeps at
 least R% of each batch un-skimmed as a hard rail.
 
+6N flow-to-harvest (opt-in `model_purge_hold`)
+----------------------------------------------
+By default harvest leaves the facility INSTANTLY in its draw week (the original
+POC). With `model_purge_hold=True` the planner instead mirrors the production
+pipeline's 6N depuration flow (see `forecast.placement` STARVE/move-in +
+`forecast.sixn`), per-week resolved by `is_purge_mode` / `in_transition_window`:
+
+  * PURGE mode: a drawn cohort is MOVED into a 6N pair ~2 weeks before harvest,
+    held OFF-FEED (no feed, no growth; biomass STILL counts to standing), and
+    released round-robin (~one pair/week). Standing runs higher (held, not shed
+    early), feed runs lower (held fish don't eat), 6N pairs are in use.
+  * PRODUCTION mode (>= sixn_production_start): off-feed IN PLACE for
+    starvation_period_days, then removed; 6N main tanks join the placement pool.
+  * TRANSITION window: 6N fallow — no new move-ins.
+
+See `plan(..., model_purge_hold=...)` and `PurgeTraceRow`.
+
 What this is NOT
 ----------------
 This is L1 only: the *envelope*, not the assignment. It does not place fish in
-tanks, does not respect per-system caps, does not model 6N depuration, and uses
-the OG-tank kg ceiling as the only spatial proxy. L2 (assign envelope -> systems)
-and L3 (assign -> tanks, density) are out of scope. See the runner's notes.
+specific tanks or respect per-system caps, and uses the OG-tank kg ceiling as
+the spatial proxy (one pair/week in purge mode). The 6N flow is modeled at the
+tankless / system-config grain (a pooled purge buffer + whole-tank 6N footprint),
+NOT placement's per-tank state machine. L2 (assign envelope -> systems) and L3
+(assign -> tanks, density) are out of scope. See the runner's notes.
 """
 from __future__ import annotations
 
@@ -85,7 +104,27 @@ from .biology import (
     sgr_pct_per_day,
 )
 from .models import BatchInput, BiologyTables, ControlParams, FacilityConfig
+from .sixn import (
+    SIXN_PAIRS,
+    in_transition_window,
+    is_purge_mode,
+)
 from .time_grid import iso_week_label, week_range
+
+
+# 6N purge-hold (off-feed depuration) modeling, mirroring the production
+# pipeline (`forecast.placement` STARVE / move-in flow + `forecast.sixn`):
+#   * Purge mode: a harvest-bound cohort is MOVED into a 6N pair ~PURGE_HOLD_WEEKS
+#     before its harvest week, held OFF-FEED (no feed, no growth; biomass still
+#     counts to standing), and leaves round-robin (~one pair/week). 6N pairs ==
+#     len(SIXN_PAIRS) (3) physical pairs (6 tanks), staged at 125% density.
+#   * Production mode (week >= sixn_production_start): no 6N staging — harvest is
+#     in-place off-feed for `starvation_period_days`, then removed; the 3 6N main
+#     tanks join the production placement pool.
+# The default `model_purge_hold=False` keeps every existing caller byte-identical
+# (instant removal, no buffer); the L1<->L3 loop turns it ON.
+_PURGE_HOLD_WEEKS = 2
+_N_SIXN_PAIRS = len(SIXN_PAIRS)          # 3 depuration pairs (61/67, 63/69, 65/71)
 
 
 # Number of histogram bins used to represent a batch's weight distribution.
@@ -406,6 +445,13 @@ class BatchStandingRow:
     This is purely additive: it records, for each active batch each week, the
     standing biomass/count/mean-weight AFTER that week's harvest draw. It does
     not influence L1's harvest math; L2 (system assignment) consumes it.
+
+    `in_purge` (default False) flags rows that are 6N PURGE-HOLD population —
+    fish that have left grow-out into a 6N depuration pair, held off-feed for the
+    rolling 2-week purge (see `model_purge_hold`). These rows carry biomass but
+    ZERO feed (`feed_kg_day == 0`) and must be placed into the 6N staging pool,
+    NOT the 33-tank grow-out placement pool. When `model_purge_hold` is off every
+    row is grow-out (`in_purge=False`), so existing L2/L3 callers are unchanged.
     """
     week: int
     week_label: str
@@ -414,6 +460,27 @@ class BatchStandingRow:
     biomass_kg: float
     avg_wt_g: float
     feed_kg_day: float
+    in_purge: bool = False
+
+
+@dataclass
+class PurgeTraceRow:
+    """Per-week 6N PURGE-HOLD accounting (only when `model_purge_hold` is on).
+
+    Mirrors the production pipeline's 6N depuration flow at the tankless grain:
+    fish enter a 6N pair ~`purge_hold_weeks` before harvest, held OFF-FEED (no
+    feed, no growth; biomass still counts), and leave round-robin (~one pair /
+    week). See `forecast.sixn` for the reference structure being mirrored.
+    """
+    week: int
+    week_label: str
+    mode: str                    # "purge" | "production" | "transition"
+    held_count: float            # fish parked in 6N this week (standing)
+    held_biomass_kg: float       # their biomass (counts to standing, off-feed)
+    moved_in_kg: float           # biomass that entered the hold this week
+    released_kg: float           # biomass harvested OUT of the hold this week
+    sixn_tanks_used: int         # 6N pair-tanks occupied (125% staged density)
+    sixn_pairs_used: int         # 6N pairs occupied this week
 
 
 @dataclass
@@ -430,6 +497,9 @@ class PlannerResult:
     # called with record_standing=True. Empty otherwise (byte-identical default
     # behaviour for existing callers).
     batch_standing: list[BatchStandingRow] = field(default_factory=list)
+    # Per-week 6N purge-hold accounting, only populated when model_purge_hold=True.
+    # Empty otherwise (byte-identical default behaviour for existing callers).
+    purge_trace: list[PurgeTraceRow] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -459,15 +529,59 @@ def plan(
     reserve_fraction: float = 0.05,
     harvest_tank_density_pct: float = 1.25,
     record_standing: bool = False,
+    biomass_ceiling: Optional[dict[str, float]] = None,
+    model_purge_hold: bool = False,
 ) -> PlannerResult:
     """Run the tankless L1 planner. See module docstring for the algorithm.
 
     Returns a PlannerResult with the harvest envelope, standing trace, feasibility
     verdict, and per-batch conservation.
+
+    `biomass_ceiling` (ADDITIVE, opt-in) is an optional per-week-LABEL biomass
+    ceiling override. When None (default) every week uses the flat
+    `control.max_biomass_kg`, so existing callers are byte-identical. When given,
+    week `w` harvests to hold `biomass_ceiling.get(label, control.max_biomass_kg)`
+    instead of the flat facility cap — the L1<->L3 feasibility loop lowers a
+    week's ceiling to what the tanks can physically realize and re-plans. The
+    ceiling drives the biomass/arrival need + the legality verdict; the feed cap
+    is untouched (the loop only constrains biomass).
+
+    `model_purge_hold` (ADDITIVE, opt-in; default False == byte-identical
+    instant-removal) models the production pipeline's 6N flow-to-harvest instead
+    of removing the harvest envelope instantly:
+
+      * PURGE mode (`forecast.sixn.is_purge_mode`): the kg drawn in a week are not
+        removed at once. They are MOVED OUT of grow-out into a 6N PURGE HOLD
+        (mirroring placement's STARVE move-in) and released (actually harvested)
+        `_PURGE_HOLD_WEEKS` (==2) weeks later. While held they count to STANDING
+        biomass but eat NOTHING (off-feed, frozen weight) and occupy 6N pairs at
+        the 125% staged density. So standing biomass runs HIGHER (fish are held,
+        not shed early) and feed runs LOWER (held fish don't eat). The
+        `required` draw is sized against the standing that INCLUDES the hold, and
+        the hold is round-robin throughput-capped at ~one pair (`_N_SIXN_PAIRS`)
+        per week — at most one pair's worth of biomass releases per week.
+      * PRODUCTION mode (`week >= sixn_production_start`): harvest-bound fish go
+        off-feed IN PLACE for `control.starvation_period_days` then are removed;
+        no separate 6N staging (the 3 6N main tanks join the placement pool — an
+        L3 tank-count concern, surfaced via `available_tanks_for_week`). Modeled
+        here as a short in-place off-feed hold (`starvation_period_days/7` weeks,
+        rounded up) before removal.
+      * TRANSITION window (`forecast.sixn.in_transition_window`): 6N is fallow;
+        no new move-ins, the buffer is allowed to drain.
+
+    The purge-hold population is recorded as `in_purge=True` BatchStandingRows
+    (zero feed) so L3 places it into the 6N staging pool, not the 33-tank
+    grow-out pool. Per-week 6N accounting lands in `PlannerResult.purge_trace`.
     """
     fs = _as_date(control.forecast_start)
     horizon = control.horizon_weeks
     biomass_cap = control.max_biomass_kg
+
+    def _bio_cap_for(label: str) -> float:
+        """Per-week biomass ceiling: the override if present, else the flat cap."""
+        if biomass_ceiling is None:
+            return biomass_cap
+        return biomass_ceiling.get(label, biomass_cap)
     feed_cap = control.max_feed_per_day_kg
     min_wt = control.min_harvest_weight_g
     max_harvest_fish = control.max_harvest_per_week
@@ -513,14 +627,29 @@ def plan(
     envelope: list[HarvestEnvelopeRow] = []
     trace: list[StandingTraceRow] = []
     batch_standing: list[BatchStandingRow] = []
+    purge_trace: list[PurgeTraceRow] = []
     infeasible: list[tuple[int, str, str, float]] = []
     # Carry-forward pre-draw debt: if an arrival deadline needs earlier shedding,
     # add it to this week's required (simple redistribution-to-earlier proxy).
     pre_draw_debt: dict[int, float] = {w: 0.0 for w in range(horizon)}
 
+    # 6N purge-hold buffer (only used when model_purge_hold). Each entry is one
+    # cohort slice MOVED into 6N this week, frozen off-feed, due to be harvested
+    # out `release_week` weeks later. Mirrors placement's STARVE move-in: weight
+    # is frozen at move-in (no growth), feed is zero during the hold.
+    #   buffer[w_release] -> list of dicts {batch_id, count, biomass_kg, avg_wt_g}
+    purge_buffer: dict[int, list[dict]] = {}
+    # In-place production-mode off-feed hold length in whole weeks (>=1).
+    _starv_weeks = max(1, math.ceil((control.starvation_period_days or 7) / 7.0))
+
     for w in range(horizon):
         ws, we = week_range(w, fs)
         label = iso_week_label(ws)
+        # 6N mode for THIS week (mirrors forecast.sixn resolution at week grain).
+        _purge = is_purge_mode(control, ws) if model_purge_hold else False
+        _transition = (in_transition_window(control, ws)
+                       if model_purge_hold else False)
+        _hold_weeks = _PURGE_HOLD_WEEKS if _purge else _starv_weeks
 
         # 1) Activate batches entering OG this week.
         for s in seeds:
@@ -552,14 +681,47 @@ def plan(
                     cons[s.batch_id]["cull_kg"] += cb
             h.grow_week(b, tables)
 
-        # 3) Compute facility standing + feed BEFORE harvest.
-        standing = sum(work[s.batch_id].biomass_kg() for s in seeds
-                       if entered[s.batch_id])
+        # 2b) PURGE-HOLD release: fish whose hold ends this week LEAVE 6N now —
+        # this is the actual harvest (HOG) for the week. The held cohorts were
+        # frozen off-feed since move-in, so they release at their move-in weight.
+        released_rows: dict[str, list[float]] = {}  # batch -> [count, kg]
+        released_kg = 0.0
+        if model_purge_hold:
+            for entry in purge_buffer.pop(w, []):
+                bid = entry["batch_id"]
+                acc = released_rows.setdefault(bid, [0.0, 0.0])
+                acc[0] += entry["count"]
+                acc[1] += entry["biomass_kg"]
+                released_kg += entry["biomass_kg"]
+                cons[bid]["harvested_count"] += entry["count"]
+                cons[bid]["harvested_kg"] += entry["biomass_kg"]
+            for bid, (c, kg) in released_rows.items():
+                envelope.append(HarvestEnvelopeRow(
+                    week=w, week_label=label, batch_id=bid,
+                    count=c, biomass_kg=kg,
+                    avg_wt_g=(kg * 1000.0 / c if c > 0 else 0.0),
+                ))
+
+        # Biomass STILL held in the purge buffer (not yet released): counts to
+        # standing, eats nothing (off-feed). Frozen at move-in weight.
+        held_biomass = sum(e["biomass_kg"]
+                           for rel in purge_buffer.values() for e in rel)
+        held_count = sum(e["count"]
+                         for rel in purge_buffer.values() for e in rel)
+
+        # 3) Compute facility standing + feed BEFORE this week's draw.
+        # Standing INCLUDES the off-feed purge hold (fish are still on-farm);
+        # feed EXCLUDES it (depuration fish eat nothing).
+        grow_biomass = sum(work[s.batch_id].biomass_kg() for s in seeds
+                           if entered[s.batch_id])
+        standing = grow_biomass + held_biomass
         feed = sum(work[s.batch_id].feed_kg_day(s.batch, tables) for s in seeds
                    if entered[s.batch_id])
 
-        # 4) Required draw = max of the three needs.
-        need_biomass = max(0.0, standing - biomass_cap)
+        # 4) Required draw = max of the three needs. The biomass ceiling is the
+        # per-week override when given (else the flat facility cap).
+        wk_bio_cap = _bio_cap_for(label)
+        need_biomass = max(0.0, standing - wk_bio_cap)
 
         # need_feed: remove top mass until feed/day <= feed_cap. Feed scales
         # ~linearly with biomass at the heavy end; approximate the kg to shed
@@ -573,7 +735,7 @@ def plan(
         # the cap; pre-draw the overflow now.
         upcoming = sum(arrivals_by_week.get(w + k, 0.0)
                        for k in range(1, arrival_lead_weeks + 1))
-        need_arrival = max(0.0, (standing + upcoming) - biomass_cap)
+        need_arrival = max(0.0, (standing + upcoming) - wk_bio_cap)
 
         required = max(need_biomass, need_feed, need_arrival,
                        pre_draw_debt.get(w, 0.0))
@@ -597,6 +759,14 @@ def plan(
                         if eligible_count > 0 else min_wt)
         fish_ceiling_kg = max_harvest_fish * elig_mean_wt / 1000.0
         weekly_ceiling = min(og_ceiling, fish_ceiling_kg)
+        # In purge mode the 6N round-robin clears ~one PAIR (2 staged tanks) per
+        # week, so the weekly MOVE-IN throughput is one pair's worth at the 125%
+        # staged density (still bounded by the fish/wk processing cap). This is
+        # the depuration pipeline's physical rate, replacing the single-tank OG
+        # ceiling that modeled instant removal.
+        if model_purge_hold and _purge:
+            pair_ceiling = 2.0 * og_ceiling
+            weekly_ceiling = min(pair_ceiling, fish_ceiling_kg)
 
         draw_target = min(required, weekly_ceiling)
         # If required exceeds the ceiling and it's arrival-driven, push the
@@ -604,9 +774,19 @@ def plan(
         if required > weekly_ceiling and binding in ("arrival", "predraw") and w > 0:
             pre_draw_debt[w - 1] = pre_draw_debt.get(w - 1, 0.0) + (required - weekly_ceiling)
 
-        # 6) Allocate draw_target via FIFO-with-grade cascade.
+        # In the TRANSITION window 6N is fallow (empty) — no new move-ins; let the
+        # buffer drain and hold the draw at zero this week.
+        if model_purge_hold and _transition:
+            draw_target = 0.0
+
+        # 6) Allocate draw_target via FIFO-with-grade cascade. With the purge-hold
+        # model the drawn fish are MOVED into 6N (parked in the buffer, frozen
+        # off-feed) and released `_hold_weeks` later; the week's HOG is the
+        # buffer RELEASE computed in step 2b. Without it (default) the draw IS
+        # the week's instant HOG (byte-identical legacy behaviour).
         remaining = draw_target
         week_rows: dict[str, list[float]] = {}  # batch -> [count, kg]
+        moved_in_kg = 0.0
         for s in seeds_fifo:
             if remaining <= 1e-6:
                 break
@@ -627,23 +807,54 @@ def plan(
             if got_kg > 0:
                 week_rows[s.batch_id] = [got_c, got_kg]
                 remaining -= got_kg
-                cons[s.batch_id]["harvested_count"] += got_c
-                cons[s.batch_id]["harvested_kg"] += got_kg
+                if model_purge_hold:
+                    # PURGE mode: MOVE into a 6N pair (staged, `sixn=True`).
+                    # PRODUCTION mode: off-feed IN PLACE (`sixn=False` — it stays
+                    # on a grow-out tank, NOT 6N staging). Release (=harvest)
+                    # _hold_weeks later; frozen at the drawn slice's move-in mean.
+                    rel = w + _hold_weeks
+                    purge_buffer.setdefault(rel, []).append({
+                        "batch_id": s.batch_id, "count": got_c,
+                        "biomass_kg": got_kg,
+                        "avg_wt_g": (got_kg * 1000.0 / got_c if got_c > 0 else 0.0),
+                        "sixn": _purge,
+                    })
+                    moved_in_kg += got_kg
+                    # conservation credited at RELEASE (step 2b), not here.
+                else:
+                    cons[s.batch_id]["harvested_count"] += got_c
+                    cons[s.batch_id]["harvested_kg"] += got_kg
 
-        harvested_kg = sum(v[1] for v in week_rows.values())
-        harvested_count = sum(v[0] for v in week_rows.values())
-        for bid, (c, kg) in week_rows.items():
-            envelope.append(HarvestEnvelopeRow(
-                week=w, week_label=label, batch_id=bid,
-                count=c, biomass_kg=kg,
-                avg_wt_g=(kg * 1000.0 / c if c > 0 else 0.0),
-            ))
+        if model_purge_hold:
+            # The week's HOG is what was RELEASED from 6N (step 2b); the envelope
+            # rows were already emitted there.
+            drawn_kg = sum(v[1] for v in week_rows.values())
+            harvested_kg = released_kg
+            harvested_count = sum(v[0] for v in released_rows.values())
+        else:
+            drawn_kg = 0.0
+            harvested_kg = sum(v[1] for v in week_rows.values())
+            harvested_count = sum(v[0] for v in week_rows.values())
+            for bid, (c, kg) in week_rows.items():
+                envelope.append(HarvestEnvelopeRow(
+                    week=w, week_label=label, batch_id=bid,
+                    count=c, biomass_kg=kg,
+                    avg_wt_g=(kg * 1000.0 / c if c > 0 else 0.0),
+                ))
 
-        # 7) Post-harvest standing + feed + feasibility verdict.
-        standing_post = standing - harvested_kg
+        # 7) Post-harvest standing + feed + feasibility verdict. The draw left
+        # grow-out (it is now off-feed in 6N), so subtract this week's MOVE-IN
+        # from the grow-out biomass; the held buffer (incl. this week's move-in,
+        # minus this week's release) is added back as standing.
+        if model_purge_hold:
+            grow_post = grow_biomass - drawn_kg
+            held_post = held_biomass + moved_in_kg  # release already popped
+            standing_post = grow_post + held_post
+        else:
+            standing_post = standing - harvested_kg
         feed_post = sum(work[s.batch_id].feed_kg_day(s.batch, tables)
                         for s in seeds if entered[s.batch_id])
-        over_bio = max(0.0, standing_post - biomass_cap)
+        over_bio = max(0.0, standing_post - wk_bio_cap)
         over_feed = max(0.0, feed_post - feed_cap)
         legal = over_bio <= 1e-3 and over_feed <= 1e-3
         if not legal:
@@ -654,7 +865,7 @@ def plan(
         trace.append(StandingTraceRow(
             week=w, week_label=label,
             standing_biomass_kg=standing_post, feed_kg_day=feed_post,
-            biomass_cap=biomass_cap, feed_cap=feed_cap,
+            biomass_cap=wk_bio_cap, feed_cap=feed_cap,
             harvested_kg=harvested_kg, harvested_count=harvested_count,
             required_kg=required, binding=binding, legal=legal,
             over_biomass_kg=over_bio, over_feed_kg=over_feed,
@@ -676,14 +887,83 @@ def plan(
                     avg_wt_g=h.avg_wt_g(),
                     feed_kg_day=h.feed_kg_day(s.batch, tables),
                 ))
+            # 8b) The off-feed HOLD population is ALSO standing. PURGE-mode holds
+            # (sixn=True) occupy 6N pairs -> flagged in_purge so L3 routes them to
+            # the 6N staging pool (not the 33-tank grow-out pool). PRODUCTION-mode
+            # in-place starvation (sixn=False) stays on a GROW-OUT tank -> recorded
+            # as ordinary (non-purge) standing so it competes for the 36-tank
+            # production pool. Both are OFF-FEED (feed_kg_day=0).
+            if model_purge_hold:
+                held_6n: dict[str, list[float]] = {}     # bid -> [count, kg]
+                held_inplace: dict[str, list[float]] = {}
+                for rel in purge_buffer.values():
+                    for e in rel:
+                        tgt = held_6n if e.get("sixn") else held_inplace
+                        acc = tgt.setdefault(e["batch_id"], [0.0, 0.0])
+                        acc[0] += e["count"]
+                        acc[1] += e["biomass_kg"]
+                for bid, (c, kg) in held_6n.items():
+                    if c <= 1e-9:
+                        continue
+                    batch_standing.append(BatchStandingRow(
+                        week=w, week_label=label, batch_id=bid,
+                        count=c, biomass_kg=kg,
+                        avg_wt_g=(kg * 1000.0 / c if c > 0 else 0.0),
+                        feed_kg_day=0.0, in_purge=True,
+                    ))
+                for bid, (c, kg) in held_inplace.items():
+                    if c <= 1e-9:
+                        continue
+                    batch_standing.append(BatchStandingRow(
+                        week=w, week_label=label, batch_id=bid,
+                        count=c, biomass_kg=kg,
+                        avg_wt_g=(kg * 1000.0 / c if c > 0 else 0.0),
+                        feed_kg_day=0.0, in_purge=False,
+                    ))
+
+        # 8c) (additive, opt-in) per-week 6N purge-hold accounting trace. The
+        # held population AFTER this week's release + move-in is the current
+        # buffer contents; 6N tank/pair footprint is its whole-tank ceil at the
+        # 125% staged (one-tank) density.
+        if model_purge_hold:
+            held_now_kg = sum(e["biomass_kg"]
+                              for rel in purge_buffer.values() for e in rel)
+            held_now_ct = sum(e["count"]
+                              for rel in purge_buffer.values() for e in rel)
+            # 6N staging footprint counts ONLY 6N-staged (purge) holds; the
+            # production-mode in-place starvation occupies grow-out tanks instead.
+            held_6n_kg = sum(e["biomass_kg"]
+                             for rel in purge_buffer.values() for e in rel
+                             if e.get("sixn"))
+            sixn_tanks = (math.ceil(held_6n_kg / og_ceiling)
+                          if held_6n_kg > 1e-6 else 0)
+            sixn_pairs = math.ceil(sixn_tanks / 2.0) if sixn_tanks else 0
+            mode = ("transition" if _transition else
+                    "purge" if _purge else "production")
+            purge_trace.append(PurgeTraceRow(
+                week=w, week_label=label, mode=mode,
+                held_count=held_now_ct, held_biomass_kg=held_now_kg,
+                moved_in_kg=moved_in_kg, released_kg=released_kg,
+                sixn_tanks_used=sixn_tanks, sixn_pairs_used=sixn_pairs,
+            ))
 
     # Final per-batch conservation: input ~= harvested + standing@horizon +
     # mortality + culls. seeded_count already folds the TranOG reconciliation
     # cull (we stock the post-cull count target), so we reconcile the
     # SEEDED population through OG.
+    # Any fish still in the 6N purge hold at the horizon end are on-farm standing
+    # (never released): fold them into the per-batch standing so conservation
+    # (seeded == harvested + standing + mort + cull) still closes exactly.
+    held_at_end: dict[str, float] = {}
+    if model_purge_hold:
+        for rel in purge_buffer.values():
+            for e in rel:
+                held_at_end[e["batch_id"]] = (
+                    held_at_end.get(e["batch_id"], 0.0) + e["count"])
     for s in seeds:
         c = cons[s.batch_id]
-        c["standing_count"] = work[s.batch_id].total_count()
+        c["standing_count"] = (work[s.batch_id].total_count()
+                               + held_at_end.get(s.batch_id, 0.0))
         c["standing_kg"] = work[s.batch_id].biomass_kg()
         accounted = (c["harvested_count"] + c["standing_count"]
                      + c["mortality_count"] + c["cull_count"])
@@ -698,4 +978,5 @@ def plan(
         feasible=(len(infeasible) == 0), infeasible_weeks=infeasible,
         conservation=cons,
         batch_standing=batch_standing,
+        purge_trace=purge_trace,
     )

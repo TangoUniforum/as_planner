@@ -105,6 +105,7 @@ from .global_planner_l2_poc import (
     GROWOUT_SYSTEMS,
     NURSERY_SYSTEMS,
     ONE_KG_LOCK_G,
+    PURGE_SYSTEMS,
     _tier_for_weight,
     _tier_systems,
     og_systems_from_facility,
@@ -146,6 +147,94 @@ def n_tanks_per_system(facility: FacilityConfig) -> dict[str, int]:
     return counts
 
 
+# ---------------------------------------------------------------------------
+# Mode-aware available-tank count (for the L1<->L3 feasibility loop)
+# ---------------------------------------------------------------------------
+
+def _is_purge_week(week_label: str, control: ControlParams) -> bool:
+    """True if `week_label` is BEFORE control.sixn_production_start (6N purge).
+
+    Mirrors forecast.sixn.is_purge_mode at the week grain: with no
+    sixn_production_start the whole horizon is purge; otherwise a week is purge
+    while its Monday is strictly before the production-start date.
+    """
+    from .time_grid import parse_iso_label
+
+    psd = getattr(control, "sixn_production_start", None)
+    if psd is None:
+        return True
+    psd_date = psd.date() if hasattr(psd, "date") else psd
+    wk_monday = parse_iso_label(week_label)
+    if wk_monday is None:
+        return True
+    return wk_monday < psd_date
+
+
+def available_tanks_for_week(
+    week_label: str, facility: FacilityConfig, control: ControlParams
+) -> tuple[int, int]:
+    """Mode-aware (biomass_tanks, feed_tanks) physically available this week.
+
+    The whole-tank demand competes for the OG tanks L3 places production fish
+    into. The count available differs by 6N mode; the spec's distinction is that
+    6N purge tanks HOLD biomass but take NO feed (mirrors the STARVE treatment),
+    so a 6N purge tank counts toward the biomass-tank budget but not the
+    feed-tank budget:
+
+      * 6N PURGE mode  (week < sixn_production_start): a 6N purge tank holds
+        biomass (no feed). biomass_tanks counts it; feed_tanks does not.
+      * 6N PRODUCTION mode (week >= sixn_production_start): every OG production
+        tank feeds, so 6N counts toward BOTH budgets.
+
+    On THIS facility the conveyor geometry is: the 11 NURSERY+GROWOUT systems
+    are the production placement pool (33 tanks, all feeding), and OG6N (6 tanks)
+    is a SEPARATE harvest-staging / depuration pool that L3 does NOT stock
+    production fish into. So:
+
+      * The placement pool = 11 NURSERY+GROWOUT systems = 33 feeding tanks.
+        None of these 33 are 6N purge tanks, so biomass_tanks == feed_tanks ==
+        33 in BOTH modes here. (The spec's "33 incl. 2 6N off-feed" shape
+        assumed 6N sat INSIDE the placement systems; here it is a distinct pool,
+        so the off-feed adjustment has nothing to subtract from the 33.)
+
+    The mode-aware STARVE logic is kept STRUCTURAL (so a facility whose
+    placement pool DID contain purge tanks would get the off-feed subtraction):
+    `feed_tanks` excludes placement-pool tanks that are 6N purge this week;
+    `biomass_tanks` includes them. The PURGE_SYSTEMS (6N) outside the placement
+    pool are reported separately and not added — they are not stocking targets.
+    Counts are derived from the facility's real OG inventory so a re-sized
+    facility stays correct.
+    """
+    n_by_sys = n_tanks_per_system(facility)
+    prod_systems = set(NURSERY_SYSTEMS) | set(GROWOUT_SYSTEMS)
+    purge_systems = set(PURGE_SYSTEMS)
+    purge_week = _is_purge_week(week_label, control)
+
+    biomass_tanks = 0
+    feed_tanks = 0
+    for s, n in n_by_sys.items():
+        if s in prod_systems:
+            # In-pool production tank: feeds + holds biomass in both modes.
+            biomass_tanks += n
+            feed_tanks += n
+        elif s in purge_systems:
+            # 6N depuration/staging pool: NOT a placement target on this
+            # facility, so it adds NO realizable placement capacity. (Kept here
+            # explicitly so the geometry is documented; if a future facility
+            # folds 6N into the placement pool, move it into prod_systems and
+            # the off-feed STARVE subtraction below applies.)
+            continue
+    # STARVE adjustment (structural): any placement-pool tank that is a 6N purge
+    # tank this week holds biomass but does not feed. On this facility there are
+    # none in-pool, so this is a no-op; it preserves the spec's semantics for a
+    # facility where 6N IS a placement system.
+    if purge_week:
+        in_pool_purge = sum(n for s, n in n_by_sys.items()
+                            if s in prod_systems and s in purge_systems)
+        feed_tanks -= in_pool_purge
+    return biomass_tanks, feed_tanks
+
+
 @dataclass
 class TankDemandRow:
     """Step-2 whole-tank demand for one (batch, week)."""
@@ -166,11 +255,22 @@ def build_tank_demand(
     facility: FacilityConfig,
     control: ControlParams,
 ) -> list[TankDemandRow]:
-    """Step 2: ceil(biomass / per_tank_capacity) whole tanks per (batch, week)."""
+    """Step 2: ceil(biomass / per_tank_capacity) whole tanks per (batch, week).
+
+    6N PURGE-HOLD rows (`BatchStandingRow.in_purge`, only present when L1 ran
+    with `model_purge_hold=True`) are SKIPPED here: the off-feed depuration
+    population sits in the separate 6N staging pool (its own pairs at the 125%
+    staged density), which L3 does not stock grow-out production fish into. So
+    the grow-out whole-tank demand stays pure (no 6N double-count) and the 6N
+    footprint is accounted by `sixn_tank_demand` against the 6 6N tanks. When
+    `model_purge_hold` is off no row is `in_purge`, so this is byte-identical.
+    """
     cap = per_tank_capacity_kg(facility, control)
     rows: list[TankDemandRow] = []
     for r in l1.batch_standing:
         if r.biomass_kg <= 1e-9:
+            continue
+        if getattr(r, "in_purge", False):
             continue
         tanks = max(1, math.ceil(r.biomass_kg / cap))
         rows.append(TankDemandRow(
@@ -182,6 +282,36 @@ def build_tank_demand(
             per_tank_feed_kg_day=r.feed_kg_day / tanks,
         ))
     return rows
+
+
+def sixn_tank_demand(
+    l1: PlannerResult,
+    facility: FacilityConfig,
+    control: ControlParams,
+) -> dict[int, int]:
+    """Per-week 6N staging-tank demand from the L1 purge-hold population.
+
+    The off-feed depuration fish (BatchStandingRow.in_purge) are staged in 6N
+    pairs at the 125% harvest-staging density (a 6N tank holds MORE than a
+    production tank because fish about to be harvested may exceed the running
+    density). Footprint = ceil(total 6N-held biomass / (smallest_OG_tank *
+    1.25)). Returns {week: tanks_in_6N}; empty when no in_purge rows (purge-hold
+    off), so existing callers see nothing.
+    """
+    sixn_cap = smallest_og_tank_kg(facility) * 1.25
+    held: dict[int, float] = {}
+    for r in l1.batch_standing:
+        if getattr(r, "in_purge", False) and r.biomass_kg > 1e-9:
+            held[r.week] = held.get(r.week, 0.0) + r.biomass_kg
+    return {w: max(1, math.ceil(kg / sixn_cap)) for w, kg in held.items()
+            if kg > 1e-9}
+
+
+def smallest_og_tank_kg(facility: FacilityConfig) -> float:
+    """Min over OG tanks of (max_density_kg_m3 * volume_m3) — raw tank mass."""
+    og = [t.max_density_kg_m3 * t.volume_m3 for t in facility.tanks
+          if t.type == "OG"]
+    return min(og) if og else float("inf")
 
 
 # ---------------------------------------------------------------------------
