@@ -400,6 +400,23 @@ class StandingTraceRow:
 
 
 @dataclass
+class BatchStandingRow:
+    """Per-(batch, week) POST-harvest standing state — exposed for L2.
+
+    This is purely additive: it records, for each active batch each week, the
+    standing biomass/count/mean-weight AFTER that week's harvest draw. It does
+    not influence L1's harvest math; L2 (system assignment) consumes it.
+    """
+    week: int
+    week_label: str
+    batch_id: str
+    count: float
+    biomass_kg: float
+    avg_wt_g: float
+    feed_kg_day: float
+
+
+@dataclass
 class PlannerResult:
     envelope: list[HarvestEnvelopeRow]
     trace: list[StandingTraceRow]
@@ -409,6 +426,10 @@ class PlannerResult:
     feasible: bool
     infeasible_weeks: list[tuple[int, str, str, float]]  # (wk, label, cap, over_kg)
     conservation: dict[str, dict]
+    # Per-(batch, week) post-harvest standing, only populated when plan() is
+    # called with record_standing=True. Empty otherwise (byte-identical default
+    # behaviour for existing callers).
+    batch_standing: list[BatchStandingRow] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -437,6 +458,7 @@ def plan(
     max_grade_fraction: float = 0.5,
     reserve_fraction: float = 0.05,
     harvest_tank_density_pct: float = 1.25,
+    record_standing: bool = False,
 ) -> PlannerResult:
     """Run the tankless L1 planner. See module docstring for the algorithm.
 
@@ -490,6 +512,7 @@ def plan(
 
     envelope: list[HarvestEnvelopeRow] = []
     trace: list[StandingTraceRow] = []
+    batch_standing: list[BatchStandingRow] = []
     infeasible: list[tuple[int, str, str, float]] = []
     # Carry-forward pre-draw debt: if an arrival deadline needs earlier shedding,
     # add it to this week's required (simple redistribution-to-earlier proxy).
@@ -637,6 +660,23 @@ def plan(
             over_biomass_kg=over_bio, over_feed_kg=over_feed,
         ))
 
+        # 8) (additive, opt-in) record per-(batch, week) POST-harvest standing
+        # so L2 can assign the standing population to systems. This reads the
+        # already-evolved working histograms; it does not alter the harvest math.
+        if record_standing:
+            for s in seeds:
+                if not entered[s.batch_id]:
+                    continue
+                h = work[s.batch_id]
+                if h.is_empty():
+                    continue
+                batch_standing.append(BatchStandingRow(
+                    week=w, week_label=label, batch_id=s.batch_id,
+                    count=h.total_count(), biomass_kg=h.biomass_kg(),
+                    avg_wt_g=h.avg_wt_g(),
+                    feed_kg_day=h.feed_kg_day(s.batch, tables),
+                ))
+
     # Final per-batch conservation: input ~= harvested + standing@horizon +
     # mortality + culls. seeded_count already folds the TranOG reconciliation
     # cull (we stock the post-cull count target), so we reconcile the
@@ -657,4 +697,5 @@ def plan(
         og_tank_ceiling_kg=og_ceiling, max_harvest_per_week=max_harvest_fish,
         feasible=(len(infeasible) == 0), infeasible_weeks=infeasible,
         conservation=cons,
+        batch_standing=batch_standing,
     )
