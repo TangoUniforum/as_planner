@@ -398,39 +398,77 @@ def pick_tanks(
             chosen_by_ps[(batch_id, system)] = chosen
             actual_total[batch_id] = actual_total.get(batch_id, 0) + len(chosen)
 
-        # ---- DENSITY-RELIEF SPREAD (minimize density via the EMPTY tanks). ----
-        # After the base placement, any batch whose per-tank biomass is above the
-        # operating density target claims additional FREE (empty-last-week) tanks
-        # in its system(s) and spreads its biomass down toward that target —
-        # filling the idle grow-out tanks instead of leaving them empty while
-        # another tank sits over-cap. Multi-objective + bounded:
-        #   * density:   spread down to the operating target (lower per-tank kg)
-        #   * transfers: stop AT the target (never over-split); kept tanks persist
-        #                week-to-week (Pass-1 continuity), so no re-churn
-        #   * system load: unchanged — same biomass over more tanks
-        #   * tanks:     only free_clean tanks -> never over-subscribes, 0-drift
-        op_per_tank = smallest_og_tank_kg(facility) * getattr(
-            control, "density_target_pct", 0.9)
+        # ---- DENSITY-RELIEF SPREAD (CROSS-SYSTEM, minimize density). ----
+        # After the base placement, an over-dense batch claims its next tank to
+        # spread down toward the operating density target — in its OWN system if a
+        # tank is free, ELSE in another ELIGIBLE system (same conveyor tier;
+        # grow-out may spill to nursery) that has a free tank AND cap headroom.
+        # That splits the batch and halves its density instead of cramming to 176
+        # while tanks sit idle in another system (the controller's rebalancer
+        # move). Multi-objective + bounded:
+        #   * density:    spread to the operating target (lower per-tank kg)
+        #   * transfers:  stop AT the target; kept tanks persist (Pass-1 continuity)
+        #   * system load: destination biomass + feed kept under cap (checked)
+        #   * tanks:      free_clean only -> never over-subscribes, 0-drift
+        BIO_CAP, FEED_CAP = 400000.0, 3000.0
+        # Relieve toward 0.97 of the HARD cap (not the softer operating target),
+        # so ONLY genuinely over-cap tanks get spread — fixing the real >95
+        # breaches while leaving acceptable 85-95 tanks alone (minimize transfers).
+        op_per_tank = smallest_og_tank_kg(facility) * 0.97
+        batch_feed: dict[str, float] = {}
+        for p in plist:
+            batch_feed[p.batch_id] = batch_feed.get(p.batch_id, 0.0) + p.feed_kg_day
+        grow_sys = [s for s in GROWOUT_SYSTEMS if s in sys_tank_ids]
+        nurs_sys = [s for s in NURSERY_SYSTEMS if s in sys_tank_ids]
+        # Per-system load AFTER the base placement (approx; conservative for the
+        # headroom check — a spreading batch re-thins its other tanks, lowering
+        # their systems, which we don't credit back, so the check only over-states).
+        sys_bio: dict[str, float] = {}
+        sys_feed: dict[str, float] = {}
+        for (b2, sysm), ch in chosen_by_ps.items():
+            n = actual_total.get(b2, len(ch)) or 1
+            _, bb, _ = standing.get((b2, w), (0.0, 0.0, 0.0))
+            sys_bio[sysm] = sys_bio.get(sysm, 0.0) + (bb / n) * len(ch)
+            sys_feed[sysm] = (sys_feed.get(sysm, 0.0)
+                              + (batch_feed.get(b2, 0.0) / n) * len(ch))
         if op_per_tank > 0:
-            for p in plist:
-                batch_id, system = p.batch_id, p.system_id
-                cur = chosen_by_ps.get((batch_id, system))
-                if not cur:
-                    continue
-                _, bio, _ = standing.get((batch_id, w), (0.0, 0.0, 0.0))
+            for bid in sorted({p.batch_id for p in plist}):
+                _, bio, avg = standing.get((bid, w), (0.0, 0.0, 0.0))
                 if bio <= 0:
                     continue
-                n_act = actual_total.get(batch_id, len(cur))
-                extra = math.ceil(bio / op_per_tank) - n_act   # tanks to reach target
+                n_act = actual_total.get(bid, 0)
+                if n_act <= 0:
+                    continue
+                extra = math.ceil(bio / op_per_tank) - n_act
                 if extra <= 0:
                     continue
-                sys_ids = sys_tank_ids.get(system, [])
-                free_clean = sorted(t for t in sys_ids
-                                    if t not in used_tanks and t not in prev_state)
-                for tid in free_clean[:extra]:
-                    used_tanks.add(tid)
-                    cur.append(tid)
-                    actual_total[batch_id] = actual_total.get(batch_id, 0) + 1
+                feed = batch_feed.get(bid, 0.0)
+                elig = (grow_sys + nurs_sys) if avg >= 1000.0 else nurs_sys
+                cur_sys = {s for (b2, s) in chosen_by_ps if b2 == bid}
+                order = ([s for s in elig if s in cur_sys]
+                         + [s for s in elig if s not in cur_sys])
+                for _ in range(extra):
+                    placed = False
+                    for sysm in order:
+                        free = sorted(t for t in sys_tank_ids.get(sysm, [])
+                                      if t not in used_tanks and t not in prev_state)
+                        if not free:
+                            continue
+                        new_n = actual_total[bid] + 1
+                        pb, pf = bio / new_n, feed / new_n
+                        if (sys_bio.get(sysm, 0.0) + pb > BIO_CAP
+                                or sys_feed.get(sysm, 0.0) + pf > FEED_CAP):
+                            continue
+                        tid = free[0]
+                        used_tanks.add(tid)
+                        chosen_by_ps.setdefault((bid, sysm), []).append(tid)
+                        actual_total[bid] = new_n
+                        sys_bio[sysm] = sys_bio.get(sysm, 0.0) + pb
+                        sys_feed[sysm] = sys_feed.get(sysm, 0.0) + pf
+                        placed = True
+                        break
+                    if not placed:
+                        break
 
         # ---- PASS 2: even-split each batch's standing over its ACTUAL tanks. ----
         # Splitting over the actually-placed tank count (not L3's planned count)
