@@ -15,8 +15,8 @@ It is deliberately ADDITIVE: it imports the POC layers + excel_io writers
 verbatim and re-implements no biology, no L1/L3 math, and no writer. It is NOT
 imported by `forecast/run.py`; the production pipeline stays byte-identical.
 
-What is FULLY wired vs SYSTEM-LEVEL / pending
----------------------------------------------
+What is FULLY wired
+-------------------
 FULL (the L1/L3 layers support these without specific-tank detail):
   * HarvestPlan / HarvestReport / Batch Plan — from the L1 harvest envelope
     (round/live HOG; HOG-yield applied by the writer).
@@ -25,105 +25,67 @@ FULL (the L1/L3 layers support these without specific-tank detail):
     shared `_feed_by_type_week` helper.
   * Advisory — facility biomass + feed vs caps, scored on the TRUE total
     (FW + OG + purge), because L1 ran with `model_full_facility=True`.
-  * FacilityMap — per-system tank-counts + biomass + feed from the L3 layout.
   * WeeklyReport / MonthlyReport open-close ledgers — chained from the L1
     facility standing trace (facility grain, see the stamp).
   * ReconciliationReport — the L1 per-batch conservation
     (seeded == harvested + standing + mort + cull, FW counted in the total).
 
-SYSTEM-LEVEL / SPECIFIC-TANK ASSIGNMENT PENDING (clearly stamped on the sheet):
-  * BatchLocations / FacilityMap rows / TransferPlan carry a DETERMINISTIC,
-    PROVISIONAL within-system tank assignment (fill the system's tanks in
-    tank-id order, one batch's tanks packed densely). The specific physical-tank
-    pick + density-walk + 6N pair rotation is the DEFERRED next step (#2). Every
-    such sheet is stamped "system-level; specific-tank assignment pending".
+SPECIFIC-TANK PICK (step #2, NOW REAL — `forecast.global_tank_pick_poc`):
+  * BatchLocations — REAL per-physical-tank occupancy (continuity-preserving
+    pick: each batch stays on its tanks while L3 keeps it in the system; tanks
+    claimed/released/relocated only when forced). One batch per tank, even-split.
+  * FacilityMap — REAL physical per-tank grid (built from the same rows).
+  * TransferPlan — REAL tank-to-tank moves: every physical relocation emitted as
+    a Transfer (week, batch, source_tank, dest_tank, count). The 6N depuration
+    flow uses the `forecast.sixn` pair round-robin (mains 61/63/65 preferred).
+  * TankContinuityAudit — proves 0 TANK_DRIFT / 0 BIO_DRIFT over the emitted
+    BatchLocations + TransferPlan + harvest events (every fish always in a tank;
+    every move conserved) — the same invariant the production controller passes.
+  The known structurally over-subscribed week (ceil rounding asks for >33
+  grow-out tanks one week) is placed by double-stacking the overflow + FLAGGED
+  (n_oversub_rows / oversub_weeks in the stamp), never dropped.
 """
 from __future__ import annotations
 
-import math
-from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from dataclasses import dataclass
+from datetime import date
 from typing import Optional
 
-from . import global_planner_poc as gpp
-from .global_planner_l2_poc import NURSERY_SYSTEMS, GROWOUT_SYSTEMS, PURGE_SYSTEMS
-from .global_planner_l3_poc import n_tanks_per_system, smallest_og_tank_kg
+from . import global_tank_pick_poc as tankpick
 from .models import BatchInput, BiologyTables, ControlParams, FacilityConfig
-from .time_grid import iso_week_label, parse_iso_label, week_range
 
 
-METHOD_STAMP = "planning_method = GLOBAL (precalculated L1->L3)"
-PENDING_STAMP = "system-level; specific-tank assignment pending (specific-tank pick deferred)"
-
-
-# ---------------------------------------------------------------------------
-# Lightweight stand-ins for the writer-consumed dataclasses (duck-typed).
-# excel_io writers read attributes, never isinstance — so these adapters carry
-# exactly the fields each writer reads. (We do NOT import placement.py /
-# events.py types — those are production files; we only mirror their read shape.)
-# ---------------------------------------------------------------------------
-
-@dataclass
-class _LocRow:
-    """Mirror of placement.BatchLocationRow (the read shape excel_io expects)."""
-    week_label: str
-    week_start: date
-    batch_id: str
-    tank_id: int
-    location_id: str
-    system_id: str
-    count: float
-    avg_wt_g: float
-    biomass_kg: float
-    density_kg_m3: float
-    stage: str = ""
-
-
-@dataclass
-class _HarvestEv:
-    """Mirror of events.Harvest's read shape (HarvestPlan/Report/Advisory)."""
-    batch_id: str
-    event_date: date
-    source_tank_id: int
-    count: float
-    avg_wt_g: float
+METHOD_STAMP = "planning_method = GLOBAL (precalculated L1->L3 + specific-tank pick)"
+TANKPICK_STAMP = ("REAL specific-tank pick (continuity-preserving; 6N pair "
+                  "round-robin; tank-to-tank transfers; TankContinuityAudit 0-drift)")
 
 
 # ---------------------------------------------------------------------------
 # Build the writer-facing structures from the converged loop result.
+#
+# BatchLocations / Transfers / Harvest events are all the REAL specific-tank
+# objects from `global_tank_pick_poc` (which mirror the read shapes excel_io's
+# writers + the TankContinuityAudit expect — placement.BatchLocationRow,
+# events.Transfer, events.Harvest — without importing the production types).
 # ---------------------------------------------------------------------------
-
-def _label_to_week_start(label: str, forecast_start) -> date:
-    """Monday of an ISO label, falling back to the forecast start if unparseable."""
-    d = parse_iso_label(label)
-    if d is not None:
-        return d
-    fs = forecast_start.date() if hasattr(forecast_start, "date") else forecast_start
-    return fs
-
-
-def _system_tank_ids(facility: FacilityConfig) -> dict[str, list[int]]:
-    """Per OG system, the sorted physical tank ids (for the provisional pick)."""
-    out: dict[str, list[int]] = {}
-    for t in facility.tanks:
-        if t.type == "OG":
-            out.setdefault(t.system_id, []).append(t.tank_id)
-    for s in out:
-        out[s].sort()
-    return out
-
 
 @dataclass
 class GlobalForecastTables:
     """Everything the runner needs to drive the excel_io writers."""
-    batch_locations: list           # _LocRow (system-level provisional tanks)
-    harvest_events: list            # _HarvestEv (from L1 envelope)
+    batch_locations: list           # TankLocRow (REAL specific-tank occupancy)
+    harvest_events: list            # TankHarvest (real source tank per draw)
+    transfer_events: list           # TankTransfer (REAL tank-to-tank moves)
+    tranog_events: list             # TankTranOG (first OG stocking, FW->tank)
     fw_states: list                 # BatchWeekState (FW/EGG phase; biology)
     conservation: dict              # L1 per-batch conservation
     trace: list                     # L1 StandingTraceRow (facility standing)
     purge_trace: list               # L1 purge-hold accounting
     forecast_start: date
-    n_pending_tank_rows: int        # rows carrying provisional tank ids
+    n_transfers: int                # count of tank-to-tank transfers emitted
+    n_oversub_rows: int             # double-stacked rows (over-subscribed weeks)
+    oversub_weeks: list             # [week_label] genuinely over-subscribed
+    realized_biology: dict          # {(tank, wk, batch): (net_kg, mort)} for audit
+    mort_states: list               # _MortState for the audit COUNT balance
 
 
 def build_tables(
@@ -137,131 +99,43 @@ def build_tables(
 ) -> GlobalForecastTables:
     """Convert a converged `run_loop` LoopResult into excel_io-ready structures.
 
-    * `harvest_events` come from the L1 harvest ENVELOPE (one event per
-      (batch, week); event_date = the ISO week's Monday; source_tank_id is a
-      provisional in-system tank).
-    * `batch_locations` come from the L3 PLACEMENT (one row per
-      (batch, system, week, tank), provisionally numbered within the system),
-      plus the L1 6N purge-hold population as STARVE rows on OG6N tanks.
+    * `batch_locations`, `transfer_events` and `harvest_events` ALL come from the
+      REAL specific-tank pick (`global_tank_pick_poc.pick_tanks`): a continuity-
+      preserving physical-tank assignment of L3's system plan + the L1 6N
+      purge-hold flow (sixn pair round-robin). Every physical move is a
+      tank-to-tank Transfer and every harvest draw is debited from the specific
+      tank the batch is released from (the 6N depuration tank in purge mode, the
+      grow-out tank in production mode). The pick also emits `realized_biology`
+      and `mort_states` so the TankContinuityAudit reconciles to 0 drift.
     * `fw_states` are the FW/EGG biology rows (the validated projectors), so the
       feed forecast + ledgers carry the freshwater phase.
     """
-    l1 = loop_result.final_l1
-    l3 = loop_result.final_l3
     fs = control.forecast_start
     fs_date = fs.date() if hasattr(fs, "date") else fs
 
-    # ---- Harvest events from the L1 envelope ----
-    harvest_events: list[_HarvestEv] = []
-    # Deterministic provisional source-tank ids: reuse the facility's first OG
-    # tank id as a stand-in (the specific-tank pick is deferred). We keep a
-    # per-week rotating index so the HarvestReport doesn't collapse every
-    # event onto one tank id visually.
-    sys_tank_ids = _system_tank_ids(facility)
-    purge_tanks = [tid for s in PURGE_SYSTEMS for tid in sys_tank_ids.get(s, [])]
-    all_og_tanks = sorted(tid for ids in sys_tank_ids.values() for tid in ids)
-    _ht_default = (purge_tanks or all_og_tanks or [0])
-    for i, e in enumerate(sorted(l1.envelope, key=lambda r: (r.week_label, r.batch_id))):
-        if e.count <= 0:
-            continue
-        ws = _label_to_week_start(e.week_label, fs_date)
-        harvest_events.append(_HarvestEv(
-            batch_id=e.batch_id, event_date=ws,
-            source_tank_id=_ht_default[i % len(_ht_default)],
-            count=e.count, avg_wt_g=e.avg_wt_g,
-        ))
-
-    # ---- Batch locations from the L3 placement (provisional tank pick) ----
-    # Per (system, week) keep a cursor so each batch's tanks get distinct ids
-    # within that system that week (densely packed, deterministic). When demand
-    # exceeds the physical tank count (documented over-subscription on this
-    # capacity-bound config) the ids wrap — flagged via the pending stamp.
-    per_tank_cap = smallest_og_tank_kg(facility)  # raw mass for density calc
-    tank_volume = {t.tank_id: t.volume_m3 for t in facility.tanks}
-    batch_locations: list[_LocRow] = []
-    cursor: dict[tuple[str, str], int] = {}
-    n_pending = 0
-    for p in sorted(l3.placements, key=lambda r: (r.week_label, r.system_id, r.batch_id)):
-        if p.tanks <= 0:
-            continue
-        ids = sys_tank_ids.get(p.system_id, [])
-        if not ids:
-            continue
-        ws = _label_to_week_start(p.week_label, fs_date)
-        per_tank_bio = p.biomass_kg / p.tanks
-        per_tank_count = 0.0
-        avg_wt_g = (p.biomass_kg * 1000.0 / 1.0)  # placeholder; set below per row
-        # Per-tank count from the placement's per-tank biomass + the batch mean
-        # weight that week (from L1 standing). Use the placement avg weight.
-        avg_wt_g = _avg_wt_for(l1, p.batch_id, p.week)
-        if avg_wt_g <= 0:
-            avg_wt_g = (per_tank_bio * 1000.0)  # degenerate fallback
-        per_tank_count = per_tank_bio * 1000.0 / avg_wt_g if avg_wt_g > 0 else 0.0
-        for k in range(p.tanks):
-            key = (p.system_id, p.week_label)
-            idx = cursor.get(key, 0)
-            cursor[key] = idx + 1
-            tank_id = ids[idx % len(ids)]
-            if idx >= len(ids):
-                n_pending += 1   # over-subscribed: provisional id wraps
-            vol = tank_volume.get(tank_id, 0.0)
-            dens = (per_tank_bio / vol) if vol > 0 else 0.0
-            batch_locations.append(_LocRow(
-                week_label=p.week_label, week_start=ws, batch_id=p.batch_id,
-                tank_id=tank_id, location_id=f"{p.system_id}-{tank_id}",
-                system_id=p.system_id, count=per_tank_count,
-                avg_wt_g=avg_wt_g, biomass_kg=per_tank_bio,
-                density_kg_m3=dens, stage="",
-            ))
-
-    # ---- 6N purge-hold population as STARVE rows on OG6N (off-feed) ----
-    sixn_cap = smallest_og_tank_kg(facility) * 1.25
-    purge_ids = purge_tanks or all_og_tanks
-    pcursor: dict[str, int] = {}
-    for r in l1.batch_standing:
-        if not getattr(r, "in_purge", False) or r.biomass_kg <= 1e-9:
-            continue
-        n_tanks_held = max(1, math.ceil(r.biomass_kg / sixn_cap))
-        ws = _label_to_week_start(r.week_label, fs_date)
-        per_tank_bio = r.biomass_kg / n_tanks_held
-        per_tank_count = r.count / n_tanks_held
-        for k in range(n_tanks_held):
-            idx = pcursor.get(r.week_label, 0)
-            pcursor[r.week_label] = idx + 1
-            tid = purge_ids[idx % len(purge_ids)] if purge_ids else 0
-            vol = tank_volume.get(tid, 0.0)
-            dens = (per_tank_bio / vol) if vol > 0 else 0.0
-            sysid = next((s for s in PURGE_SYSTEMS
-                          if tid in sys_tank_ids.get(s, [])), "OG6N")
-            batch_locations.append(_LocRow(
-                week_label=r.week_label, week_start=ws, batch_id=r.batch_id,
-                tank_id=tid, location_id=f"{sysid}-{tid}", system_id=sysid,
-                count=per_tank_count, avg_wt_g=r.avg_wt_g,
-                biomass_kg=per_tank_bio, density_kg_m3=dens, stage="STARVE",
-            ))
-            n_pending += 1
+    # ---- REAL specific-tank pick (step #2): physical tanks + transfers +
+    #      harvest events + audit-closing realized biology / mortality. ----
+    pick = tankpick.pick_tanks(loop_result, control, facility)
 
     # ---- FW/EGG biology rows (the validated projectors) ----
     fw_states = _fw_biology_states(batches, tables, control, fw_inflight=fw_inflight)
 
     return GlobalForecastTables(
-        batch_locations=batch_locations,
-        harvest_events=harvest_events,
+        batch_locations=pick.batch_locations,
+        harvest_events=pick.harvest_events,
+        transfer_events=pick.transfers,
+        tranog_events=pick.tranog_events,
         fw_states=fw_states,
-        conservation=l1.conservation,
-        trace=l1.trace,
-        purge_trace=l1.purge_trace,
+        conservation=loop_result.final_l1.conservation,
+        trace=loop_result.final_l1.trace,
+        purge_trace=loop_result.final_l1.purge_trace,
         forecast_start=fs_date,
-        n_pending_tank_rows=n_pending,
+        n_transfers=pick.n_transfers,
+        n_oversub_rows=pick.n_oversub_rows,
+        oversub_weeks=pick.oversub_weeks,
+        realized_biology=pick.realized_biology,
+        mort_states=pick.mort_states,
     )
-
-
-def _avg_wt_for(l1, batch_id: str, week: int) -> float:
-    """Mean weight (g) for a (batch, week) from L1 standing; 0 if not found."""
-    for r in l1.batch_standing:
-        if r.batch_id == batch_id and r.week == week and not getattr(r, "in_purge", False):
-            return r.avg_wt_g
-    return 0.0
 
 
 def _fw_biology_states(batches, tables, control, *, fw_inflight=None):

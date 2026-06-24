@@ -16,14 +16,15 @@ imports the writers but adds no branch to run.py.
 
 Sheets emitted
 --------------
-FULL (L1/L3 support these without specific-tank detail):
   RunConfig (method stamp), HarvestPlan, HarvestReport, Batch Plan,
-  FeedForecastWeekly, FeedForecastMonthly, Advisory, FacilityMap, WeeklyReport,
+  FeedForecastWeekly, FeedForecastMonthly, Advisory, WeeklyReport,
   MonthlyReport, ReconciliationReport (L1 conservation), StandingTrace (L1).
-SYSTEM-LEVEL / SPECIFIC-TANK PENDING (stamped on the sheet):
-  BatchLocations + the FacilityMap tank grid + (no specific-tank TransferPlan —
-  see notes). The within-system tank ids are a deterministic PROVISIONAL pick;
-  the specific physical-tank pick + 6N pair rotation is the deferred next step.
+SPECIFIC-TANK PICK (step #2 — NOW REAL, `forecast.global_tank_pick_poc`):
+  BatchLocations (real per-physical-tank occupancy, continuity-preserving),
+  FacilityMap (real physical tank grid), TransferPlan (real tank-to-tank moves;
+  6N sixn pair round-robin), and TankContinuityAudit (proves 0 TANK_DRIFT /
+  0 BIO_DRIFT over the emitted locations + transfers + harvest events). The known
+  1-week structural over-subscription is double-stacked + flagged, not dropped.
 
 Usage:
     python -m tools.run_global_forecast
@@ -121,8 +122,11 @@ def main() -> int:
           f"({cons['residual_pct']:.4f}%); worst per-batch "
           f"{cons['worst_batch_residual_pct']:.4f}% "
           f"({'OK — conserves' if cons['worst_batch_residual_pct'] < 0.01 else 'CHECK'})")
-    print(f"  Provisional tank rows (specific-tank pick pending): "
-          f"{gft.n_pending_tank_rows}")
+    print(f"  SPECIFIC-TANK PICK (step #2): {gft.n_transfers} tank-to-tank "
+          f"transfers; {len(gft.batch_locations)} tank-week rows; "
+          f"over-subscribed weeks: {len(gft.oversub_weeks)} "
+          f"({gft.n_oversub_rows} double-stacked rows)"
+          + (f" {gft.oversub_weeks}" if gft.oversub_weeks else ""))
 
     # ---- Emit the standard workbook via the SHARED writers.
     out_path = (Path(args.out) if args.out
@@ -142,7 +146,8 @@ def _emit_workbook(gft, result, batches, tables, control, facility,
         write_facility_map, write_feed_forecast_monthly,
         write_feed_forecast_weekly, write_harvest_plan_output,
         write_harvest_plan_report, write_harvest_report,
-        write_monthly_report, write_weekly_report,
+        write_monthly_report, write_tank_continuity_audit,
+        write_transfer_plan_output, write_weekly_report,
     )
 
     batch_by_id = {b.batch_id: b for b in batches}
@@ -153,6 +158,30 @@ def _emit_workbook(gft, result, batches, tables, control, facility,
     fw_states_by_batch: dict[str, list] = {}
     for s in gft.fw_states:
         fw_states_by_batch.setdefault(s.batch_id, []).append(s)
+
+    # ---- TankContinuityAudit: build the sheet, then scan it for drift flags ----
+    # so the RunConfig stamp can report the drift counts (must be 0/0). The audit
+    # reconciles the REAL BatchLocations + Transfers + Harvest events; the
+    # specific-tank pick supplies `realized_biology` (per-tank net growth/mort)
+    # and `mort_states` (per-(batch, week) weekly mortality %) so both the count
+    # and biomass balances close exactly. No PR initial tank state is passed
+    # (the global pick stocks every batch from empty), so first-week opens are 0.
+    _audit_wb = Workbook()
+    write_tank_continuity_audit(
+        _audit_wb, bl, gft.mort_states, hv, gft.transfer_events,
+        grade_events=[], tranog_events=gft.tranog_events, initial_state=None,
+        realized_biology=gft.realized_biology)
+    n_tank_drift, n_bio_drift, fac_count_signed, fac_count_abs = \
+        _scan_audit_drift(_audit_wb["TankContinuityAudit"])
+    _audit_wb.close()
+    tank_drift_note = (
+        f"TankContinuityAudit: {n_tank_drift} TANK_DRIFT / {n_bio_drift} "
+        f"BIO_DRIFT rows (0/0 = every fish in a tank, every move conserved); "
+        f"facility count signed/abs {fac_count_signed:.0f}/{fac_count_abs:.0f}")
+    print(f"  TankContinuityAudit: TANK_DRIFT={n_tank_drift}, "
+          f"BIO_DRIFT={n_bio_drift}, facility count signed/abs "
+          f"{fac_count_signed:.0f}/{fac_count_abs:.0f} "
+          f"({'OK — 0 drift' if n_tank_drift == 0 else 'CHECK'})")
 
     wb = Workbook()
 
@@ -180,8 +209,13 @@ def _emit_workbook(gft, result, batches, tables, control, facility,
         ("  + mortality", round(cons["mortality"], 0)),
         ("  + cull", round(cons["cull"], 0)),
         ("  residual_pct", f"{cons['residual_pct']:.4f}%"),
-        ("SPECIFIC-TANK PICK", gf.PENDING_STAMP),
-        ("provisional_tank_rows", gft.n_pending_tank_rows),
+        ("SPECIFIC-TANK PICK", gf.TANKPICK_STAMP),
+        ("tank_to_tank_transfers", gft.n_transfers),
+        ("tank_week_rows", len(gft.batch_locations)),
+        ("over_subscribed_weeks",
+         f"{len(gft.oversub_weeks)} (double-stacked {gft.n_oversub_rows} rows): "
+         + (", ".join(gft.oversub_weeks) if gft.oversub_weeks else "none")),
+        ("tank_continuity", tank_drift_note),
     ]
     for i, (k, v) in enumerate(rows, start=2):
         ws[f"A{i}"] = k
@@ -216,16 +250,45 @@ def _emit_workbook(gft, result, batches, tables, control, facility,
     _write_standing_trace(wb, gft, control)
     _write_reconciliation(wb, gft, cons)
 
-    # ---- SYSTEM-LEVEL / SPECIFIC-TANK PENDING sheets (stamped). ----
+    # ---- REAL specific-tank sheets (step #2): physical tanks + transfers. ----
     write_facility_map(wb, bl, facility, batches=batch_by_id, tables=tables)
     write_batch_locations(wb, bl)
-    _stamp_pending(wb, "BatchLocations")
-    _stamp_pending(wb, "FacilityMap")
+    write_transfer_plan_output(wb, gft.transfer_events,
+                               tranog_events=gft.tranog_events, grade_events=[])
+    # The REAL continuity audit over the emitted BatchLocations + Transfers +
+    # TranOG + Harvest events (proves 0 TANK_DRIFT / 0 BIO_DRIFT).
+    write_tank_continuity_audit(
+        wb, bl, gft.mort_states, hv, gft.transfer_events,
+        grade_events=[], tranog_events=gft.tranog_events, initial_state=None,
+        realized_biology=gft.realized_biology)
 
     # Order: RunConfig first.
     wb.move_sheet("RunConfig", -(wb.sheetnames.index("RunConfig")))
     wb.save(out_path)
     wb.close()
+
+
+def _scan_audit_drift(ws):
+    """Scan a written TankContinuityAudit sheet for TANK_DRIFT / BIO_DRIFT flags
+    + the facility count signed/abs totals. Columns (1-based): Flag=15,
+    Bio_Flag=28; the facility summary row 'Count (fish)' carries signed/abs."""
+    n_tank = n_bio = 0
+    fac_signed = fac_abs = 0.0
+    for row in ws.iter_rows(values_only=True):
+        if not row:
+            continue
+        if len(row) >= 28:
+            if row[14] == "TANK_DRIFT":
+                n_tank += 1
+            if row[27] == "BIO_DRIFT":
+                n_bio += 1
+        if row and row[0] == "Count (fish)" and len(row) >= 3:
+            try:
+                fac_signed = float(row[1] or 0.0)
+                fac_abs = float(row[2] or 0.0)
+            except (TypeError, ValueError):
+                pass
+    return n_tank, n_bio, fac_signed, fac_abs
 
 
 def _write_standing_trace(wb, gft, control) -> None:
@@ -272,15 +335,6 @@ def _write_reconciliation(wb, gft, cons) -> None:
     from openpyxl.utils import get_column_letter
     for c in range(1, 10):
         ws.column_dimensions[get_column_letter(c)].width = 12
-
-
-def _stamp_pending(wb, sheet_name: str) -> None:
-    """Insert a STAMP banner row at the top of a system-level/pending sheet."""
-    if sheet_name not in wb.sheetnames:
-        return
-    ws = wb[sheet_name]
-    ws.insert_rows(1)
-    ws["A1"] = f"[{gf.PENDING_STAMP}] — {gf.METHOD_STAMP}"
 
 
 if __name__ == "__main__":
