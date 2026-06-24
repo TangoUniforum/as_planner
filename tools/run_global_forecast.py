@@ -141,6 +141,50 @@ def main() -> int:
     return 0
 
 
+def run_global(input_path, output_path, config_dir, scenario_dir, *,
+               no_pr: bool = False, overstock: bool = True,
+               max_iterations: int = 10, margin_frac: float = 0.5,
+               slack_epsilon: float = 1000.0, mip_time_limit: float = 180.0,
+               mip_rel_gap: float = 0.01) -> int:
+    """Produce the standard GLOBAL-method workbook at `output_path` from the PR at
+    `input_path` + the app's config/scenario. Callable mirror of `main()` for the
+    UI (parallel to `forecast.run.main`). `overstock=True` bakes in the placement
+    optimizer's winning SELECTIVE over-stock (light<2.5kg toward the hard cap).
+    Returns 0 on success. Touches no production file.
+    """
+    from forecast import global_planner_l3_poc as _l3
+    control, tables, facility = load_config(str(config_dir))
+    batches = load_batches(str(scenario_dir))
+    _facility_limits, system_limits = load_limits(str(scenario_dir))
+    inflight_og, fw_inflight, purge_inflight = {}, {}, {}
+    if not no_pr:
+        inflight_og, fw_inflight, derived_start, purge_inflight = _hydrate_pr(
+            Path(input_path), batches)
+        if derived_start is not None:
+            control.forecast_start = derived_start
+
+    _prev = (_l3._OVERSTOCK_DENSITY_PCT, _l3._OVERSTOCK_MAX_WT_G)
+    if overstock:
+        _l3._OVERSTOCK_DENSITY_PCT, _l3._OVERSTOCK_MAX_WT_G = 1.0, 2500.0
+    try:
+        result = loop.run_loop(
+            batches, tables, control, facility, system_limits,
+            inflight_og=inflight_og, max_iterations=max_iterations,
+            margin_frac=margin_frac,
+            l3_kwargs=dict(slack_epsilon=slack_epsilon, mip_time_limit=mip_time_limit,
+                           mip_rel_gap=mip_rel_gap, verbose=False),
+            model_purge_hold=True, model_full_facility=True,
+            fw_inflight=fw_inflight, purge_inflight=purge_inflight, verbose=False)
+        gft = gf.build_tables(result, batches, tables, control, facility,
+                              fw_inflight=fw_inflight)
+        cons = gf.conservation_summary(gft)
+        _emit_workbook(gft, result, batches, tables, control, facility,
+                       _facility_limits, cons, Path(output_path))
+    finally:
+        _l3._OVERSTOCK_DENSITY_PCT, _l3._OVERSTOCK_MAX_WT_G = _prev
+    return 0
+
+
 def _emit_workbook(gft, result, batches, tables, control, facility,
                    facility_limits, cons, out_path: Path) -> None:
     from openpyxl import Workbook

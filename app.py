@@ -824,6 +824,23 @@ with st.sidebar:
         st.info("No config yet — set it up in **Configure**.")
 
     st.header("Run")
+    forecast_method = st.radio(
+        "Planning method",
+        ["Controller (validated)", "Global (precalculated)"],
+        help="Controller: the validated closed-loop production planner (forecast/"
+             "run.py). Global: the precalculated L1→L3 method — whole-facility, "
+             "within-limits L1; swap-free, 0-drift specific-tank pick; optimizer-"
+             "tuned selective over-stock. Same PR in, same workbook shape out "
+             "(stamped with the method) so you can compare apples-to-apples. The "
+             "global method runs an LP per week, so it's slower.",
+        key="forecast_method",
+    )
+    _is_global = forecast_method.startswith("Global")
+    if _is_global:
+        st.caption("⚠ Global is the experimental precalculated engine — the "
+                   "BatchLocations/Transfers are real (0-drift); residual per-tank "
+                   "density over-cap is the same structural capacity limit the "
+                   "controller has.")
     if _cfg_ok:
         from forecast.config_io import load_control, control_to_dict
         _render_active_config(
@@ -847,7 +864,9 @@ with st.sidebar:
             label="⬇ Download output workbook",
             data=r["output_bytes"],
             file_name=r["output_name"],
-            mime="application/vnd.ms-excel.sheet.macroenabled.12",
+            mime=("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                  if str(r["output_name"]).lower().endswith(".xlsx")
+                  else "application/vnd.ms-excel.sheet.macroenabled.12"),
             use_container_width=True,
         )
         # Fallback: show where the file lives on disk in case the
@@ -890,6 +909,7 @@ def _run_with_workbook_bytes(
     input_name: str,
     config_dir: str | None = None,
     scenario_dir: str | None = None,
+    method: str = "controller",
 ) -> dict:
     """Run the pipeline against `input_bytes` in a temp directory.
 
@@ -900,9 +920,12 @@ def _run_with_workbook_bytes(
     """
     work_dir = Path(tempfile.mkdtemp(prefix="as_forecast_"))
     in_path = work_dir / input_name
-    out_name = (
-        Path(input_name).stem + "_planned" + Path(input_name).suffix
-    )
+    # The global method emits a fresh .xlsx (no VBA to carry); the controller
+    # keeps the uploaded macro workbook's suffix.
+    if method == "global":
+        out_name = Path(input_name).stem + "_planned_GLOBAL.xlsx"
+    else:
+        out_name = Path(input_name).stem + "_planned" + Path(input_name).suffix
     out_path = work_dir / out_name
     in_path.write_bytes(input_bytes)
 
@@ -911,8 +934,12 @@ def _run_with_workbook_bytes(
     captured = io.StringIO()
     try:
         with redirect_stdout(captured):
-            rc = run_pipeline(input_path=in_path, output_path=out_path,
-                              config_dir=config_dir, scenario_dir=scenario_dir)
+            if method == "global":
+                from tools.run_global_forecast import run_global
+                rc = run_global(in_path, out_path, config_dir, scenario_dir)
+            else:
+                rc = run_pipeline(input_path=in_path, output_path=out_path,
+                                  config_dir=config_dir, scenario_dir=scenario_dir)
     except Exception as e:
         return {
             "ok": False,
@@ -958,7 +985,8 @@ def _run_with_workbook_bytes(
 
 def _parse_output_workbook(path: Path) -> dict:
     """Extract data from the saved workbook for the UI's visualization."""
-    wb = load_workbook(path, keep_vba=True, data_only=False)
+    wb = load_workbook(path, keep_vba=str(path).lower().endswith(".xlsm"),
+                       data_only=False)
 
     # Density violations from BatchLocations (header at row 4).
     violations = []
@@ -1725,11 +1753,15 @@ if app_mode.startswith("Optimize"):
 # ============================================================
 
 if run_clicked and uploaded is not None:
-    with st.status("Running forecast pipeline...", expanded=True) as status:
+    _method = "global" if _is_global else "controller"
+    _spin = ("Running GLOBAL (precalculated L1→L3) planner — LP per week, slower..."
+             if _is_global else "Running forecast pipeline...")
+    with st.status(_spin, expanded=True) as status:
         st.write("Config + scenario from the app; ProductionReport from upload...")
         result = _run_with_workbook_bytes(
             uploaded.getvalue(), uploaded.name,
             config_dir=str(CONFIG_DIR), scenario_dir=str(SCENARIO_DIR),
+            method=_method,
         )
         if result["ok"]:
             st.write(
@@ -1738,7 +1770,9 @@ if run_clicked and uploaded is not None:
                 f"worst {result['worst_density']:.1f} kg/m³"
             )
             status.update(label="✓ Forecast complete", state="complete")
-            result["_run_label"] = f"Run forecast — {_harvest_mode_label(CONFIG_DIR)}"
+            _mlabel = ("Global (precalculated L1→L3)" if _is_global
+                       else f"Controller — {_harvest_mode_label(CONFIG_DIR)}")
+            result["_run_label"] = _mlabel
             st.session_state.result = result
         else:
             st.error(f"Pipeline failed: {result.get('error', 'unknown')}")
