@@ -197,3 +197,200 @@ def solve_week(
 def _scap(metric, wl, s, system_limits, default):
     v = resolve_system_cap(metric, wl, s, system_limits)
     return v if v is not None else default
+
+
+def solve_full_horizon(
+    by_week, og_tanks, tank_vol, vol, wl_of, system_limits, control,
+    np, linprog, time_limit=600.0, mip_rel_gap=0.01, verbose=True,
+    prior_count=None, prior_tank_batch=None,
+):
+    """MONOLITHIC placement MILP over the given weeks (the 'full picture').
+
+    `prior_count` ({(b,t): kfish}) and `prior_tank_batch` ({t: batch}) carry the
+    COMMITTED state of the week BEFORE the first week here, so this can solve a
+    rolling WINDOW coupled to history (swap-free + move-in of the first window
+    week reference the prior committed layout). Empty defaults => fresh start.
+
+    Solves all weeks at once so fallow is planned globally — swap-free is a HARD
+    constraint (`empty[t,w]` is a decision, so the solver MUST arrange a fallow
+    week before any tank changes batch). If feasible, same-week swaps are
+    structurally impossible (true 0-drift). Vars per eligible (b,t,w): x in {0,1}
+    occupy, q>=0 kg, over>=0 kg over density, mv>=0 kfish moved-in. Slack sb/sf per
+    (system,week). Objective: W_SLACK*slack + W_OVER*over + sum(mv).
+
+    `by_week[w] = {batch: (bio, feed, avg)}`; returns (q_by_w, info).
+    """
+    from scipy.sparse import coo_matrix
+    growout, nursery = set(GROWOUT_SYSTEMS), set(NURSERY_SYSTEMS)
+    prior_count = prior_count or {}
+    prior_tank_batch = prior_tank_batch or {}
+    weeks = sorted(by_week)
+    wpos = {w: i for i, w in enumerate(weeks)}
+    systems = sorted({s for s in og_tanks.values()})
+
+    # ---- enumerate eligible (b,t,w) and assign variable columns -------------
+    xb = {}                                   # (b,t,w) -> column of x
+    cols = 0
+    btw = []
+    for w in weeks:
+        for b, (bio, feed, avg) in by_week[w].items():
+            if bio <= 1e-9:
+                continue
+            for t in _eligible_tanks(avg, og_tanks, growout, nursery):
+                xb[(b, t, w)] = cols; btw.append((b, t, w)); cols += 1
+    n = cols
+    OFF_X, OFF_Q, OFF_OV, OFF_MV = 0, n, 2 * n, 3 * n
+    sw_idx = {(s, w): 4 * n + i for i, (s, w) in
+              enumerate((s, w) for w in weeks for s in systems)}
+    OFF_SB = 4 * n
+    nsw = len(sw_idx)
+    OFF_SF = OFF_SB + nsw
+    OFF_SW = 4 * n + 2 * nsw          # SOFT swap var per cell (penalized, keeps feasible)
+    nv = 5 * n + 2 * nsw
+
+    er, ec, ev, beq = [], [], [], []
+    ur, uc, uv, bub = [], [], [], []
+    E = R = 0
+
+    # place all biomass: sum_t q[b,t,w] = bio[b,w]
+    bw_idx = {}
+    for (b, t, w), c in xb.items():
+        bw_idx.setdefault((b, w), []).append(c)
+    for (b, w), cs in bw_idx.items():
+        for c in cs:
+            er.append(E); ec.append(OFF_Q + c); ev.append(1.0)
+        beq.append(by_week[w][b][0]); E += 1
+
+    # one batch per tank: sum_b x[b,t,w] <= 1
+    tw_idx = {}
+    for (b, t, w), c in xb.items():
+        tw_idx.setdefault((t, w), []).append((b, c))
+    for (t, w), bcs in tw_idx.items():
+        for _, c in bcs:
+            ur.append(R); uc.append(OFF_X + c); uv.append(1.0)
+        bub.append(1.0); R += 1
+
+    for (b, t, w), c in xb.items():
+        bio = by_week[w][b][0]; avg = by_week[w][b][2]
+        # q - BIG*x <= 0
+        ur.append(R); uc.append(OFF_Q + c); uv.append(1.0)
+        ur.append(R); uc.append(OFF_X + c); uv.append(-bio); bub.append(0.0); R += 1
+        # over >= q - cap_kg
+        ur.append(R); uc.append(OFF_Q + c); uv.append(1.0)
+        ur.append(R); uc.append(OFF_OV + c); uv.append(-1.0)
+        bub.append(tank_vol[t]); R += 1
+        # move-in: mv >= count - prev_count = q/avg - q_prev/avg_prev
+        pw = w - 1
+        pc = xb.get((b, t, pw))
+        ur.append(R); uc.append(OFF_Q + c); uv.append(1.0 / (avg * 1000.0))
+        ur.append(R); uc.append(OFF_MV + c); uv.append(-1.0)
+        if pc is not None:                          # prev week in window (variable)
+            avgp = by_week[pw][b][2]
+            ur.append(R); uc.append(OFF_Q + pc); uv.append(-1.0 / (avgp * 1000.0))
+            bub.append(0.0)
+        elif pw not in wpos:                         # first window week -> prior (const)
+            bub.append(prior_count.get((b, t), 0.0))
+        else:
+            bub.append(0.0)
+        R += 1
+        # SOFT swap-free: x[b,t,w] + sum_{a!=b} x[a,t,w-1] - sw <= 1  (sw>0 penalized)
+        if pw in wpos:                               # internal: vs in-window prev
+            ur.append(R); uc.append(OFF_X + c); uv.append(1.0)
+            for a, ac in tw_idx.get((t, pw), []):
+                if a != b:
+                    ur.append(R); uc.append(OFF_X + ac); uv.append(1.0)
+            ur.append(R); uc.append(OFF_SW + c); uv.append(-1.0)
+            bub.append(1.0); R += 1
+        else:                                        # first window week: vs prior committed
+            pb = prior_tank_batch.get(t)
+            if pb is not None and pb != b:           # another batch held t last wk -> penalize
+                ur.append(R); uc.append(OFF_X + c); uv.append(1.0)
+                ur.append(R); uc.append(OFF_SW + c); uv.append(-1.0)
+                bub.append(0.0); R += 1
+
+    # per-system caps (soft): sum q <= bio_cap + sb ; feed <= feed_cap + sf
+    sysw_q = {}
+    for (b, t, w), c in xb.items():
+        sysw_q.setdefault((og_tanks[t], w), []).append((b, c))
+    for (s, w), bcs in sysw_q.items():
+        sb = _scap(METRIC_BIOMASS, wl_of[w], s, system_limits, _DEFAULT_BIO_CAP)
+        sf = _scap(METRIC_FEED_DAY, wl_of[w], s, system_limits, _DEFAULT_FEED_CAP)
+        for _, c in bcs:
+            ur.append(R); uc.append(OFF_Q + c); uv.append(1.0)
+        ur.append(R); uc.append(sw_idx[(s, w)]); uv.append(-1.0); bub.append(sb); R += 1
+        for b, c in bcs:
+            sfr = by_week[w][b][1] / by_week[w][b][0] if by_week[w][b][0] > 0 else 0.0
+            ur.append(R); uc.append(OFF_Q + c); uv.append(sfr)
+        ur.append(R); uc.append(OFF_SF + (sw_idx[(s, w)] - OFF_SB)); uv.append(-1.0)
+        bub.append(sf); R += 1
+
+    cobj = np.zeros(nv)
+    cobj[OFF_MV:OFF_MV + n] = 1.0
+    cobj[OFF_OV:OFF_OV + n] = W_OVER
+    cobj[OFF_SB:OFF_SB + 2 * nsw] = W_SLACK
+    cobj[OFF_SW:OFF_SW + n] = W_SWAP
+    integ = np.zeros(nv); integ[OFF_X:OFF_X + n] = 1
+    A_eq = coo_matrix((ev, (er, ec)), shape=(E, nv))
+    A_ub = coo_matrix((uv, (ur, uc)), shape=(R, nv))
+    if verbose:
+        print(f"[full-horizon] {n} (b,t,w) cells, {nv} vars ({n} binary), "
+              f"{E} eq + {R} ub rows; solving (limit {time_limit}s)...")
+    res = linprog(cobj, A_ub=A_ub, b_ub=np.array(bub), A_eq=A_eq, b_eq=np.array(beq),
+                  bounds=[(0.0, None)] * nv, method="highs", integrality=integ,
+                  options={"time_limit": time_limit, "mip_rel_gap": mip_rel_gap})
+    info = {"status": res.status, "success": res.success,
+            "obj": float(res.fun) if res.fun is not None else None}
+    if res.x is None:
+        return None, info
+    x = res.x
+    q_by_w = {}
+    for (b, t, w), c in xb.items():
+        if x[OFF_Q + c] > 1e-6:
+            q_by_w.setdefault(w, {})[(b, t)] = x[OFF_Q + c]
+    info["moved_kfish"] = float(x[OFF_MV:OFF_MV + n].sum())
+    info["over_kg"] = float(x[OFF_OV:OFF_OV + n].sum())
+    info["slack_kg"] = float(x[OFF_SB:OFF_SB + 2 * nsw].sum())
+    info["sw_sum"] = float(x[OFF_SW:OFF_SW + n].sum())
+    return q_by_w, info
+
+
+def solve_rolling(
+    by_week, og_tanks, tank_vol, vol, wl_of, system_limits, control,
+    np, linprog, window=8, stride=4, time_limit=60.0, mip_rel_gap=0.02,
+    verbose=True,
+):
+    """ROLLING-WINDOW placement: solve `window` weeks at once (hard swap-free, so
+    fallow is planned across the window — the cascade depth that governs
+    continuity), COMMIT the first `stride` weeks, carry their committed layout as
+    prior state, and roll forward. Tractable (small windows) while still planning
+    fallow over the relevant future. Returns (committed {w: {(b,t): kg}}, info)."""
+    weeks = sorted(by_week)
+    committed: dict = {}
+    prior_count: dict = {}
+    prior_tank_batch: dict = {}
+    i = 0
+    while i < len(weeks):
+        win = weeks[i:i + window]
+        sub = {w: by_week[w] for w in win}
+        q_by_w, info = solve_full_horizon(
+            sub, og_tanks, tank_vol, vol, wl_of, system_limits, control,
+            np, linprog, time_limit=time_limit, mip_rel_gap=mip_rel_gap,
+            verbose=False, prior_count=prior_count, prior_tank_batch=prior_tank_batch)
+        if q_by_w is None:
+            if verbose:
+                print(f"  window @{wl_of[win[0]]} ({len(win)}w) FAILED "
+                      f"(status {info['status']}) — switch to soft swap-free")
+            return None, {"failed_window": win[0], "status": info["status"]}
+        commit = win[:stride]
+        for w in commit:
+            committed[w] = q_by_w.get(w, {})
+        lastw = commit[-1]
+        lq = committed[lastw]
+        prior_count = {(b, t): kg / (by_week[lastw][b][2] * 1000.0)
+                       for (b, t), kg in lq.items()}
+        prior_tank_batch = {t: b for (b, t) in lq}
+        if verbose:
+            print(f"  committed {wl_of[commit[0]]}..{wl_of[lastw]}  "
+                  f"(window {len(win)}w, solve status {info['status']})")
+        i += stride
+    return committed, {"ok": True}
