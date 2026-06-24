@@ -43,6 +43,12 @@ the controller knobs and read the per-batch density distribution — §7.1), and
 **Optimize (multi-objective)** (rank knob variants on a selectable walk-the-line /
 feed / handling objective — §7.2).
 
+In **Run forecast** mode the sidebar also has a **Planning method** selector:
+**Controller (validated)** — the default closed-loop planner (§4) — or **Global
+(precalculated)** — an experimental alternative engine (§12). Same PR in, same
+workbook shape out, each stamped with the method that produced it, so you can run
+both and compare apples-to-apples.
+
 ### CLI
 ```
 python -m forecast.run <input.xlsm> [output.xlsm] --config-dir config --scenario-dir scenario
@@ -610,6 +616,10 @@ streamlit run app.py
 python -m forecast.run --workbook Forecast.xlsm --output out.xlsm `
     --config-dir config --scenario-dir scenario
 
+# The GLOBAL (precalculated) method instead of the controller (§12) — writes
+# <stem>_GLOBAL.xlsx; or use the app's Run forecast -> Planning method selector
+python -m tools.run_global_forecast --workbook Forecast.xlsm
+
 # Tests (the conservation + determinism guardrails)
 python -m pytest tests/ -q          # -v = test names, -s = see the pipeline prints
 
@@ -707,3 +717,63 @@ greedy run. Leave it `greedy` for routine runs; switch to `lns` (or add it to an
 optimizer sweep — it's the `lns-placement` grid variant) when you want to test whether a
 given PR's layout can be flattened further. Measure it with `python -m tools.lns_measure`
 (compares greedy vs lns: hot spot, weeks-over-cap, drift, determinism).
+
+---
+
+## 12. Optional: the Global (precalculated) planning method
+
+An **alternative planning engine** to the closed-loop controller (§4), selectable in
+the app's sidebar (**Run forecast → Planning method → Global (precalculated)**) or
+via `tools/run_global_forecast.run_global(...)`. It is **experimental**; the
+**Controller is the validated default** and the one you should plan against. Global
+exists so you can run the same PR through a different engine and **compare
+apples-to-apples** — same workbook shape, each stamped with its method.
+
+**How it differs.** The controller decides harvest *reactively*, week by week, against
+the realized placement. The global method **pre-calculates** the whole horizon in
+layers:
+- **L1 (tankless harvest envelope).** Runs the biology and harvests just enough to
+  hold the **true whole-facility biomass** — FW (freshwater) + OG (grow-out) + the 6N
+  purge backlog, all counted — **within the cap every week**. It paces harvest
+  anticipatorily against the 2-week 6N purge lag, and **primes the purge pipeline with
+  the fish already mid-purge in the PR's 6N tanks** (mirroring `sixn.initial_purge_pair_
+  queue`) so it doesn't over-shoot at startup.
+- **L3 (placement LP).** A lexicographic linear program lays the whole horizon out at
+  once — meet the per-system caps first, then minimize transfers.
+- **Specific-tank pick.** Realizes the system plan as physical tanks **swap-free** (a
+  tank a batch leaves stays fallow a week before another batch enters it), which is what
+  guarantees **0 TANK_DRIFT** — every fish accounted for, the same continuity audit the
+  controller passes.
+- **Over-stock (optimizer-tuned).** A placement optimizer
+  (`tools/run_placement_optimize.py`) sweeps candidate levers and bakes in the winner:
+  **selectively concentrating light/young batches toward the hard density cap** to free
+  tanks (heavier batches stay at operating density). It cuts density-over-cap tank-weeks
+  ~30%.
+
+**What's guaranteed.** Conservation is exact (seeded == harvested + standing +
+mortality + cull, 0.0000%); `TankContinuityAudit` shows **0 TANK_DRIFT**; L1 holds the
+true total within limits every week. The output is the standard workbook via the shared
+writers, with a `RunConfig` "GLOBAL METHOD EXPORT" stamp and a `_planned_GLOBAL.xlsx`
+filename.
+
+**Honest limitations.**
+- It emits the core sheets (HarvestPlan, FeedForecast, Advisory, WeeklyReport,
+  BatchLocations, FacilityMap, TransferPlan, TankContinuityAudit, StandingTrace,
+  ReconciliationReport) but **not** BiologyProjection, ValidationLog, YearlySummary,
+  TransferTemplate, or Control — so those app tabs render **empty** for a Global run.
+  The density heatmap + violation/worst-density/harvest KPIs work for both methods.
+- The residual per-tank **density over-cap is a structural capacity limit** — the
+  *same* one the controller hits (§7.1: it's a stocking/capacity problem, not a tuning
+  one). No placement engine removes it without lowering the stocking target.
+- It runs an LP per week, so it's **slower** than the controller (though fast once L1 is
+  within limits).
+
+**What the build established (useful regardless of which engine you ship).** Holding the
+global method to the same conservation bar as the controller showed, from first
+principles, that **the controller is already near-optimal** for this facility — every
+correctness refinement made the global method converge toward what the controller does.
+It also surfaced one actionable finding in the *shipped* tool: the production biomass cap
+is enforced on **OG only**, ignoring the 100–266k kg of **FW** standing on-farm, so the
+true total runs ~3–4% over the cap at peaks (a deferred fix — count FW in the facility
+cap). Use Global as a **cross-check and diagnostic**, not a replacement for the validated
+controller.
