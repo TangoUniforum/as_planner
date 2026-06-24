@@ -118,6 +118,15 @@ from .models import ControlParams, FacilityConfig
 _DEFAULT_BIO_CAP = 400000.0
 _DEFAULT_FEED_CAP = 3000.0
 
+# SELECTIVE over-stock lever (placement optimizer candidate, default OFF =
+# operating density everywhere -> byte-identical). When set, a batch whose mean
+# weight is <= _OVERSTOCK_MAX_WT_G packs toward _OVERSTOCK_DENSITY_PCT of the HARD
+# density cap (fewer tanks, freeing tanks for other batches' hand-offs); heavier
+# batches stay at the operating density. Light fish are safe to concentrate (low
+# kg/m3); mature fish near the cap are not. The optimizer sweeps these.
+_OVERSTOCK_DENSITY_PCT: Optional[float] = None   # e.g. 0.97 of the hard cap
+_OVERSTOCK_MAX_WT_G: Optional[float] = None       # only batches lighter than this
+
 
 # ---------------------------------------------------------------------------
 # Step 2: whole-tank demand (pure arithmetic, no solver)
@@ -265,13 +274,21 @@ def build_tank_demand(
     footprint is accounted by `sixn_tank_demand` against the 6 6N tanks. When
     `model_purge_hold` is off no row is `in_purge`, so this is byte-identical.
     """
-    cap = per_tank_capacity_kg(facility, control)
+    op_cap = per_tank_capacity_kg(facility, control)   # operating-density per tank
+    _dt = getattr(control, "density_target_pct", 1.0) or 1.0
+    hard_cap = op_cap / _dt                            # the smallest-OG hard cap
     rows: list[TankDemandRow] = []
     for r in l1.batch_standing:
         if r.biomass_kg <= 1e-9:
             continue
         if getattr(r, "in_purge", False):
             continue
+        # SELECTIVE over-stock: only LIGHT batches concentrate toward the hard cap
+        # (safe, low kg/m3); mature batches stay at operating density.
+        cap = op_cap
+        if (_OVERSTOCK_DENSITY_PCT is not None
+                and r.avg_wt_g <= (_OVERSTOCK_MAX_WT_G or float("inf"))):
+            cap = hard_cap * _OVERSTOCK_DENSITY_PCT
         tanks = max(1, math.ceil(r.biomass_kg / cap))
         rows.append(TankDemandRow(
             week=r.week, week_label=r.week_label, batch_id=r.batch_id,
