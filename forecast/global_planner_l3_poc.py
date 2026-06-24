@@ -127,6 +127,14 @@ _DEFAULT_FEED_CAP = 3000.0
 _OVERSTOCK_DENSITY_PCT: Optional[float] = None   # e.g. 0.97 of the hard cap
 _OVERSTOCK_MAX_WT_G: Optional[float] = None       # only batches lighter than this
 
+# ANTICIPATORY-FALLOW lever (placement optimizer candidate, default 0 = off ->
+# byte-identical). A batch's whole-tank demand is raised to its MAX over the next
+# _LOOKAHEAD_EXPAND_WEEKS weeks, so it claims the upcoming peak tank EARLY — while
+# a clean tank is still free — and holds it through the growth, instead of finding
+# no clean tank at the peak and cramming (the 176 kg/m3 double-stacks). The batch
+# runs slightly UNDER density in the lead-in weeks (extra tank), which is safe.
+_LOOKAHEAD_EXPAND_WEEKS: int = 0
+
 
 # ---------------------------------------------------------------------------
 # Step 2: whole-tank demand (pure arithmetic, no solver)
@@ -277,26 +285,37 @@ def build_tank_demand(
     op_cap = per_tank_capacity_kg(facility, control)   # operating-density per tank
     _dt = getattr(control, "density_target_pct", 1.0) or 1.0
     hard_cap = op_cap / _dt                            # the smallest-OG hard cap
-    rows: list[TankDemandRow] = []
+
+    # Pass 1: RAW whole-tank count per (batch, week), with the selective
+    # over-stock lever (light batches concentrate toward the hard cap).
+    raw: list[tuple] = []                              # (row, raw_tanks)
     for r in l1.batch_standing:
-        if r.biomass_kg <= 1e-9:
+        if r.biomass_kg <= 1e-9 or getattr(r, "in_purge", False):
             continue
-        if getattr(r, "in_purge", False):
-            continue
-        # SELECTIVE over-stock: only LIGHT batches concentrate toward the hard cap
-        # (safe, low kg/m3); mature batches stay at operating density.
         cap = op_cap
         if (_OVERSTOCK_DENSITY_PCT is not None
                 and r.avg_wt_g <= (_OVERSTOCK_MAX_WT_G or float("inf"))):
             cap = hard_cap * _OVERSTOCK_DENSITY_PCT
-        tanks = max(1, math.ceil(r.biomass_kg / cap))
+        raw.append((r, max(1, math.ceil(r.biomass_kg / cap))))
+
+    # Pass 2: ANTICIPATORY pre-expand — a batch's tank count is the MAX over the
+    # next _LOOKAHEAD_EXPAND_WEEKS weeks, so it secures the upcoming peak tank
+    # early (while clean) and holds it. per_tank biomass/feed use the CURRENT
+    # biomass split over the (possibly larger) held tank count -> lower density in
+    # the lead-in, no last-minute cram. 0 = off (byte-identical).
+    raw_by_bw = {(r.batch_id, r.week): t for r, t in raw}
+    rows: list[TankDemandRow] = []
+    for r, t in raw:
+        if _LOOKAHEAD_EXPAND_WEEKS > 0:
+            t = max([t] + [raw_by_bw.get((r.batch_id, r.week + k), 0)
+                           for k in range(1, _LOOKAHEAD_EXPAND_WEEKS + 1)])
         rows.append(TankDemandRow(
             week=r.week, week_label=r.week_label, batch_id=r.batch_id,
-            tier=_tier_for_weight(r.avg_wt_g), tanks=tanks,
+            tier=_tier_for_weight(r.avg_wt_g), tanks=t,
             biomass_kg=r.biomass_kg, feed_kg_day=r.feed_kg_day,
             avg_wt_g=r.avg_wt_g,
-            per_tank_biomass_kg=r.biomass_kg / tanks,
-            per_tank_feed_kg_day=r.feed_kg_day / tanks,
+            per_tank_biomass_kg=r.biomass_kg / t,
+            per_tank_feed_kg_day=r.feed_kg_day / t,
         ))
     return rows
 

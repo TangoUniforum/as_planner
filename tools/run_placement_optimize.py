@@ -26,12 +26,14 @@ from forecast import global_planner_l3_poc as l3
 from forecast import global_tank_pick_poc as tp
 from tools.run_full_facility_poc import _hydrate_pr
 
-# (label, overstock_density_pct, max_wt_g)  -- None,None = operating baseline.
+# (label, overstock_density_pct, max_wt_g, lookahead_expand_weeks)
+# None,None = operating density; lookahead 0 = no anticipatory pre-expand.
 CANDIDATES = [
-    ("baseline (operating 0.90)", None, None),
-    ("light<1.5kg @0.97cap", 0.97, 1500.0),
-    ("light<2.5kg @0.97cap", 0.97, 2500.0),
-    ("light<2.5kg @1.00cap", 1.00, 2500.0),
+    ("baseline", None, None, 0),
+    ("overstock light<2.5kg@1.0", 1.00, 2500.0, 0),
+    ("lookahead 1wk", None, None, 1),
+    ("lookahead 2wk", None, None, 2),
+    ("overstock + lookahead 2wk", 1.00, 2500.0, 2),
 ]
 
 DENSITY_CAP = 95.0  # kg/m3 welfare cap
@@ -56,9 +58,10 @@ def main() -> int:
     print(f"  {'candidate':<26} {'over95':>6} {'maxd':>5} {'dense':>6} "
           f"{'xfer':>5} {'peak%':>6}")
     rows = []
-    for name, dens, wt in CANDIDATES:
+    for name, dens, wt, look in CANDIDATES:
         l3._OVERSTOCK_DENSITY_PCT = dens
         l3._OVERSTOCK_MAX_WT_G = wt
+        l3._LOOKAHEAD_EXPAND_WEEKS = look
         res = loop.run_loop(
             batches, tables, control, facility, system_limits,
             inflight_og=inflight_og,
@@ -73,6 +76,7 @@ def main() -> int:
               f"{res.pct_of_cap_peak:>5.1f}%")
     l3._OVERSTOCK_DENSITY_PCT = None
     l3._OVERSTOCK_MAX_WT_G = None
+    l3._LOOKAHEAD_EXPAND_WEEKS = 0
 
     best = min(rows, key=lambda r: r[1])
     print(f"\n  BEST given the L1 result: {best[0]}")
