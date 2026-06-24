@@ -398,6 +398,40 @@ def pick_tanks(
             chosen_by_ps[(batch_id, system)] = chosen
             actual_total[batch_id] = actual_total.get(batch_id, 0) + len(chosen)
 
+        # ---- DENSITY-RELIEF SPREAD (minimize density via the EMPTY tanks). ----
+        # After the base placement, any batch whose per-tank biomass is above the
+        # operating density target claims additional FREE (empty-last-week) tanks
+        # in its system(s) and spreads its biomass down toward that target —
+        # filling the idle grow-out tanks instead of leaving them empty while
+        # another tank sits over-cap. Multi-objective + bounded:
+        #   * density:   spread down to the operating target (lower per-tank kg)
+        #   * transfers: stop AT the target (never over-split); kept tanks persist
+        #                week-to-week (Pass-1 continuity), so no re-churn
+        #   * system load: unchanged — same biomass over more tanks
+        #   * tanks:     only free_clean tanks -> never over-subscribes, 0-drift
+        op_per_tank = smallest_og_tank_kg(facility) * getattr(
+            control, "density_target_pct", 0.9)
+        if op_per_tank > 0:
+            for p in plist:
+                batch_id, system = p.batch_id, p.system_id
+                cur = chosen_by_ps.get((batch_id, system))
+                if not cur:
+                    continue
+                _, bio, _ = standing.get((batch_id, w), (0.0, 0.0, 0.0))
+                if bio <= 0:
+                    continue
+                n_act = actual_total.get(batch_id, len(cur))
+                extra = math.ceil(bio / op_per_tank) - n_act   # tanks to reach target
+                if extra <= 0:
+                    continue
+                sys_ids = sys_tank_ids.get(system, [])
+                free_clean = sorted(t for t in sys_ids
+                                    if t not in used_tanks and t not in prev_state)
+                for tid in free_clean[:extra]:
+                    used_tanks.add(tid)
+                    cur.append(tid)
+                    actual_total[batch_id] = actual_total.get(batch_id, 0) + 1
+
         # ---- PASS 2: even-split each batch's standing over its ACTUAL tanks. ----
         # Splitting over the actually-placed tank count (not L3's planned count)
         # guarantees ALL of the batch's biomass/count is placed even when a
