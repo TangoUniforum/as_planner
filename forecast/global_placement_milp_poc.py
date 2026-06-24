@@ -40,6 +40,7 @@ from .models import ControlParams, FacilityConfig
 _DEFAULT_BIO_CAP = 400000.0
 _DEFAULT_FEED_CAP = 3000.0
 W_SLACK = 1.0e6     # meet per-system caps first
+W_SWAP = 1.0e5      # then avoid same-week A->B swaps (each would cause drift)
 W_OVER = 1.0e3      # then minimize per-tank over-density
 # (transfers have weight 1.0 — the last priority)
 
@@ -94,7 +95,8 @@ def solve_week(
     ns = len(systems)
     OFF_X, OFF_Q, OFF_OV, OFF_TR = 0, n, 2 * n, 3 * n
     OFF_SB, OFF_SF = 4 * n, 4 * n + ns
-    nv = 4 * n + 2 * ns
+    OFF_SW = 4 * n + 2 * ns          # SOFT swap (penalized, keeps every week feasible)
+    nv = 5 * n + 2 * ns
 
     er, ec, ev, beq = [], [], [], []
     ur, uc, uv, bub = [], [], [], []
@@ -133,13 +135,13 @@ def solve_week(
         ur.append(R); uc.append(OFF_X + i); uv.append(1.0)
         ur.append(R); uc.append(OFF_TR + i); uv.append(-1.0)
         bub.append(1.0 if (b, t) in prev_x else 0.0); R += 1
-        # swap-free: x <= x_prev[b,t] + empty_prev[t]
+        # SOFT swap-free: x - sw <= x_prev[b,t] + empty_prev[t]  (sw>0 = a swap,
+        # heavily penalized but allowed so the tight weeks stay FEASIBLE).
         empty_prev = 0.0 if any((bb, t) in prev_x for bb in by_b) else 1.0
         x_prev_bt = 1.0 if (b, t) in prev_x else 0.0
-        ub_rhs = min(1.0, x_prev_bt + empty_prev)
-        if ub_rhs < 1.0:
-            ur.append(R); uc.append(OFF_X + i); uv.append(1.0)
-            bub.append(ub_rhs); R += 1
+        ur.append(R); uc.append(OFF_X + i); uv.append(1.0)
+        ur.append(R); uc.append(OFF_SW + i); uv.append(-1.0)
+        bub.append(x_prev_bt + empty_prev); R += 1
 
     # per-system caps (soft): sum q <= bio_cap + sbio ; feed <= feed_cap + sfeed
     for s in systems:
@@ -164,6 +166,7 @@ def solve_week(
     c[OFF_OV:OFF_OV + n] = W_OVER
     c[OFF_SB:OFF_SB + ns] = W_SLACK
     c[OFF_SF:OFF_SF + ns] = W_SLACK
+    c[OFF_SW:OFF_SW + n] = W_SWAP
     integ = np.zeros(nv)
     integ[OFF_X:OFF_X + n] = 1
     integ[OFF_TR:OFF_TR + n] = 1
@@ -175,7 +178,9 @@ def solve_week(
     if res.x is None:
         return {}, 0, 0.0, 0.0, res.status
     x = res.x
-    q = {bt[i]: x[OFF_Q + i] for i in range(n) if x[OFF_Q + i] > 1.0}
+    # keep ALL placed biomass (the >1kg cut was display-only and made nearly-
+    # harvested batches read as 'unplaced' dust — conservation must be exact).
+    q = {bt[i]: x[OFF_Q + i] for i in range(n) if x[OFF_Q + i] > 1e-6}
     tr = int(round(x[OFF_TR:OFF_TR + n].sum()))
     over = float(x[OFF_OV:OFF_OV + n].sum())
     sslk = float(x[OFF_SB:OFF_SB + ns].sum() + x[OFF_SF:OFF_SF + ns].sum())
