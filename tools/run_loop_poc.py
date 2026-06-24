@@ -74,10 +74,11 @@ def main() -> int:
 
     inflight = {}
     fw_inflight = {}
+    purge_inflight = {}
     if not args.no_pr:
         # Hydrate BOTH OG and FW in-flight units: model_full_facility (now the
         # default) needs fw_inflight or it under-counts the FW phase.
-        inflight, fw_inflight, derived_start = _hydrate_pr(
+        inflight, fw_inflight, derived_start, purge_inflight = _hydrate_pr(
             Path(args.workbook), batches)
         if derived_start is not None:
             control.forecast_start = derived_start
@@ -126,6 +127,7 @@ def main() -> int:
         # toggle so --no-purge-hold recovers the OG-only instant-removal compare.
         model_full_facility=model_purge_hold,
         fw_inflight=fw_inflight,
+        purge_inflight=purge_inflight,
         verbose=True,
     )
 

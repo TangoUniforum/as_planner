@@ -625,6 +625,7 @@ def plan(
     model_purge_hold: bool = True,
     model_full_facility: bool = False,
     fw_inflight: Optional[dict[str, tuple[float, float, "date"]]] = None,
+    purge_inflight: Optional[dict[str, tuple[float, float]]] = None,
 ) -> PlannerResult:
     """Run the tankless L1 planner. See module docstring for the algorithm.
 
@@ -781,6 +782,28 @@ def plan(
     # In-place production-mode off-feed hold length in whole weeks (>=1).
     _starv_weeks = max(1, math.ceil((control.starvation_period_days or 7) / 7.0))
 
+    # PRIME the purge pipeline with fish ALREADY in 6N at hand-over (mid-purge in
+    # the PR snapshot). Mirrors the production pipeline (sixn.initial_purge_pair_
+    # queue + placement's startup sixn_pair_queue, placement.py:2417): the stocked
+    # 6N pairs are already in the purge queue and harvest out ~one pair/week in the
+    # first weeks. Releasing them over the first _PURGE_HOLD_WEEKS gives the early
+    # relief that stops L1 spinning a fresh backlog from EMPTY (the startup
+    # overshoot). These fish are NOT in the grow-out seeds (the hydration split
+    # them out), so they are added to seeded_count here for conservation; they
+    # release as HOG in step 2b, which balances.
+    if model_purge_hold and purge_inflight:
+        _nrel = _PURGE_HOLD_WEEKS
+        for _bid, (_c, _wt) in purge_inflight.items():
+            _cc = cons.setdefault(_bid, {
+                "input_count": 0.0, "seeded_count": 0.0,
+                "harvested_count": 0.0, "harvested_kg": 0.0,
+                "mortality_count": 0.0, "cull_count": 0.0, "cull_kg": 0.0})
+            _cc["seeded_count"] += _c
+            for _k in range(_nrel):
+                purge_buffer.setdefault(_k, []).append({
+                    "batch_id": _bid, "count": _c / _nrel,
+                    "biomass_kg": _c / _nrel * _wt / 1000.0, "avg_wt_g": _wt})
+
     for w in range(horizon):
         ws, we = week_range(w, fs)
         label = iso_week_label(ws)
@@ -868,6 +891,34 @@ def plan(
         # per-week override when given (else the flat facility cap).
         wk_bio_cap = _bio_cap_for(label)
         need_biomass = max(0.0, standing - wk_bio_cap)
+        # ANTICIPATORY pacing (purge mode): a drawn fish is MOVED into the 6N
+        # hold and keeps counting as standing until it RELEASES `_hold_weeks`
+        # later — so drawing this week barely moves this week's standing
+        # (grow-out -> held) and the relief lags by the hold. Reactive drawing
+        # therefore overshoots the cap. Also draw against the grow-out PROJECTED
+        # forward to the release week (frozen FW + held excluded — the drawn fish
+        # are off-feed and don't grow), so we start early enough that the release
+        # lands before the true total breaches.
+        if model_purge_hold and _purge and grow_biomass > 0:
+            _tb = _tg = 0.0
+            for _s in seeds:
+                if not entered[_s.batch_id]:
+                    continue
+                _st = work[_s.batch_id]
+                _b = _st.biomass_kg()
+                if _b <= 0:
+                    continue
+                _sgr = sgr_pct_per_day(_st.avg_wt_g(), "SW", _s.batch, tables)
+                _tb += _b
+                _tg += _b * (1.0 + _sgr / 100.0) ** 7
+            _wk_factor = (_tg / _tb) if _tb > 0 else 1.0
+            _proj_grow = grow_biomass * (_wk_factor ** _hold_weeks)
+            # The purge backlog (held, off-feed, ~steady) still occupies the cap
+            # at the release week, so the grow-out must be drawn against
+            # (cap - FW - held), not (cap - FW). Subtracting held is what brings
+            # the true total to the cap instead of cap+held.
+            need_biomass = max(need_biomass,
+                               (_proj_grow + fw_bio + held_biomass) - wk_bio_cap)
 
         # need_feed: remove top mass until feed/day <= feed_cap. Feed scales
         # ~linearly with biomass at the heavy end; approximate the kg to shed

@@ -77,9 +77,16 @@ def _hydrate_pr(workbook_path: Path, batches):
                                  pr_closing.day) + timedelta(days=1)
         pr_close_date = datetime(pr_closing.year, pr_closing.month, pr_closing.day)
 
+    # Split OG closing fish into grow-out vs 6N-RESIDENT (already mid-purge at
+    # hand-over). The 6N fish must NOT seed grow-out — they belong in the purge
+    # pipeline, releasing within the next ~2 weeks. Mixing them into grow-out is
+    # what made L1 spin a fresh purge backlog from empty (the startup overshoot).
+    from forecast.sixn import SIXN_ALL_TANKS
     og_agg: dict[str, dict] = {}
+    purge_agg: dict[str, dict] = {}
     for r in og_records:
-        e = og_agg.setdefault(r.batch_id, {"count": 0.0, "biomass_kg": 0.0})
+        target = purge_agg if r.tank_id in SIXN_ALL_TANKS else og_agg
+        e = target.setdefault(r.batch_id, {"count": 0.0, "biomass_kg": 0.0})
         e["count"] += r.closing_count
         e["biomass_kg"] += r.closing_biomass_kg
     batch_cv = {b.batch_id: b.tran_og_cv for b in batches}
@@ -88,6 +95,11 @@ def _hydrate_pr(workbook_path: Path, batches):
         if e["count"] > 0:
             avg_wt = e["biomass_kg"] * 1000.0 / e["count"]
             inflight_og[bid] = (e["count"], avg_wt, batch_cv.get(bid, 16.0))
+    # purge_inflight: handed-over 6N fish, batch_id -> (count, avg_wt_g).
+    purge_inflight = {}
+    for bid, e in purge_agg.items():
+        if e["count"] > 0:
+            purge_inflight[bid] = (e["count"], e["biomass_kg"] * 1000.0 / e["count"])
 
     # FW-in-flight: measured in FW units at PR, NOT yet in OG. Mirrors run.py.
     fw_agg: dict[str, dict] = {}
@@ -100,7 +112,7 @@ def _hydrate_pr(workbook_path: Path, batches):
         if e["count"] > 0 and bid not in inflight_og:
             avg_wt = e["biomass_kg"] * 1000.0 / e["count"]
             fw_inflight[bid] = (e["count"], avg_wt, pr_close_date)
-    return inflight_og, fw_inflight, derived_start
+    return inflight_og, fw_inflight, derived_start, purge_inflight
 
 
 def _score_true_total(res, fw_bio_by_label):
@@ -141,9 +153,9 @@ def main() -> int:
 
     control, tables, facility = load_config(args.config_dir)
     batches = load_batches(args.scenario_dir)
-    inflight_og, fw_inflight = {}, {}
+    inflight_og, fw_inflight, purge_inflight = {}, {}, {}
     if not args.no_pr:
-        inflight_og, fw_inflight, derived_start = _hydrate_pr(
+        inflight_og, fw_inflight, derived_start, purge_inflight = _hydrate_pr(
             Path(args.workbook), batches)
         if derived_start is not None:
             control.forecast_start = derived_start
@@ -159,7 +171,7 @@ def main() -> int:
     print(f"  facility caps: biomass<={cap_b:,.0f} kg, feed<={cap_f:,.0f} kg/day")
 
     common = dict(inflight_og=inflight_og, record_standing=True,
-                  model_purge_hold=args.purge_hold)
+                  model_purge_hold=args.purge_hold, purge_inflight=purge_inflight)
 
     # OG-only (the controller's modeling philosophy): cap checked vs OG only.
     og_only = gpp.plan(batches, tables, control, facility,

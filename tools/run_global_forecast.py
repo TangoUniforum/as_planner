@@ -74,11 +74,13 @@ def main() -> int:
     print(f"  Config:   {args.config_dir}")
     print(f"  Scenario: {len(batches)} batches from {args.scenario_dir}")
 
-    inflight_og, fw_inflight = {}, {}
+    inflight_og, fw_inflight, purge_inflight = {}, {}, {}
     if not args.no_pr:
         # Hydrate BOTH OG and FW in-flight units — model_full_facility (the
         # correct default) REQUIRES fw_inflight or it under-counts the FW phase.
-        inflight_og, fw_inflight, derived_start = _hydrate_pr(
+        # purge_inflight = fish already in 6N at hand-over (primes the purge
+        # pipeline so L1 doesn't spin a fresh backlog -> startup overshoot).
+        inflight_og, fw_inflight, derived_start, purge_inflight = _hydrate_pr(
             Path(args.workbook), batches)
         if derived_start is not None:
             control.forecast_start = derived_start
@@ -105,6 +107,7 @@ def main() -> int:
         model_purge_hold=True,
         model_full_facility=True,
         fw_inflight=fw_inflight,
+        purge_inflight=purge_inflight,
         verbose=True,
     )
     print(f"  converged={result.converged}, iterations={result.n_iterations}, "
