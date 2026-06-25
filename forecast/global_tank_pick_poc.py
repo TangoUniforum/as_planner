@@ -243,6 +243,7 @@ def pick_tanks(
     loop_result,
     control: ControlParams,
     facility: FacilityConfig,
+    grow_q_by_week: Optional[dict] = None,
 ) -> TankPickResult:
     """Realize the converged L1->L3 plan as specific physical tanks.
 
@@ -317,6 +318,10 @@ def pick_tanks(
 
     sixn_cap = smallest_og_tank_kg(facility) * 1.25  # 6N staged density
 
+    # Tank geometry (for the CP-SAT injection's per-tank density flag).
+    tank_vol_m3 = {t.tank_id: t.volume_m3 for t in facility.tanks}
+    tank_maxd = {t.tank_id: t.max_density_kg_m3 for t in facility.tanks}
+
     for w in weeks:
         wl = week_label[w]
         ws = _label_to_week_start(wl, fs_date)
@@ -336,8 +341,11 @@ def pick_tanks(
         # 1) GROW-OUT placement from L3 y[b,s,w] (production OG systems).
         # =============================================================
         # Order batches deterministically; process so continuity is honoured.
-        plist = sorted(placements_by_week.get(w, []),
-                       key=lambda p: (p.system_id, p.batch_id))
+        # When CP-SAT drives grow-out placement, the L3 greedy block below is a
+        # no-op (empty plist) and new_state is built from the optimal q after it.
+        plist = ([] if grow_q_by_week is not None else
+                 sorted(placements_by_week.get(w, []),
+                        key=lambda p: (p.system_id, p.batch_id)))
         # A batch may be placed across MULTIPLE systems the same week (L3
         # fragmentation). The L1 standing count/biomass is split EVENLY over the
         # batch's TOTAL tank footprint that week (all systems), not per-placement
@@ -493,6 +501,49 @@ def pick_tanks(
                     avg_wt_g=per_avg, oversub=denser)
                 if denser:
                     n_oversub_rows += 1
+
+        # ---- CP-SAT INJECTION: grow-out new_state straight from the optimal q. ----
+        # Per-tank count = batch_count * (kg / batch_placed_kg): the fractions sum
+        # to 1 so the COUNT conserves EXACTLY (independent of the integer-kg
+        # rounding, which only nudges biomass sub-kg). Hard swap-free in the solve
+        # guarantees no same-week A->B handover, so the audit reconciles 0-drift.
+        if grow_q_by_week is not None:
+            qw = grow_q_by_week.get(w, {})
+            pbio: dict[str, float] = {}
+            for (b, t), kg in qw.items():
+                pbio[b] = pbio.get(b, 0.0) + kg
+            for (b, t), kg in qw.items():
+                cnt, bio, avg = standing.get((b, w), (0.0, 0.0, 0.0))
+                frac = (kg / pbio[b]) if pbio[b] > 0 else 0.0
+                volm = tank_vol_m3.get(t, 0.0)
+                dens = (kg / volm) if volm > 0 else 0.0
+                over = dens > tank_maxd.get(t, 1e9)
+                new_state[t] = _Occ(batch_id=b, count=cnt * frac, biomass_kg=kg,
+                                    avg_wt_g=avg, oversub=over)
+                used_tanks.add(t)
+                if over:
+                    n_oversub_rows += 1
+            # DUST fallback: a grow-out batch whose standing rounded below 1 kg got
+            # no CP-SAT cell — keep it on a prior tank so no fish vanish from the
+            # count audit (near-harvest tails of B41/B42).
+            for (b2, w2), (cnt2, bio2, avg2) in standing.items():
+                if w2 != w or bio2 <= 1e-9 or b2 in pbio:
+                    continue
+                # SWAP-FREE only: the batch's OWN prior tank (free_mine), else a
+                # tank EMPTY last week (free_clean). Never a tank another batch held
+                # last week — that is a same-week A->B swap the audit charges the
+                # prior occupant's whole count against (the B48->B42 drift). If no
+                # swap-free tank exists, skip: this is the <1-fish near-harvest tail.
+                pri = [t for t in prev_by_batch.get(b2, [])
+                       if t not in used_tanks and t not in sixn_set]
+                tid = (pri[0] if pri else
+                       next((t for t in sorted(tank_sys)
+                             if t not in used_tanks and t not in sixn_set
+                             and prev_state.get(t) is None), None))
+                if tid is not None:
+                    new_state[tid] = _Occ(batch_id=b2, count=cnt2, biomass_kg=bio2,
+                                          avg_wt_g=avg2, oversub=False)
+                    used_tanks.add(tid)
 
         # =============================================================
         # 2) 6N PURGE HOLD — park in_purge population in 6N pairs (round-robin).

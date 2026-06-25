@@ -145,7 +145,8 @@ def run_global(input_path, output_path, config_dir, scenario_dir, *,
                no_pr: bool = False, overstock: bool = True,
                max_iterations: int = 10, margin_frac: float = 0.5,
                slack_epsilon: float = 1000.0, mip_time_limit: float = 180.0,
-               mip_rel_gap: float = 0.01) -> int:
+               mip_rel_gap: float = 0.01,
+               optimal: bool = False, cpsat_time: float = 300.0) -> int:
     """Produce the standard GLOBAL-method workbook at `output_path` from the PR at
     `input_path` + the app's config/scenario. Callable mirror of `main()` for the
     UI (parallel to `forecast.run.main`). `overstock=True` bakes in the placement
@@ -175,14 +176,43 @@ def run_global(input_path, output_path, config_dir, scenario_dir, *,
                            mip_rel_gap=mip_rel_gap, verbose=False),
             model_purge_hold=True, model_full_facility=True,
             fw_inflight=fw_inflight, purge_inflight=purge_inflight, verbose=False)
+        grow_q = None
+        if optimal:
+            grow_q = _solve_cpsat_q(result, facility, system_limits, control,
+                                    cpsat_time)
         gft = gf.build_tables(result, batches, tables, control, facility,
-                              fw_inflight=fw_inflight)
+                              fw_inflight=fw_inflight, grow_q_by_week=grow_q)
         cons = gf.conservation_summary(gft)
         _emit_workbook(gft, result, batches, tables, control, facility,
                        _facility_limits, cons, Path(output_path))
     finally:
         _l3._OVERSTOCK_DENSITY_PCT, _l3._OVERSTOCK_MAX_WT_G = _prev
     return 0
+
+
+def _solve_cpsat_q(result, facility, system_limits, control, time_limit):
+    """Run the CP-SAT full-horizon optimal placement on L1's standing and return
+    {week: {(batch, tank): kg}} for the optimal grow-out layout (0-swap)."""
+    from collections import defaultdict
+    from forecast.global_placement_milp_poc import solve_cpsat
+    og = {t.tank_id: t.system_id for t in facility.tanks
+          if t.type == "OG" and t.system_id != "OG6N"}
+    tvol = {t.tank_id: t.max_density_kg_m3 * t.volume_m3 for t in facility.tanks
+            if t.type == "OG" and t.system_id != "OG6N"}
+    vol = {t.tank_id: t.volume_m3 for t in facility.tanks
+           if t.type == "OG" and t.system_id != "OG6N"}
+    by_week, wl_of = defaultdict(dict), {}
+    for r in result.final_l1.batch_standing:
+        if getattr(r, "in_purge", False) or r.biomass_kg <= 1e-9:
+            continue
+        by_week[r.week][r.batch_id] = (r.biomass_kg, r.feed_kg_day, r.avg_wt_g)
+        wl_of[r.week] = r.week_label
+    q, info = solve_cpsat(by_week, og, tvol, vol, wl_of, system_limits, control,
+                          time_limit=time_limit, verbose=True)
+    print(f"  [CP-SAT optimal placement] status={info['status']} "
+          f"obj={info.get('obj')} bound={info.get('bound')} "
+          f"slack={info.get('slack_kg')} over={info.get('over_kg')}")
+    return q
 
 
 def _emit_workbook(gft, result, batches, tables, control, facility,
