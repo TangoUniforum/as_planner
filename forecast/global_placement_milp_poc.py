@@ -354,6 +354,100 @@ def solve_full_horizon(
     return q_by_w, info
 
 
+def solve_cpsat(
+    by_week, og_tanks, tank_vol, vol, wl_of, system_limits, control,
+    time_limit=300.0, workers=8, verbose=True,
+):
+    """FULL-HORIZON placement via CP-SAT (OR-Tools) — the tractable 'full picture'.
+
+    The placement is an assignment/scheduling problem; CP-SAT solves the whole
+    52-week horizon at once where HiGHS branch-and-bound cannot. HARD swap-free
+    (a tank changes batch only after a fallow week) makes same-week swaps
+    structurally impossible -> the realized layout is 0-drift by the audit, not
+    just by assertion. Integer kg (q): each batch's biomass is placed to the whole
+    kg (sub-kg remainder dropped — negligible vs the count audit). Objective lexical-ish:
+    minimize system-cap slack, then over-density, then tank moves (entries). The
+    hard swap-free guarantees the audit's continuity; within-tank biomass shuffle
+    is measured downstream, not minimized here. Returns (q_by_w {w:{(b,t):kg}}, info)."""
+    from ortools.sat.python import cp_model
+    gset, nset = set(GROWOUT_SYSTEMS), set(NURSERY_SYSTEMS)
+    weeks = sorted(by_week)
+    wpos = {w: i for i, w in enumerate(weeks)}
+    m = cp_model.CpModel()
+    x, q, ov = {}, {}, {}
+    for w in weeks:
+        for b, (bio, feed, avg) in by_week[w].items():
+            if bio <= 1e-9:
+                continue
+            B = int(round(bio))
+            for t in _eligible_tanks(avg, og_tanks, gset, nset):
+                x[b, t, w] = m.NewBoolVar(f"x_{b}_{t}_{w}")
+                q[b, t, w] = m.NewIntVar(0, B, f"q_{b}_{t}_{w}")
+                ov[b, t, w] = m.NewIntVar(0, B, f"o_{b}_{t}_{w}")
+                m.Add(q[b, t, w] <= B * x[b, t, w])
+                m.Add(ov[b, t, w] >= q[b, t, w] - int(tank_vol[t]))
+    # place ALL biomass (rounded to whole kg): sum_t q = round(bio)
+    for (b, w) in {(b, w) for (b, t, w) in x}:
+        m.Add(sum(q[b, t, w] for t in og_tanks if (b, t, w) in x)
+              == int(round(by_week[w][b][0])))
+    # one batch per tank
+    for (t, w) in {(t, w) for (b, t, w) in x}:
+        m.Add(sum(x[b, t, w] for b in by_week[w] if (b, t, w) in x) <= 1)
+    # HARD swap-free + tank-ENTRY transfer term (boolean, small magnitude — avoids
+    # the int64 overflow a fish-count objective would create in the weighted sum;
+    # within-tank biomass shuffle is MEASURED in the audit, not minimized here).
+    tr = {}
+    for (b, t, w) in x:
+        pw = w - 1
+        if pw in wpos:
+            others = [x[a, t, pw] for a in by_week.get(pw, {})
+                      if a != b and (a, t, pw) in x]
+            if others:
+                m.Add(x[b, t, w] + sum(others) <= 1)
+        tr[b, t, w] = m.NewBoolVar(f"tr_{b}_{t}_{w}")
+        if (b, t, pw) in x:
+            m.Add(tr[b, t, w] >= x[b, t, w] - x[b, t, pw])
+        else:
+            m.Add(tr[b, t, w] >= x[b, t, w])
+    # per-system caps (soft)
+    sl = []
+    for (s, w) in {(og_tanks[t], w) for (b, t, w) in x}:
+        cells = [(b, t) for (b, t, ww) in x if ww == w and og_tanks[t] == s]
+        sb = m.NewIntVar(0, 10 ** 8, f"sb_{s}_{w}"); sl.append(sb)
+        m.Add(sum(q[b, t, w] for (b, t) in cells)
+              <= int(_scap(METRIC_BIOMASS, wl_of[w], s, system_limits,
+                           _DEFAULT_BIO_CAP)) + sb)
+        sf = m.NewIntVar(0, 10 ** 8, f"sf_{s}_{w}"); sl.append(sf)
+        fcap = int(_scap(METRIC_FEED_DAY, wl_of[w], s, system_limits,
+                         _DEFAULT_FEED_CAP) * 1000)
+        m.Add(sum(q[b, t, w] * int(by_week[w][b][1] / by_week[w][b][0] * 1000)
+                  for (b, t) in cells) <= fcap + sf * 1000)
+    # lexical-ish: system-cap slack >> over-density >> tank moves (test-proven)
+    m.Minimize(10 ** 6 * sum(sl) + 10 ** 3 * sum(ov.values()) + sum(tr.values()))
+    solver = cp_model.CpSolver()
+    solver.parameters.max_time_in_seconds = float(time_limit)
+    solver.parameters.num_search_workers = int(workers)
+    if verbose:
+        print(f"[CP-SAT] {len(x)} cells; solving full horizon "
+              f"({time_limit}s, {workers} workers)...")
+    st = solver.Solve(m)
+    info = {"status": solver.StatusName(st),
+            "obj": solver.ObjectiveValue() if st in
+            (cp_model.OPTIMAL, cp_model.FEASIBLE) else None,
+            "bound": solver.BestObjectiveBound() if st in
+            (cp_model.OPTIMAL, cp_model.FEASIBLE) else None}
+    if st not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        return None, info
+    q_by_w = {}
+    for (b, t, w) in x:
+        v = solver.Value(q[b, t, w])
+        if v > 0:
+            q_by_w.setdefault(w, {})[(b, t)] = float(v)
+    info["slack_kg"] = sum(solver.Value(s) for s in sl)
+    info["over_kg"] = sum(solver.Value(o) for o in ov.values())
+    return q_by_w, info
+
+
 def solve_rolling(
     by_week, og_tanks, tank_vol, vol, wl_of, system_limits, control,
     np, linprog, window=8, stride=4, time_limit=60.0, mip_rel_gap=0.02,
