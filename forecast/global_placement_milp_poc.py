@@ -386,6 +386,7 @@ def solve_cpsat(
                 ov[b, t, w] = m.NewIntVar(0, B, f"o_{b}_{t}_{w}")
                 m.Add(q[b, t, w] <= B * x[b, t, w])
                 m.Add(ov[b, t, w] >= q[b, t, w] - int(tank_vol[t]))
+                m.Add(q[b, t, w] <= int(tank_vol[t]))   # HARD density cap: never over
     # place ALL biomass (rounded to whole kg): sum_t q = round(bio)
     for (b, w) in {(b, w) for (b, t, w) in x}:
         m.Add(sum(q[b, t, w] for t in og_tanks if (b, t, w) in x)
@@ -422,8 +423,21 @@ def solve_cpsat(
                          _DEFAULT_FEED_CAP) * 1000)
         m.Add(sum(q[b, t, w] * int(by_week[w][b][1] / by_week[w][b][0] * 1000)
                   for (b, t) in cells) <= fcap + sf * 1000)
-    # lexical-ish: system-cap slack >> over-density >> tank moves (test-proven)
-    m.Minimize(10 ** 6 * sum(sl) + 10 ** 3 * sum(ov.values()) + sum(tr.values()))
+    # FILL ALL TANKS (operator goal): minimize the MAX per-tank utilization each
+    # week. To lower the busiest tank the solver must spread biomass into the empty
+    # ones -> every eligible tank ends up occupied at low, even density => no
+    # empties, lowest load, steady occupancy over time (low temporal variance).
+    # Cost: more transfers (spreading = more tanks/batch). Operator prioritizes
+    # full+low-density+low-variance over move count.
+    tw_cells: dict = {}
+    for (b, t, w) in x:
+        tw_cells.setdefault((t, w), []).append(b)
+    zmax = {w: m.NewIntVar(0, 300, f"zmax_{w}") for w in weeks}
+    for (t, w), bs in tw_cells.items():
+        m.Add(100 * sum(q[b, t, w] for b in bs)
+              <= zmax[w] * int(round(tank_vol[t])))
+    # lexical-ish: meet system caps >> FILL (min max-utilization) >> tank moves
+    m.Minimize(10 ** 6 * sum(sl) + 100 * sum(zmax.values()) + sum(tr.values()))
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = float(time_limit)
     solver.parameters.num_search_workers = int(workers)
