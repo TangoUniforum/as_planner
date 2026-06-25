@@ -509,20 +509,31 @@ def pick_tanks(
         # guarantees no same-week A->B handover, so the audit reconciles 0-drift.
         if grow_q_by_week is not None:
             qw = grow_q_by_week.get(w, {})
-            pbio: dict[str, float] = {}
-            for (b, t), kg in qw.items():
-                pbio[b] = pbio.get(b, 0.0) + kg
-            for (b, t), kg in qw.items():
+            # CP-SAT owns the HARD part: WHICH tanks each batch occupies (system
+            # biomass+feed headroom, hard swap-free). The split WITHIN that set is a
+            # DETERMINED rule, not CP-SAT's arbitrary q: biomass proportional to tank
+            # VOLUME -> every tank of a batch sits at the SAME (average) density =
+            # maximum per-tank headroom. It's feasible (avg <= the max CP-SAT proved
+            # <= cap, so 0 over-cap) and STABLE (a fixed rule over a stable tank set
+            # just scales with the count, so Step-4 sees pure mortality/harvest, NOT
+            # inter-tank shuffle). Forward/target-driven, not anchored to last week.
+            tanks_by_b: dict[str, list[int]] = {}
+            for (b, t) in qw:
+                tanks_by_b.setdefault(b, []).append(t)
+            for b, tankset in tanks_by_b.items():
                 cnt, bio, avg = standing.get((b, w), (0.0, 0.0, 0.0))
-                frac = (kg / pbio[b]) if pbio[b] > 0 else 0.0
-                volm = tank_vol_m3.get(t, 0.0)
-                dens = (kg / volm) if volm > 0 else 0.0
-                over = dens > tank_maxd.get(t, 1e9)
-                new_state[t] = _Occ(batch_id=b, count=cnt * frac, biomass_kg=kg,
-                                    avg_wt_g=avg, oversub=over)
-                used_tanks.add(t)
-                if over:
-                    n_oversub_rows += 1
+                volsum = sum(tank_vol_m3.get(t, 0.0) for t in tankset) or 1.0
+                for t in tankset:
+                    vf = tank_vol_m3.get(t, 0.0) / volsum
+                    pkg = bio * vf
+                    volm = tank_vol_m3.get(t, 0.0)
+                    over = (pkg / volm if volm > 0 else 0.0) > tank_maxd.get(t, 1e9)
+                    new_state[t] = _Occ(batch_id=b, count=cnt * vf, biomass_kg=pkg,
+                                        avg_wt_g=avg, oversub=over)
+                    used_tanks.add(t)
+                    if over:
+                        n_oversub_rows += 1
+            pbio = tanks_by_b   # batches CP-SAT placed (for the dust-fallback guard)
             # DUST fallback: a grow-out batch whose standing rounded below 1 kg got
             # no CP-SAT cell — keep it on a prior tank so no fish vanish from the
             # count audit (near-harvest tails of B41/B42).
