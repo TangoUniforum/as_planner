@@ -836,11 +836,29 @@ with st.sidebar:
         key="forecast_method",
     )
     _is_global = forecast_method.startswith("Global")
+    _global_optimal = False
+    _cpsat_time = 300.0
     if _is_global:
         st.caption("⚠ Global is the experimental precalculated engine — the "
-                   "BatchLocations/Transfers are real (0-drift); residual per-tank "
-                   "density over-cap is the same structural capacity limit the "
-                   "controller has.")
+                   "BatchLocations/Transfers are real (0-drift). Heuristic mode "
+                   "leaves some per-tank density over-cap (the structural limit the "
+                   "controller also hits); the optimal mode below removes it.")
+        _global_optimal = st.checkbox(
+            "Optimal placement (CP-SAT) — fills tanks, 0 over-cap, low variance",
+            value=False, key="global_optimal",
+            help="Solves the WHOLE-horizon tank layout as ONE precalculated "
+                 "optimization (OR-Tools CP-SAT): keeps tanks as full as 0-drift "
+                 "allows (~90% — the remainder is the mandatory fallow week between "
+                 "batches in a tank), spreads biomass to low EVEN density (0 "
+                 "over-cap, worst ~94 vs the controller's 176), and minimizes "
+                 "system-load variance. Determined proportional-volume split; 0 "
+                 "TANK_DRIFT, audited. SLOWER — minutes, not seconds.")
+        if _global_optimal:
+            _cpsat_time = float(st.slider(
+                "CP-SAT solve budget (seconds)", 60, 900, 300, 60,
+                key="cpsat_time",
+                help="More time tightens the optimum (fewer transfers); fill "
+                     "plateaus past ~300s, so 300s is a good default."))
     if _cfg_ok:
         from forecast.config_io import load_control, control_to_dict
         _render_active_config(
@@ -910,6 +928,7 @@ def _run_with_workbook_bytes(
     config_dir: str | None = None,
     scenario_dir: str | None = None,
     method: str = "controller",
+    cpsat_time: float = 300.0,
 ) -> dict:
     """Run the pipeline against `input_bytes` in a temp directory.
 
@@ -922,7 +941,9 @@ def _run_with_workbook_bytes(
     in_path = work_dir / input_name
     # The global method emits a fresh .xlsx (no VBA to carry); the controller
     # keeps the uploaded macro workbook's suffix.
-    if method == "global":
+    if method == "global_optimal":
+        out_name = Path(input_name).stem + "_planned_OPTIMAL.xlsx"
+    elif method == "global":
         out_name = Path(input_name).stem + "_planned_GLOBAL.xlsx"
     else:
         out_name = Path(input_name).stem + "_planned" + Path(input_name).suffix
@@ -934,9 +955,11 @@ def _run_with_workbook_bytes(
     captured = io.StringIO()
     try:
         with redirect_stdout(captured):
-            if method == "global":
+            if method in ("global", "global_optimal"):
                 from tools.run_global_forecast import run_global
-                rc = run_global(in_path, out_path, config_dir, scenario_dir)
+                rc = run_global(in_path, out_path, config_dir, scenario_dir,
+                                optimal=(method == "global_optimal"),
+                                cpsat_time=cpsat_time)
             else:
                 rc = run_pipeline(input_path=in_path, output_path=out_path,
                                   config_dir=config_dir, scenario_dir=scenario_dir)
@@ -1753,15 +1776,19 @@ if app_mode.startswith("Optimize"):
 # ============================================================
 
 if run_clicked and uploaded is not None:
-    _method = "global" if _is_global else "controller"
-    _spin = ("Running GLOBAL (precalculated L1→L3) planner — LP per week, slower..."
+    _method = ("global_optimal" if (_is_global and _global_optimal)
+               else "global" if _is_global else "controller")
+    _spin = ("Running GLOBAL OPTIMAL (CP-SAT whole-horizon solve) — this takes "
+             f"~{int(_cpsat_time)}s plus setup, please wait..."
+             if _method == "global_optimal"
+             else "Running GLOBAL (precalculated L1→L3) planner — LP per week, slower..."
              if _is_global else "Running forecast pipeline...")
     with st.status(_spin, expanded=True) as status:
         st.write("Config + scenario from the app; ProductionReport from upload...")
         result = _run_with_workbook_bytes(
             uploaded.getvalue(), uploaded.name,
             config_dir=str(CONFIG_DIR), scenario_dir=str(SCENARIO_DIR),
-            method=_method,
+            method=_method, cpsat_time=_cpsat_time,
         )
         if result["ok"]:
             st.write(
