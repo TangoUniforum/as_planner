@@ -198,6 +198,13 @@ class _HarvestBudget:
 # cadences.
 _ARRIVAL_SMOOTH_WEEKS = 1
 
+# Lookahead (weeks) for anticipating the FW biomass rise in the harvest setpoint.
+# The FW curve is fully known forward, so the predictive harvest pre-positions OG
+# drawdown for the upcoming FW peak over this window rather than reacting once the
+# total has spiked. Sized to the move-in lead so the weekly harvest clip keeps the
+# facility under the cap without falling behind the growing FW load.
+_FW_ANTICIPATE_WEEKS = 8
+
 # Damping gain on the move-in's proportional biomass-deviation correction. The
 # move-in is a lagged actuator (drains ~lead weeks later), so a full deadbeat
 # (1.0) correction through it oscillates; a fraction spreads the correction
@@ -2583,11 +2590,26 @@ def phase_d_emit_events(
         # FW-INCLUSIVE cap basis (audit H1): add this week's pre-feed (EGG/FW)
         # standing biomass + feed so the setpoint and the feed-implied cap below
         # measure TOTAL facility biomass against the 3.8M cap, not OG-only.
-        # fac_growth_kg is left OG-only on purpose: FW fish are not harvestable, so
-        # only OG biomass can be shed to make room for the FW load.
         if fw_biomass_by_week is not None:
-            fac_bio += fw_biomass_by_week.get(week_label, 0.0)
+            _fw_now = fw_biomass_by_week.get(week_label, 0.0)
+            fac_bio += _fw_now
             _fac_feed_kg_day += fw_feed_by_week.get(week_label, 0.0)
+            # ANTICIPATE the FW load: the FW biomass curve is fully known, so add its
+            # projected RISE over the next _FW_ANTICIPATE_WEEKS into the growth term.
+            # The predictive harvest then pre-positions OG drawdown AHEAD of the
+            # growing FW instead of reacting after the total has already spiked, so
+            # the weekly harvest clip keeps the facility under the cap rather than
+            # falling behind. Only the rise is added: a FW DROP is a TranOG departure
+            # whose OG arrival the arrivals feed-forward already covers, so
+            # subtracting it would double-count. FW is never harvested — this only
+            # sheds OG sooner to make room for it.
+            _ci = sorted_weeks.index(week_label)
+            _fw_ahead = max(
+                (fw_biomass_by_week.get(sorted_weeks[_ci + k], 0.0)
+                 for k in range(1, _FW_ANTICIPATE_WEEKS + 1)
+                 if _ci + k < len(sorted_weeks)),
+                default=_fw_now)
+            fac_growth_kg += max(0.0, _fw_ahead - _fw_now)
         bio_cap = resolve_facility_cap(METRIC_BIOMASS, week_label, facility_limits, control)
         feed_cap = resolve_facility_cap(METRIC_FEED_DAY, week_label, facility_limits, control)
         max_hv = resolve_facility_cap(METRIC_MAX_HARVEST, week_label, facility_limits, control)
