@@ -83,6 +83,7 @@ Facility-wide knobs read into `ControlParams`:
 | `min_harvest_per_week` | weekly harvest floor | 30,000 |
 | `min_harvest_weight_g` | minimum weight a fish can be harvested at | 3,500 |
 | `min_tank_control` | force-empty floor (fish): a harvest/transfer leaving fewer than this empties the tank (INV-5) | 7,000 |
+| `min_transfer_count` | min rebalancer transfer size (fish): the density/load balancer won't split a sub-group **smaller than this OUT** of a tank (the OUT-side mirror of `min_tank_control`). **0 = OFF.** Suppresses tiny partial moves — trades fewer transfers for more *marginal* density over-cap (the small moves were doing fine-grained relief); whole-tank consolidation moves are unaffected | 0 (off) |
 | `default_hog_yield` | gross→HOG conversion (per-week overrides in FacilityLimits) | 0.81 |
 | `scenario_name` | label for the run (reports + RunConfig) | Forecast |
 | `facility_biomass_deviation_pct` | **FACILITY** setpoint band — the soft band below the (FW-inclusive) facility biomass/feed cap the harvest controller runs at; the one knob for how close to the *facility* cap to run (§4.3) | (config default) |

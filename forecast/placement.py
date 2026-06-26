@@ -1836,7 +1836,7 @@ def _rebalance_systems_realized(
 def _variable_quantity_rebalance(
     state, wl, event_date, transfer_events, warnings,
     cap_lookup, buf, batch_meta, tables, og_systems, og_tanks_by_system,
-    budget,
+    budget, min_transfer=0.0,
 ):
     """Shave over-cap systems by moving a PRECISE count of fish between a
     batch's EXISTING tanks in different systems.
@@ -1931,7 +1931,11 @@ def _variable_quantity_rebalance(
             continue
         move_bio, bid, src, dst = best
         move_count = move_bio / (src.avg_wt_g / 1000.0)
-        if move_count < 1.0:
+        # MIN-TRANSFER floor: don't split a sub-group smaller than min_transfer out
+        # of a tank — a tiny partial move costs handling for marginal relief. This
+        # is a PARTIAL move (leaves the source non-empty), so the floor applies;
+        # whole-tank consolidation moves are emitted elsewhere. 0 = no floor.
+        if move_count < max(1.0, min_transfer):
             stuck.add(S)
             continue
         before = src.biomass_kg
@@ -1957,7 +1961,7 @@ def _balance_loads(
     ta_index, week_tank_owner, sorted_weeks, week_index,
     cap_lookup, buf, batch_meta, tables,
     og_systems, growout_systems, og_tanks_by_system, budget,
-    level=False, reserved=frozenset(),
+    level=False, reserved=frozenset(), min_transfer=0.0,
 ):
     """Multi-objective balancer: cut out-of-bounds across per-tank DENSITY,
     per-system FEED, and per-system BIOMASS *together*.
@@ -2108,6 +2112,11 @@ def _balance_loads(
             stuck.add(src.tank_id)
             continue
         move_count = move_kg / (src.avg_wt_g / 1000.0)
+        # MIN-TRANSFER floor (see _variable_quantity_rebalance): skip a partial
+        # split smaller than min_transfer fish. 0 = no floor.
+        if move_count < max(1.0, min_transfer):
+            stuck.add(src.tank_id)
+            continue
         before = src.biomass_kg
         ev = Transfer(
             batch_id=b, event_date=event_date, source_tank_id=src.tank_id,
@@ -2973,6 +2982,7 @@ def phase_d_emit_events(
                     _grow_sys, _og_tanks, _bal_budget,
                     level=bool(getattr(control, "rebalance_level", False)),
                     reserved=_reserved_og,
+                    min_transfer=getattr(control, "min_transfer_count", 0.0) or 0.0,
                 )
 
             # Variable-quantity pass: with the week's placement realized, shave
@@ -2986,6 +2996,7 @@ def phase_d_emit_events(
                     state, week_label, transfer_date, transfer_events, warnings,
                     _sys_cap, _rebal_buf, batch_meta, tables, og_systems_set,
                     og_tanks_by_system_r, _vq_budget,
+                    min_transfer=getattr(control, "min_transfer_count", 0.0) or 0.0,
                 )
 
         # ANTICIPATORY PURGE PACING (purge mode only). The TranOG arrival

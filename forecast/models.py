@@ -31,6 +31,13 @@ class ControlParams:
     tran_og_default_tanks: int = 3
     global_buffer_pct: float = 0.05      # R29: system-limits symmetric buffer
     starvation_period_days: int = 7      # R30: in-place purge length (production mode); 7d = one weekly step (single-cohort pipeline)
+    # Minimum rebalancer transfer size (fish): the density/load rebalancer will not
+    # split a sub-group smaller than this OUT of a tank (tiny moves cost handling for
+    # little relief) — the OUT-side mirror of min_tank_control's "don't leave a
+    # dribble" rule. 0 = OFF (no floor; default = byte-identical). Set e.g. to
+    # min_tank_control (7000) or 10000 to suppress small partial transfers; whole-
+    # tank consolidation moves are unaffected.
+    min_transfer_count: float = 0.0
     # R31: per-tank density target as a fraction of the cap. Drives
     # precalc `tanks_needed_at_density_cap` sizing, the Phase D Grade-
     # split trigger, and the PR-concentration advisory/action gate.
