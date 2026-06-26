@@ -603,15 +603,21 @@ def write_yearly_summary(
         if kg:
             wk_movein[wk_] += kg
 
-    # FW/EGG projected feed (hatchery — FW fish live in FW tanks, absent from
-    # batch_locations) per week, so the annual total includes hatchery feed too.
+    # FW/EGG projected feed (hatchery) AND biomass per week. FW fish live in FW
+    # tanks, absent from batch_locations, so both are sourced here from the biology
+    # projection. The biomass is folded into wk_bio because FW/EGG biomass is real
+    # facility biomass counted against the 3.8M cap (audit H2) — so Peak/Mean/
+    # Utilisation are FW-inclusive, mirroring the long-standing FW-feed correction.
     wk_fwfeed: dict[str, float] = defaultdict(float)
     for states in (biology_states_by_batch or {}).values():
         for s in states:
-            if s.stage in ("FW", "EGG") and s.feed_kg_week:
+            if s.stage not in ("FW", "EGG"):
+                continue
+            if s.feed_kg_week:
                 wk_fwfeed[s.week_label] += s.feed_kg_week
-                wk_year.setdefault(s.week_label,
-                                   s.week_start.year if hasattr(s.week_start, "year") else None)
+            wk_bio[s.week_label] += s.biomass_kg
+            wk_year.setdefault(s.week_label,
+                               s.week_start.year if hasattr(s.week_start, "year") else None)
 
     # Harvest per year (HOG via per-week override or default).
     hog_overrides = hog_overrides or {}
@@ -2167,6 +2173,7 @@ def write_facility_map(
     facility,
     batches=None,
     tables=None,
+    biology_states_by_batch=None,
     sheet_name: str = "FacilityMap",
 ) -> None:
     """Tank × Week matrix showing which batch occupies each tank each week.
@@ -2228,23 +2235,37 @@ def write_facility_map(
             sys_feed[(r.system_id, r.week_label)] += _row_feed_kg_day(r, batches, tables)
             sys_bio[(r.system_id, r.week_label)] += r.biomass_kg
 
+    # FW/EGG (hatchery) biomass per week — real facility biomass against the cap
+    # (audit H2) but not in any OG system (FW fish live in FW tanks). Shown as its
+    # own row and folded into the BIOMASS block's FACILITY total so that total is
+    # FW-inclusive, matching the engine's cap basis and the Advisory.
+    fw_bio: dict[str, float] = defaultdict(float)
+    for states in (biology_states_by_batch or {}).values():
+        for s in states:
+            if s.stage in ("FW", "EGG"):
+                fw_bio[s.week_label] += s.biomass_kg
+
     def _sys_label(sysid):
         return sysid[2:] if sysid.startswith("OG") else sysid
 
-    def _block(title, data, fmt):
+    def _block(title, data, fmt, extra=None):
         ws.append([])
         ws.append([title])
         ws.append(["System", ""] + weeks)
         for sysid in systems:
             ws.append([_sys_label(sysid), ""]
                       + [fmt(data.get((sysid, w), 0.0)) for w in weeks])
+        if extra is not None:
+            elabel, edata = extra
+            ws.append([elabel, ""] + [fmt(edata.get(w, 0.0)) for w in weeks])
         ws.append(["FACILITY", ""]
-                  + [fmt(sum(data.get((s, w), 0.0) for s in systems)) for w in weeks])
+                  + [fmt(sum(data.get((s, w), 0.0) for s in systems)
+                         + (extra[1].get(w, 0.0) if extra else 0.0)) for w in weeks])
 
     _block("TOTAL PLANNED FEED PER DAY (kg/day) — per system (STARVE/6N-purge = 0)",
            sys_feed, lambda v: round(v, 0))
-    _block("BIOMASS (kg) — per system per week (the daily average held)",
-           sys_bio, lambda v: round(v, 0))
+    _block("BIOMASS (kg) — per system per week; FW = hatchery, FACILITY = total vs cap",
+           sys_bio, lambda v: round(v, 0), extra=("FW (hatchery)", fw_bio))
 
     ws.column_dimensions[get_column_letter(1)].width = 9
     ws.column_dimensions[get_column_letter(2)].width = 6
@@ -2260,6 +2281,7 @@ def write_advisory(
     control,
     batches=None,
     tables=None,
+    biology_states_by_batch=None,
     sheet_name: str = "Advisory",
 ) -> None:
     """Per-week capacity advisory + harvest recommendations (matches reference).
@@ -2298,6 +2320,16 @@ def write_advisory(
         # 4-day pre-transfer feed is a TOTAL-feed accounting item (in the
         # FeedForecast / ledger / YearlySummary totals), not a per-day rate.
         feed[r.week_label] += _row_feed_kg_day(r, batches, tables)
+    # FW-INCLUSIVE biomass (audit H2): FW/EGG fish live in FW tanks (absent from
+    # batch_locations) but are real facility biomass counted against the 3.8M cap.
+    # Add their projected biomass so Total_Biomass / Biomass_Excess / the OK-vs-
+    # REDUCE flag report TOTAL facility biomass — the same basis the harvest engine
+    # now enforces — instead of OG-only (which can show false headroom).
+    for states in (biology_states_by_batch or {}).values():
+        for s in states:
+            if s.stage in ("FW", "EGG"):
+                bio[s.week_label] += s.biomass_kg
+                wk_start.setdefault(s.week_label, s.week_start)
 
     harv_c: dict[str, float] = defaultdict(float)
     harv_b: dict[str, float] = defaultdict(float)

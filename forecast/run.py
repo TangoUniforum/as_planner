@@ -586,9 +586,15 @@ def main(
         wb, placement.batch_locations, placement.harvest_events,
         default_hog_yield=control.default_hog_yield,
     )
+    # Realized-lifespan biology states (FW/EGG biomass + feed for the FW-inclusive
+    # report corrections). Defined here so the Advisory can use it too.
+    rl_states_by_batch = {
+        b: _to_realized_lifespan(sl) for b, sl in states_by_batch.items()
+    }
     write_advisory(
         wb, placement.batch_locations, placement.harvest_events,
         facility_limits, control, batches=batch_by_id, tables=tables,
+        biology_states_by_batch=rl_states_by_batch,
     )
     write_validation_log(
         wb,
@@ -611,9 +617,6 @@ def main(
         facility_limits_hog=facility_hog_overrides,
         forecast_start=fs_date,
     )
-    rl_states_by_batch = {
-        b: _to_realized_lifespan(sl) for b, sl in states_by_batch.items()
-    }
     write_yearly_summary(
         wb, placement.batch_locations, placement.harvest_events,
         facility_limits, control, batches=batch_by_id, tables=tables,
@@ -677,7 +680,8 @@ def main(
           f"-> SystemLimitsAudit sheet")
 
     write_facility_map(wb, placement.batch_locations, facility,
-                       batches=batch_by_id, tables=tables)
+                       batches=batch_by_id, tables=tables,
+                       biology_states_by_batch=rl_states_by_batch)
 
     # Config snapshot: embed the exact app-managed config + scenario this
     # run used into the output workbook, so the saved file is a complete,
