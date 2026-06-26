@@ -1536,6 +1536,7 @@ def _realized_facility_metrics(
       *mass* into a harvest *count* (same convention as the scheduler).
     """
     fac_bio = 0.0
+    fac_sw_bio = 0.0   # feeding (SW grow-out) biomass only; off-feed STARVE excluded
     fac_growth_kg = 0.0
     fac_feed_kg_day = 0.0
     mature: list[tuple[date, float]] = []  # (input_date, avg_wt_g)
@@ -1546,6 +1547,7 @@ def _realized_facility_metrics(
         fac_bio += bio
         batch = batch_meta.get(t.batch_id)
         if t.stage == "SW":
+            fac_sw_bio += bio
             sgr_eff = sgr_pct_per_day(t.avg_wt_g, "SW", batch, tables)
             fac_growth_kg += bio * (sgr_eff / 100.0) * 7.0
             fcr_curve = tables.fcr_by_model.get(
@@ -1560,7 +1562,7 @@ def _realized_facility_metrics(
     if mature:
         mature.sort(key=lambda m: m[0])
         oldest_mature_avg_wt = mature[0][1]
-    return fac_bio, fac_growth_kg, fac_feed_kg_day, oldest_mature_avg_wt
+    return fac_bio, fac_growth_kg, fac_feed_kg_day, oldest_mature_avg_wt, fac_sw_bio
 
 
 def _tank_to_system_of(tid, og_tanks_by_system):
@@ -2578,10 +2580,11 @@ def phase_d_emit_events(
         #     operational floor; raised to full capacity only when biomass is
         #     already over the upper band, as a safety net for an acute spike
         #     (e.g. an unmodelled TranOG arrival) the lagged channel can't catch.
-        fac_bio, fac_growth_kg, _fac_feed_kg_day, oldest_wt = (
+        fac_bio, fac_growth_kg, _fac_feed_kg_day, oldest_wt, _fac_sw_bio = (
             _realized_facility_metrics(
                 state, batch_meta, tables, control.min_harvest_weight_g)
         )
+        _fw_now = 0.0   # this week's FW standing biomass (set below if available)
         # FW-INCLUSIVE cap basis (audit H1): add this week's pre-feed (EGG/FW)
         # standing biomass + feed so the setpoint and the feed-implied cap below
         # measure TOTAL facility biomass against the 3.8M cap, not OG-only.
@@ -2622,8 +2625,22 @@ def phase_d_emit_events(
             # move-in floors to min_harvest, so biomass + feed BUILD toward the caps;
             # near it, harvest ramps between min and max to MAINTAIN them.
             eff_cap = bio_cap
-            if feed_cap and _fac_feed_kg_day > 0 and fac_bio > 0:
-                eff_cap = min(bio_cap, feed_cap * fac_bio / _fac_feed_kg_day)
+            if feed_cap and _fac_feed_kg_day > 0:
+                # Feed-implied biomass ceiling, UN-BIASED (audit M3): only the FEEDING
+                # biomass (SW grow-out + FW) produces facility feed; off-feed 6N/STARVE
+                # purge biomass eats nothing, so it must NOT inflate the biomass-per-
+                # feed ratio (the old proxy divided TOTAL fac_bio by SW feed, which
+                # overstated the ceiling whenever depuration biomass was large).
+                # Convert only the feeding biomass at the feed cap, then add the
+                # non-feeding biomass back so the result is a TOTAL-biomass ceiling
+                # comparable to fac_bio. Both caps are HARD; the lower one binds; the
+                # deviation band below is the only soft margin.
+                _feeding_bio = _fac_sw_bio + _fw_now
+                _nonfeed_bio = max(0.0, fac_bio - _feeding_bio)
+                if _feeding_bio > 0:
+                    eff_cap = min(
+                        bio_cap,
+                        feed_cap * _feeding_bio / _fac_feed_kg_day + _nonfeed_bio)
             _dev = control.facility_biomass_deviation_pct or 0.0
             setpoint = eff_cap * (1.0 - _dev)
         else:

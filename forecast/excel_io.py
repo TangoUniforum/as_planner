@@ -2381,15 +2381,17 @@ def write_advisory(
         # 4-day pre-transfer feed is a TOTAL-feed accounting item (in the
         # FeedForecast / ledger / YearlySummary totals), not a per-day rate.
         feed[r.week_label] += _row_feed_kg_day(r, batches, tables)
-    # FW-INCLUSIVE biomass (audit H2): FW/EGG fish live in FW tanks (absent from
-    # batch_locations) but are real facility biomass counted against the 3.8M cap.
-    # Add their projected biomass so Total_Biomass / Biomass_Excess / the OK-vs-
-    # REDUCE flag report TOTAL facility biomass — the same basis the harvest engine
-    # now enforces — instead of OG-only (which can show false headroom).
+    # FW-INCLUSIVE biomass + feed (audit H2/M3): FW/EGG fish live in FW tanks
+    # (absent from batch_locations) but are real facility biomass against the 3.8M
+    # cap AND eat real hatchery feed against the feed/day cap. Add both so
+    # Total_Biomass / Total_Feed / the excess + OK-vs-REDUCE flag report the TOTAL
+    # facility figures — the same dual-limit basis the harvest engine now enforces —
+    # instead of OG-only (which can show false headroom on either limit).
     for states in (biology_states_by_batch or {}).values():
         for s in states:
             if s.stage in ("FW", "EGG"):
                 bio[s.week_label] += s.biomass_kg
+                feed[s.week_label] += getattr(s, "feed_kg_day", 0.0)
                 wk_start.setdefault(s.week_label, s.week_start)
 
     harv_c: dict[str, float] = defaultdict(float)
