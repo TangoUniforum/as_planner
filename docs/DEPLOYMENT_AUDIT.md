@@ -10,6 +10,13 @@
 
 **GO-WITH-FIXES** — The realized closed-loop controller is conservation-sound and enforces the 3.8M cap correctly *in execution* (6N depuration biomass is counted; fish are not leaked or double-counted). However, the **binding setpoint and every operator-facing cap report omit FW biomass** (~4–7%, ~150–265k kg), so the primary compliance numbers an operator reads can show "OK" while true facility biomass is at/over cap. Ship only after the FW-in-cap reporting/setpoint cluster is fixed and the stale pin/lookahead documentation traps are removed.
 
+> **Resolution status (updated 2026-06-25, branch `feature/closed-loop-harvest`, pending operator sign-off):**
+> - **H1 FIXED** — binding setpoint now FW-inclusive (`placement.py`); weeks over true cap 36 → 0 after adding FW anticipation; tonnage 8.50M → 8.21M (over-production correction).
+> - **H2 FIXED** — Advisory / YearlySummary / FacilityMap now report FW-inclusive biomass.
+> - **I2 FIXED** — closed FW-phase mass-balance gate added to `InputConservationAudit` + `test_fw_mass_balance`. Confirmed B49/B50 are *not* dropped (the apparent gap was the pre-horizon egg phase).
+> - **H3 / H4 / L7 FIXED** — false pin "honored" claims corrected, dead demand dicts removed, vestigial lookahead knob marked inactive.
+> - **STILL OPEN:** M3 (facility feed/day cap only proxied — permit-owner decision). M1 is moot for compliance now that anticipation holds 0 weeks over. M2/M4/M6/M7 and the LOW items unchanged (latent / by-design).
+
 ---
 
 ## 2. Findings by Severity
