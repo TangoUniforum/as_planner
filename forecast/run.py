@@ -722,6 +722,18 @@ def main(
     # stale B3 unambiguously means "not yet run against the current PR".
     write_forecast_start(wb, control.forecast_start)
 
+    # Match the output extension to the workbook's actual content type: a
+    # macro-enabled workbook (kept VBA from an .xlsm/template input) MUST be saved
+    # `.xlsm`, a plain one `.xlsx` — otherwise Excel refuses to open it (content-
+    # type / extension mismatch). Coerce here as a backstop so NO caller (CLI,
+    # app, or a manual output name) can produce a mis-stamped, un-openable export.
+    _macro = getattr(wb, "vba_archive", None) is not None
+    _want = ".xlsm" if _macro else ".xlsx"
+    if out_path.suffix.lower() != _want:
+        _new = out_path.with_suffix(_want)
+        print(f"  NOTE: output extension '{out_path.suffix}' does not match the "
+              f"workbook type; saving as '{_new.name}' so Excel can open it.")
+        out_path = _new
     wb.save(out_path)
     wb.close()
     print(f"\nSaved workbook {out_path}  ({elapsed:.2f}s, status={status}, "

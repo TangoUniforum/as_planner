@@ -947,7 +947,13 @@ def _run_with_workbook_bytes(
     elif method == "global":
         out_name = Path(input_name).stem + "_planned_GLOBAL.xlsx"
     else:
-        out_name = Path(input_name).stem + "_planned" + Path(input_name).suffix
+        # Match the output extension to the workbook's MACRO STATE, not the input
+        # name's suffix: the controller keeps VBA on load, so a macro-enabled input
+        # yields a macro-enabled output that MUST be .xlsm — Excel refuses a macro
+        # workbook wearing a .xlsx extension. (run.py also backstops this on save.)
+        from forecast.excel_io import is_macro_enabled_workbook
+        _suf = ".xlsm" if is_macro_enabled_workbook(input_bytes) else ".xlsx"
+        out_name = Path(input_name).stem + "_planned" + _suf
     out_path = work_dir / out_name
     in_path.write_bytes(input_bytes)
 

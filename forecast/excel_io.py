@@ -2645,6 +2645,23 @@ def load_workbook(path: Path):
     return openpyxl.load_workbook(path, keep_vba=True, data_only=True)
 
 
+def is_macro_enabled_workbook(src) -> bool:
+    """True if the workbook (bytes or path) is macro-enabled — its content type is
+    macroEnabled or it carries a vbaProject. The controller loads with keep_vba=True,
+    so a macro-enabled INPUT yields a macro-enabled OUTPUT that MUST be saved as
+    `.xlsm`: Excel refuses a macro-enabled workbook that wears a `.xlsx` extension
+    (content-type / extension mismatch). Use this to pick the output extension."""
+    import zipfile, io as _io
+    try:
+        srcobj = _io.BytesIO(src) if isinstance(src, (bytes, bytearray)) else str(src)
+        with zipfile.ZipFile(srcobj) as z:
+            if any("vbaProject" in n for n in z.namelist()):
+                return True
+            return "macroEnabled" in z.read("[Content_Types].xml").decode("utf-8", "replace")
+    except Exception:
+        return False
+
+
 def iso_week_label(d: datetime) -> str:
     y, w, _ = d.isocalendar()
     return f"{y}-W{w:02d}"
