@@ -190,9 +190,10 @@ def write_harvest_plan_output(
     Gross_Biomass (kg), HOG_Yield (ratio), HOG_AvgWt (kg), HOG_Biomass (kg).
 
     `facility_limits_hog` is a dict `{week_label: hog_yield}` for per-week HOG
-    yield overrides; default falls back to `default_hog_yield`. Pins (if any —
-    the workbook is now write-only, so normally none) are honored upstream as
-    harvest events and so already appear in `harvest_events`.
+    yield overrides; default falls back to `default_hog_yield`. NOTE (audit H3):
+    `harvest_events` are the realized closed-loop harvests; pin ingestion is NOT
+    wired into the planner, so pinned harvests do NOT appear here (an earlier
+    docstring wrongly claimed they were honored upstream).
     """
     if sheet_name in wb.sheetnames:
         del wb[sheet_name]

@@ -194,13 +194,18 @@ def main(
     fs_date = control.forecast_start.date() if hasattr(control.forecast_start, "date") else control.forecast_start
     from .scenario_io import load_limits
     facility_limits, system_limits = load_limits(scenario_dir)
-    # Pins are an in-app planning concern; the workbook is the PR only.
+    # Pins are an in-app planning concern; the workbook is the PR only. NOTE
+    # (audit H3): pin INGESTION is not wired into the realized planner — the
+    # closed-loop harvest engine drives off realized biomass and never consumes a
+    # pin/HarvestDemand list, so pinned_harvests is always empty here. Do NOT
+    # advertise pins as honored until an ingestion path exists.
     pinned_harvests = []
     pinned_transfers = []
     print(f"\n  Caps + pinned plans:")
     print(f"    FacilityLimits overrides: {len(facility_limits.overrides)}")
     print(f"    SystemLimits caps:        {len(system_limits.caps)}")
-    print(f"    Pinned harvests:          {len(pinned_harvests)} (honored as hard constraints)")
+    print(f"    Pinned harvests:          {len(pinned_harvests)} "
+          f"({'NOT honored — pin ingestion not wired' if pinned_harvests else 'none'})")
     print(f"    Pinned transfers:         {len(pinned_transfers)} "
           f"({'NOT YET HONORED — see warning below' if pinned_transfers else 'none'})")
     if pinned_transfers:

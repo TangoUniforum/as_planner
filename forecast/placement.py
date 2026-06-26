@@ -158,8 +158,11 @@ _SETPOINT_FRACTION = 0.995
 # residual gap to 100% is NATURAL cohort troughs (weeks with little mature
 # biomass), not slack. Raise toward 0.90 for a strict zero-breach run.
 #
-# EXPOSED as the Control knob `harvest_setpoint_lookahead_weeks` (default 0.75);
-# the constant below is only the fallback default if a config predates the knob.
+# INACTIVE (audit L7): this lookahead-margin mechanism and its Control knob
+# `harvest_setpoint_lookahead_weeks` were SUPERSEDED by the dual-limit setpoint
+# (min(biomass_cap, feed-implied cap), one facility_biomass_deviation_pct band
+# below). No harvest path reads the knob or the constants below anymore; they are
+# retained only so configs that predate the redesign still load.
 _SETPOINT_LOOKAHEAD_WEEKS = 0.75
 _MARGIN_MIN_FRAC = 0.005
 _MARGIN_MAX_FRAC = 0.04
@@ -2294,19 +2297,11 @@ def phase_d_emit_events(
     tank_by_bw: dict[tuple[str, str], list[int]] = {
         (a.batch_id, a.week_label): a.tank_ids for a in tank_assignments
     }
-    demands_by_week: dict[str, list[HarvestDemand]] = {}
-    for d in harvest_demands:
-        demands_by_week.setdefault(d.week_label, []).append(d)
-    # Aggregate Layer 2 demand per week as the 6N move-in target proxy.
-    # The 6N pipeline harvests "two weeks of purge later", so a move-in
-    # at week T should match what Layer 2 plans to harvest at week T + 2
-    # (clamped to [min_harvest_per_week, max_harvest_per_week] in the
-    # pipeline). This lets the dynamic harvest count (min while biomass
-    # is building, ramping to max as facility cap approaches) carry
-    # through to the pipeline's actual throughput.
-    weekly_demand_count: dict[str, float] = {}
-    for d in harvest_demands:
-        weekly_demand_count[d.week_label] = weekly_demand_count.get(d.week_label, 0.0) + d.count
+    # NOTE (audit H4): the realized harvest is driven CLOSED-LOOP off realized tank
+    # biomass below (the dual-limit setpoint), NOT off the Layer-2 HarvestDemand
+    # list. The scheduler's per-week demand is advisory/diagnostic only — it shaped
+    # the Phase-A precalc load footprint upstream, but is not consumed here. A
+    # former per-week demand aggregation lived here and was dead code; removed.
     splits_by_batch = {s.batch_id: s for s in splits}
 
     # TranOG arrival schedule (kg of biomass entering OG per ISO week). Each

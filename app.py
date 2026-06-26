@@ -313,9 +313,10 @@ _CONTROL_HELP = {
     "rebalance_level": "Load-LEVELING (ON by default). Spreads load off the hottest OG "
         "system onto the coldest, leveling feed + biomass + density together — the fix "
         "for per-system feed spikes. Set false for the old density-only behavior.",
-    "harvest_setpoint_lookahead_weeks": "Anticipatory harvest margin: hold biomass "
-        "below the cap by ~this many weeks of realized growth. 0.75 = tightest (~95.8% "
-        "utilisation); 0.90 = strict zero-breach (~94.8%); higher = safer/lower.",
+    "harvest_setpoint_lookahead_weeks": "INACTIVE (audit L7): superseded by the "
+        "dual-limit setpoint (one facility_biomass_deviation_pct band below the FW-"
+        "inclusive cap). No harvest path reads this knob — tuning it has no effect; "
+        "kept only for config back-compatibility.",
     "harvest_level_load": "Harvest smoother (ON by default). Holds the weekly harvest "
         "cap as a hard ceiling and pre-harvests earlier so harvest is flat, not a "
         "sawtooth. Pairs with rebalance_level (which otherwise spikes harvest).",
