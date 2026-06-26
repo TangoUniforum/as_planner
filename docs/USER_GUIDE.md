@@ -77,15 +77,16 @@ Facility-wide knobs read into `ControlParams`:
 | Knob | Meaning | Typical |
 |---|---|---|
 | `horizon_weeks` | forecast length | 140 |
-| `max_biomass_kg` | facility biomass cap (default; per-week overrides in FacilityLimits) | 3,900,000 (→ 4,200,000 raised in later years) |
-| `max_feed_per_day_kg` | facility daily feed cap (kg/day) | 34,000 |
+| `max_biomass_kg` | facility biomass cap — checked against **TOTAL** facility biomass (FW + OG + 6N purge), per-week overrides in FacilityLimits | (config default; overridable per week) |
+| `max_feed_per_day_kg` | facility daily feed cap — checked against total **feeding** (SW + FW) feed/day; off-feed purge fish excluded (§4.1) | (config default) |
 | `max_harvest_per_week` | weekly harvest/processing ceiling (fish) | 55,000 |
 | `min_harvest_per_week` | weekly harvest floor | 30,000 |
 | `min_harvest_weight_g` | minimum weight a fish can be harvested at | 3,500 |
 | `min_tank_control` | force-empty floor (fish): a harvest/transfer leaving fewer than this empties the tank (INV-5) | 7,000 |
 | `default_hog_yield` | gross→HOG conversion (per-week overrides in FacilityLimits) | 0.81 |
 | `scenario_name` | label for the run (reports + RunConfig) | Forecast |
-| `facility_biomass_deviation_pct` | ± tolerance band around the cap (R24) | 0.01 |
+| `facility_biomass_deviation_pct` | **FACILITY** setpoint band — the soft band below the (FW-inclusive) facility biomass/feed cap the harvest controller runs at; the one knob for how close to the *facility* cap to run (§4.3) | (config default) |
+| `global_buffer_pct` | **SYSTEM-limits** buffer (R29) — a *separate* symmetric ±% applied to per-**system** feed/biomass caps (the rebalancer headroom + SystemLimitsAudit, `caps.py`); does **not** touch the facility setpoint above | (config default) |
 | `handling_mortality_pct` | mortality applied per transfer | small |
 | `sixn_growth` | 6N runs as growout (vs purge) for the whole horizon | false |
 | `sixn_production_start` | date 6N flips purge → production | e.g. 2028-01-01 |
@@ -131,13 +132,21 @@ its caps — biomass *and* feed — **without** spiking past the 55k/week proces
 ceiling, and to **build toward** the caps when below them.
 
 ### 4.1 How it works
-- **Dual-limit, control-driven setpoint.** The setpoint sits one
-  `facility_biomass_deviation_pct` band below the **effective ceiling** — the *lower*
-  of (a) the biomass cap and (b) the biomass at which facility **feed** would reach its
-  cap (feed scales ~linearly with biomass at the current size mix). So whichever limit
-  binds drives the harvest, and the controller works the facility toward **both** caps.
-  There is **no hidden margin** — `facility_biomass_deviation_pct` is your single knob
+- **Dual-limit setpoint, measured on TOTAL facility biomass.** Both caps are
+  **FW-inclusive**: the biomass and feed the controller checks count the freshwater (FW)
+  fish, the grow-out (OG), *and* the off-feed 6N purge hold — not OG alone — so the
+  facility never silently runs over the *true* cap. The setpoint sits one
+  `facility_biomass_deviation_pct` band below the **effective ceiling** — the *lower* of
+  (a) the biomass cap and (b) the biomass at which facility **feed** reaches its cap (the
+  feed-implied ceiling converts only the *feeding* biomass — SW + FW — since off-feed
+  purge fish eat nothing). Whichever limit binds drives the harvest. Both caps are
+  **hard**; `facility_biomass_deviation_pct` is the single **soft** margin — your one knob
   for *how close to the cap to run* (§4.3).
+- **Anticipates the known FW curve.** The FW biomass trajectory is known forward, so the
+  controller pre-positions OG drawdown *ahead* of each FW peak (over `_FW_ANTICIPATE_WEEKS`
+  = 8 weeks) instead of reacting after the total has spiked. This is what lets the
+  55k/week harvest clip hold the FW-inclusive cap with **0 weeks over** — FW itself is
+  never harvested; only OG is shed earlier to make room for it.
 - **Build-then-maintain.** When biomass + feed are **below** the band, the predictive
   move-in floors to `min_harvest_per_week` — harvest is minimal so growth **fills the
   facility up toward the caps**. As they reach the band, harvest **ramps between min and
@@ -178,7 +187,9 @@ the **± tolerance band around the cap**, and it now sets how close the setpoint
 To run **within ±X tons** of the cap, set it to `X_tons / cap` — e.g. ±50 t → `≈ 0.013`.
 If a setting touches the hard cap more than you want, **widen** the band; to run closer,
 **tighten** it. (`harvest_setpoint_lookahead_weeks` is now vestigial — superseded by this
-band; the level-load floor in §4.4 still provides peak anticipation.)
+band. Peak anticipation comes from two live channels instead: the FW-curve lookahead
+`_FW_ANTICIPATE_WEEKS` (§4.1) and the level-load window `harvest_smooth_lookahead_weeks`
+(§4.4).)
 
 > **Utilisation is also a stocking question.** If standing biomass sits well *below* the
 > band no matter how tight you set it, the pipeline isn't being fed enough fish — that's
@@ -261,7 +272,7 @@ matters.
 | **FacilityMap** | tank × week grid (cell = "Batch# AvgWt/Density"); **below it**: per-system × week **feed (kg/day)** and **biomass (kg)** blocks, each with a FACILITY total row | occupancy at a glance + per-system load vs caps |
 | **BatchLocations** | per-(week, batch, tank) occupancy | raw realized placement |
 | **ValidationLog** | numbered warnings (# / Category / Detail), incl. FW-calibration + bottleneck (annotated with resolution) | diagnostics |
-| **InputConservationAudit** | per batch: placed/dropped, harvested, standing, **FW reconciliation** (planned vs realized seawater entry) | conservation + FW calibration gaps |
+| **InputConservationAudit** | per batch: placed/dropped, harvested, standing, **FW reconciliation** (planned vs realized seawater entry) + **closed FW mass-balance** (`first_FW_count` vs `realized_TranOG + FW_mort + FW_cull`; §6 #6) | conservation + FW calibration gaps |
 | **TankContinuityAudit** | per-(tank, week) balance + **facility conservation summary** | 0-drift proof |
 | **ReconciliationReport / SystemLimitsAudit** | per-batch open/close balance (count reconciles **exactly** via recorded realized biology; biomass within tolerance) / per-system cap usage | deeper audits — *TankContinuityAudit is the authoritative 0-drift biomass check* |
 | **RunConfig** | the exact config + scenario embedded in the output | reproducibility |
@@ -323,6 +334,14 @@ mode (see `tests/test_coordinator_regression.py`):
    signal, not a lost-fish gate** (the realized count is conserved downstream).
 5. **GradedHarvest accounting + HOG consistency** — every event type is accounted
    for; HOG biomass matches across sheets.
+6. **Closed FW-phase mass-balance** — for every batch crossing to seawater,
+   `first_FW_count == realized_TranOG + FW_mortality + FW_culls`. The freshwater phase
+   was previously *unaudited* — continuity (#1) only starts at OG — so a fish leak or a
+   mortality/cull-accounting error inside FW could shift total smolts (and harvest
+   tonnage) with every other gate green. Now gated (`test_fw_mass_balance`); a breach
+   beyond ~2% (the band absorbs the FW→SW transition week) flags in
+   `InputConservationAudit`. Reconciles from each batch's first projected FW count, not
+   the egg seed — the egg→startfeed phase is pre-horizon for in-flight batches.
 
 ### The one standing limitation (be honest about it)
 **"0 drift" proves *bookkeeping* consistency, not *model* correctness.** The audits
@@ -358,8 +377,12 @@ may need re-calibrating — but it can't tell you the model's *absolute* truth.
 
 ### 7.1 Tuning per-batch density over-cap (the Plan tab)
 
-The Plan tab flags every batch whose **peak tank density** exceeds the cap. Do
-**not** chase the raw "OVER CAP" count to zero — read the *distribution*:
+The Plan tab flags every batch whose **peak tank density** exceeds its tank's
+`max_density_kg_m3` cap. The **OG6N depuration/purge pool is excluded** from this
+peak (and from the app's density alert and the optimizer's `density_overshoot`):
+harvest-size fish held off-feed at high density just before shipping is expected, not
+a stocking problem — counting it buried the real grow-out signal. Do **not** chase the
+raw "OVER CAP" count to zero — read the *distribution*:
 
 - **≤ 1.0** — under cap.
 - **1.0–1.1** — *at* cap. Running the facility near full utilisation means many
@@ -439,7 +462,7 @@ limit AND flat, not minimized:
 | `feed_var` | feed CV + swing | flat |
 | `transfers_per_fish` | avg tank-to-tank moves a fish sees | minimize handling |
 | `system_overshoot` | per-system feed+biomass over-cap fraction (compliance, §7.3) | no breach |
-| `density_overshoot` | per-tank density over-cap fraction (compliance, §7.3) | no breach |
+| `density_overshoot` | per-tank density over-cap fraction, **OG6N purge excluded** (compliance, §7.3) | no breach |
 | `system_peak` | the single **hottest** (system, week) load — biomass *or* feed, as a fraction of cap | **no hot spots** |
 
 **Emphasis presets:** *Walk the line* (default — flatness + no-breach dominate),
@@ -560,8 +583,10 @@ transfers. Set `rebalance_level: false` to recover the old density-only behavior
 optimizer still *measures* this trade via two compliance components:
 
 - **`system_overshoot`** — fraction of (system, week) cells over their feed *or*
-  biomass cap (read from SystemLimitsAudit).
-- **`density_overshoot`** — fraction of (tank, week) cells over the density cap.
+  biomass cap (read from SystemLimitsAudit; the per-system cap carries the
+  `global_buffer_pct` R29 headroom — distinct from the facility setpoint band).
+- **`density_overshoot`** — fraction of (tank, week) cells over the per-tank
+  `max_density_kg_m3` cap (the OG6N depuration pool excluded — §7.1).
 
 Leveling is on by default, so the optimizer grid carries the **`density-only`**
 control (`rebalance_level: false`) instead — the sweep runs *both* and scores the
@@ -772,8 +797,11 @@ filename.
 global method to the same conservation bar as the controller showed, from first
 principles, that **the controller is already near-optimal** for this facility — every
 correctness refinement made the global method converge toward what the controller does.
-It also surfaced one actionable finding in the *shipped* tool: the production biomass cap
-is enforced on **OG only**, ignoring the 100–266k kg of **FW** standing on-farm, so the
-true total runs ~3–4% over the cap at peaks (a deferred fix — count FW in the facility
-cap). Use Global as a **cross-check and diagnostic**, not a replacement for the validated
-controller.
+It also surfaced one actionable finding in the *shipped* tool: the binding harvest
+controller enforced its cap on **OG only**, ignoring the 100–266k kg of **FW** standing
+on-farm, so the true total ran ~3–4% over the cap at peaks. **This has since been FIXED
+in the controller** (a 37-agent deployment audit, `docs/DEPLOYMENT_AUDIT.md`): the cap
+basis is now FW-inclusive, the controller anticipates the known FW curve, and the
+operator cap reports + the feed dual-limit were aligned to match (§4.1, §6). The two
+engines now agree on tonnage (~8.2M kg), both 0 weeks over the true cap. Use Global as a
+**cross-check and diagnostic**, not a replacement for the validated controller.
