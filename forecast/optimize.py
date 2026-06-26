@@ -362,9 +362,15 @@ def _density_overshoot(wb):
     cols = _col_map(ws, lambda r: r and str(r[0]).strip() == "Week"
                     and any(str(c).strip().startswith("Density") for c in r if c))
     di = _find_col(cols, "Density", default=8)   # "Density (kg/m3)"
+    si = _find_col(cols, "System", default=4)
     over = tot = 0
     for i, row in enumerate(ws.iter_rows(values_only=True), 1):
         if i < 5 or not row or row[0] is None:
+            continue
+        # EXCLUDE the OG6N depuration/purge pool: harvest-size fish held off-feed
+        # at high density just before shipping is expected, not a compliance breach
+        # (consistent with the engine, the app alert, and the smoothness term above).
+        if len(row) > si and row[si] == "OG6N":
             continue
         dens = row[di] if len(row) > di else None
         if isinstance(dens, (int, float)):

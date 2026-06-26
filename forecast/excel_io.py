@@ -384,6 +384,7 @@ def write_transfer_template(
     ])
 
     cap = {t.tank_id: t.max_density_kg_m3 for t in facility.tanks}
+    tsys = {t.tank_id: t.system_id for t in facility.tanks}
     weeks = sorted({r.week_label for r in batch_locations})
     widx = {w: i for i, w in enumerate(weeks)}
 
@@ -394,7 +395,11 @@ def write_transfer_template(
         e["wsum"] += r.avg_wt_g * r.count
         e["tanks"].add(r.tank_id)
         c = cap.get(r.tank_id)
-        if c and r.density_kg_m3:
+        # Peak density EXCLUDES the OG6N depuration/purge pool — harvest-size fish
+        # held off-feed at high density before shipping is expected, not a stocking
+        # problem, so it must not dominate a batch's peak (consistent with the
+        # engine + the app/optimizer density alerts).
+        if c and r.density_kg_m3 and tsys.get(r.tank_id) != "OG6N":
             e["maxratio"] = max(e["maxratio"], r.density_kg_m3 / c)
 
     tog_week = {}

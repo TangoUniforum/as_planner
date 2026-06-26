@@ -1026,7 +1026,14 @@ def _parse_output_workbook(path: Path) -> dict:
                 "Count": count, "AvgWt_kg": avg_wt, "Biomass_kg": biomass,
                 "Density_kg_m3": density,
             })
-            if isinstance(density, (int, float)) and density > 95:
+            # Density alert EXCLUDES the OG6N depuration/purge pool: those tanks
+            # hold harvest-size fish concentrated + off-feed for depuration just
+            # before shipping, so high density there is expected, not a welfare
+            # flag. Mirrors the engine's own density-violation count, which skips
+            # the 6N purge pool (run.py). This parse is shared by every pipeline's
+            # output (controller + global), so the exclusion applies to all.
+            if (isinstance(density, (int, float)) and density > 95
+                    and sys_id != "OG6N"):
                 violations.append(density)
 
     # BiologyProjection — per (batch, week) explicit mortality % + cull
