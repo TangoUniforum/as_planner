@@ -1423,6 +1423,7 @@ def write_input_conservation_audit(
     harvest_events,
     control,
     tranog_events=None,
+    biology_states_by_batch=None,
     sheet_name: str = "InputConservationAudit",
 ) -> None:
     """Input-fish conservation: every stocked batch must have a realized fate.
@@ -1485,6 +1486,33 @@ def write_input_conservation_audit(
         tranog_placed[ev.batch_id] = tranog_placed.get(ev.batch_id, 0.0) + sum(
             getattr(d, "count", 0.0) for d in getattr(ev, "destinations", []))
 
+    # CLOSED FW MASS-BALANCE (audit I2): the projected FRESHWATER phase must
+    # conserve fish — the count entering FW reduces to the realized seawater entry
+    # ONLY through the modeled losses:
+    #   first_FW_count == realized_TranOG + FW_mortality + FW_culls.
+    # We reconcile from each batch's FIRST projected FW count, NOT the egg seed:
+    # for in-flight batches the egg->startfeed phase is pre-horizon (absent from the
+    # states), so input_count (eggs) cannot be reconciled here. But the projected FW
+    # phase can, and a fish leak or a mortality/cull-accounting error inside it would
+    # otherwise pass every gate — TankContinuity only starts at OG, and the drop/
+    # over guards never balanced FW losses. Pre-TranOG there is no harvest, so the
+    # balance is clean (no M4 pre/post-harvest mortality ambiguity); the few-percent
+    # tolerance absorbs the FW->SW transition-week boundary.
+    _FW_BALANCE_THRESH = 0.02   # flag |residual| / first_FW_count beyond 2%
+    fw_loss = {}   # batch_id -> (first_fw_count, mortality, cull) over FW/EGG weeks
+    for b_id, sl in (biology_states_by_batch or {}).items():
+        fws = sorted((s for s in sl if s.stage in ("FW", "EGG")),
+                     key=lambda s: s.week_label)
+        if not fws:
+            continue
+        m = sum(getattr(s, "mort_count_week", 0.0) for s in fws)
+        c = sum(getattr(s, "cull_count_week", 0.0) for s in fws)
+        fw_loss[b_id] = (fws[0].count, m, c)
+    fw_bal_base = 0.0       # summed first-FW count of crossed-in-horizon batches
+    fw_bal_residual = 0.0   # summed signed residual (first - tranog - mort - cull)
+    fw_bal_abs = 0.0        # summed |residual|
+    fw_unbalanced = []      # (batch_id, residual, residual_pct)
+
     dropped_fish = 0.0
     dropped_batches = 0
     in_horizon_input = 0.0
@@ -1541,6 +1569,18 @@ def write_input_conservation_audit(
             elif _div > _FW_DIVERGENCE_THRESH:
                 fw_flag = "FW OVER plan"
                 fw_divergent.append((bid, _div))
+        # Closed FW mass-balance for this batch (only meaningful once it has
+        # crossed TranOG in-horizon, so there is a realized seawater entry to
+        # reconcile the seed against through the modeled FW losses).
+        _fwbase, fwm, fwc = fw_loss.get(bid, (0.0, 0.0, 0.0))
+        fw_resid = None
+        if realized_tog > 0 and _fwbase > 0:
+            fw_resid = _fwbase - realized_tog - fwm - fwc
+            fw_bal_base += _fwbase
+            fw_bal_residual += fw_resid
+            fw_bal_abs += abs(fw_resid)
+            if abs(fw_resid) > _fwbase * _FW_BALANCE_THRESH:
+                fw_unbalanced.append((bid, fw_resid, 100.0 * fw_resid / _fwbase))
         rowbuf.append([
             bid, round(bt.input_count or 0, 0),
             togd, "Y" if in_h else "N",
@@ -1552,6 +1592,9 @@ def write_input_conservation_audit(
             round(realized_tog, 0) if realized_tog else "",
             round(fw_surv, 1) if fw_surv is not None else "",
             fw_flag,
+            round(fwm, 0) if realized_tog > 0 else "",
+            round(fwc, 0) if realized_tog > 0 else "",
+            round(fw_resid, 0) if fw_resid is not None else "",
         ])
 
     pct = (100.0 * dropped_fish / in_horizon_input) if in_horizon_input > 0 else 0.0
@@ -1571,11 +1614,28 @@ def write_input_conservation_audit(
         ws.append([f"NOTE: {len(fw_divergent)} batch(es) reached seawater >"
                    f"{_FW_DIVERGENCE_THRESH * 100:.0f}% off the planned tran_og_count — FW "
                    f"survival calibration gap (NOT lost fish; realized count is conserved): {_d}"])
+    # Closed FW mass-balance gate (audit I2): first_FW_count == realized_TranOG +
+    # FW_mort + FW_cull (reconciles the projected FW phase; see note above).
+    fw_bal_pct = (100.0 * fw_bal_residual / fw_bal_base) if fw_bal_base > 0 else 0.0
+    fw_bal_abs_pct = (100.0 * fw_bal_abs / fw_bal_base) if fw_bal_base > 0 else 0.0
+    if fw_unbalanced:
+        _u = ", ".join(f"{b} ({p:+.1f}%)"
+                       for b, _r, p in sorted(fw_unbalanced, key=lambda x: -abs(x[1])))
+        ws.append([f"*** FW MASS-BALANCE BREACH: {len(fw_unbalanced)} batch(es) where the FW "
+                   f"phase does not conserve (first_FW_count != realized_TranOG + FW_mort + "
+                   f"FW_cull) beyond {_FW_BALANCE_THRESH * 100:.0f}%: {_u}. A fish leak or a FW "
+                   f"mortality/cull-accounting error shifts smolts -> harvest tonnage with no "
+                   f"other gate catching it. ***"])
+    elif fw_bal_base > 0:
+        ws.append([f"FW mass-balance OK — projected FW phase conserves (first_FW_count == "
+                   f"realized_TranOG + FW_mort + FW_cull; facility net {fw_bal_residual:+,.0f} "
+                   f"fish, {fw_bal_pct:+.2f}%; abs {fw_bal_abs_pct:.2f}%)."])
     ws.append([
         "Batch", "Input_Count (fish)", "TranOG_Date", "In_Horizon",
         "Placed", "Harvested (fish)", "Standing@Horizon (fish)",
         "Status", "Fish_At_Risk (fish)",
         "Planned_TranOG (fish)", "Realized_TranOG (fish)", "FW_Survival (%)", "FW_Flag",
+        "FW_Mort (fish)", "FW_Cull (fish)", "FW_Bal_Residual (fish)",
     ])
     for r in rowbuf:
         ws.append(r)

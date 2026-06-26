@@ -133,6 +133,22 @@ def test_no_dropped_batches(run_outputs):
     assert not over, f"input-fish conservation breached (fish created): {over}"
 
 
+def test_fw_mass_balance(run_outputs):
+    """Closed FW-phase mass-balance (audit I2): the previously-unaudited freshwater
+    phase must conserve fish — first_FW_count == realized_TranOG + FW_mortality +
+    FW_culls for every batch that crosses to seawater in-horizon. TankContinuity
+    only starts at OG, so a fish leak or a mortality/cull-accounting error in FW
+    would otherwise shift total smolts (and harvest tonnage) with every other gate
+    green. The InputConservationAudit emits a 'FW MASS-BALANCE BREACH' line when any
+    batch fails to reconcile beyond tolerance; it must not be present.
+    """
+    wb = _load(run_outputs)
+    ws = wb["InputConservationAudit"]
+    breach = [row[0] for row in ws.iter_rows(values_only=True)
+              if row and isinstance(row[0], str) and "FW MASS-BALANCE BREACH" in row[0]]
+    assert not breach, f"FW phase does not conserve fish: {breach}"
+
+
 def test_facility_count_conservation(run_outputs):
     """No DISTRIBUTED fish loss across the facility.
 

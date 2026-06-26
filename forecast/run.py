@@ -657,6 +657,7 @@ def main(
     write_input_conservation_audit(
         wb, batches, placement.batch_locations, placement.harvest_events, control,
         tranog_events=placement.tranog_events,
+        biology_states_by_batch=states_by_batch,
     )
     write_tank_continuity_audit(
         wb,
