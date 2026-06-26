@@ -2255,6 +2255,8 @@ def phase_d_emit_events(
     tables: BiologyTables,
     facility_limits: Optional[FacilityLimits] = None,
     system_limits: Optional[SystemLimits] = None,
+    fw_biomass_by_week: Optional[dict] = None,
+    fw_feed_by_week: Optional[dict] = None,
 ) -> tuple[FacilityState, list[TranOGEntry], list[Transfer], list[Harvest],
            list[BatchLocationRow], list[str]]:
     """Walk the plan week by week; emit events from assignment diff +
@@ -2578,6 +2580,14 @@ def phase_d_emit_events(
             _realized_facility_metrics(
                 state, batch_meta, tables, control.min_harvest_weight_g)
         )
+        # FW-INCLUSIVE cap basis (audit H1): add this week's pre-feed (EGG/FW)
+        # standing biomass + feed so the setpoint and the feed-implied cap below
+        # measure TOTAL facility biomass against the 3.8M cap, not OG-only.
+        # fac_growth_kg is left OG-only on purpose: FW fish are not harvestable, so
+        # only OG biomass can be shed to make room for the FW load.
+        if fw_biomass_by_week is not None:
+            fac_bio += fw_biomass_by_week.get(week_label, 0.0)
+            _fac_feed_kg_day += fw_feed_by_week.get(week_label, 0.0)
         bio_cap = resolve_facility_cap(METRIC_BIOMASS, week_label, facility_limits, control)
         feed_cap = resolve_facility_cap(METRIC_FEED_DAY, week_label, facility_limits, control)
         max_hv = resolve_facility_cap(METRIC_MAX_HARVEST, week_label, facility_limits, control)
@@ -3455,12 +3465,31 @@ def run_placement(
     result.tank_assignments = tank_assigns
     result.warnings.extend(f"[C] {w}" for w in c_warns)
 
+    # FW-INCLUSIVE cap basis (audit H1/M5): pre-feed batches (EGG/FW stages) are
+    # real facility biomass but are NEVER stocked into tanks, so the realized
+    # harvest controller's tank-only biomass omits them. Pre-sum FW biomass + feed
+    # per week from the biology states and pass them in, so the setpoint + the
+    # feed-implied cap measure TOTAL facility biomass (OG+FW), not OG-only — else
+    # true biomass rides over the 3.8M cap by the FW load (~4-7%) at setpoint.
+    fw_biomass_by_week: dict = {}
+    fw_feed_by_week: dict = {}
+    for _sts in biology_states_by_batch.values():
+        for _s in _sts:
+            if getattr(_s, "stage", None) in ("FW", "EGG"):
+                fw_biomass_by_week[_s.week_label] = (
+                    fw_biomass_by_week.get(_s.week_label, 0.0) + _s.biomass_kg)
+                fw_feed_by_week[_s.week_label] = (
+                    fw_feed_by_week.get(_s.week_label, 0.0)
+                    + getattr(_s, "feed_kg_day", 0.0))
+
     (final_state, tranog, transfers, harvests, grades, locs, d_warns,
      sixn_feed, realized_bio) = phase_d_emit_events(
         result.load_table, result.tank_assignments, harvest_demands,
         splits, initial_state, facility, control, batch_meta, tables,
         facility_limits=facility_limits,
         system_limits=system_limits,
+        fw_biomass_by_week=fw_biomass_by_week,
+        fw_feed_by_week=fw_feed_by_week,
     )
     result.tranog_events = tranog
     result.transfer_events = transfers
