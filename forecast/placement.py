@@ -890,9 +890,15 @@ def _try_graded_move_in(
     reserved=frozenset(),
     tables: Optional[BiologyTables] = None,
     sixn_move_in_feed: Optional[dict] = None,
+    retain_in_source: bool = False,
 ) -> float:
     """Graded harvest fallback (DESIGN §5a) when no batch's avg_wt is
     above min_harvest_weight.
+
+    retain_in_source=True (grade-to-min top-up): the small (< harvest-weight)
+    tail STAYS in the source tank — no separate retention tank needed; only the
+    big tail is peeled to the 6N pickup. Honors min_transfer_count (don't peel a
+    sub-min group out) and min_tank_control (don't leave a sub-min dribble).
 
     Walks FIFO across batches; for each production tank where the
     average is below threshold but a fraction ≥ `min_fraction` of fish
@@ -941,29 +947,40 @@ def _try_graded_move_in(
     if chosen is None:
         return 0.0
 
-    # Retention: lowest-id free OG3+ tank not in 6N pipeline AND not held for
-    # an imminent TranOG arrival (reserved) — else the graded move-in's small
-    # tail would re-stock a slot the anticipatory pacing is holding empty.
-    retention = next(
-        (t for t in sorted(state.tanks_by_id.values(), key=lambda x: x.tank_id)
-         if t.is_empty and t.type == "OG"
-         and t.system_id not in _SIXN_SYSTEMS
-         and t.system_id not in OG12_SYSTEMS
-         and t.tank_id not in reserved),
-        None,
-    )
-    if retention is None:
-        warnings.append(
-            f"{week_label}: graded move-in for {chosen.batch_id} "
-            f"{chosen.location_id} declined (no free OG3+ retention tank)"
-        )
-        return 0.0
-
     cv = chosen.cv_pct or 16.0
     frac = frac_above(chosen.avg_wt_g, cv, min_hv)
     big_count = chosen.count * frac
     small_count = chosen.count - big_count
     big_avg, small_avg = upper_truncated_split(chosen.avg_wt_g, cv, min_hv)
+
+    # Operator rules: never peel a sub-min group OUT (min_transfer_count), and in
+    # retain-in-source mode never leave a sub-min dribble BEHIND (min_tank_control).
+    _min_tr = getattr(control, "min_transfer_count", 0.0) or 0.0
+    if big_count < max(1.0, _min_tr):
+        return 0.0
+    if retain_in_source and small_count < (control.min_tank_control or 0):
+        return 0.0
+
+    # Retention destination. retain_in_source (grade-to-min top-up): the small tail
+    # STAYS in the SOURCE tank — same batch, no extra tank needed. Otherwise (make-
+    # room): a free OG3+ tank not in the 6N pipeline / OG1-2 / reserved.
+    if retain_in_source:
+        retention = chosen  # the small tail stays in the SOURCE tank (same batch)
+    else:
+        retention = next(
+            (t for t in sorted(state.tanks_by_id.values(), key=lambda x: x.tank_id)
+             if t.is_empty and t.type == "OG"
+             and t.system_id not in _SIXN_SYSTEMS
+             and t.system_id not in OG12_SYSTEMS
+             and t.tank_id not in reserved),
+            None,
+        )
+        if retention is None:
+            warnings.append(
+                f"{week_label}: graded move-in for {chosen.batch_id} "
+                f"{chosen.location_id} declined (no free OG3+ retention tank)"
+            )
+            return 0.0
 
     # PURGE move-in: the big (pickup) portion lands in the 6N main tank at the
     # mid-week transfer weight (its upper-tail mean grown 4 SW days) and is
@@ -1208,6 +1225,7 @@ def _run_sixn_purge_week(
                 state, batch_meta, control, week_label, week_start_date,
                 (ptank,), transfer_events, warnings, reserved=reserved,
                 tables=tables, sixn_move_in_feed=sixn_move_in_feed,
+                retain_in_source=True,
             )
             count_moved += moved
 

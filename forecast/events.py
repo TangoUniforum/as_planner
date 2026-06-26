@@ -457,6 +457,19 @@ class GradedHarvest:
             )
             pickup.count = new_count
 
+        # SMALL-STAYS-IN-SOURCE mode (grade-to-min top-up): when the retention tank
+        # IS the source, the < harvest-weight portion simply remains in the source at
+        # its lower mean — only the pickup (>= weight) tail is peeled to the 6N purge
+        # tank. No separate retention tank is needed; the source is NOT drained, it
+        # becomes the small portion. (Conserves: pickup_count + retention_count = the
+        # source's original count.)
+        if self.retention_tank_id == self.source_tank_id:
+            src.assign(
+                batch_id=self.batch_id, count=self.retention_count,
+                avg_wt_g=self.retention_avg_wt_g, cv_pct=self.cv_pct, stage=stage,
+            )
+            return warns
+
         # Top up or assign retention.
         if retention.is_empty:
             retention.assign(
