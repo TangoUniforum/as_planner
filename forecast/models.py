@@ -38,6 +38,14 @@ class ControlParams:
     # min_tank_control (7000) or 10000 to suppress small partial transfers; whole-
     # tank consolidation moves are unaffected.
     min_transfer_count: float = 0.0
+    # GRADE-TO-MIN (opt-in): on a 6N purge week where whole mature tanks can't fill
+    # the harvest floor, peel the over-weight TAIL from near-market tanks into a free
+    # pair tank (big -> 6N purge) with the small tail to a free OG retention tank,
+    # topping the move-in up toward min_harvest_per_week. An EXCEPTION that fires
+    # only when short (never a routine rule); trades some grow-out yield (those fish
+    # land at the low end of market weight + a grading handling event) for a steady
+    # processing floor. Default OFF = byte-identical.
+    harvest_grade_to_min: bool = False
     # R31: per-tank density target as a fraction of the cap. Drives
     # precalc `tanks_needed_at_density_cap` sizing, the Phase D Grade-
     # split trigger, and the PR-concentration advisory/action gate.

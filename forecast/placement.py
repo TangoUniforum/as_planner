@@ -1189,6 +1189,28 @@ def _run_sixn_purge_week(
         if moved_this_batch > 0:
             contributing_batches.append(move_in_batch)
 
+    # GRADE-TO-MIN top-up (opt-in `harvest_grade_to_min`): if whole mature tanks
+    # couldn't fill the floor, peel the over-weight TAIL from near-market tanks into
+    # the pair tank(s) left FREE by the whole-tank move-in (big -> 6N purge), with
+    # the small tail to a free OG retention tank — reusing the graded move-in engine
+    # (which routes bigs through 6N and declines if no retention tank is free). An
+    # EXCEPTION that fires ONLY when actually short of the floor, never a routine
+    # rule. Trades grow-out yield (the tail lands at the low end of market weight)
+    # for a steady processing floor.
+    if getattr(control, "harvest_grade_to_min", False) and count_moved < target:
+        for ptank in fill_pair:
+            if count_moved >= target:
+                break
+            pt = state.tanks_by_id.get(ptank)
+            if pt is None or not pt.is_empty:
+                continue  # already filled by the whole-tank move-in above
+            moved = _try_graded_move_in(
+                state, batch_meta, control, week_label, week_start_date,
+                (ptank,), transfer_events, warnings, reserved=reserved,
+                tables=tables, sixn_move_in_feed=sixn_move_in_feed,
+            )
+            count_moved += moved
+
     if count_moved == 0:
         warnings.append(
             f"{week_label}: 6N resting pair {fill_pair} move-in failed (no fish "
