@@ -15,7 +15,8 @@
 > - **H2 FIXED** — Advisory / YearlySummary / FacilityMap now report FW-inclusive biomass.
 > - **I2 FIXED** — closed FW-phase mass-balance gate added to `InputConservationAudit` + `test_fw_mass_balance`. Confirmed B49/B50 are *not* dropped (the apparent gap was the pre-horizon egg phase).
 > - **H3 / H4 / L7 FIXED** — false pin "honored" claims corrected, dead demand dicts removed, vestigial lookahead knob marked inactive.
-> - **STILL OPEN:** M3 (facility feed/day cap only proxied — permit-owner decision). M1 is moot for compliance now that anticipation holds 0 weeks over. M2/M4/M6/M7 and the LOW items unchanged (latent / by-design).
+> - **M3 FIXED** — feed/day is now a hard dual-limit with biomass (whichever binds first), within the single deviation-band buffer. The feed-implied ceiling no longer counts off-feed STARVE biomass in its ratio; Advisory feed is FW-inclusive. On the live config biomass binds first (98.4%), feed has headroom (88.4%), 0 weeks over either.
+> - **REMAINING:** M1 moot (anticipation holds 0 over). M2/M4/M6/M7 and the LOW items are latent / by-design (documented). No CRITICAL or HIGH items open.
 
 ---
 
