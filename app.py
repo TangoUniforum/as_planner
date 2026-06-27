@@ -280,6 +280,11 @@ _CONTROL_HELP = {
     "min_harvest_per_week": "Weekly harvest floor (fish) the controller tries to meet.",
     "min_tank_control": "Force-empty floor (fish): a harvest/transfer that would leave "
         "fewer than this many fish empties the tank instead (invariant INV-5).",
+    "min_transfer_count": "Min rebalancer transfer size (fish): the density/load balancer "
+        "won't split a sub-group smaller than this OUT of a tank — the OUT-side mirror of "
+        "min_tank_control. 0 = off. Trades fewer transfers for more MARGINAL density "
+        "over-cap (the small moves do fine-grained relief); whole-tank consolidation "
+        "moves are unaffected. Sweep knee ~5000 on the current config.",
     "default_hog_yield": "Gross→HOG (head-off, gutted) conversion factor. Per-week "
         "overrides in FacilityLimits.",
     "facility_biomass_deviation_pct": "± tolerance band around the biomass cap "
@@ -324,7 +329,14 @@ _CONTROL_HELP = {
         "coming-due biomass to spread the pre-harvest over. Only used when "
         "harvest_level_load is on; bigger = smoother/earlier.",
     "harvest_level_target": "Flat fish/week harvest floor when level-loading. Blank = "
-        "auto-computed from realized growth. Only used when harvest_level_load is on.",
+        "auto-computed from realized growth. Only used when harvest_level_load is on. "
+        "Good value = the sustainable average weekly harvest (between min and max).",
+    "harvest_grade_to_min": "Grade-harvest to the floor (opt-in, OFF by default). On a "
+        "6N purge week below min_harvest_per_week, peel just enough of the over-weight "
+        "tail from near-market tanks (big → 6N purge; small stays in the source tank) to "
+        "REACH the floor — honoring min_transfer_count + min_tank_control. An exception "
+        "(only fires when short), not a rule. Measured net production-positive (more cap "
+        "headroom, slightly higher avg harvest weight) while holding the harvest floor.",
     "placement_method": "Tank-placement engine. 'greedy' (default) is the production "
         "engine. 'lns' runs greedy first, then an LNS pass that relocates/swaps grow-out "
         "tank occupancy off the hottest systems onto cooler ones (each move a conserved "
@@ -336,6 +348,47 @@ _CONTROL_HELP = {
         "will make per run (only used when placement_method = lns). Higher = chases more "
         "hot spots but slower.",
 }
+
+# Friendly display labels for the Control editor (the raw field name stays the key).
+_CONTROL_LABEL = {
+    "forecast_start": "Forecast start (derived from PR)",
+    "horizon_weeks": "Horizon (weeks)",
+    "scenario_name": "Scenario name",
+    "max_feed_per_day_kg": "Max feed / day (kg)",
+    "max_biomass_kg": "Max facility biomass (kg)",
+    "max_harvest_per_week": "Max harvest / week (fish)",
+    "min_harvest_per_week": "Min harvest / week (fish)",
+    "min_harvest_weight_g": "Min harvest weight (g)",
+    "min_tank_control": "Force-empty floor (fish)",
+    "min_transfer_count": "Min transfer size (fish)",
+    "default_hog_yield": "Default HOG yield",
+    "facility_biomass_deviation_pct": "Biomass setpoint band (R24)",
+    "handling_mortality_pct": "Handling mortality (per transfer)",
+    "sixn_growth": "Run 6N as grow-out",
+    "sixn_production_start": "6N production start date",
+    "sixn_transition_weeks": "6N transition fallow (weeks)",
+    "tran_og_default_tanks": "TranOG default tanks",
+    "global_buffer_pct": "System-cap buffer (R29)",
+    "starvation_period_days": "In-place purge length (days)",
+    "density_target_pct": "Density target (% of cap)",
+    "rebalance_balance_budget": "Rebalancer moves / week",
+    "rebalance_split_budget": "Split-pass moves / week",
+    "rebalance_varqty_budget": "Variable-qty moves / week",
+    "rebalance_level": "Load leveling (on/off)",
+    "harvest_setpoint_lookahead_weeks": "Setpoint lookahead (INACTIVE)",
+    "harvest_level_load": "Harvest smoother (on/off)",
+    "harvest_smooth_lookahead_weeks": "Harvest smoother window K",
+    "harvest_level_target": "Harvest level target (fish/wk)",
+    "harvest_grade_to_min": "Grade-harvest to the floor",
+    "placement_method": "Placement engine",
+    "lns_max_moves": "LNS move budget",
+}
+
+
+def _ctl_label(k: str) -> str:
+    """Friendly Control-editor label for a knob (falls back to a prettified name)."""
+    return _CONTROL_LABEL.get(k, k.replace("_", " ").capitalize())
+
 
 # Column tooltips for the tabular editors (shown on the column header in the grid).
 _FACILITY_HELP = {
@@ -395,15 +448,15 @@ def _edit_control():
                             "value is an ignored seed.")
                 new[k] = v
             elif isinstance(v, bool):
-                new[k] = st.checkbox(k, value=v, help=_CONTROL_HELP.get(k))
+                new[k] = st.checkbox(_ctl_label(k), value=v, help=_CONTROL_HELP.get(k))
             elif isinstance(v, int):
-                new[k] = int(st.number_input(k, value=int(v), step=1,
+                new[k] = int(st.number_input(_ctl_label(k), value=int(v), step=1,
                                              help=_CONTROL_HELP.get(k)))
             elif isinstance(v, float):
-                new[k] = float(st.number_input(k, value=float(v), format="%.5f",
-                                               help=_CONTROL_HELP.get(k)))
+                new[k] = float(st.number_input(_ctl_label(k), value=float(v),
+                                               format="%.5f", help=_CONTROL_HELP.get(k)))
             else:
-                new[k] = st.text_input(k, value="" if v is None else str(v),
+                new[k] = st.text_input(_ctl_label(k), value="" if v is None else str(v),
                                        help=_CONTROL_HELP.get(k)) or None
         if st.form_submit_button("💾 Save Control"):
             dump_config(CONFIG_DIR, control=control_from_dict(new),
@@ -1284,6 +1337,24 @@ def _tuner():
     else:
         st.success(f"**Recommendation:** {rec.text}")
 
+    # Apply & save the recommended knobs — same mechanism as Optimize mode, so a
+    # tuning sweep flows straight into config/control.yaml without retyping anything.
+    best = next((r for r in results if r.label == rec.best_label), results[0])
+    from forecast import optimize as _opt
+    if best.overrides:
+        with st.container(border=True):
+            st.markdown(f"**Apply — `{best.label}`** · these are Control-knob overrides "
+                        "(the same knobs the **Configure → Control** tab edits).")
+            st.code(_opt.overrides_yaml(best.overrides) or "# baseline", language="yaml")
+            if st.button("💾 Save these tuning knobs to my config", key="tune_save",
+                         type="primary"):
+                _opt.save_overrides_to_config(str(CONFIG_DIR), best.overrides)
+                _clear_all_editor_state()
+                st.success("Saved to config/control.yaml — switch to **Run forecast** "
+                           "to use them (or open **Configure → Control** to review).")
+    else:
+        st.caption("Recommended variant is the baseline — no knob change to save.")
+
     df = _results_to_frame(results)
 
     def _hl(row):
@@ -1307,7 +1378,6 @@ def _tuner():
     st.plotly_chart(fig, use_container_width=True)
 
     # Severe-batch detail for the recommended (or baseline) variant.
-    best = next((r for r in results if r.label == rec.best_label), results[0])
     if best.severe_rows:
         st.subheader(f"Batches over 1.2× cap — {best.label}")
         st.caption(
