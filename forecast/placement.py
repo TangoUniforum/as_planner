@@ -891,6 +891,7 @@ def _try_graded_move_in(
     tables: Optional[BiologyTables] = None,
     sixn_move_in_feed: Optional[dict] = None,
     retain_in_source: bool = False,
+    max_count: Optional[float] = None,
 ) -> float:
     """Graded harvest fallback (DESIGN §5a) when no batch's avg_wt is
     above min_harvest_weight.
@@ -950,6 +951,11 @@ def _try_graded_move_in(
     cv = chosen.cv_pct or 16.0
     frac = frac_above(chosen.avg_wt_g, cv, min_hv)
     big_count = chosen.count * frac
+    # Surgical cap: peel only what's needed to close the floor gap (not the whole
+    # over-weight tail) — minimizes the yield/biomass given up and the rotation
+    # disturbance. The remaining over-weight fish stay in source and harvest later.
+    if max_count is not None and big_count > max_count:
+        big_count = max(0.0, max_count)
     small_count = chosen.count - big_count
     big_avg, small_avg = upper_truncated_split(chosen.avg_wt_g, cv, min_hv)
 
@@ -1206,17 +1212,17 @@ def _run_sixn_purge_week(
         if moved_this_batch > 0:
             contributing_batches.append(move_in_batch)
 
-    # GRADE-TO-MIN top-up (opt-in `harvest_grade_to_min`): if whole mature tanks
-    # couldn't fill the floor, peel the over-weight TAIL from near-market tanks into
-    # the pair tank(s) left FREE by the whole-tank move-in (big -> 6N purge), with
-    # the small tail to a free OG retention tank — reusing the graded move-in engine
-    # (which routes bigs through 6N and declines if no retention tank is free). An
-    # EXCEPTION that fires ONLY when actually short of the floor, never a routine
-    # rule. Trades grow-out yield (the tail lands at the low end of market weight)
-    # for a steady processing floor.
-    if getattr(control, "harvest_grade_to_min", False) and count_moved < target:
+    # GRADE-TO-MIN top-up (opt-in `harvest_grade_to_min`): when the whole-tank move-in
+    # leaves the resting pair below the harvest FLOOR (min_h), peel just enough of the
+    # over-weight tail from near-market tanks to REACH THE FLOOR — not the controller's
+    # full move-in target. The small tail stays in the source (no extra tank). Each
+    # peel is capped at the exact remaining shortfall, so it harvests the least, gives
+    # up the least yield/biomass, and disturbs the rotation the least. An EXCEPTION
+    # (fires only when below the floor), never a rule; routes the bigs through 6N purge.
+    _floor = min_h
+    if getattr(control, "harvest_grade_to_min", False) and count_moved < _floor:
         for ptank in fill_pair:
-            if count_moved >= target:
+            if count_moved >= _floor:
                 break
             pt = state.tanks_by_id.get(ptank)
             if pt is None or not pt.is_empty:
@@ -1225,7 +1231,7 @@ def _run_sixn_purge_week(
                 state, batch_meta, control, week_label, week_start_date,
                 (ptank,), transfer_events, warnings, reserved=reserved,
                 tables=tables, sixn_move_in_feed=sixn_move_in_feed,
-                retain_in_source=True,
+                retain_in_source=True, max_count=_floor - count_moved,
             )
             count_moved += moved
 
