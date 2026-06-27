@@ -1063,6 +1063,14 @@ def _run_with_workbook_bytes(
         }
     elapsed = time.time() - t0
 
+    # run.py coerces the output extension to match the workbook's macro state (.xlsm
+    # vs .xlsx, so Excel can open it), which may differ from the name the app chose —
+    # locate the actual saved file (same stem, any extension) before reading it.
+    if not out_path.exists():
+        _alt = next(iter(work_dir.glob(out_path.stem + ".*")), None)
+        if _alt is not None:
+            out_path = _alt
+
     if rc != 0 or not out_path.exists():
         return {
             "ok": False,
@@ -1089,7 +1097,7 @@ def _run_with_workbook_bytes(
         "elapsed": elapsed,
         "stdout": captured.getvalue(),
         "output_bytes": output_bytes,
-        "output_name": out_name,
+        "output_name": out_path.name,
         "output_path": str(out_path),
         "config_used": config_used,
     })
