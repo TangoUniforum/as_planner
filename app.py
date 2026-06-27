@@ -855,6 +855,27 @@ with st.sidebar:
              "density distribution. Optimize: sweep knobs and rank variants on a "
              "selectable objective (walk the line + minimize feed/handling).",
     )
+    with st.expander("ℹ️ Which mode? — Run vs Tune vs Optimize"):
+        st.markdown(
+            "- **Run forecast** — runs the pipeline with your **current** Control knobs "
+            "and produces the plan + reports. This is the everyday mode. *\"Run with "
+            "tuned knobs\"* just means a normal Run **after** Tune or Optimize has saved "
+            "better knobs into your config.\n"
+            "- **Tune (density knobs)** — sweeps **only the density knobs**, shows the "
+            "per-batch peak-density distribution, and recommends + saves the best set. "
+            "**One axis (density).** Use when the Plan tab's per-batch density is the "
+            "concern.\n"
+            "- **Optimize (multi-objective)** — sweeps knobs against **several goals at "
+            "once** (flat biomass, feed, handling, cap compliance) on a *selectable* "
+            "weighted objective, ranks variants, and applies the best. **Many axes**, and "
+            "it finds knob *combinations* a single-axis sweep can't.\n"
+            "- **Configure** — hand-edit the models, control knobs, facility, batches, and "
+            "limits (every knob has a tooltip).\n\n"
+            "**Tune and Optimize don't use a different engine** — they run *the same "
+            "forecast* many times with different Control knobs, then save the winning set "
+            "to `config/control.yaml`. So after either, a plain **Run forecast** uses "
+            "those tuned knobs — and you can review/adjust them in **Configure → Control**."
+        )
     st.divider()
 
     st.header("ProductionReport")
