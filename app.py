@@ -56,7 +56,7 @@ def _active_config_summary(cd: dict) -> list[tuple]:
     lv, hl = bool(g("rebalance_level")), bool(g("harvest_level_load"))
     pm = str(g("placement_method", "greedy"))
     dt = g("density_target_pct", 0) or 0
-    return [
+    rows = [
         ("Feed leveling", "ON" if lv else "OFF",
          "spreads load off the hottest system → no per-system feed spikes"
          if lv else "density-only → per-system feed can spike"),
@@ -65,9 +65,9 @@ def _active_config_summary(cd: dict) -> list[tuple]:
          if hl else "reactive → harvest can be lumpy"),
         ("TranOG tanks / arrival", g("tran_og_default_tanks"),
          "more tanks = lower per-system feed but a tighter facility (spikier harvest)"),
-        ("Harvest setpoint", f"{g('harvest_setpoint_lookahead_weeks')} wk",
-         "holds biomass ~this many weeks of growth below the cap (higher = safer, "
-         "lower utilisation)"),
+        ("Biomass setpoint band", f"{(g('facility_biomass_deviation_pct') or 0) * 100:.2f}%",
+         "how close to the FW-inclusive cap the harvest controller runs (the only soft "
+         "margin; tighter = higher utilisation)"),
         ("Density target", f"{dt * 100:.0f}%",
          "packs each tank to this % of its density cap (lower = more headroom, "
          "fewer hot spots)"),
@@ -81,6 +81,15 @@ def _active_config_summary(cd: dict) -> list[tuple]:
                  f"harvest {g('max_harvest_per_week', 0):,.0f} fish/wk",
          "the hard limits the plan must respect"),
     ]
+    # Surface the opt-in knobs only when they're engaged (off by default).
+    if g("harvest_grade_to_min"):
+        rows.append(("Grade-to-min harvest", "ON",
+            "weeks short of the floor grade near-market tails into 6N to hold the min "
+            "(small stays in source); net production-positive"))
+    if (g("min_transfer_count") or 0) > 0:
+        rows.append(("Min transfer size", f"{g('min_transfer_count'):,.0f} fish",
+            "rebalancer won't split a smaller sub-group out of a tank"))
+    return rows
 
 
 def _render_active_config(cd: dict, title: str):
