@@ -10,7 +10,7 @@ batches:
   tran_og_count: 258565
   tran_og_avg_wt_g: 340.26
   tran_og_cv: 16.0
-  fcr_model: FCR_121_Quick
+  fcr_model: FCR_116_Quick
   fw_correction: 1.0
   sgr_correction: 0.73
   notes: ''
@@ -22,7 +22,7 @@ batches:
   tran_og_count: 255082
   tran_og_avg_wt_g: 455.03
   tran_og_cv: 16.0
-  fcr_model: FCR_121_Quick
+  fcr_model: FCR_116_Quick
   fw_correction: 1.0
   sgr_correction: 0.75
   notes: ''
@@ -34,7 +34,7 @@ batches:
   tran_og_count: 259535
   tran_og_avg_wt_g: 457.97
   tran_og_cv: 16.0
-  fcr_model: FCR_121_Quick
+  fcr_model: FCR_116_Quick
   fw_correction: 1.0
   sgr_correction: 0.75
   notes: ''
@@ -46,7 +46,7 @@ batches:
   tran_og_count: 269338
   tran_og_avg_wt_g: 498.59
   tran_og_cv: 16.0
-  fcr_model: FCR_121_Quick
+  fcr_model: FCR_116_Quick
   fw_correction: 1.0
   sgr_correction: 0.85
   notes: ''
@@ -70,7 +70,7 @@ batches:
   tran_og_count: 276767
   tran_og_avg_wt_g: 433.67
   tran_og_cv: 16.0
-  fcr_model: FCR_121_Quick
+  fcr_model: FCR_118_Quick
   fw_correction: 1.0
   sgr_correction: 0.85
   notes: ''
@@ -82,7 +82,7 @@ batches:
   tran_og_count: 281537
   tran_og_avg_wt_g: 335.86
   tran_og_cv: 16.0
-  fcr_model: FCR_118_Quick
+  fcr_model: FCR_116_Quick
   fw_correction: 1.0
   sgr_correction: 0.9
   notes: ''
@@ -96,7 +96,7 @@ batches:
   tran_og_cv: 16.0
   fcr_model: FCR_116_Quick
   fw_correction: 1.0
-  sgr_correction: 0.9
+  sgr_correction: 0.925
   notes: ''
 - batch_id: B45
   input_date: '2025-03-06'
@@ -108,7 +108,7 @@ batches:
   tran_og_cv: 16.0
   fcr_model: FCR_116_Quick
   fw_correction: 1.0
-  sgr_correction: 0.9
+  sgr_correction: 0.925
   notes: ''
 - batch_id: B46
   input_date: '2025-04-18'
@@ -120,7 +120,7 @@ batches:
   tran_og_cv: 16.0
   fcr_model: FCR_116_Quick
   fw_correction: 0.7152
-  sgr_correction: 0.9
+  sgr_correction: 0.925
   notes: ''
 - batch_id: B47
   input_date: '2025-06-06'
@@ -132,7 +132,7 @@ batches:
   tran_og_cv: 16.0
   fcr_model: FCR_116_Quick
   fw_correction: 0.82
-  sgr_correction: 0.9
+  sgr_correction: 0.925
   notes: ''
 - batch_id: B48
   input_date: '2025-07-24'
@@ -144,7 +144,7 @@ batches:
   tran_og_cv: 16.0
   fcr_model: FCR_116_Quick
   fw_correction: 0.82
-  sgr_correction: 0.92
+  sgr_correction: 0.925
   notes: ''
 - batch_id: B49
   input_date: '2025-09-11'
@@ -155,8 +155,8 @@ batches:
   tran_og_avg_wt_g: 370.0
   tran_og_cv: 16.0
   fcr_model: FCR_116_Quick
-  fw_correction: 0.95
-  sgr_correction: 0.92
+  fw_correction: 0.9517
+  sgr_correction: 0.925
   notes: ''
 - batch_id: B50
   input_date: '2025-10-30'
@@ -167,8 +167,8 @@ batches:
   tran_og_avg_wt_g: 370.0
   tran_og_cv: 16.0
   fcr_model: FCR_116_Quick
-  fw_correction: 0.8
-  sgr_correction: 0.92
+  fw_correction: 0.7873
+  sgr_correction: 0.95
   notes: ''
 - batch_id: B51
   input_date: '2025-12-19'
@@ -179,8 +179,8 @@ batches:
   tran_og_avg_wt_g: 370.0
   tran_og_cv: 16.0
   fcr_model: FCR_116_Quick
-  fw_correction: 0.89
-  sgr_correction: 0.92
+  fw_correction: 0.926
+  sgr_correction: 0.95
   notes: ''
 - batch_id: B52
   input_date: '2026-02-05'
@@ -191,8 +191,8 @@ batches:
   tran_og_avg_wt_g: 370.0
   tran_og_cv: 16.0
   fcr_model: FCR_116_Quick
-  fw_correction: 0.85
-  sgr_correction: 0.92
+  fw_correction: 0.867
+  sgr_correction: 0.95
   notes: ''
 - batch_id: B53
   input_date: '2026-04-02'
@@ -227,7 +227,7 @@ batches:
   tran_og_avg_wt_g: 370.0
   tran_og_cv: 16.0
   fcr_model: FCR_116_Quick
-  fw_correction: 0.8051
+  fw_correction: 0.82
   sgr_correction: 0.95
   notes: ''
 - batch_id: B56
@@ -239,7 +239,7 @@ batches:
   tran_og_avg_wt_g: 370.0
   tran_og_cv: 16.0
   fcr_model: FCR_116_Quick
-  fw_correction: 0.8051
+  fw_correction: 0.82
   sgr_correction: 0.97
   notes: ''
 - batch_id: B57
@@ -251,7 +251,7 @@ batches:
   tran_og_avg_wt_g: 370.0
   tran_og_cv: 16.0
   fcr_model: FCR_116_Quick
-  fw_correction: 0.8051
+  fw_correction: 0.82
   sgr_correction: 0.97
   notes: ''
 - batch_id: B58
@@ -263,7 +263,7 @@ batches:
   tran_og_avg_wt_g: 370.0
   tran_og_cv: 16.0
   fcr_model: FCR_116_Quick
-  fw_correction: 0.8051
+  fw_correction: 0.82
   sgr_correction: 0.97
   notes: ''
 - batch_id: B59
@@ -275,7 +275,7 @@ batches:
   tran_og_avg_wt_g: 370.0
   tran_og_cv: 16.0
   fcr_model: FCR_116_Quick
-  fw_correction: 0.8051
+  fw_correction: 0.82
   sgr_correction: 0.97
   notes: ''
 - batch_id: B60
@@ -287,7 +287,7 @@ batches:
   tran_og_avg_wt_g: 370.0
   tran_og_cv: 16.0
   fcr_model: FCR_116_Quick
-  fw_correction: 0.8051
+  fw_correction: 0.82
   sgr_correction: 0.97
   notes: ''
 - batch_id: B61
@@ -299,7 +299,7 @@ batches:
   tran_og_avg_wt_g: 370.0
   tran_og_cv: 16.0
   fcr_model: FCR_116_Quick
-  fw_correction: 0.8051
+  fw_correction: 0.82
   sgr_correction: 0.97
   notes: ''
 - batch_id: B62
@@ -311,7 +311,7 @@ batches:
   tran_og_avg_wt_g: 370.0
   tran_og_cv: 16.0
   fcr_model: FCR_116_Quick
-  fw_correction: 0.8051
+  fw_correction: 0.82
   sgr_correction: 0.97
   notes: ''
 - batch_id: B63
@@ -323,7 +323,7 @@ batches:
   tran_og_avg_wt_g: 370.0
   tran_og_cv: 16.0
   fcr_model: FCR_116_Quick
-  fw_correction: 0.8051
+  fw_correction: 0.82
   sgr_correction: 0.97
   notes: ''
 - batch_id: B64
@@ -335,7 +335,7 @@ batches:
   tran_og_avg_wt_g: 370.0
   tran_og_cv: 16.0
   fcr_model: FCR_116_Quick
-  fw_correction: 0.8051
+  fw_correction: 0.82
   sgr_correction: 0.97
   notes: ''
 - batch_id: B65
@@ -347,7 +347,7 @@ batches:
   tran_og_avg_wt_g: 370.0
   tran_og_cv: 16.0
   fcr_model: FCR_116_Quick
-  fw_correction: 0.8051
+  fw_correction: 0.82
   sgr_correction: 0.97
   notes: ''
 - batch_id: B66
@@ -359,7 +359,7 @@ batches:
   tran_og_avg_wt_g: 370.0
   tran_og_cv: 16.0
   fcr_model: FCR_116_Quick
-  fw_correction: 0.8051
+  fw_correction: 0.82
   sgr_correction: 0.97
   notes: ''
 - batch_id: B67
@@ -371,7 +371,7 @@ batches:
   tran_og_avg_wt_g: 370.0
   tran_og_cv: 16.0
   fcr_model: FCR_116_Quick
-  fw_correction: 0.8051
+  fw_correction: 0.82
   sgr_correction: 0.97
   notes: ''
 - batch_id: B68
@@ -383,7 +383,7 @@ batches:
   tran_og_avg_wt_g: 370.0
   tran_og_cv: 16.0
   fcr_model: FCR_116_Quick
-  fw_correction: 0.8051
+  fw_correction: 0.82
   sgr_correction: 0.97
   notes: ''
 - batch_id: B69
@@ -395,7 +395,7 @@ batches:
   tran_og_avg_wt_g: 370.0
   tran_og_cv: 16.0
   fcr_model: FCR_116_Quick
-  fw_correction: 0.8051
+  fw_correction: 0.82
   sgr_correction: 0.97
   notes: ''
 - batch_id: B70
@@ -407,7 +407,7 @@ batches:
   tran_og_avg_wt_g: 370.0
   tran_og_cv: 16.0
   fcr_model: FCR_116_Quick
-  fw_correction: 0.8051
+  fw_correction: 0.82
   sgr_correction: 0.97
   notes: ''
 - batch_id: B71
@@ -419,7 +419,7 @@ batches:
   tran_og_avg_wt_g: 370.0
   tran_og_cv: 16.0
   fcr_model: FCR_116_Quick
-  fw_correction: 0.8051
+  fw_correction: 0.82
   sgr_correction: 0.97
   notes: ''
 - batch_id: B72
@@ -431,7 +431,7 @@ batches:
   tran_og_avg_wt_g: 370.0
   tran_og_cv: 16.0
   fcr_model: FCR_116_Quick
-  fw_correction: 0.8051
+  fw_correction: 0.82
   sgr_correction: 0.97
   notes: ''
 - batch_id: B73
@@ -443,7 +443,7 @@ batches:
   tran_og_avg_wt_g: 370.0
   tran_og_cv: 16.0
   fcr_model: FCR_116_Quick
-  fw_correction: 0.8051
+  fw_correction: 0.82
   sgr_correction: 0.97
   notes: ''
 - batch_id: B74
@@ -455,7 +455,7 @@ batches:
   tran_og_avg_wt_g: 370.0
   tran_og_cv: 16.0
   fcr_model: FCR_116_Quick
-  fw_correction: 0.8051
+  fw_correction: 0.82
   sgr_correction: 0.97
   notes: ''
 - batch_id: B75
@@ -467,7 +467,7 @@ batches:
   tran_og_avg_wt_g: 370.0
   tran_og_cv: 16.0
   fcr_model: FCR_116_Quick
-  fw_correction: 0.8051
+  fw_correction: 0.82
   sgr_correction: 0.97
   notes: ''
 - batch_id: B76
@@ -479,7 +479,7 @@ batches:
   tran_og_avg_wt_g: 370.0
   tran_og_cv: 16.0
   fcr_model: FCR_116_Quick
-  fw_correction: 0.8051
+  fw_correction: 0.82
   sgr_correction: 0.97
   notes: ''
 - batch_id: B77
@@ -491,7 +491,7 @@ batches:
   tran_og_avg_wt_g: 370.0
   tran_og_cv: 16.0
   fcr_model: FCR_116_Quick
-  fw_correction: 0.8051
+  fw_correction: 0.82
   sgr_correction: 0.97
   notes: ''
 - batch_id: B78
@@ -503,7 +503,7 @@ batches:
   tran_og_avg_wt_g: 370.0
   tran_og_cv: 16.0
   fcr_model: FCR_116_Quick
-  fw_correction: 0.8051
+  fw_correction: 0.82
   sgr_correction: 0.97
   notes: ''
 - batch_id: B79
@@ -515,7 +515,7 @@ batches:
   tran_og_avg_wt_g: 370.0
   tran_og_cv: 16.0
   fcr_model: FCR_116_Quick
-  fw_correction: 0.8051
+  fw_correction: 0.82
   sgr_correction: 0.97
   notes: ''
 - batch_id: B80
@@ -527,7 +527,7 @@ batches:
   tran_og_avg_wt_g: 370.0
   tran_og_cv: 16.0
   fcr_model: FCR_116_Quick
-  fw_correction: 0.8051
+  fw_correction: 0.82
   sgr_correction: 0.97
   notes: ''
 - batch_id: B81
@@ -539,6 +539,6 @@ batches:
   tran_og_avg_wt_g: 370.0
   tran_og_cv: 16.0
   fcr_model: FCR_116_Quick
-  fw_correction: 0.8051
+  fw_correction: 0.82
   sgr_correction: 0.97
   notes: ''
