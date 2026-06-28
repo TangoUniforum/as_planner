@@ -46,6 +46,12 @@ class ControlParams:
     # land at the low end of market weight + a grading handling event) for a steady
     # processing floor. Default OFF = byte-identical.
     harvest_grade_to_min: bool = False
+    # LEVEL 6N DRAINS (opt-in): cap how full a 6N purge pair may get (at
+    # max_harvest_per_week) so weekly fills don't ACCUMULATE into one pair across
+    # its rotation residency — the root cause of 90-113k drain spikes that starve
+    # other pairs into sub-min troughs. Surplus waits in grow-out and fills the next
+    # thin pair, lifting its drain toward the floor (meet the harvest min every week).
+    sixn_level_drains: bool = False
     # R31: per-tank density target as a fraction of the cap. Drives
     # precalc `tanks_needed_at_density_cap` sizing, the Phase D Grade-
     # split trigger, and the PR-concentration advisory/action gate.

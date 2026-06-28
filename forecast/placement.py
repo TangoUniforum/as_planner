@@ -76,6 +76,7 @@ from .sixn import (
     SIXN_PAIRS,
     initial_purge_pair_queue,
     is_purge_mode,
+    pair_combined_count,
 )
 from .state import FacilityState, TankState, STAGE_STARVE
 from .time_grid import (
@@ -1141,6 +1142,15 @@ def _run_sixn_purge_week(
         target = max(min_h, min(max_h, move_in_target))
     else:
         target = min_h
+    # LEVEL DRAINS (opt-in `sixn_level_drains`): cap the fill by the resting pair's
+    # REMAINING headroom (one weekly harvest's worth, max_h) so fills don't ACCUMULATE
+    # into one pair across its rotation residency — the root cause of the 90-113k drain
+    # spikes that starve OTHER pairs into sub-min troughs. Surplus stays in grow-out and
+    # becomes the move-in for the next thin pair, lifting its drain toward the floor —
+    # so every week meets the harvest MIN.
+    if getattr(control, "sixn_level_drains", False):
+        _existing = pair_combined_count(state, fill_pair)
+        target = min(target, max(0.0, max_h - _existing))
     if target <= 0:
         pair_queue.append(fill_pair)
         return new_resting
