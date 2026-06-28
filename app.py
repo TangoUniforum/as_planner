@@ -346,6 +346,12 @@ _CONTROL_HELP = {
         "REACH the floor — honoring min_transfer_count + min_tank_control. An exception "
         "(only fires when short), not a rule. Measured net production-positive (more cap "
         "headroom, slightly higher avg harvest weight) while holding the harvest floor.",
+    "sixn_level_drains": "Level the 6N purge drains (opt-in, OFF by default). Caps how "
+        "full a 6N purge pair may get (at max_harvest_per_week) so weekly fills don't "
+        "ACCUMULATE into one pair across its rotation — the root cause of 90-113k drain "
+        "spikes that starve other pairs into sub-min troughs. Surplus waits in grow-out and "
+        "fills the next thin pair, lifting its drain toward the floor so every week meets "
+        "the harvest minimum. Only affects 6N PURGE mode.",
     "placement_method": "Tank-placement engine. 'greedy' (default) is the production "
         "engine. 'lns' runs greedy first, then an LNS pass that relocates/swaps grow-out "
         "tank occupancy off the hottest systems onto cooler ones (each move a conserved "
@@ -376,6 +382,7 @@ _CONTROL_LABEL = {
     "sixn_growth": "Run 6N as grow-out",
     "sixn_production_start": "6N production start date",
     "sixn_transition_weeks": "6N transition fallow (weeks)",
+    "sixn_level_drains": "Level 6N purge drains (on/off)",
     "tran_og_default_tanks": "TranOG default tanks",
     "global_buffer_pct": "System-cap buffer (R29)",
     "starvation_period_days": "In-place purge length (days)",
