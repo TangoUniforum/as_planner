@@ -1580,7 +1580,10 @@ def _quick_viz(r):
         bw["Biomass_t"] = bw["Biomass_kg"] / 1000.0
         fig2 = px.line(bw, x="Week", y="Biomass_t",
                        title="Facility biomass per week (t)")
-        fig2.add_hline(y=3900, line_dash="dot", annotation_text="3.9M cap")
+        _cap_t = float((r.get("config_used") or {}).get("max_biomass_kg")
+                       or 3_800_000) / 1000.0
+        fig2.add_hline(y=_cap_t, line_dash="dot",
+                       annotation_text=f"{_cap_t / 1000:.2f}M cap")
         fig2.update_layout(height=340, xaxis_title="", yaxis_title="tonnes")
         st.plotly_chart(fig2, use_container_width=True)
 
@@ -2367,8 +2370,10 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
                     wk_facility, x="Week", y="FacilityBiomass_kg",
                     markers=True, title="Facility biomass (kg)",
                 )
-                fig.add_hline(y=3_900_000, line_dash="dash", line_color="red",
-                              annotation_text="Max Biomass cap (3,900 t)")
+                _cap_kg = float((r.get("config_used") or {}).get("max_biomass_kg")
+                                or 3_800_000)
+                fig.add_hline(y=_cap_kg, line_dash="dash", line_color="red",
+                              annotation_text=f"Max Biomass cap ({_cap_kg / 1000:,.0f} t)")
                 fig.update_layout(height=350, yaxis_title="kg")
                 st.plotly_chart(fig, use_container_width=True)
             with c2:
