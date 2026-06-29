@@ -181,7 +181,6 @@ def write_harvest_plan_output(
     harvest_events,
     default_hog_yield: float,
     facility_limits_hog: dict,
-    pinned_harvests=None,
     sheet_name: str = "HarvestPlan",
 ) -> None:
     """Per-event harvest plan as a single table (matches reference format).
@@ -190,10 +189,8 @@ def write_harvest_plan_output(
     Gross_Biomass (kg), HOG_Yield (ratio), HOG_AvgWt (kg), HOG_Biomass (kg).
 
     `facility_limits_hog` is a dict `{week_label: hog_yield}` for per-week HOG
-    yield overrides; default falls back to `default_hog_yield`. NOTE (audit H3):
-    `harvest_events` are the realized closed-loop harvests; pin ingestion is NOT
-    wired into the planner, so pinned harvests do NOT appear here (an earlier
-    docstring wrongly claimed they were honored upstream).
+    yield overrides; default falls back to `default_hog_yield`. `harvest_events`
+    are the realized closed-loop harvests.
     """
     if sheet_name in wb.sheetnames:
         del wb[sheet_name]
@@ -232,7 +229,6 @@ def write_transfer_plan_output(
     transfer_events,
     tranog_events,
     grade_events=None,
-    pinned_transfers=None,
     sheet_name: str = "TransferPlan",
 ) -> None:
     """Per-event transfer + TranOG + Grade plan as a single table (matches

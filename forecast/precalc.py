@@ -44,8 +44,6 @@ from .models import (
     BiologyTables,
     ControlParams,
     FacilityConfig,
-    PinnedHarvest,
-    PinnedTransfer,
     SizeClassSplit,
 )
 from .sixn import SIXN_PAIRS, in_transition_window, is_purge_mode
@@ -274,9 +272,6 @@ class PrecalcCanvas:
 
     weekly_facility: dict[str, WeeklyFacilityFact]
     weekly_system: dict[tuple[str, str], WeeklySystemFact]
-
-    pinned_harvests: list[PinnedHarvest]
-    pinned_transfers: list[PinnedTransfer]
 
     bottlenecks: list[Bottleneck]
     total_og_tank_weeks_supply: int
@@ -1438,8 +1433,6 @@ def build_precalc_canvas(
     biology_states_by_batch: dict[str, list[BatchWeekState]],
     splits: list[SizeClassSplit],
     harvest_demands: list[HarvestDemand],
-    pinned_harvests: list[PinnedHarvest],
-    pinned_transfers: list[PinnedTransfer],
     initial_state: Optional[FacilityState] = None,
     projected_biomass_by_week: Optional[dict[str, float]] = None,
     allowed_pr_corrections: Optional[set[str]] = None,
@@ -1556,8 +1549,6 @@ def build_precalc_canvas(
         batch_week_facts=batch_week_facts,
         weekly_facility=weekly_facility,
         weekly_system=weekly_system,
-        pinned_harvests=pinned_harvests,
-        pinned_transfers=pinned_transfers,
         bottlenecks=bottlenecks,
         total_og_tank_weeks_supply=total_og_supply,
         total_og_tank_weeks_demand=total_og_demand,

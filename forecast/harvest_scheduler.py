@@ -47,7 +47,7 @@ from .caps import (
     apply_facility_buffer,
     resolve_facility_cap,
 )
-from .models import BatchInput, BatchWeekState, ControlParams, PinnedHarvest
+from .models import BatchInput, BatchWeekState, ControlParams
 from .time_grid import forecast_week_labels, iso_week_label
 
 
@@ -155,7 +155,6 @@ def project_biomass_under_min_only(
 def schedule_harvests(
     states_by_batch: dict[str, list[BatchWeekState]],
     batches_by_id: dict[str, BatchInput],
-    pinned: list[PinnedHarvest],
     control: ControlParams,
     facility_limits: FacilityLimits,
     projected_biomass: Optional[dict[str, float]] = None,
@@ -173,22 +172,8 @@ def schedule_harvests(
                       else control.forecast_start)
     horizon_labels = forecast_week_labels(forecast_start, control.horizon_weeks)
 
-    # --- Apply pinned harvests first (treated as hard pre-commitments). ---
+    # Running per-batch harvested total, accumulated as demands are scheduled.
     cumulative_harvest: dict[str, float] = {}
-    for p in pinned:
-        if p.week_label is None:
-            warnings.append(f"pinned harvest week unparseable: '{p.raw_week_cell}' "
-                            f"({p.batch_id}, tank {p.tank_id})")
-            continue
-        demands.append(HarvestDemand(
-            week_label=p.week_label,
-            batch_id=p.batch_id,
-            count=p.count,
-            avg_wt_g=p.gross_avg_wt_kg * 1000.0 if p.gross_avg_wt_kg > 0 else 0.0,
-            biomass_kg=p.gross_biomass_kg,
-            source="pinned",
-        ))
-        cumulative_harvest[p.batch_id] = cumulative_harvest.get(p.batch_id, 0.0) + p.count
 
     # --- FIFO ordering. ---
     fifo_order = sorted(

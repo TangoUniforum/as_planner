@@ -204,30 +204,16 @@ def main(
         for w in manual_warns:
             print(f"    - {w}")
 
-    # ----- Caps + pinned plans -----
+    # ----- Caps -----
     fs_date = control.forecast_start.date() if hasattr(control.forecast_start, "date") else control.forecast_start
     from .scenario_io import load_limits
     facility_limits, system_limits = load_limits(scenario_dir)
-    # Pins are an in-app planning concern; the workbook is the PR only. NOTE
-    # (audit H3): pin INGESTION is not wired into the realized planner — the
-    # closed-loop harvest engine drives off realized biomass and never consumes a
-    # pin/HarvestDemand list, so pinned_harvests is always empty here. Do NOT
-    # advertise pins as honored until an ingestion path exists.
-    pinned_harvests = []
-    pinned_transfers = []
-    print(f"\n  Caps + pinned plans:")
+    # Operator-authored starting events are applied above (manual_events); the
+    # workbook upload is the ProductionReport only. The realized closed-loop
+    # planner has no separate pin-ingestion path.
+    print(f"\n  Caps:")
     print(f"    FacilityLimits overrides: {len(facility_limits.overrides)}")
     print(f"    SystemLimits caps:        {len(system_limits.caps)}")
-    print(f"    Pinned harvests:          {len(pinned_harvests)} "
-          f"({'NOT honored — pin ingestion not wired' if pinned_harvests else 'none'})")
-    print(f"    Pinned transfers:         {len(pinned_transfers)} "
-          f"({'NOT YET HONORED — see warning below' if pinned_transfers else 'none'})")
-    if pinned_transfers:
-        print(f"  WARN: {len(pinned_transfers)} TransferPlan pin(s) detected but "
-              f"placement does not yet honor them as hard constraints. The "
-              f"planner re-decides all transfers from scratch. Pin rows are "
-              f"preserved at the top of TransferPlan for visibility; the "
-              f"planner-emitted rows follow below them.")
     print(f"    Control R24 deviation:    ±{control.facility_biomass_deviation_pct*100:.1f}% (biomass + feed)")
     print(f"    Control R29 global buf:   ±{control.global_buffer_pct*100:.1f}% (system caps)")
     print(f"    Default TranOG tanks:     {control.tran_og_default_tanks}")
@@ -332,7 +318,7 @@ def main(
         states_by_batch, batch_by_id, control, facility_limits,
     )
     demands, sched_warns = schedule_harvests(
-        states_by_batch, batch_by_id, pinned_harvests, control, facility_limits,
+        states_by_batch, batch_by_id, control, facility_limits,
         projected_biomass=biomass_projection,
     )
     summary_d = summarize_demands(demands)
@@ -375,8 +361,7 @@ def main(
             facility=facility, facility_limits=facility_limits,
             system_limits=system_limits,
             biology_states_by_batch=states_by_batch, splits=splits,
-            harvest_demands=demands, pinned_harvests=pinned_harvests,
-            pinned_transfers=pinned_transfers, initial_state=state,
+            harvest_demands=demands, initial_state=state,
             projected_biomass_by_week=biomass_projection,
             allowed_pr_corrections=allowed,
         )
@@ -581,7 +566,6 @@ def main(
         wb, placement.harvest_events,
         default_hog_yield=control.default_hog_yield,
         facility_limits_hog=facility_hog_overrides,
-        pinned_harvests=pinned_harvests,
     )
     write_harvest_plan_report(
         wb, placement.harvest_events,
@@ -593,7 +577,6 @@ def main(
     write_transfer_plan_output(
         wb, placement.transfer_events, placement.tranog_events,
         grade_events=placement.grade_events,
-        pinned_transfers=pinned_transfers,
     )
     write_transfer_template(
         wb, placement.batch_locations, placement.harvest_events,

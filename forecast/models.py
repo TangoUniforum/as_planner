@@ -155,44 +155,6 @@ class CalibrationResidual:
 
 
 @dataclass
-class PinnedHarvest:
-    """Operator-pinned harvest event read from the HarvestPlan input sheet.
-
-    Treated as a hard constraint by the planner. `week_label` is the
-    canonical ISO label ("2026-W20"); `raw_week_cell` preserves the
-    original cell text so the planner can diagnose unparseable rows.
-    """
-    week_label: Optional[str]      # ISO "YYYY-Www" or None if unparseable
-    raw_week_cell: str             # raw 'Week' cell text from the sheet
-    batch_id: str
-    tank_id: int
-    count: float
-    gross_avg_wt_kg: float
-    gross_biomass_kg: float
-    hog_yield: float
-    hog_avg_wt_kg: float
-    hog_biomass_kg: float
-
-
-@dataclass
-class PinnedTransfer:
-    """Operator-pinned transfer event read from the TransferPlan input sheet.
-
-    Treated as a hard constraint. `from_tank` may be the sentinel 'FW'
-    for TranOG-entry rows; otherwise it is a stringified tank_id.
-    """
-    week_label: Optional[str]
-    raw_week_cell: str
-    batch_id: str
-    from_tank: str
-    to_tank: str
-    count: float
-    avg_weight_kg: float
-    grade: str
-    cv_pct: float
-
-
-@dataclass
 class SizeClassSplit:
     """Post-TranOG 2-class split metadata.
 
