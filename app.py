@@ -1571,7 +1571,10 @@ def _quick_viz(r):
         hw = (he.groupby("Week", as_index=False)["Count"].sum()
                 .sort_values("Week"))
         fig = px.bar(hw, x="Week", y="Count", title="Harvest — fish per week")
-        fig.add_hline(y=55000, line_dash="dot", annotation_text="55k cap")
+        _hv_cap = float((r.get("config_used") or {}).get("max_harvest_per_week")
+                        or 55000)
+        fig.add_hline(y=_hv_cap, line_dash="dot",
+                      annotation_text=f"{_hv_cap / 1000:,.0f}k cap")
         fig.update_layout(height=340, xaxis_title="", yaxis_title="fish")
         st.plotly_chart(fig, use_container_width=True)
     if not bl.empty and "Week" in bl and "Biomass_kg" in bl:
@@ -2451,8 +2454,10 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
                 hw, x="Week", y="AvgWt_kg", markers=True,
                 title="Average harvest weight per week (kg/fish)",
             )
-            fig.add_hline(y=3.5, line_dash="dot", line_color="orange",
-                          annotation_text="Min harvest weight (3.5 kg)")
+            _minw = float((r.get("config_used") or {}).get("min_harvest_weight_g")
+                          or 3500) / 1000.0
+            fig.add_hline(y=_minw, line_dash="dot", line_color="orange",
+                          annotation_text=f"Min harvest weight ({_minw:.1f} kg)")
             fig.update_layout(height=300, yaxis_title="kg/fish")
             st.plotly_chart(fig, use_container_width=True)
 
