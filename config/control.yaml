@@ -13,7 +13,7 @@ handling_mortality_pct: 0.01
 sixn_growth: false
 sixn_production_start: '2028-01-01'
 sixn_transition_weeks: 0
-sixn_level_drains: false
+sixn_level_drains: true
 tran_og_default_tanks: 3
 global_buffer_pct: 0.05
 starvation_period_days: 7

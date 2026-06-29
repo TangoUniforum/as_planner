@@ -346,7 +346,7 @@ _CONTROL_HELP = {
         "REACH the floor — honoring min_transfer_count + min_tank_control. An exception "
         "(only fires when short), not a rule. Measured net production-positive (more cap "
         "headroom, slightly higher avg harvest weight) while holding the harvest floor.",
-    "sixn_level_drains": "Level the 6N purge drains (opt-in, OFF by default). Caps how "
+    "sixn_level_drains": "Level the 6N purge drains (ON by default). Caps how "
         "full a 6N purge pair may get (at max_harvest_per_week) so weekly fills don't "
         "ACCUMULATE into one pair across its rotation — the root cause of 90-113k drain "
         "spikes that starve other pairs into sub-min troughs. Surplus waits in grow-out and "
