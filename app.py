@@ -852,6 +852,12 @@ st.caption(
 # ============================================================
 
 with st.sidebar:
+    # If ▶ Run forecast was clicked from another mode, jump to Run forecast HERE —
+    # before the radio is instantiated, so setting its session_state value is allowed
+    # (Streamlit forbids mutating a widget's key after it renders). The pending run is
+    # then honored by the run handler below.
+    if st.session_state.pop("_goto_run_mode", False):
+        st.session_state["app_mode"] = "Run forecast"
     app_mode = st.radio(
         "Mode",
         ["Run forecast", "Configure (models & control)", "Tune (density knobs)",
@@ -861,6 +867,7 @@ with st.sidebar:
              "Tune: sweep the controller knobs and read the per-batch "
              "density distribution. Optimize: sweep knobs and rank variants on a "
              "selectable objective (walk the line + minimize feed/handling).",
+        key="app_mode",
     )
     with st.expander("ℹ️ Which mode? — Run vs Tune vs Optimize"):
         st.markdown(
@@ -963,6 +970,15 @@ with st.sidebar:
         help=None if (_pr_ok and _cfg_ok)
         else "Upload a valid ProductionReport and set up config first.",
     )
+
+    # The ▶ Run forecast button lives in the sidebar in EVERY mode, but the run
+    # results render only in Run forecast mode — so clicking it from Configure/Tune/
+    # Optimize used to silently do nothing (the main panel st.stop()s before the run
+    # handler). Jump to Run forecast and run there instead.
+    if run_clicked and app_mode != "Run forecast":
+        st.session_state["_goto_run_mode"] = True
+        st.session_state["_pending_run"] = True
+        st.rerun()
 
     if "result" in st.session_state and st.session_state.result.get("ok"):
         r = st.session_state.result
@@ -1904,7 +1920,7 @@ if app_mode.startswith("Optimize"):
 # Run the pipeline when the button is clicked
 # ============================================================
 
-if run_clicked and uploaded is not None:
+if (run_clicked or st.session_state.pop("_pending_run", False)) and uploaded is not None:
     _method = ("global_optimal" if (_is_global and _global_optimal)
                else "global" if _is_global else "controller")
     _spin = ("Running GLOBAL OPTIMAL (CP-SAT whole-horizon solve) — this takes "
