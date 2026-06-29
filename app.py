@@ -1132,6 +1132,30 @@ def _parse_output_workbook(path: Path) -> dict:
     wb = load_workbook(path, keep_vba=str(path).lower().endswith(".xlsm"),
                        data_only=False)
 
+    # Per-tank density caps from facility config (a control input) — never a
+    # hardcoded literal. Each tank's over-cap is judged against ITS OWN cap
+    # (nursery 30–65, grow-out 95), so the Violations count stays correct if
+    # the cap is retuned or if lower-cap tanks ever enter the placement.
+    tank_caps, sys_cap_biomass = {}, {}
+    growout_cap = 95.0
+    try:
+        from forecast.config_io import load_facility_config
+        _fac = load_facility_config(CONFIG_DIR)
+        for t in _fac.tanks:
+            tank_caps[t.tank_id] = t.max_density_kg_m3
+            sys_cap_biomass[t.system_id] = (
+                sys_cap_biomass.get(t.system_id, 0.0)
+                + t.volume_m3 * t.max_density_kg_m3
+            )
+        # Representative grow-out density cap for facility-wide reference lines:
+        # the OG production tanks, excluding the OG6N depuration pool.
+        _grow = [t.max_density_kg_m3 for t in _fac.tanks
+                 if t.system_id.startswith("OG") and t.system_id != "OG6N"]
+        if _grow:
+            growout_cap = float(max(_grow))
+    except Exception:  # noqa: BLE001
+        pass
+
     # Density violations from BatchLocations (header at row 4).
     violations = []
     bl_rows = []
@@ -1152,7 +1176,8 @@ def _parse_output_workbook(path: Path) -> dict:
             # flag. Mirrors the engine's own density-violation count, which skips
             # the 6N purge pool (run.py). This parse is shared by every pipeline's
             # output (controller + global), so the exclusion applies to all.
-            if (isinstance(density, (int, float)) and density > 95
+            if (isinstance(density, (int, float))
+                    and density > tank_caps.get(tid, growout_cap)
                     and sys_id != "OG6N"):
                 violations.append(density)
 
@@ -1293,6 +1318,8 @@ def _parse_output_workbook(path: Path) -> dict:
     return {
         "violations": len(violations),
         "worst_density": max(violations, default=0.0),
+        "growout_density_cap": growout_cap,
+        "system_biomass_cap": sys_cap_biomass,
         "harvest_kg": harvest_kg,
         "harvest_count": harvest_count,
         "batch_locations": bl_rows,
@@ -1982,7 +2009,10 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
     with top_kpi:
         st.subheader("Summary")
         k1, k2, k3, k4 = st.columns(4)
-        k1.metric("Violations", r["violations"], help="Tanks where density > 95 kg/m³")
+        k1.metric("Violations", r["violations"],
+                  help="Tanks where realized density exceeds that tank's own "
+                       "density cap (per-tank, from facility config; the OG6N "
+                       "depuration pool is excluded).")
         k2.metric("Worst density", f"{r['worst_density']:.1f} kg/m³",
                   help="Highest per-tank density across the horizon")
         k3.metric("Total harvest", f"{r['harvest_kg']/1000:,.1f} t",
@@ -2062,17 +2092,17 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
                 values="Batch", aggfunc="first",
             ).reindex(index=tank_order, columns=weeks)
             # Severity-honest scale: span the TRUE worst density (clamping at 130
-            # hid 3.8x spikes as ordinary red). Hard color break at the 95 cap;
+            # hid 3.8x spikes as ordinary red). Hard color break at the cap;
             # over-cap tanks deepen toward dark red as they get worse.
             _dv = pd.to_numeric(df["Density_kg_m3"], errors="coerce")
             vmax = max(130.0, float(_dv.max()) if _dv.notna().any() else 130.0)
-            CAP = 95.0
+            CAP = float(r.get("growout_density_cap") or 95.0)
             c_lo, c_cap = 80.0 / vmax, CAP / vmax
             colorscale = sorted({
                 0.0: "#f0f0f0",          # empty / ~zero
                 min(c_lo, c_cap * 0.5): "#a8d5a8",   # green, under target
                 max(0.0, c_cap - 1e-3): "#f5d49a",   # amber, just under cap
-                c_cap: "#e8615e",        # red AT the 95 cap
+                c_cap: "#e8615e",        # red AT the cap
                 1.0: "#7a0d0b",          # dark red at the worst observed
             }.items())
             # 6N rows are depuration/purge — empty cells there are NOT free
@@ -2107,7 +2137,7 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
             st.plotly_chart(fig, use_container_width=True)
             st.caption(
                 f"Color = per-tank density. Green = under target, amber = "
-                f"approaching the 95 kg/m³ cap, red = over cap, deepening to "
+                f"approaching the {CAP:.0f} kg/m³ cap, red = over cap, deepening to "
                 f"dark red at the worst observed ({vmax:.0f} kg/m³) — so a 3.8x "
                 f"spike no longer looks like a mild one. Rows tagged ⛔purge are "
                 f"OG6N depuration tanks: empty cells there are NOT free growout "
@@ -2137,12 +2167,12 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
                 # Per-system biomass as % of typical density-cap capacity
                 # (avg tank volume × density cap × tank count per system).
                 # Approximation: pull tank count per system from data.
-                tanks_per_sys = bl_df.groupby("System")["Tank"].nunique().to_dict()
-                # Avg cap-biomass per tank: 95 kg/m³ × 1720 m³ = 163,400 kg.
-                CAP_PER_TANK = 95 * 1720
+                # Exact per-system density-cap capacity from facility config:
+                # Σ(tank volume × tank max_density), not a flat 95×1720 guess.
+                sys_cap_biomass = r.get("system_biomass_cap") or {}
                 sys_bio_pct = sys_bio.copy()
                 sys_bio_pct["Cap_kg"] = sys_bio_pct["System"].map(
-                    lambda s: tanks_per_sys.get(s, 0) * CAP_PER_TANK
+                    lambda s: sys_cap_biomass.get(s, 0.0)
                 )
                 sys_bio_pct["Pct_of_cap"] = (
                     sys_bio_pct["Biomass_kg"] / sys_bio_pct["Cap_kg"] * 100
@@ -2163,7 +2193,8 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
             st.caption(
                 "Left: absolute biomass per system, summed across that "
                 "system's tanks. Right: same as % of the system's "
-                "density-cap capacity (95 kg/m³ × volume × tank count). "
+                "density-cap capacity (Σ tank volume × tank max_density, "
+                "from facility config). "
                 "Watch for systems pinned at 100% while others sit idle "
                 "— that's the operational signal of imbalance."
             )
@@ -2295,9 +2326,11 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
                         view, x="Week", y="MaxDensity", color="Batch",
                         markers=True, title="Max per-tank density (kg/m³)",
                     )
-                    fig.add_hline(y=95, line_dash="dash", line_color="red",
+                    _dcap = float(r.get("growout_density_cap") or 95.0)
+                    fig.add_hline(y=_dcap, line_dash="dash", line_color="red",
                                   annotation_text="cap")
-                    fig.add_hline(y=95*0.85, line_dash="dot", line_color="orange",
+                    fig.add_hline(y=_dcap * 0.85, line_dash="dot",
+                                  line_color="orange",
                                   annotation_text="85% target")
                     fig.update_layout(height=350, yaxis_title="kg/m³")
                     st.plotly_chart(fig, use_container_width=True)
@@ -2404,7 +2437,8 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
                     markers=True,
                     title="Mean per-tank density across facility (kg/m³)",
                 )
-                fig.add_hline(y=95, line_dash="dash", line_color="red",
+                fig.add_hline(y=float(r.get("growout_density_cap") or 95.0),
+                              line_dash="dash", line_color="red",
                               annotation_text="cap")
                 fig.update_layout(height=300, yaxis_title="kg/m³")
                 st.plotly_chart(fig, use_container_width=True)
