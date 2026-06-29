@@ -20,7 +20,28 @@ from __future__ import annotations
 from datetime import timedelta
 
 from .biology import advance_tank_one_day
+from .placement import BatchLocationRow
 from .time_grid import forecast_week_labels
+
+
+def _snapshot_week(state, week_label, week_start):
+    """End-of-week per-tank BatchLocationRows for every occupied tank — the same
+    shape Phase D emits (placement.py), so the prefix weeks stitch seamlessly
+    into the BatchLocations output + the (event-stream-driven) continuity audit.
+    """
+    rows = []
+    for tank in state.tanks_by_id.values():
+        if tank.is_empty:
+            continue
+        rows.append(BatchLocationRow(
+            week_label=week_label, week_start=week_start,
+            batch_id=tank.batch_id, tank_id=tank.tank_id,
+            location_id=tank.location_id, system_id=tank.system_id,
+            count=tank.count, avg_wt_g=tank.avg_wt_g,
+            biomass_kg=tank.biomass_kg, density_kg_m3=tank.density_kg_m3,
+            stage=tank.stage,
+        ))
+    return rows
 
 
 def advance_facility_one_week(state, batch_by_id, tables, week_start_date,
@@ -69,10 +90,12 @@ def advance_facility_window(state, batch_by_id, tables, forecast_start,
     """
     labels = forecast_week_labels(forecast_start, n_weeks)
     realized: dict[tuple[int, str, str], list[float]] = {}
+    batch_locations: list = []
     week_start = forecast_start
     for i in range(n_weeks):
         wk_realized = advance_facility_one_week(
             state, batch_by_id, tables, week_start, labels[i])
         realized.update(wk_realized)
+        batch_locations.extend(_snapshot_week(state, labels[i], week_start))
         week_start = week_start + timedelta(days=7)
-    return realized, week_start
+    return realized, batch_locations, week_start

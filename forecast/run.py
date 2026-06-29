@@ -213,19 +213,20 @@ def main(
     # `state`, below). Phase A = pure biology (no operations / no in-window
     # TranOG); operations + report stitching + FW re-anchoring land in B/A2.
     prefix_realized: dict = {}
+    prefix_batch_locations: list = []
     if advance_weeks and advance_weeks > 0:
         from .manual_window import advance_facility_window
         from datetime import datetime as _dt_aw
         _bbi = {b.batch_id: b for b in batches}
         _fs0 = (control.forecast_start.date()
                 if hasattr(control.forecast_start, "date") else control.forecast_start)
-        prefix_realized, _new_start = advance_facility_window(
+        prefix_realized, prefix_batch_locations, _new_start = advance_facility_window(
             state, _bbi, tables, _fs0, advance_weeks)
         control.forecast_start = _dt_aw(_new_start.year, _new_start.month, _new_start.day)
         control.horizon_weeks = max(1, control.horizon_weeks - advance_weeks)
         print(f"\n  Manual override window: advanced {advance_weeks} week(s) of biology; "
               f"forecast now opens {_new_start} (horizon {control.horizon_weeks}w). "
-              f"Captured {len(prefix_realized)} prefix (tank,week,batch) biology rows.")
+              f"Captured {len(prefix_batch_locations)} prefix BatchLocations rows.")
 
     # ----- Caps -----
     fs_date = control.forecast_start.date() if hasattr(control.forecast_start, "date") else control.forecast_start
@@ -557,6 +558,16 @@ def main(
         except Exception as e:  # noqa: BLE001 — any failure keeps greedy
             print(f"  LNS placement: refine failed ({type(e).__name__}: {e}); "
                   f"greedy stands")
+
+    # Stitch the manual override window (weeks 1..N) into the output so the
+    # operator's scripted weeks are visible + audited. The continuity audit is
+    # event-stream driven, so the prefix BatchLocations + realized_biology
+    # reconcile with no audit changes (Phase A: biology-only prefix).
+    if prefix_batch_locations:
+        placement.batch_locations = prefix_batch_locations + placement.batch_locations
+        placement.realized_biology.update(prefix_realized)
+        print(f"  Stitched {len(prefix_batch_locations)} prefix BatchLocations rows "
+              f"(manual override window) into the output.")
 
     # Write the plan outputs from Stage 2 placement.
     write_batch_locations(wb, placement.batch_locations)
