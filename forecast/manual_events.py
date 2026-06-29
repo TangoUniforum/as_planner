@@ -24,19 +24,22 @@ purge logic) — they warn-and-skip until their phase lands.
 """
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
 import yaml
 
-from .events import TankAllocation, Transfer
+from .events import Harvest, TankAllocation, Transfer
 from .yaml_atomic import read_text_resilient, write_text_atomic
 
 MANUAL_EVENTS_FILE = "manual_events.yaml"
 
-# Event types recognised by this module. Only og_transfer is wired in Phase 1.
+# Event types recognised by this module. og_transfer + harvest are wired;
+# fw_to_og / og_to_6n are recognised but deferred to a later phase.
 TYPE_OG_TRANSFER = "og_transfer"
+TYPE_HARVEST = "harvest"
 TYPE_FW_TO_OG = "fw_to_og"
 TYPE_OG_TO_6N = "og_to_6n"
 _DEFERRED_TYPES = {TYPE_FW_TO_OG, TYPE_OG_TO_6N}
@@ -60,8 +63,9 @@ class ManualDest:
 @dataclass
 class ManualEvent:
     type: str
-    from_tank: Optional[int] = None          # source tank id (og_transfer / og_to_6n)
+    from_tank: Optional[int] = None          # source tank id (og_transfer / harvest / og_to_6n)
     destinations: list[ManualDest] = field(default_factory=list)
+    count: Optional[float] = None            # harvest amount; None = harvest the whole tank
     batch: Optional[str] = None              # optional cross-check; inferred from source if absent
     mode: str = "transfer"                    # "transfer" | "graded" | "harvest_grade" (later phases)
     notes: str = ""
@@ -79,6 +83,7 @@ def manual_events_to_list(events: list[ManualEvent]) -> list[dict]:
                 {"tank": d.tank, "count": d.count, "avg_wt_g": d.avg_wt_g}
                 for d in e.destinations
             ],
+            "count": e.count,
             "batch": e.batch,
             "mode": e.mode,
             "notes": e.notes,
@@ -98,10 +103,12 @@ def manual_events_from_list(data: list[dict]) -> list[ManualEvent]:
             for x in (d.get("destinations") or [])
         ]
         ft = d.get("from_tank")
+        cnt = d.get("count")
         out.append(ManualEvent(
             type=str(d["type"]),
             from_tank=(int(ft) if ft is not None else None),
             destinations=dests,
+            count=(float(cnt) if cnt is not None else None),
             batch=(str(d["batch"]) if d.get("batch") is not None else None),
             mode=str(d.get("mode") or "transfer"),
             notes=str(d.get("notes") or ""),
@@ -191,6 +198,36 @@ def _apply_og_transfer(state, ev: ManualEvent, idx: int) -> list[str]:
     return warns
 
 
+def _apply_harvest(state, ev: ManualEvent, idx: int) -> list[str]:
+    """Apply one direct starting-state harvest via events.Harvest.
+
+    Removes `count` fish (None = the whole tank) from the source. The fish are
+    taken OUT of the week-0 inventory before the forecast runs forward.
+    """
+    warns: list[str] = []
+    tag = f"MANUAL harvest #{idx}"
+    src = state.tanks_by_id.get(ev.from_tank)
+    if src is None:
+        return [f"{tag}: unknown source tank #{ev.from_tank}"]
+    if src.is_empty:
+        return [f"{tag}: source tank {src.location_id} is empty (nothing to harvest)"]
+    if ev.batch and src.batch_id != ev.batch:
+        warns.append(
+            f"{tag}: source {src.location_id} holds batch {src.batch_id}, "
+            f"not the specified {ev.batch} — using actual batch {src.batch_id}")
+    batch_id = src.batch_id
+    count = ev.count if ev.count is not None else src.count
+    if count > src.count + 0.5:
+        return [f"{tag}: requested {count:,.0f} fish exceeds tank "
+                f"{src.location_id} population {src.count:,.0f}"]
+    h = Harvest(batch_id=batch_id, event_date=state.today,
+                source_tank_id=ev.from_tank, count=count, avg_wt_g=src.avg_wt_g)
+    warns.extend(f"{tag}: {w}" for w in h.apply(state))
+    print(f"    {tag}: harvested {h.count:,.0f} fish of batch {batch_id} "
+          f"from tank #{ev.from_tank}")
+    return warns
+
+
 def apply_manual_events(state, events: list[ManualEvent]) -> list[str]:
     """Apply all manual starting-state events to the hydrated FacilityState.
 
@@ -201,9 +238,34 @@ def apply_manual_events(state, events: list[ManualEvent]) -> list[str]:
     for i, ev in enumerate(events, 1):
         if ev.type == TYPE_OG_TRANSFER:
             warns.extend(_apply_og_transfer(state, ev, i))
+        elif ev.type == TYPE_HARVEST:
+            warns.extend(_apply_harvest(state, ev, i))
         elif ev.type in _DEFERRED_TYPES:
             warns.append(f"MANUAL event #{i}: type '{ev.type}' not yet "
                          f"implemented (Phase 3) — skipped")
         else:
             warns.append(f"MANUAL event #{i}: unknown type '{ev.type}' — skipped")
     return warns
+
+
+def validate_manual_events(state, events: list[ManualEvent]) -> list[tuple[int, bool, list[str]]]:
+    """Dry-run each event against a COPY of the hydrated state for reject-at-entry.
+
+    Applies events cumulatively to a deep copy (so event N sees the effect of
+    1..N-1, matching the real run) without mutating the caller's state. Returns
+    one (index, ok, messages) tuple per event; ok=False means the event was
+    refused or produced a warning the UI should surface before saving.
+    """
+    scratch = copy.deepcopy(state)
+    results: list[tuple[int, bool, list[str]]] = []
+    for i, ev in enumerate(events, 1):
+        if ev.type == TYPE_OG_TRANSFER:
+            w = _apply_og_transfer(scratch, ev, i)
+        elif ev.type == TYPE_HARVEST:
+            w = _apply_harvest(scratch, ev, i)
+        elif ev.type in _DEFERRED_TYPES:
+            w = [f"type '{ev.type}' not yet implemented"]
+        else:
+            w = [f"unknown type '{ev.type}'"]
+        results.append((i, not w, w))
+    return results

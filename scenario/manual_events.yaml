@@ -1,2 +1,3 @@
 # Manual starting-state events (operator-authored). Empty by default.
+# Authored in the app UI (Run mode -> Starting setup); not hand-edited.
 events: []
