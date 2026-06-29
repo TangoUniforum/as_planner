@@ -1,0 +1,2 @@
+# Manual starting-state events (operator-authored). Empty by default.
+events: []

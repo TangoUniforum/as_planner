@@ -190,6 +190,20 @@ def main(
         for w in inv_warns:
             print(f"    - {w}")
 
+    # ----- Manual starting-state events (operator-authored) -----
+    # Applied to the PR-hydrated week-0 state BEFORE the forecast runs forward
+    # (augment-the-PR, starting-state-only). Reuses events.py .apply(), so a
+    # refused event leaves the source intact — no fish lost. The planner then
+    # builds forward on top of the adjusted start. See forecast/manual_events.py.
+    from .manual_events import load_manual_events, apply_manual_events
+    manual_events = load_manual_events(scenario_dir)
+    manual_warns = apply_manual_events(state, manual_events)
+    if manual_events:
+        print(f"\n  Manual starting events: {len(manual_events)} event(s) applied "
+              f"({len(manual_warns)} warning(s))")
+        for w in manual_warns:
+            print(f"    - {w}")
+
     # ----- Caps + pinned plans -----
     fs_date = control.forecast_start.date() if hasattr(control.forecast_start, "date") else control.forecast_start
     from .scenario_io import load_limits
@@ -608,7 +622,7 @@ def main(
         scheduler_warnings=sched_warns,
         bottlenecks=canvas.bottlenecks,
         density_violations=density_violations,
-        invariant_warnings=list(hydration_warns) + list(inv_warns),
+        invariant_warnings=list(hydration_warns) + list(inv_warns) + list(manual_warns),
         placed_batches={r.batch_id for r in placement.batch_locations},
     )
     write_daily_harvest_schedule(
