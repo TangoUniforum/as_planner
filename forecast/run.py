@@ -214,6 +214,8 @@ def main(
     prefix_batch_locations: list = []
     prefix_transfers: list = []
     prefix_harvests: list = []
+    prefix_tranogs: list = []
+    transferred_fw: set = set()
     manual_warns: list = []
     # The continuity audit anchors each tank's first week to this initial state.
     # The window advances `state` in place to week N+1 (what the pipeline plans
@@ -229,11 +231,14 @@ def main(
         _fs0 = (control.forecast_start.date()
                 if hasattr(control.forecast_start, "date") else control.forecast_start)
         _win = advance_facility_window(
-            state, _bbi, tables, _fs0, window_n, events=manual_events)
+            state, _bbi, tables, _fs0, window_n, events=manual_events,
+            control=control, pr_closing=pr_closing, fw_records=fw_records)
         prefix_realized = _win["realized_biology"]
         prefix_batch_locations = _win["batch_locations"]
         prefix_transfers = _win["transfer_events"]
         prefix_harvests = _win["harvest_events"]
+        prefix_tranogs = _win["tranog_events"]
+        transferred_fw = _win["transferred_fw_batches"]
         manual_warns = _win["warnings"]
         _new_start = _win["new_start"]
         control.forecast_start = _dt_aw(_new_start.year, _new_start.month, _new_start.day)
@@ -588,9 +593,13 @@ def main(
         placement.realized_biology.update(prefix_realized)
         placement.transfer_events = prefix_transfers + placement.transfer_events
         placement.harvest_events = prefix_harvests + placement.harvest_events
+        placement.tranog_events = prefix_tranogs + placement.tranog_events
         print(f"  Stitched manual override window into the output: "
               f"{len(prefix_batch_locations)} BatchLocations rows, "
-              f"{len(prefix_transfers)} transfer + {len(prefix_harvests)} harvest events.")
+              f"{len(prefix_transfers)} transfer + {len(prefix_harvests)} harvest "
+              f"+ {len(prefix_tranogs)} TranOG event(s)"
+              + (f"; manual FW->OG: {sorted(transferred_fw)}" if transferred_fw else "")
+              + ".")
 
     # Write the plan outputs from Stage 2 placement.
     write_batch_locations(wb, placement.batch_locations)

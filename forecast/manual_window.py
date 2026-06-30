@@ -75,26 +75,65 @@ def advance_facility_one_week(state, batch_by_id, tables, week_start_date,
     return realized
 
 
+def _build_fw_lookup(events, fw_records, control, pr_closing, tables, batch_by_id):
+    """Index (batch_id, week_label) -> (count, avg_wt_g, cv) for every FW batch
+    referenced by an fw_to_og event, by projecting its in-flight FW trajectory.
+    Only FW-stage (pre-TranOG) weeks are indexed — a manual FW->OG must happen
+    while the batch is still in freshwater.
+    """
+    from collections import defaultdict
+    from .manual_events import TYPE_FW_TO_OG
+    fw_batches = {ev.batch for ev in (events or [])
+                  if ev.type == TYPE_FW_TO_OG and ev.batch}
+    if not fw_batches or not fw_records or control is None:
+        return {}
+    from .biology import project_in_flight_fw_batch
+    agg = defaultdict(lambda: {"count": 0.0, "biomass_kg": 0.0})
+    for r in fw_records:
+        if r.batch_id in fw_batches:
+            agg[r.batch_id]["count"] += r.closing_count
+            agg[r.batch_id]["biomass_kg"] += r.closing_biomass_kg
+    lookup: dict = {}
+    for bid in fw_batches:
+        a = agg.get(bid)
+        b_meta = batch_by_id.get(bid)
+        if not a or a["count"] <= 0 or b_meta is None:
+            continue
+        avg_wt = a["biomass_kg"] * 1000.0 / a["count"]
+        states, _, _ = project_in_flight_fw_batch(
+            b_meta, tables, control, a["count"], avg_wt, pr_closing)
+        cv = b_meta.tran_og_cv or 16.0
+        for s in states:
+            if s.stage == "FW":
+                lookup[(bid, s.week_label)] = (s.close_count, s.close_avg_weight_g, cv)
+    return lookup
+
+
 def advance_facility_window(state, batch_by_id, tables, forecast_start,
-                            n_weeks, events=None):
+                            n_weeks, events=None, control=None,
+                            pr_closing=None, fw_records=None):
     """Run the manual override window: `n_weeks` of (operator events + biology).
 
     For each week k in 1..N: apply the operator's events scheduled for week k
-    (transfers/harvests, recorded), advance 7 days of biology, snapshot
-    BatchLocations. Returns a dict with realized_biology, batch_locations,
-    transfer_events, harvest_events, warnings, and new_start (the date that
-    opens week N+1 — where the forward pipeline takes over). All of it stitches
-    into the output so the window weeks are visible + audited.
-
-    Phase A: pure biology only — assumes no TranOG arrival and no operations
-    inside the window (callers must keep N small enough, validated upstream).
+    (transfers / harvests / 6N-moves / FW->OG, recorded), advance 7 days of
+    biology, snapshot BatchLocations. Returns a dict with realized_biology,
+    batch_locations, transfer_events, harvest_events, tranog_events,
+    transferred_fw_batches (FW batches manually moved to OG — the caller must
+    exclude them from the auto FW supply), warnings, and new_start (the date
+    that opens week N+1). All of it stitches into the output so the window weeks
+    are visible + audited.
     """
     from .manual_events import apply_events_for_week
+    handling_frac = ((control.handling_mortality_pct / 100.0)
+                     if control is not None else 0.0)
+    fw_lookup = _build_fw_lookup(
+        events, fw_records, control, pr_closing, tables, batch_by_id)
     labels = forecast_week_labels(forecast_start, n_weeks)
     realized: dict[tuple[int, str, str], list[float]] = {}
     batch_locations: list = []
     transfer_events: list = []
     harvest_events: list = []
+    tranog_events: list = []
     warnings: list[str] = []
     week_start = forecast_start
     for i in range(n_weeks):
@@ -102,9 +141,12 @@ def advance_facility_window(state, batch_by_id, tables, forecast_start,
         # so the end-of-week BatchLocations reflect the post-event, post-growth
         # state and the events date into this week for the continuity audit.
         if events:
-            tr, hv, w = apply_events_for_week(state, events, i + 1, week_start)
+            tr, hv, tn, w = apply_events_for_week(
+                state, events, i + 1, week_start, week_label=labels[i],
+                handling_frac=handling_frac, fw_lookup=fw_lookup)
             transfer_events.extend(tr)
             harvest_events.extend(hv)
+            tranog_events.extend(tn)
             warnings.extend(w)
         wk_realized = advance_facility_one_week(
             state, batch_by_id, tables, week_start, labels[i])
@@ -116,6 +158,8 @@ def advance_facility_window(state, batch_by_id, tables, forecast_start,
         "batch_locations": batch_locations,
         "transfer_events": transfer_events,
         "harvest_events": harvest_events,
+        "tranog_events": tranog_events,
+        "transferred_fw_batches": {e.batch_id for e in tranog_events},
         "warnings": warnings,
         "new_start": week_start,
     }

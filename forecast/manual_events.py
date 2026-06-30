@@ -31,7 +31,7 @@ from typing import Optional
 
 import yaml
 
-from .events import Harvest, TankAllocation, Transfer
+from .events import Harvest, TankAllocation, TranOGEntry, Transfer
 from .yaml_atomic import read_text_resilient, write_text_atomic
 
 MANUAL_EVENTS_FILE = "manual_events.yaml"
@@ -42,7 +42,6 @@ TYPE_OG_TRANSFER = "og_transfer"
 TYPE_HARVEST = "harvest"
 TYPE_FW_TO_OG = "fw_to_og"
 TYPE_OG_TO_6N = "og_to_6n"
-_DEFERRED_TYPES = {TYPE_FW_TO_OG}
 
 
 @dataclass
@@ -304,16 +303,97 @@ def _apply_og_to_6n(state, ev: ManualEvent, idx: int,
     return warns
 
 
-def apply_events_for_week(state, events, week, week_start):
+def _apply_fw_to_og(state, ev: ManualEvent, idx: int, fw_count, fw_avg_wt_g,
+                    fw_cv, handling_frac, event_date=None, out_tranog=None):
+    """Manual FW->OG transfer (TranOG) into operator-chosen OG tanks.
+
+    Applies the SAME logic as the auto pipeline: handling mortality, then a
+    reconcile-to-target cull (ev.count = the target tran_og_count) via
+    _apply_bottom_cull, then the size-class split; emits a TranOGEntry into the
+    chosen OG tanks (big class to the first ceil(N/2) tanks, small to the rest,
+    mirroring placement). `fw_*` is the batch's FW state at this week (supplied
+    by the caller from the FW projection). Returns (warnings, culled_count).
+    """
+    from .biology import _apply_bottom_cull, compute_size_class_split
+    warns: list[str] = []
+    tag = f"MANUAL fw_to_og #{idx}"
+    batch_id = ev.batch
+    if not batch_id:
+        return [f"{tag}: fw_to_og requires `batch` (the FW batch to transfer)"], 0.0
+    if not ev.destinations:
+        return [f"{tag}: no OG destination tanks specified"], 0.0
+    for d in ev.destinations:
+        t = state.tanks_by_id.get(d.tank)
+        if t is None:
+            return [f"{tag}: unknown dest tank #{d.tank}"], 0.0
+        if t.type != "OG":
+            return [f"{tag}: dest #{d.tank} ({t.location_id}) is not an OG tank"], 0.0
+        if not t.is_empty:
+            return [f"{tag}: dest {t.location_id} not empty (holds {t.batch_id})"], 0.0
+    if fw_count <= 0:
+        return [f"{tag}: FW batch {batch_id} has no fish at this week"], 0.0
+
+    # 1. handling mortality, 2. reconcile-to-target cull (operator's tran_og_count)
+    cnt = fw_count * (1.0 - handling_frac)
+    culled = fw_count - cnt
+    target = ev.count
+    if target and cnt > target:
+        cull_pct = 1.0 - target / cnt
+        cnt, fw_avg_wt_g, _cn, _cb = _apply_bottom_cull(
+            cnt, fw_avg_wt_g, fw_cv, cull_pct)
+        culled += _cn
+
+    # 3. size-class split, 4. allocate big/small across the chosen tanks
+    split = compute_size_class_split(
+        batch_id=batch_id, tran_og_date=event_date,
+        post_cull_count=cnt, post_cull_avg_wt_g=fw_avg_wt_g, cv_pct=fw_cv)
+    tanks = [d.tank for d in ev.destinations]
+    n = len(tanks)
+    allocs = []
+    if n >= 2:
+        big_n = (n + 1) // 2
+        small_n = n - big_n
+        per_big = (split.big_class_count / big_n) if big_n else 0.0
+        per_small = (split.small_class_count / small_n) if small_n else 0.0
+        for i in range(big_n):
+            allocs.append(TankAllocation(
+                tank_id=tanks[i], count=per_big,
+                avg_wt_g=split.big_class_avg_wt_g,
+                cv_pct=split.post_cull_cv_pct, size_class="big"))
+        for i in range(small_n):
+            allocs.append(TankAllocation(
+                tank_id=tanks[big_n + i], count=per_small,
+                avg_wt_g=split.small_class_avg_wt_g,
+                cv_pct=split.post_cull_cv_pct, size_class="small"))
+    else:
+        allocs.append(TankAllocation(
+            tank_id=tanks[0], count=split.post_cull_count,
+            avg_wt_g=split.post_cull_avg_wt_g,
+            cv_pct=split.post_cull_cv_pct, size_class="mixed"))
+
+    entry = TranOGEntry(batch_id=batch_id, event_date=event_date, destinations=allocs)
+    warns.extend(f"{tag}: {w}" for w in entry.apply(state))
+    if out_tranog is not None:
+        out_tranog.append(entry)
+    print(f"    {tag}: TranOG {cnt:,.0f} fish of {batch_id} -> OG tanks {tanks} "
+          f"(culled {culled:,.0f} to hit target {target})")
+    return warns, culled
+
+
+def apply_events_for_week(state, events, week, week_start, week_label=None,
+                          handling_frac=0.0, fw_lookup=None):
     """Apply every manual event scheduled for `week` (1-based) at the start of
     that override-window week, dating each event at `week_start`.
 
-    Returns (transfer_objs, harvest_objs, warnings): the events.* objects that
-    actually applied, so the window can stitch them into the report streams +
-    continuity audit. Mutates `state`.
+    Returns (transfer_objs, harvest_objs, tranog_objs, warnings): the events.*
+    objects that actually applied, so the window can stitch them into the report
+    streams + continuity audit. `fw_lookup` maps (batch_id, week_label) ->
+    (count, avg_wt_g, cv) for fw_to_og events (the chosen FW batch's state at
+    this week). Mutates `state`.
     """
     transfers: list = []
     harvests: list = []
+    tranogs: list = []
     warns: list[str] = []
     for i, ev in enumerate(events, 1):
         if (ev.week or 1) != week:
@@ -327,13 +407,21 @@ def apply_events_for_week(state, events, week, week_start):
         elif ev.type == TYPE_OG_TO_6N:
             warns.extend(_apply_og_to_6n(
                 state, ev, i, event_date=week_start, out_events=transfers))
-        elif ev.type in _DEFERRED_TYPES:
-            warns.append(f"MANUAL week {week} event #{i}: type '{ev.type}' "
-                         f"not yet implemented — skipped")
+        elif ev.type == TYPE_FW_TO_OG:
+            fw = (fw_lookup or {}).get((ev.batch, week_label))
+            if fw is None:
+                warns.append(f"MANUAL week {week} fw_to_og #{i}: no FW state for "
+                             f"batch {ev.batch!r} at this week (must be an in-flight "
+                             f"FW batch still in freshwater)")
+            else:
+                w, _culled = _apply_fw_to_og(
+                    state, ev, i, fw[0], fw[1], fw[2], handling_frac,
+                    event_date=week_start, out_tranog=tranogs)
+                warns.extend(w)
         else:
             warns.append(f"MANUAL week {week} event #{i}: unknown type "
                          f"'{ev.type}' — skipped")
-    return transfers, harvests, warns
+    return transfers, harvests, tranogs, warns
 
 
 def validate_manual_events(state, events: list[ManualEvent]) -> list[tuple[int, bool, list[str]]]:
@@ -353,8 +441,18 @@ def validate_manual_events(state, events: list[ManualEvent]) -> list[tuple[int, 
             w = _apply_harvest(scratch, ev, i)
         elif ev.type == TYPE_OG_TO_6N:
             w = _apply_og_to_6n(scratch, ev, i)
-        elif ev.type in _DEFERRED_TYPES:
-            w = [f"type '{ev.type}' not yet implemented"]
+        elif ev.type == TYPE_FW_TO_OG:
+            # Full feasibility needs the run-time FW projection; here just check
+            # the destination tanks are empty OG tanks.
+            w = []
+            for d in ev.destinations:
+                t = scratch.tanks_by_id.get(d.tank)
+                if t is None:
+                    w.append(f"unknown dest tank #{d.tank}")
+                elif t.type != "OG":
+                    w.append(f"dest #{d.tank} is not an OG tank")
+                elif not t.is_empty:
+                    w.append(f"dest {t.location_id} not empty")
         else:
             w = [f"unknown type '{ev.type}'"]
         results.append((i, not w, w))
