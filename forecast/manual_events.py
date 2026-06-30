@@ -42,7 +42,7 @@ TYPE_OG_TRANSFER = "og_transfer"
 TYPE_HARVEST = "harvest"
 TYPE_FW_TO_OG = "fw_to_og"
 TYPE_OG_TO_6N = "og_to_6n"
-_DEFERRED_TYPES = {TYPE_FW_TO_OG, TYPE_OG_TO_6N}
+_DEFERRED_TYPES = {TYPE_FW_TO_OG}
 
 
 @dataclass
@@ -238,6 +238,72 @@ def _apply_harvest(state, ev: ManualEvent, idx: int,
     return warns
 
 
+def _apply_og_to_6n(state, ev: ManualEvent, idx: int,
+                    event_date=None, out_events=None) -> list[str]:
+    """Move OG fish into a 6N depuration tank (normal-transfer mode).
+
+    Reuses events.Transfer (so the move is audited as Transfer_Out/In), then
+    FREEZES each 6N destination to STAGE_STARVE — off-feed depuration: the daily
+    biology loop applies mortality but no growth, and the feed reports exclude
+    STARVE tank-weeks. Destinations must be OG6N tanks.
+    """
+    from .sixn import SIXN_ALL_TANKS
+    from .state import STAGE_STARVE
+    warns: list[str] = []
+    tag = f"MANUAL og_to_6n #{idx}"
+    src = state.tanks_by_id.get(ev.from_tank)
+    if src is None:
+        return [f"{tag}: unknown source tank #{ev.from_tank}"]
+    if src.is_empty:
+        return [f"{tag}: source tank {src.location_id} is empty (nothing to move)"]
+    if not ev.destinations:
+        return [f"{tag}: no 6N destination specified"]
+    for d in ev.destinations:
+        if d.tank not in SIXN_ALL_TANKS:
+            return [f"{tag}: dest tank #{d.tank} is not a 6N depuration tank "
+                    f"({sorted(SIXN_ALL_TANKS)})"]
+    if ev.batch and src.batch_id != ev.batch:
+        warns.append(f"{tag}: source {src.location_id} holds batch {src.batch_id}, "
+                     f"not the specified {ev.batch} — using actual batch {src.batch_id}")
+    batch_id = src.batch_id
+
+    explicit = sum(d.count for d in ev.destinations if d.count is not None)
+    null_dests = [d for d in ev.destinations if d.count is None]
+    remaining = src.count - explicit
+    if remaining < -0.5:
+        return [f"{tag}: requested {explicit:,.0f} fish exceeds tank "
+                f"{src.location_id} population {src.count:,.0f}"]
+    per_null = (remaining / len(null_dests)) if null_dests else 0.0
+    allocs = []
+    for d in ev.destinations:
+        cnt = d.count if d.count is not None else per_null
+        wt = d.avg_wt_g if d.avg_wt_g is not None else src.avg_wt_g
+        allocs.append(TankAllocation(
+            tank_id=d.tank, count=cnt, avg_wt_g=wt, cv_pct=src.cv_pct))
+    total = sum(a.count for a in allocs)
+    leaves_empty = abs(total - src.count) < 0.5
+    tr = Transfer(
+        batch_id=batch_id, event_date=(event_date or state.today),
+        source_tank_id=ev.from_tank, destinations=allocs,
+        leaves_source_empty=leaves_empty)
+    warns.extend(f"{tag}: {w}" for w in tr.apply(state))
+
+    if tr.count_transferred <= 0:
+        warns.append(f"{tag}: moved 0 fish (all destinations refused) — "
+                     f"batch {batch_id} stays in tank #{ev.from_tank}")
+    else:
+        for d in ev.destinations:
+            t = state.tanks_by_id.get(d.tank)
+            if t is not None and not t.is_empty:
+                t.stage = STAGE_STARVE  # freeze: off-feed depuration
+        if out_events is not None:
+            out_events.append(tr)
+        print(f"    {tag}: moved {tr.count_transferred:,.0f} fish of batch "
+              f"{batch_id} from tank #{ev.from_tank} -> 6N "
+              f"{[d.tank for d in ev.destinations]} (frozen, off-feed)")
+    return warns
+
+
 def apply_events_for_week(state, events, week, week_start):
     """Apply every manual event scheduled for `week` (1-based) at the start of
     that override-window week, dating each event at `week_start`.
@@ -258,6 +324,9 @@ def apply_events_for_week(state, events, week, week_start):
         elif ev.type == TYPE_HARVEST:
             warns.extend(_apply_harvest(
                 state, ev, i, event_date=week_start, out_events=harvests))
+        elif ev.type == TYPE_OG_TO_6N:
+            warns.extend(_apply_og_to_6n(
+                state, ev, i, event_date=week_start, out_events=transfers))
         elif ev.type in _DEFERRED_TYPES:
             warns.append(f"MANUAL week {week} event #{i}: type '{ev.type}' "
                          f"not yet implemented — skipped")
@@ -282,6 +351,8 @@ def validate_manual_events(state, events: list[ManualEvent]) -> list[tuple[int, 
             w = _apply_og_transfer(scratch, ev, i)
         elif ev.type == TYPE_HARVEST:
             w = _apply_harvest(scratch, ev, i)
+        elif ev.type == TYPE_OG_TO_6N:
+            w = _apply_og_to_6n(scratch, ev, i)
         elif ev.type in _DEFERRED_TYPES:
             w = [f"type '{ev.type}' not yet implemented"]
         else:
