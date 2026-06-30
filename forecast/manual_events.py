@@ -396,16 +396,21 @@ def apply_events_for_week(state, events, week, week_start, week_label=None,
     """Apply every manual event scheduled for `week` (1-based) at the start of
     that override-window week, dating each event at `week_start`.
 
-    Returns (transfer_objs, harvest_objs, tranog_objs, warnings): the events.*
-    objects that actually applied, so the window can stitch them into the report
-    streams + continuity audit. `fw_lookup` maps (batch_id, week_label) ->
-    (count, avg_wt_g, cv) for fw_to_og events (the chosen FW batch's state at
+    Returns (transfer_objs, harvest_objs, tranog_objs, warnings, fw_balance):
+    the events.* objects that actually applied, so the window can stitch them
+    into the report streams + continuity audit, plus `fw_balance` =
+    {batch_id: [fw_count_at_transfer, culled]} for each fw_to_og — the FW-phase
+    conservation leg (fw_count == placed + culled) that the InputConservation
+    audit reconciles (the batch becomes OG-in-flight with no FW states, so this
+    is the only record of its FW losses). `fw_lookup` maps (batch_id, week_label)
+    -> (count, avg_wt_g, cv) for fw_to_og events (the chosen FW batch's state at
     this week). Mutates `state`.
     """
     transfers: list = []
     harvests: list = []
     tranogs: list = []
     warns: list[str] = []
+    fw_balance: dict[str, list[float]] = {}
     for i, ev in enumerate(events, 1):
         if (ev.week or 1) != week:
             continue
@@ -429,10 +434,15 @@ def apply_events_for_week(state, events, week, week_start, week_label=None,
                     state, ev, i, fw[0], fw[1], fw[2], handling_frac,
                     event_date=week_start, out_tranog=tranogs)
                 warns.extend(w)
+                # Record the FW-phase conservation leg for the audit gate:
+                # fw_count entering the transfer must equal placed + culled.
+                rec = fw_balance.setdefault(ev.batch, [0.0, 0.0])
+                rec[0] += fw[0]       # fw_count at the transfer week
+                rec[1] += _culled     # handling mortality + reconcile-to-target cull
         else:
             warns.append(f"MANUAL week {week} event #{i}: unknown type "
                          f"'{ev.type}' — skipped")
-    return transfers, harvests, tranogs, warns
+    return transfers, harvests, tranogs, warns, fw_balance
 
 
 def validate_manual_events(state, events: list[ManualEvent]) -> list[tuple[int, bool, list[str]]]:

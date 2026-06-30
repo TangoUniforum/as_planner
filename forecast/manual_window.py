@@ -135,19 +135,24 @@ def advance_facility_window(state, batch_by_id, tables, forecast_start,
     harvest_events: list = []
     tranog_events: list = []
     warnings: list[str] = []
+    manual_fw_balance: dict[str, list[float]] = {}
     week_start = forecast_start
     for i in range(n_weeks):
         # Operations FIRST (start of the week), then biology, then snapshot —
         # so the end-of-week BatchLocations reflect the post-event, post-growth
         # state and the events date into this week for the continuity audit.
         if events:
-            tr, hv, tn, w = apply_events_for_week(
+            tr, hv, tn, w, fwb = apply_events_for_week(
                 state, events, i + 1, week_start, week_label=labels[i],
                 handling_frac=handling_frac, fw_lookup=fw_lookup)
             transfer_events.extend(tr)
             harvest_events.extend(hv)
             tranog_events.extend(tn)
             warnings.extend(w)
+            for b, (cnt, culled) in fwb.items():
+                rec = manual_fw_balance.setdefault(b, [0.0, 0.0])
+                rec[0] += cnt
+                rec[1] += culled
         wk_realized = advance_facility_one_week(
             state, batch_by_id, tables, week_start, labels[i])
         realized.update(wk_realized)
@@ -160,6 +165,7 @@ def advance_facility_window(state, batch_by_id, tables, forecast_start,
         "harvest_events": harvest_events,
         "tranog_events": tranog_events,
         "transferred_fw_batches": {e.batch_id for e in tranog_events},
+        "manual_fw_balance": manual_fw_balance,
         "warnings": warnings,
         "new_start": week_start,
     }

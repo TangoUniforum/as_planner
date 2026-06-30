@@ -216,6 +216,7 @@ def main(
     prefix_harvests: list = []
     prefix_tranogs: list = []
     transferred_fw: set = set()
+    manual_fw_balance: dict = {}
     manual_warns: list = []
     # The continuity audit anchors each tank's first week to this initial state.
     # The window advances `state` in place to week N+1 (what the pipeline plans
@@ -239,6 +240,7 @@ def main(
         prefix_harvests = _win["harvest_events"]
         prefix_tranogs = _win["tranog_events"]
         transferred_fw = _win["transferred_fw_batches"]
+        manual_fw_balance = _win.get("manual_fw_balance", {})
         manual_warns = _win["warnings"]
         _new_start = _win["new_start"]
         control.forecast_start = _dt_aw(_new_start.year, _new_start.month, _new_start.day)
@@ -753,6 +755,7 @@ def main(
         wb, batches, placement.batch_locations, placement.harvest_events, control,
         tranog_events=placement.tranog_events,
         biology_states_by_batch=states_by_batch,
+        manual_fw_balance=manual_fw_balance,
     )
     write_tank_continuity_audit(
         wb,

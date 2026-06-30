@@ -1426,6 +1426,7 @@ def write_input_conservation_audit(
     control,
     tranog_events=None,
     biology_states_by_batch=None,
+    manual_fw_balance=None,
     sheet_name: str = "InputConservationAudit",
 ) -> None:
     """Input-fish conservation: every stocked batch must have a realized fate.
@@ -1562,8 +1563,15 @@ def write_input_conservation_audit(
         planned_tog = bt.tran_og_count or 0
         realized_tog = tranog_placed.get(bid, 0.0)
         fw_surv = (100.0 * realized_tog / bt.input_count) if (realized_tog and bt.input_count) else None
+        # A manual fw_to_og batch was transferred to OG in the override window at
+        # an OPERATOR-CHOSEN target count — its realized-vs-planned gap is
+        # intentional, NOT an FW-survival calibration miss, so it must not be
+        # mislabeled "FW UNDER/OVER plan" or counted in fw_divergent.
+        _man_fw = (manual_fw_balance or {}).get(bid)
         fw_flag = ""
-        if realized_tog > 0 and planned_tog > 0:
+        if _man_fw is not None:
+            fw_flag = "manual fw_to_og"
+        elif realized_tog > 0 and planned_tog > 0:
             _div = (realized_tog - planned_tog) / planned_tog
             if _div < -_FW_DIVERGENCE_THRESH:
                 fw_flag = "FW UNDER plan"
@@ -1575,6 +1583,14 @@ def write_input_conservation_audit(
         # crossed TranOG in-horizon, so there is a realized seawater entry to
         # reconcile the seed against through the modeled FW losses).
         _fwbase, fwm, fwc = fw_loss.get(bid, (0.0, 0.0, 0.0))
+        if _man_fw is not None and _fwbase <= 0:
+            # Manually transferred FW->OG: the FW phase + cull ran inside the
+            # override window (handling mortality + reconcile-to-target cull),
+            # so this batch has NO FW biology states for the gate above. The
+            # window captured (fw_count_at_transfer, culled); reconcile from
+            # those: fw_count == realized_TranOG (placed) + culled. Reported in
+            # the FW_Cull column (the cull includes handling mortality).
+            _fwbase, fwm, fwc = _man_fw[0], 0.0, _man_fw[1]
         fw_resid = None
         if realized_tog > 0 and _fwbase > 0:
             fw_resid = _fwbase - realized_tog - fwm - fwc

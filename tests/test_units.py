@@ -264,3 +264,106 @@ class TestISOWeekConsistency:
         assert iso_week_label(date(2026, 12, 29)) == "2026-W53"
         # 2027-01-04 (Mon) is in ISO 2027-W01.
         assert iso_week_label(date(2027, 1, 4)) == "2027-W01"
+
+
+class TestManualFwToOgConservation:
+    """The manual FW->OG override (`_apply_fw_to_og`) must conserve fish: the
+    FW count entering the transfer splits exactly into placed + culled, with no
+    fish created or leaked. This identity is what the InputConservation FW
+    mass-balance gate relies on for a manually-transferred batch (which has no
+    FW biology states of its own)."""
+
+    def _state_two_empty_og(self):
+        from datetime import date as _d
+        from forecast.models import FacilityConfig, TankConfig
+        from forecast.state import FacilityState
+        cfg = FacilityConfig(tanks=[
+            TankConfig(location_id="OG2S-26", system_id="OG2S", tank_id=26,
+                       volume_m3=1720, max_density_kg_m3=95,
+                       max_feed_kg_day=3000, type="OG"),
+            TankConfig(location_id="OG4S-44", system_id="OG4S", tank_id=44,
+                       volume_m3=1720, max_density_kg_m3=95,
+                       max_feed_kg_day=3000, type="OG"),
+        ])
+        return FacilityState.from_facility_config(cfg, today=_d(2026, 6, 1))
+
+    def test_culled_plus_placed_equals_fw_count(self):
+        from datetime import date as _d
+        from forecast.manual_events import (
+            ManualEvent, ManualDest, _apply_fw_to_og)
+        s = self._state_two_empty_og()
+        fw_count = 300000.0
+        ev = ManualEvent(type="fw_to_og", week=1, batch="B49", count=250000,
+                         destinations=[ManualDest(tank=26), ManualDest(tank=44)])
+        tranogs = []
+        warns, culled = _apply_fw_to_og(
+            s, ev, 1, fw_count, 370.0, 20.0, 0.0001,
+            event_date=_d(2026, 6, 1), out_tranog=tranogs)
+        placed = sum(d.count for e in tranogs for d in e.destinations)
+        # Conservation identity: nothing created or leaked.
+        assert math.isclose(placed + culled, fw_count, abs_tol=1e-6)
+        # Operator hit the target count exactly.
+        assert math.isclose(placed, 250000, abs_tol=1e-6)
+        # Tanks now hold exactly the placed fish, split across both dests.
+        assert math.isclose(
+            s.tanks_by_id[26].count + s.tanks_by_id[44].count, placed, abs_tol=1e-6)
+
+
+class TestManualFwBalanceAudit:
+    """The InputConservation FW mass-balance gate must reconcile a manual
+    fw_to_og batch from the window-captured (fw_count, culled) — it has no FW
+    biology states, so without this it was silently SKIPPED. It must also be
+    labeled 'manual fw_to_og' (its target gap is intentional), NOT mislabeled as
+    an 'FW UNDER/OVER plan' survival-calibration miss."""
+
+    def _run_audit(self, manual_fw_balance):
+        from datetime import datetime as _dt
+        from types import SimpleNamespace
+        import openpyxl
+        from forecast.events import TranOGEntry, TankAllocation
+        from forecast.models import BatchInput
+        from forecast.excel_io import write_input_conservation_audit
+        wb = openpyxl.Workbook()
+        bt = BatchInput(
+            batch_id="B49", input_date=_dt(2025, 12, 1), input_count=550000,
+            tran_sf_date=None, tran_og_date=_dt(2026, 8, 27),
+            tran_og_count=290000, tran_og_avg_wt_g=370.0, tran_og_cv=16.0,
+            fcr_model="FCR_121_Quick", fw_correction=1.0, sgr_correction=1.0)
+        # B49 placed into seawater at the operator's target (250k), below the
+        # 290k plan — a -14% gap that is intentional, not a calibration miss.
+        blr = SimpleNamespace(batch_id="B49", week_label="2026-W23", count=250000)
+        tog = TranOGEntry(
+            batch_id="B49", event_date=_dt(2026, 6, 1),
+            destinations=[TankAllocation(tank_id=26, count=125000,
+                                         avg_wt_g=455.0, cv_pct=16.0),
+                          TankAllocation(tank_id=44, count=125000,
+                                         avg_wt_g=330.0, cv_pct=16.0)])
+        control = SimpleNamespace(forecast_start=_dt(2026, 6, 1), horizon_weeks=130)
+        write_input_conservation_audit(
+            wb, [bt], [blr], [], control, tranog_events=[tog],
+            biology_states_by_batch=None, manual_fw_balance=manual_fw_balance)
+        ws = wb["InputConservationAudit"]
+        rows = list(ws.iter_rows(values_only=True))
+        hdr = next(r for r in rows if r and r[0] == "Batch")
+        b49 = next(r for r in rows if r and r[0] == "B49")
+        summary = " ".join(str(c) for r in rows[:8] for c in r if c is not None)
+        return dict(zip(hdr, b49)), summary
+
+    def test_manual_cull_reconciled_and_relabeled(self):
+        # fw_count(342,783) == placed(250,000) + culled(92,783) -> residual 0.
+        row, summary = self._run_audit({"B49": [342783.0, 92783.0]})
+        assert row["FW_Flag"] == "manual fw_to_og"
+        assert row["FW_Cull (fish)"] == 92783
+        assert row["FW_Bal_Residual (fish)"] == 0
+        # Intentional target gap must NOT be reported as a calibration divergence.
+        assert "B49" not in summary.split("calibration gap")[-1] \
+            if "calibration gap" in summary else True
+        assert "FW MASS-BALANCE BREACH" not in summary
+
+    def test_wrong_manual_cull_breaches_the_gate(self):
+        # If the cull were under-counted (fish leaked), the residual goes large
+        # and the gate must FLAG it — the safety net the fix restores.
+        row, summary = self._run_audit({"B49": [342783.0, 10000.0]})
+        # residual = 342783 - 250000 - 10000 = 82,783 (>2% of base) -> breach.
+        assert row["FW_Bal_Residual (fish)"] == 82783
+        assert "FW MASS-BALANCE BREACH" in summary
