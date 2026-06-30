@@ -126,6 +126,81 @@ batches then grow/feed differently, producing a different biomass trajectory,
 harvest timing, and peaks. Conservation holds regardless of the models chosen, so
 this is a safe way to stress-test or re-plan.
 
+### 3.4 Manual override window (optional starting-state editor)
+
+Sometimes the PR-hydrated starting state isn't quite the starting point you want
+to forecast from — you want to script a few operational moves first (relocate a
+batch, harvest a tank early, push fish into 6N depuration, or do a specific
+FW→OG transfer), and only **then** let the planner take over. That's what the
+**manual override window** is for.
+
+**Where:** Run mode, the **"🗓 Starting setup — manual override window
+(optional)"** expander above the results (appears once a PR is uploaded). Leave
+it empty to let the planner do everything (the default). What you enter is saved
+to `scenario/manual_events.yaml`.
+
+**How it works:** you script operations **week by week** for weeks 1..N. In each
+scripted week the forecast **executes only your events** (the planner makes no
+decisions that week) and then runs **full biology** — growth, mortality, and
+feed — exactly as the normal engine would. The window length N is implicit: it
+runs through the **last week that has an event**, and the planner takes over the
+week after. Everything you script is **recorded in the reports** (TransferPlan /
+HarvestPlan / feed) and **reconciled by the conservation audits** (§6), so the
+window is fully traceable — it is not a silent pre-run mutation.
+
+> **Starting-state only, not pins.** These events adjust week-0 reality and then
+> the planner builds forward on top. They are **not** future commitments the
+> planner must honour later — once the window ends, the closed-loop controller
+> has full control again.
+
+**The grid** (one row per event):
+
+| Column | Meaning |
+|---|---|
+| **Week** | 1-based forecast week the event fires in (start of that week) |
+| **Type** | one of the four event types below |
+| **Batch** | the FW batch id — **only** for `fw_to_og` |
+| **From tank** | source tank id — for `og_transfer` / `harvest` / `og_to_6n` |
+| **To tanks** | destination tank id(s), comma-separated; use `tank:count` to send an explicit count to a tank, or a bare `tank` to split the row's Count evenly across the bare tanks |
+| **Count / target** | `harvest` = fish to harvest (blank = whole tank); `og_transfer` / `og_to_6n` = split across To tanks; `fw_to_og` = the **target** count entering seawater (the engine culls down to it) |
+| **Notes** | free text |
+
+**The four event types:**
+
+- **`og_transfer`** — move/split OG fish from `From tank` into one or more
+  `To tanks` (same batch). Pure relocation; the destination inherits the source
+  weight. Count conserved exactly.
+- **`harvest`** — directly harvest `Count` fish from `From tank` (blank = the
+  whole tank), recorded as a real harvest in that week.
+- **`og_to_6n`** — move OG fish from `From tank` into one or more **6N
+  depuration tanks** (must be 6N tanks: 61, 63, 65, 67, 69, 71). The destination
+  is frozen **off-feed** (no growth, no feed) for depuration.
+- **`fw_to_og`** — a manual FW→OG transfer (TranOG) of `Batch` into your chosen
+  **empty OG** `To tanks`, with `Count` as the **target** entering seawater. The
+  engine applies the same logic as the automatic pipeline: handling mortality,
+  then a reconcile-to-target **cull**, then the big/small size-class split across
+  your tanks. The cull is surfaced in the **ValidationLog** and reconciled in the
+  **InputConservationAudit** FW mass-balance, so no fish go unaccounted.
+
+**Reject-at-entry validation.** As you edit, each event is dry-run against your
+uploaded PR using the **same** projection the real run uses. Infeasible events
+are listed (e.g. *"batch B45 is not in freshwater at week 1"*, *"target exceeds
+available FW"*, *"dest not empty"*) and the **Save** button is disabled until
+they're fixed. A valid window shows *"All N event(s) feasible against the
+uploaded PR."*
+
+**Rules / limits:**
+- `fw_to_og` destinations must be **empty OG tanks**, and the batch must still be
+  **in freshwater** at the event's week (you can't FW→OG a batch that's already
+  crossed to seawater).
+- The window must be **shorter than the forecast horizon** — a window as long as
+  the whole horizon is rejected (the planner needs weeks left to plan).
+- Conservation is enforced end-to-end: every event is counted in the audits, and
+  a mis-stated `fw_to_og` cull would now **breach** the FW mass-balance gate.
+  *(One benign known approximation: 6N depuration mortality is slightly
+  under-counted in the per-tank continuity audit — within the 50-fish tolerance;
+  see §6.)*
+
 ---
 
 ## 4. The closed-loop harvest controller (and how to tune it)
@@ -345,6 +420,14 @@ mode (see `tests/test_coordinator_regression.py`):
    beyond ~2% (the band absorbs the FW→SW transition week) flags in
    `InputConservationAudit`. Reconciles from each batch's first projected FW count, not
    the egg seed — the egg→startfeed phase is pre-horizon for in-flight batches.
+
+> **One benign accounting approximation (6N depuration).** Off-feed depuration
+> (STARVE) tank-weeks take real mortality, but the per-tank continuity audit
+> treats it as ~0 — a few-fish-per-week under-count that stays within the
+> 50-fish per-row tolerance (#1) and nets out facility-wide. It is deliberately
+> left as-is: "correcting" it destabilises the facility-level count balance (#3)
+> because it cancels a small opposite approximation elsewhere in the pipeline.
+> Not a leak, and harmless to plans — flagged here only for full honesty.
 
 ### The one standing limitation (be honest about it)
 **"0 drift" proves *bookkeeping* consistency, not *model* correctness.** The audits
