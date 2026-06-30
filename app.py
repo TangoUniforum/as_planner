@@ -584,6 +584,161 @@ def _edit_batches():
         st.rerun()
 
 
+# ============================================================
+# Manual override window editor (Run mode) — script week-by-week
+# operations the forecast EXECUTES before the planner takes over.
+# ============================================================
+
+_MANUAL_COLS = ["week", "type", "batch", "from_tank", "to_tanks", "count", "notes"]
+
+
+def _hydrate_state_from_upload(uploaded):
+    """Hydrate a FacilityState from the uploaded PR (cached by content hash), so
+    the editor can populate tank/batch context + dry-run validate events.
+    Returns (state, fw_records)."""
+    import hashlib
+    import io
+    data = uploaded.getvalue()
+    ck = "_hydrated_" + hashlib.md5(data).hexdigest()
+    if ck in st.session_state:
+        return st.session_state[ck]
+    from openpyxl import load_workbook
+    from datetime import datetime as _dt, timedelta as _td
+    from forecast.config_io import load_config
+    from forecast.scenario_io import load_batches
+    from forecast.production_report import read_production_report, hydrate_facility_state
+    from forecast.state import FacilityState
+    wb = load_workbook(io.BytesIO(data), data_only=True,
+                       keep_vba=str(uploaded.name).lower().endswith(".xlsm"))
+    control, tables, facility = load_config(CONFIG_DIR)
+    batches = load_batches(SCENARIO_DIR)
+    pc, og, fw = read_production_report(wb)
+    fs = _dt(pc.year, pc.month, pc.day) + _td(days=1)
+    state = FacilityState.from_facility_config(facility, today=fs.date())
+    hydrate_facility_state(state, og, batches)
+    st.session_state[ck] = (state, fw)
+    return state, fw
+
+
+def _manual_events_to_df_rows(events):
+    rows = []
+    for e in events:
+        to_tanks = ",".join(str(d.tank) for d in e.destinations)
+        if e.type in ("og_transfer", "og_to_6n"):
+            cnts = [d.count for d in e.destinations if d.count is not None]
+            count = sum(cnts) if cnts else None
+        else:
+            count = e.count
+        rows.append({"week": e.week, "type": e.type, "batch": e.batch or "",
+                     "from_tank": e.from_tank, "to_tanks": to_tanks,
+                     "count": count, "notes": e.notes})
+    return rows
+
+
+def _rows_to_manual_events(rows):
+    """Flat editor rows -> list[ManualEvent]. `count` = total to move (split
+    evenly across to_tanks) for transfer/6N; = target for fw_to_og; = amount for
+    harvest."""
+    from forecast.manual_events import ManualEvent, ManualDest
+    out = []
+    for r in rows:
+        typ = str(r.get("type") or "").strip()
+        if not typ:
+            continue
+        week = int(r.get("week") or 1)
+        batch = str(r.get("batch")).strip() if r.get("batch") else None
+        ft = r.get("from_tank")
+        from_tank = int(ft) if ft not in (None, "") else None
+        cnt = r.get("count")
+        count = float(cnt) if cnt not in (None, "") else None
+        to_tanks = [int(float(t)) for t in str(r.get("to_tanks") or "").replace(" ", "").split(",") if t]
+        notes = str(r.get("notes") or "")
+        if typ in ("og_transfer", "og_to_6n"):
+            n = len(to_tanks) or 1
+            dests = [ManualDest(tank=t, count=(count / n if count is not None else None))
+                     for t in to_tanks]
+            out.append(ManualEvent(type=typ, week=week, from_tank=from_tank,
+                                   destinations=dests, batch=batch, notes=notes))
+        elif typ == "harvest":
+            out.append(ManualEvent(type=typ, week=week, from_tank=from_tank,
+                                   count=count, batch=batch, notes=notes))
+        elif typ == "fw_to_og":
+            dests = [ManualDest(tank=t) for t in to_tanks]
+            out.append(ManualEvent(type=typ, week=week, batch=batch, count=count,
+                                   destinations=dests, notes=notes))
+        else:
+            out.append(ManualEvent(type=typ, week=week, notes=notes))
+    return out
+
+
+def _manual_window_editor(uploaded):
+    """Run-mode editor: author the week-by-week override window, validated
+    against the uploaded PR, saved to scenario/manual_events.yaml (which the run
+    reads). No Excel sheets involved."""
+    from forecast.manual_events import (
+        load_manual_events, dump_manual_events, validate_manual_events)
+    with st.expander("🗓 Starting setup — manual override window (optional)",
+                     expanded=False):
+        st.caption(
+            "Script operations week by week — the forecast EXECUTES them with full "
+            "biology (growth/mortality/feed), records them in the reports, then the "
+            "planner takes over after your last scripted week. Leave empty to let "
+            "the planner do everything.")
+        st.caption(
+            "**og_transfer**: from_tank → to_tanks (count split evenly) · "
+            "**harvest**: from_tank, count · **og_to_6n**: from_tank → 6N to_tanks · "
+            "**fw_to_og**: batch + count=target → to_tanks.")
+        base = _persist("manual_df", lambda: pd.DataFrame(
+            _manual_events_to_df_rows(load_manual_events(SCENARIO_DIR)),
+            columns=_MANUAL_COLS))
+        edited = st.data_editor(
+            base, num_rows="dynamic", hide_index=True, use_container_width=True,
+            key="manual_df_w",
+            column_config={
+                "week": st.column_config.NumberColumn("Week", min_value=1, step=1,
+                    help="1-based forecast week the event fires in"),
+                "type": st.column_config.SelectboxColumn("Type",
+                    options=["og_transfer", "harvest", "og_to_6n", "fw_to_og"]),
+                "batch": st.column_config.TextColumn("Batch", help="FW batch (fw_to_og)"),
+                "from_tank": st.column_config.NumberColumn("From tank", step=1),
+                "to_tanks": st.column_config.TextColumn("To tanks",
+                    help="comma-separated tank IDs"),
+                "count": st.column_config.NumberColumn("Count / target", step=1000),
+                "notes": st.column_config.TextColumn("Notes"),
+            })
+        events = _rows_to_manual_events(_records(edited))
+        bad = []
+        if events:
+            try:
+                state, _fw = _hydrate_state_from_upload(uploaded)
+                for i, ok, msgs in validate_manual_events(state, events):
+                    if not ok:
+                        bad.append((i, msgs))
+                if bad:
+                    st.warning(f"{len(bad)} event(s) infeasible against the uploaded PR "
+                               f"— fix before saving:")
+                    for i, msgs in bad:
+                        st.caption(f"• event #{i}: " + "; ".join(msgs))
+                else:
+                    st.success(f"All {len(events)} event(s) feasible against the uploaded PR.")
+            except Exception as e:  # noqa: BLE001
+                st.info(f"Validation unavailable ({type(e).__name__}: {e}); save still allowed.")
+        c1, c2, _ = st.columns([1, 1, 3])
+        if c1.button("💾 Save window", key="save_manual", disabled=bool(bad),
+                     help="Reject-at-entry: disabled while any event is infeasible."):
+            try:
+                dump_manual_events(SCENARIO_DIR, events)
+                _reset_keys("manual_df")
+                st.success(f"Saved scenario/manual_events.yaml ({len(events)} event(s)). "
+                           f"Click ▶ Run forecast.")
+                st.rerun()
+            except Exception as e:  # noqa: BLE001
+                st.error(f"Save failed: {e}")
+        if c2.button("↻ Reload", key="reload_manual"):
+            _reset_keys("manual_df")
+            st.rerun()
+
+
 def _og_systems_app():
     """OG system ids from facility config, or the standard 12 default."""
     try:
@@ -1947,6 +2102,11 @@ if app_mode.startswith("Tune"):
 if app_mode.startswith("Optimize"):
     _optimizer()
     st.stop()
+
+
+# ---- Run mode: manual override window editor (above the run results) ----
+if uploaded is not None:
+    _manual_window_editor(uploaded)
 
 
 # ============================================================
