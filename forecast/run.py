@@ -203,6 +203,13 @@ def main(
     manual_events = load_manual_events(scenario_dir)
     _ev_max_week = max((e.week or 1) for e in manual_events) if manual_events else 0
     window_n = max(advance_weeks or 0, _ev_max_week)
+    # The FW in-flight projection must cover the prefix window weeks (1..N) so
+    # those weeks get FW growth + feed. It uses the ORIGINAL start + horizon
+    # (captured here, before the window shifts control.forecast_start for the OG
+    # pipeline). The extra prefix FW states only reach the feed reports — the
+    # scheduler/placement key off the shifted (post-window) week labels.
+    _fw_proj_fs = control.forecast_start
+    _fw_proj_horizon = control.horizon_weeks
     prefix_realized: dict = {}
     prefix_batch_locations: list = []
     prefix_transfers: list = []
@@ -326,8 +333,11 @@ def main(
         if agg["count"] <= 0:
             continue
         avg_wt_g = agg["biomass_kg"] * 1000.0 / agg["count"]
+        import dataclasses as _dc_fw
+        _fw_control = _dc_fw.replace(
+            control, forecast_start=_fw_proj_fs, horizon_weeks=_fw_proj_horizon)
         fw_states, fw_resids, fw_splits = project_in_flight_fw_batch(
-            b_meta, tables, control, agg["count"], avg_wt_g, pr_closing
+            b_meta, tables, _fw_control, agg["count"], avg_wt_g, pr_closing
         )
         in_flight_states.extend(fw_states)
         fw_in_flight_residuals.extend(fw_resids)
