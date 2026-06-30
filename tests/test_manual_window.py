@@ -124,3 +124,29 @@ class TestFaithfulFwToOgValidation:
                          destinations=[ManualDest(tank=dests[0])])
         (i, ok, msgs), = validate_manual_events(state, [ev])  # no ctx
         assert ok, msgs  # structural-only: dest is empty OG, so it passes
+
+
+class TestWindowHorizonGuard:
+    """A manual override window as long as (or longer than) the forecast horizon
+    leaves the planner no weeks to plan; the run must reject it, not silently
+    clamp the post-window horizon to 1 week."""
+
+    def test_window_at_or_beyond_horizon_is_rejected(self, tmp_path):
+        import shutil
+        import forecast.run as run_mod
+        sdir = tmp_path / "scenario"
+        shutil.copytree(SCENARIO_DIR, sdir)
+        # A harvest event at a week far beyond any plausible horizon forces
+        # window_n >= horizon_weeks.
+        (sdir / "manual_events.yaml").write_text(
+            "events:\n"
+            "  - type: harvest\n"
+            "    week: 9999\n"
+            "    from_tank: 35\n"
+            "    count: 1000\n")
+        wb = tmp_path / "Forecast.xlsm"
+        shutil.copy(WORKBOOK, wb)
+        out = tmp_path / "out.xlsm"
+        with pytest.raises(ValueError, match="horizon"):
+            run_mod.main(str(wb), output_path=str(out),
+                         config_dir=str(CONFIG_DIR), scenario_dir=str(sdir))

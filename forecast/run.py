@@ -224,6 +224,17 @@ def main(
     # prefix weeks (which open from the PR) reconcile against the wrong opening.
     audit_initial_state = state
     if window_n > 0:
+        # Reject a window that is as long as (or longer than) the whole forecast:
+        # the planner needs at least one week after the window to plan, else the
+        # post-window horizon silently clamped to 1 (max(1, horizon - window_n))
+        # and the run no longer reflected the requested terms. Fail fast.
+        if window_n >= control.horizon_weeks:
+            raise ValueError(
+                f"Manual override window ({window_n} week(s)) is >= the forecast "
+                f"horizon ({control.horizon_weeks} week(s)) — no weeks left for "
+                f"the planner. Shorten the window (last event week / "
+                f"--advance-weeks) to at most {control.horizon_weeks - 1} week(s), "
+                f"or extend the horizon.")
         import copy as _copy_aw
         audit_initial_state = _copy_aw.deepcopy(state)
         from .manual_window import advance_facility_window
