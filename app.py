@@ -614,10 +614,24 @@ def _hydrate_state_from_upload(uploaded):
     batches = load_batches(SCENARIO_DIR)
     pc, og, fw = read_production_report(wb)
     fs = _dt(pc.year, pc.month, pc.day) + _td(days=1)
+    # Mirror the real run: the PR closing date is the forecast start (run.py
+    # DetectForecastStart). The faithful manual-event validation needs it on
+    # control so its FW projection anchors to the same week the run will.
+    control.forecast_start = fs
     state = FacilityState.from_facility_config(facility, today=fs.date())
     hydrate_facility_state(state, og, batches)
-    st.session_state[ck] = (state, fw)
-    return state, fw
+    # Run-time context so the editor can validate events FAITHFULLY (per-week
+    # biology + the FW projection for fw_to_og), matching forecast/run.py.
+    ctx = {
+        "batch_by_id": {b.batch_id: b for b in batches},
+        "tables": tables,
+        "forecast_start": fs.date(),
+        "control": control,
+        "pr_closing": pc,
+        "fw_records": fw,
+    }
+    st.session_state[ck] = (state, fw, ctx)
+    return state, fw, ctx
 
 
 def _manual_events_to_df_rows(events):
@@ -722,8 +736,8 @@ def _manual_window_editor(uploaded):
         bad = []
         if events:
             try:
-                state, _fw = _hydrate_state_from_upload(uploaded)
-                for i, ok, msgs in validate_manual_events(state, events):
+                state, _fw, _ctx = _hydrate_state_from_upload(uploaded)
+                for i, ok, msgs in validate_manual_events(state, events, **_ctx):
                     if not ok:
                         bad.append((i, msgs))
                 if bad:

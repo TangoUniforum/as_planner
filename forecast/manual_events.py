@@ -445,36 +445,117 @@ def apply_events_for_week(state, events, week, week_start, week_label=None,
     return transfers, harvests, tranogs, warns, fw_balance
 
 
-def validate_manual_events(state, events: list[ManualEvent]) -> list[tuple[int, bool, list[str]]]:
-    """Dry-run each event against a COPY of the hydrated state for reject-at-entry.
+def _validate_fw_to_og_structural(scratch, ev) -> list[str]:
+    """Cheap structural checks for an fw_to_og (dest tanks empty OG + batch set)
+    that don't need the FW projection. Shared by both validation paths."""
+    w: list[str] = []
+    for d in ev.destinations:
+        t = scratch.tanks_by_id.get(d.tank)
+        if t is None:
+            w.append(f"unknown dest tank #{d.tank}")
+        elif t.type != "OG":
+            w.append(f"dest #{d.tank} is not an OG tank")
+        elif not t.is_empty:
+            w.append(f"dest {t.location_id} not empty (holds {t.batch_id})")
+    if not ev.batch:
+        w.append("fw_to_og requires a FW batch")
+    return w
 
-    Applies events cumulatively to a deep copy (so event N sees the effect of
-    1..N-1, matching the real run) without mutating the caller's state. Returns
-    one (index, ok, messages) tuple per event; ok=False means the event was
-    refused or produced a warning the UI should surface before saving.
+
+def validate_manual_events(state, events: list[ManualEvent], *,
+                           batch_by_id=None, tables=None, forecast_start=None,
+                           control=None, pr_closing=None, fw_records=None,
+                           ) -> list[tuple[int, bool, list[str]]]:
+    """Dry-run each event for reject-at-entry, FAITHFUL to the real override
+    window when the run-time context is supplied.
+
+    The run (manual_window.advance_facility_window) applies events PER WEEK with
+    biology (growth/mortality) advancing between weeks, and an fw_to_og only
+    fires if its batch is still in freshwater at that week (the FW projection).
+    Validation must mirror that, or it accepts events that misbehave on the run:
+      * events are sequenced by their `week` (NOT list order) with a biology
+        advance between weeks, so a week-k event is checked against grown
+        weights (matters for weight-gated rules like the 1 kg-lock);
+      * fw_to_og is checked against the SAME FW projection — the batch must be
+        in freshwater at its week and the target count must be feasible.
+
+    Pass batch_by_id/tables/forecast_start/control (and pr_closing/fw_records
+    for fw_to_og) for the faithful path. Without them it falls back to the
+    legacy single-pass frozen-week-0 structural check (still catches dest/INV
+    errors) and leaves fw_to_og feasibility to run time. Returns one
+    (index, ok, messages) tuple per event in input order; applies to a COPY so
+    the caller's state is never mutated.
     """
+    from datetime import timedelta as _td
     scratch = copy.deepcopy(state)
-    results: list[tuple[int, bool, list[str]]] = []
-    for i, ev in enumerate(events, 1):
+    faithful = (batch_by_id is not None and tables is not None
+                and forecast_start is not None and control is not None)
+    handling_frac = ((control.handling_mortality_pct / 100.0)
+                     if control is not None else 0.0)
+
+    fw_lookup: dict = {}
+    labels: list[str] = []
+    if faithful:
+        from .manual_window import _build_fw_lookup, advance_facility_one_week
+        from .time_grid import forecast_week_labels
+        if fw_records is not None:
+            fw_lookup = _build_fw_lookup(
+                events, fw_records, control, pr_closing, tables, batch_by_id)
+        _max_week = max((e.week or 1) for e in events) if events else 0
+        labels = forecast_week_labels(forecast_start, max(_max_week, 1))
+
+    def _apply_one(ev, i, week_label, week_start) -> list[str]:
         if ev.type == TYPE_OG_TRANSFER:
-            w = _apply_og_transfer(scratch, ev, i)
-        elif ev.type == TYPE_HARVEST:
-            w = _apply_harvest(scratch, ev, i)
-        elif ev.type == TYPE_OG_TO_6N:
-            w = _apply_og_to_6n(scratch, ev, i)
-        elif ev.type == TYPE_FW_TO_OG:
-            # Full feasibility needs the run-time FW projection; here just check
-            # the destination tanks are empty OG tanks.
-            w = []
-            for d in ev.destinations:
-                t = scratch.tanks_by_id.get(d.tank)
-                if t is None:
-                    w.append(f"unknown dest tank #{d.tank}")
-                elif t.type != "OG":
-                    w.append(f"dest #{d.tank} is not an OG tank")
-                elif not t.is_empty:
-                    w.append(f"dest {t.location_id} not empty")
-        else:
-            w = [f"unknown type '{ev.type}'"]
-        results.append((i, not w, w))
-    return results
+            return _apply_og_transfer(scratch, ev, i, event_date=week_start)
+        if ev.type == TYPE_HARVEST:
+            return _apply_harvest(scratch, ev, i, event_date=week_start)
+        if ev.type == TYPE_OG_TO_6N:
+            return _apply_og_to_6n(scratch, ev, i, event_date=week_start)
+        if ev.type == TYPE_FW_TO_OG:
+            w = _validate_fw_to_og_structural(scratch, ev)
+            if not faithful:
+                return w  # feasibility deferred to run (legacy behavior)
+            if not ev.batch:
+                return w
+            fw = fw_lookup.get((ev.batch, week_label))
+            if fw is None:
+                w.append(f"batch {ev.batch} is not in freshwater at week "
+                         f"{ev.week or 1} — no FW state to transfer (already past "
+                         f"TranOG, or not an in-flight FW batch)")
+                return w
+            avail = fw[0] * (1.0 - handling_frac)
+            if ev.count and ev.count > avail + 0.5:
+                w.append(f"target {ev.count:,.0f} fish exceeds available FW "
+                         f"{avail:,.0f} at week {ev.week or 1}")
+            if w:
+                return w
+            # Apply so later weeks' events see the placed fish (faithful). The
+            # "MANUAL CULL ..." note _apply_fw_to_og emits is informational
+            # traceability (a cull to hit the target is EXPECTED on a valid
+            # transfer), NOT a feasibility failure — drop it so it doesn't block.
+            wa, _culled = _apply_fw_to_og(
+                scratch, ev, i, fw[0], fw[1], fw[2], handling_frac,
+                event_date=week_start, out_tranog=[])
+            return [m for m in wa if not m.startswith("MANUAL CULL")]
+        return [f"unknown type '{ev.type}'"]
+
+    msgs_by_idx: dict[int, list[str]] = {}
+    if faithful:
+        _max_week = max((e.week or 1) for e in events) if events else 0
+        week_start = forecast_start
+        for wk in range(1, _max_week + 1):
+            lbl = labels[wk - 1]
+            for i, ev in enumerate(events, 1):
+                if (ev.week or 1) != wk:
+                    continue
+                msgs_by_idx[i] = _apply_one(ev, i, lbl, week_start)
+            # Advance biology one week so the next week's events see grown fish.
+            advance_facility_one_week(scratch, batch_by_id, tables, week_start, lbl)
+            week_start = week_start + _td(days=7)
+    else:
+        # Legacy single pass in list order on the frozen week-0 state.
+        for i, ev in enumerate(events, 1):
+            msgs_by_idx[i] = _apply_one(ev, i, None, state.today)
+
+    return [(i, not msgs_by_idx.get(i, []), msgs_by_idx.get(i, []))
+            for i, _ev in enumerate(events, 1)]
