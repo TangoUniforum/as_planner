@@ -1,4 +1,2 @@
-# Manual starting-state events (operator-authored). Applied to the
-# PR-hydrated week-0 state BEFORE the forecast runs forward. See
-# forecast/manual_events.py. Starting-state only (not future pins).
+# Manual override window (operator-authored). Empty by default.
 events: []

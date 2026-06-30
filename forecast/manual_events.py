@@ -375,6 +375,14 @@ def _apply_fw_to_og(state, ev: ManualEvent, idx: int, fw_count, fw_avg_wt_g,
     warns.extend(f"{tag}: {w}" for w in entry.apply(state))
     if out_tranog is not None:
         out_tranog.append(entry)
+    # Traceability: surface the manual TranOG cull as a labelled audit entry
+    # (the engine's own FW culls show in the biology cull columns; this manual
+    # FW->OG cull happens outside that path, so record it explicitly).
+    if culled > 0:
+        warns.append(
+            f"MANUAL CULL — fw_to_og {batch_id} week {ev.week}: culled "
+            f"{culled:,.0f} fish (handling-mortality + reconcile to target "
+            f"{target:,.0f}); placed {cnt:,.0f} into OG tanks {tanks}")
     print(f"    {tag}: TranOG {cnt:,.0f} fish of {batch_id} -> OG tanks {tanks} "
           f"(culled {culled:,.0f} to hit target {target})")
     return warns, culled
