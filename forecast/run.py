@@ -191,42 +191,52 @@ def main(
         for w in inv_warns:
             print(f"    - {w}")
 
-    # ----- Manual starting-state events (operator-authored) -----
-    # Applied to the PR-hydrated week-0 state BEFORE the forecast runs forward
-    # (augment-the-PR, starting-state-only). Reuses events.py .apply(), so a
-    # refused event leaves the source intact — no fish lost. The planner then
-    # builds forward on top of the adjusted start. See forecast/manual_events.py.
-    from .manual_events import load_manual_events, apply_manual_events
+    # ----- Manual override window (operator-authored) -----
+    # Script operations week by week for weeks 1..N: the window EXECUTES your
+    # events (transfers/harvests, recorded) + REAL biology, produces the state at
+    # week N+1, then the normal pipeline plans forward from there. The OG
+    # in-flight projection re-anchors automatically (it reads the advanced
+    # `state` below). Window length N is implicit (last week with an event);
+    # --advance-weeks can extend it with pure-biology weeks. The prefix weeks are
+    # stitched into the output near the writers. See forecast/manual_window.py.
+    from .manual_events import load_manual_events
     manual_events = load_manual_events(scenario_dir)
-    manual_warns = apply_manual_events(state, manual_events)
-    if manual_events:
-        print(f"\n  Manual starting events: {len(manual_events)} event(s) applied "
-              f"({len(manual_warns)} warning(s))")
-        for w in manual_warns:
-            print(f"    - {w}")
-
-    # ----- Manual override window (Phase A: advance state through weeks 1..N) -----
-    # Advance the facility through `advance_weeks` of REAL biology (reusing the
-    # engine's per-week daily walk), then shift forecast_start + shrink the
-    # horizon so the normal pipeline plans forward from the advanced state. The
-    # OG in-flight projection re-anchors automatically (it reads the advanced
-    # `state`, below). Phase A = pure biology (no operations / no in-window
-    # TranOG); operations + report stitching + FW re-anchoring land in B/A2.
+    _ev_max_week = max((e.week or 1) for e in manual_events) if manual_events else 0
+    window_n = max(advance_weeks or 0, _ev_max_week)
     prefix_realized: dict = {}
     prefix_batch_locations: list = []
-    if advance_weeks and advance_weeks > 0:
+    prefix_transfers: list = []
+    prefix_harvests: list = []
+    manual_warns: list = []
+    # The continuity audit anchors each tank's first week to this initial state.
+    # The window advances `state` in place to week N+1 (what the pipeline plans
+    # from), so the audit must keep the ORIGINAL PR-hydrated anchor — else the
+    # prefix weeks (which open from the PR) reconcile against the wrong opening.
+    audit_initial_state = state
+    if window_n > 0:
+        import copy as _copy_aw
+        audit_initial_state = _copy_aw.deepcopy(state)
         from .manual_window import advance_facility_window
         from datetime import datetime as _dt_aw
         _bbi = {b.batch_id: b for b in batches}
         _fs0 = (control.forecast_start.date()
                 if hasattr(control.forecast_start, "date") else control.forecast_start)
-        prefix_realized, prefix_batch_locations, _new_start = advance_facility_window(
-            state, _bbi, tables, _fs0, advance_weeks)
+        _win = advance_facility_window(
+            state, _bbi, tables, _fs0, window_n, events=manual_events)
+        prefix_realized = _win["realized_biology"]
+        prefix_batch_locations = _win["batch_locations"]
+        prefix_transfers = _win["transfer_events"]
+        prefix_harvests = _win["harvest_events"]
+        manual_warns = _win["warnings"]
+        _new_start = _win["new_start"]
         control.forecast_start = _dt_aw(_new_start.year, _new_start.month, _new_start.day)
-        control.horizon_weeks = max(1, control.horizon_weeks - advance_weeks)
-        print(f"\n  Manual override window: advanced {advance_weeks} week(s) of biology; "
-              f"forecast now opens {_new_start} (horizon {control.horizon_weeks}w). "
-              f"Captured {len(prefix_batch_locations)} prefix BatchLocations rows.")
+        control.horizon_weeks = max(1, control.horizon_weeks - window_n)
+        print(f"\n  Manual override window: {window_n} week(s) "
+              f"({len(prefix_transfers)} transfer + {len(prefix_harvests)} harvest "
+              f"event(s), {len(manual_warns)} warning(s)); forecast now opens "
+              f"{_new_start} (horizon {control.horizon_weeks}w).")
+        for w in manual_warns:
+            print(f"    - {w}")
 
     # ----- Caps -----
     fs_date = control.forecast_start.date() if hasattr(control.forecast_start, "date") else control.forecast_start
@@ -566,8 +576,11 @@ def main(
     if prefix_batch_locations:
         placement.batch_locations = prefix_batch_locations + placement.batch_locations
         placement.realized_biology.update(prefix_realized)
-        print(f"  Stitched {len(prefix_batch_locations)} prefix BatchLocations rows "
-              f"(manual override window) into the output.")
+        placement.transfer_events = prefix_transfers + placement.transfer_events
+        placement.harvest_events = prefix_harvests + placement.harvest_events
+        print(f"  Stitched manual override window into the output: "
+              f"{len(prefix_batch_locations)} BatchLocations rows, "
+              f"{len(prefix_transfers)} transfer + {len(prefix_harvests)} harvest events.")
 
     # Write the plan outputs from Stage 2 placement.
     write_batch_locations(wb, placement.batch_locations)
@@ -703,7 +716,7 @@ def main(
         placement.transfer_events,
         placement.grade_events,
         placement.tranog_events,
-        state,
+        audit_initial_state,
         realized_biology=placement.realized_biology,
     )
     # Realized per-system biomass + feed vs the SystemLimits caps. The engine

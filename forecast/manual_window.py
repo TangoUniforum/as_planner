@@ -76,26 +76,46 @@ def advance_facility_one_week(state, batch_by_id, tables, week_start_date,
 
 
 def advance_facility_window(state, batch_by_id, tables, forecast_start,
-                            n_weeks):
-    """Advance the facility `n_weeks` of pure biology from `forecast_start`.
+                            n_weeks, events=None):
+    """Run the manual override window: `n_weeks` of (operator events + biology).
 
-    Returns (realized_biology, new_forecast_start) where new_forecast_start is
-    the date that opens week N (i.e. forecast_start + n_weeks*7 days) — the
-    point the forward pipeline takes over. `realized_biology` aggregates every
-    advanced (tank, week, batch) so the prefix weeks can be stitched into the
-    continuity audit later (Phase B).
+    For each week k in 1..N: apply the operator's events scheduled for week k
+    (transfers/harvests, recorded), advance 7 days of biology, snapshot
+    BatchLocations. Returns a dict with realized_biology, batch_locations,
+    transfer_events, harvest_events, warnings, and new_start (the date that
+    opens week N+1 — where the forward pipeline takes over). All of it stitches
+    into the output so the window weeks are visible + audited.
 
     Phase A: pure biology only — assumes no TranOG arrival and no operations
     inside the window (callers must keep N small enough, validated upstream).
     """
+    from .manual_events import apply_events_for_week
     labels = forecast_week_labels(forecast_start, n_weeks)
     realized: dict[tuple[int, str, str], list[float]] = {}
     batch_locations: list = []
+    transfer_events: list = []
+    harvest_events: list = []
+    warnings: list[str] = []
     week_start = forecast_start
     for i in range(n_weeks):
+        # Operations FIRST (start of the week), then biology, then snapshot —
+        # so the end-of-week BatchLocations reflect the post-event, post-growth
+        # state and the events date into this week for the continuity audit.
+        if events:
+            tr, hv, w = apply_events_for_week(state, events, i + 1, week_start)
+            transfer_events.extend(tr)
+            harvest_events.extend(hv)
+            warnings.extend(w)
         wk_realized = advance_facility_one_week(
             state, batch_by_id, tables, week_start, labels[i])
         realized.update(wk_realized)
         batch_locations.extend(_snapshot_week(state, labels[i], week_start))
         week_start = week_start + timedelta(days=7)
-    return realized, batch_locations, week_start
+    return {
+        "realized_biology": realized,
+        "batch_locations": batch_locations,
+        "transfer_events": transfer_events,
+        "harvest_events": harvest_events,
+        "warnings": warnings,
+        "new_start": week_start,
+    }

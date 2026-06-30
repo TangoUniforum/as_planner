@@ -63,6 +63,7 @@ class ManualDest:
 @dataclass
 class ManualEvent:
     type: str
+    week: int = 1                            # 1-based forecast week the event fires in (the override window)
     from_tank: Optional[int] = None          # source tank id (og_transfer / harvest / og_to_6n)
     destinations: list[ManualDest] = field(default_factory=list)
     count: Optional[float] = None            # harvest amount; None = harvest the whole tank
@@ -78,6 +79,7 @@ def manual_events_to_list(events: list[ManualEvent]) -> list[dict]:
     for e in events:
         out.append({
             "type": e.type,
+            "week": e.week,
             "from_tank": e.from_tank,
             "destinations": [
                 {"tank": d.tank, "count": d.count, "avg_wt_g": d.avg_wt_g}
@@ -106,6 +108,7 @@ def manual_events_from_list(data: list[dict]) -> list[ManualEvent]:
         cnt = d.get("count")
         out.append(ManualEvent(
             type=str(d["type"]),
+            week=int(d.get("week") or 1),
             from_tank=(int(ft) if ft is not None else None),
             destinations=dests,
             count=(float(cnt) if cnt is not None else None),
@@ -140,7 +143,8 @@ def dump_manual_events(scenario_dir, events: list[ManualEvent]) -> None:
 
 # ---------- application to the starting state ----------
 
-def _apply_og_transfer(state, ev: ManualEvent, idx: int) -> list[str]:
+def _apply_og_transfer(state, ev: ManualEvent, idx: int,
+                       event_date=None, out_events=None) -> list[str]:
     """Apply one OG->OG transfer/split to the hydrated state.
 
     Reuses events.Transfer.apply(), which enforces INV-1/INV-4/reserved and is
@@ -183,7 +187,8 @@ def _apply_og_transfer(state, ev: ManualEvent, idx: int) -> list[str]:
     total = sum(a.count for a in allocs)
     leaves_empty = abs(total - src.count) < 0.5
     tr = Transfer(
-        batch_id=batch_id, event_date=state.today, source_tank_id=ev.from_tank,
+        batch_id=batch_id, event_date=(event_date or state.today),
+        source_tank_id=ev.from_tank,
         destinations=allocs, leaves_source_empty=leaves_empty)
     warns.extend(f"{tag}: {w}" for w in tr.apply(state))
 
@@ -191,6 +196,8 @@ def _apply_og_transfer(state, ev: ManualEvent, idx: int) -> list[str]:
         warns.append(f"{tag}: moved 0 fish (all destinations refused) — "
                      f"batch {batch_id} stays in tank #{ev.from_tank}")
     else:
+        if out_events is not None:
+            out_events.append(tr)
         dest_ids = [d.tank for d in ev.destinations]
         print(f"    {tag}: moved {tr.count_transferred:,.0f} fish of batch "
               f"{batch_id} from tank #{ev.from_tank} -> tanks {dest_ids}"
@@ -198,11 +205,12 @@ def _apply_og_transfer(state, ev: ManualEvent, idx: int) -> list[str]:
     return warns
 
 
-def _apply_harvest(state, ev: ManualEvent, idx: int) -> list[str]:
-    """Apply one direct starting-state harvest via events.Harvest.
+def _apply_harvest(state, ev: ManualEvent, idx: int,
+                   event_date=None, out_events=None) -> list[str]:
+    """Apply one direct harvest via events.Harvest.
 
-    Removes `count` fish (None = the whole tank) from the source. The fish are
-    taken OUT of the week-0 inventory before the forecast runs forward.
+    Removes `count` fish (None = the whole tank) from the source. In the
+    override window this is recorded as a real harvest in the week it fires.
     """
     warns: list[str] = []
     tag = f"MANUAL harvest #{idx}"
@@ -220,32 +228,43 @@ def _apply_harvest(state, ev: ManualEvent, idx: int) -> list[str]:
     if count > src.count + 0.5:
         return [f"{tag}: requested {count:,.0f} fish exceeds tank "
                 f"{src.location_id} population {src.count:,.0f}"]
-    h = Harvest(batch_id=batch_id, event_date=state.today,
+    h = Harvest(batch_id=batch_id, event_date=(event_date or state.today),
                 source_tank_id=ev.from_tank, count=count, avg_wt_g=src.avg_wt_g)
     warns.extend(f"{tag}: {w}" for w in h.apply(state))
+    if h.count > 0 and out_events is not None:
+        out_events.append(h)
     print(f"    {tag}: harvested {h.count:,.0f} fish of batch {batch_id} "
           f"from tank #{ev.from_tank}")
     return warns
 
 
-def apply_manual_events(state, events: list[ManualEvent]) -> list[str]:
-    """Apply all manual starting-state events to the hydrated FacilityState.
+def apply_events_for_week(state, events, week, week_start):
+    """Apply every manual event scheduled for `week` (1-based) at the start of
+    that override-window week, dating each event at `week_start`.
 
-    Returns warnings (problems + refusals) for the ValidationLog. Successful
-    applications print a one-line summary to the run log. Mutates `state`.
+    Returns (transfer_objs, harvest_objs, warnings): the events.* objects that
+    actually applied, so the window can stitch them into the report streams +
+    continuity audit. Mutates `state`.
     """
+    transfers: list = []
+    harvests: list = []
     warns: list[str] = []
     for i, ev in enumerate(events, 1):
+        if (ev.week or 1) != week:
+            continue
         if ev.type == TYPE_OG_TRANSFER:
-            warns.extend(_apply_og_transfer(state, ev, i))
+            warns.extend(_apply_og_transfer(
+                state, ev, i, event_date=week_start, out_events=transfers))
         elif ev.type == TYPE_HARVEST:
-            warns.extend(_apply_harvest(state, ev, i))
+            warns.extend(_apply_harvest(
+                state, ev, i, event_date=week_start, out_events=harvests))
         elif ev.type in _DEFERRED_TYPES:
-            warns.append(f"MANUAL event #{i}: type '{ev.type}' not yet "
-                         f"implemented (Phase 3) — skipped")
+            warns.append(f"MANUAL week {week} event #{i}: type '{ev.type}' "
+                         f"not yet implemented — skipped")
         else:
-            warns.append(f"MANUAL event #{i}: unknown type '{ev.type}' — skipped")
-    return warns
+            warns.append(f"MANUAL week {week} event #{i}: unknown type "
+                         f"'{ev.type}' — skipped")
+    return transfers, harvests, warns
 
 
 def validate_manual_events(state, events: list[ManualEvent]) -> list[tuple[int, bool, list[str]]]:
