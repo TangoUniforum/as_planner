@@ -623,12 +623,13 @@ def _hydrate_state_from_upload(uploaded):
 def _manual_events_to_df_rows(events):
     rows = []
     for e in events:
-        to_tanks = ",".join(str(d.tank) for d in e.destinations)
-        if e.type in ("og_transfer", "og_to_6n"):
-            cnts = [d.count for d in e.destinations if d.count is not None]
-            count = sum(cnts) if cnts else None
-        else:
-            count = e.count
+        # Encode per-dest counts as "tank:count" so explicit / UNEQUAL counts
+        # round-trip losslessly; a bare "tank" means None (split the `count`
+        # column evenly across the bare tanks at run time).
+        to_tanks = ",".join(
+            (f"{d.tank}:{int(d.count)}" if d.count is not None else str(d.tank))
+            for d in e.destinations)
+        count = e.count if e.type not in ("og_transfer", "og_to_6n") else None
         rows.append({"week": e.week, "type": e.type, "batch": e.batch or "",
                      "from_tank": e.from_tank, "to_tanks": to_tanks,
                      "count": count, "notes": e.notes})
@@ -651,19 +652,30 @@ def _rows_to_manual_events(rows):
         from_tank = int(ft) if ft not in (None, "") else None
         cnt = r.get("count")
         count = float(cnt) if cnt not in (None, "") else None
-        to_tanks = [int(float(t)) for t in str(r.get("to_tanks") or "").replace(" ", "").split(",") if t]
+        # parse to_tanks: each token is "tank" (bare) or "tank:count" (explicit
+        # per-dest). Bare tanks share the `count` column evenly.
+        specs = []
+        for tok in str(r.get("to_tanks") or "").replace(" ", "").split(","):
+            if not tok:
+                continue
+            if ":" in tok:
+                _t, _c = tok.split(":", 1)
+                specs.append((int(float(_t)), float(_c)))
+            else:
+                specs.append((int(float(tok)), None))
         notes = str(r.get("notes") or "")
         if typ in ("og_transfer", "og_to_6n"):
-            n = len(to_tanks) or 1
-            dests = [ManualDest(tank=t, count=(count / n if count is not None else None))
-                     for t in to_tanks]
+            bare = [t for t, c in specs if c is None]
+            per_bare = (count / len(bare)) if (bare and count is not None) else None
+            dests = [ManualDest(tank=t, count=(c if c is not None else per_bare))
+                     for t, c in specs]
             out.append(ManualEvent(type=typ, week=week, from_tank=from_tank,
                                    destinations=dests, batch=batch, notes=notes))
         elif typ == "harvest":
             out.append(ManualEvent(type=typ, week=week, from_tank=from_tank,
                                    count=count, batch=batch, notes=notes))
         elif typ == "fw_to_og":
-            dests = [ManualDest(tank=t) for t in to_tanks]
+            dests = [ManualDest(tank=t) for t, c in specs]
             out.append(ManualEvent(type=typ, week=week, batch=batch, count=count,
                                    destinations=dests, notes=notes))
         else:

@@ -250,6 +250,33 @@ def main(
         for w in manual_warns:
             print(f"    - {w}")
 
+        # Reject-at-entry: a window that opens the forecast PAST an in-flight FW
+        # batch's automatic FW->OG entry week would orphan that batch — the
+        # window does pure biology (no TranOG), and the FW projection (run from
+        # the original start) then emits an OG row before the shifted start that
+        # the coordinator never covers, aborting Phase B deep in placement with
+        # no output. Fail fast with an actionable message. The operator can
+        # shorten the window, or script each crossing as an explicit fw_to_og
+        # event (which removes that batch from the auto schedule).
+        from .time_grid import og_entry_week_start as _oge_wk_start
+        _crossed = set()
+        for _r in fw_records:
+            _bm = _bbi.get(_r.batch_id)
+            if (_bm is None or not _bm.tran_og_date
+                    or _r.batch_id in transferred_fw):
+                continue
+            if _oge_wk_start(_bm.tran_og_date, _fs0) < _new_start:
+                _crossed.add((_r.batch_id,
+                              _oge_wk_start(_bm.tran_og_date, _fs0)))
+        if _crossed:
+            _lst = ", ".join(f"{b} (FW->OG ~{d})" for b, d in sorted(_crossed))
+            raise ValueError(
+                f"Manual override window of {window_n} week(s) opens the forecast "
+                f"at {_new_start}, PAST the automatic FW->OG entry of: {_lst}. The "
+                f"window does not auto-transfer FW batches. Shorten the window so "
+                f"it ends before those dates, or add an explicit fw_to_og event "
+                f"for each crossing batch.")
+
     # ----- Caps -----
     fs_date = control.forecast_start.date() if hasattr(control.forecast_start, "date") else control.forecast_start
     from .scenario_io import load_limits

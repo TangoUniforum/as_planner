@@ -183,12 +183,14 @@ def _apply_og_transfer(state, ev: ManualEvent, idx: int,
         allocs.append(TankAllocation(
             tank_id=d.tank, count=cnt, avg_wt_g=wt, cv_pct=src.cv_pct))
 
-    total = sum(a.count for a in allocs)
-    leaves_empty = abs(total - src.count) < 0.5
+    # leaves_source_empty=False: let Transfer.apply empty the source ONLY when it
+    # actually drains to ~0 (its own src.count<=0.5 check). Deriving it from the
+    # PLANNED total would force-empty and DELETE the un-moved share if any
+    # destination is refused (INV-1/INV-4/reserved) — a silent fish loss.
     tr = Transfer(
         batch_id=batch_id, event_date=(event_date or state.today),
         source_tank_id=ev.from_tank,
-        destinations=allocs, leaves_source_empty=leaves_empty)
+        destinations=allocs, leaves_source_empty=False)
     warns.extend(f"{tag}: {w}" for w in tr.apply(state))
 
     if tr.count_transferred <= 0:
@@ -279,12 +281,12 @@ def _apply_og_to_6n(state, ev: ManualEvent, idx: int,
         wt = d.avg_wt_g if d.avg_wt_g is not None else src.avg_wt_g
         allocs.append(TankAllocation(
             tank_id=d.tank, count=cnt, avg_wt_g=wt, cv_pct=src.cv_pct))
-    total = sum(a.count for a in allocs)
-    leaves_empty = abs(total - src.count) < 0.5
+    # leaves_source_empty=False (see _apply_og_transfer): avoid deleting the
+    # un-moved share on a partial refusal; Transfer.apply auto-empties at ~0.
     tr = Transfer(
         batch_id=batch_id, event_date=(event_date or state.today),
         source_tank_id=ev.from_tank, destinations=allocs,
-        leaves_source_empty=leaves_empty)
+        leaves_source_empty=False)
     warns.extend(f"{tag}: {w}" for w in tr.apply(state))
 
     if tr.count_transferred <= 0:
@@ -379,10 +381,11 @@ def _apply_fw_to_og(state, ev: ManualEvent, idx: int, fw_count, fw_avg_wt_g,
     # (the engine's own FW culls show in the biology cull columns; this manual
     # FW->OG cull happens outside that path, so record it explicitly).
     if culled > 0:
+        _tgt = f"{target:,.0f}" if target else "all FW (no target)"
         warns.append(
             f"MANUAL CULL — fw_to_og {batch_id} week {ev.week}: culled "
             f"{culled:,.0f} fish (handling-mortality + reconcile to target "
-            f"{target:,.0f}); placed {cnt:,.0f} into OG tanks {tanks}")
+            f"{_tgt}); placed {cnt:,.0f} into OG tanks {tanks}")
     print(f"    {tag}: TranOG {cnt:,.0f} fish of {batch_id} -> OG tanks {tanks} "
           f"(culled {culled:,.0f} to hit target {target})")
     return warns, culled
