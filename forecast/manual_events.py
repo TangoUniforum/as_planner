@@ -395,24 +395,29 @@ def _apply_fw_to_og(state, ev: ManualEvent, idx: int, fw_count, fw_avg_wt_g,
 
 def _apply_graded_harvest(state, ev: ManualEvent, idx: int, event_date=None,
                           out_transfers=None, out_harvests=None) -> list[str]:
-    """Manual GRADED harvest: take the biggest `ev.count` fish from the source to
-    processing, retain the smaller remainder growing (in the source, or a chosen
-    retention tank).
+    """Manual GRADED cut: peel the biggest `ev.count` fish off the source into
+    destinations[0]; retain the smaller remainder growing (in the source, or
+    destinations[1]).
 
-    Size-sorts the source population at the count-implied cutoff so BOTH count and
-    biomass conserve EXACTLY: with p = count/N the harvested fraction, the cutoff
-    is mu + sigma*Phi^-1(1-p) and biology.upper_truncated_split returns the
-    conditional means, giving big_count*big_avg + small_count*small_avg == N*mu
-    (the E[X] = P*E[X|>=t] + (1-P)*E[X|<t] identity). Emits the engine's
-    events.GradedHarvest (source -> pickup staging tank + retention) CHAINED with a
-    plain events.Harvest that drains the pickup to processing — the SAME shape the
-    auto-pipeline's 6N purge uses, so all three audits reconcile it with NO audit
-    change. destinations[0] = pickup staging tank (empty OG); destinations[1]
-    (optional) = retention tank, defaulting to the source (smalls stay in place).
-    No handling mortality (a size sort is instantaneous, not a re-water transfer).
+    The destination TYPE picks the mode (both reconcile identically in the audits):
+      * destinations[0] is a 6N tank  -> DEPURATION: the graded fish go to 6N to
+        purge (frozen off-feed), harvested LATER by a plain harvest from 6N. This
+        is the operator's "Graded -> 6N" (the realistic OG->6N->harvest flow).
+      * destinations[0] is an OG tank -> DIRECT HARVEST: chain a plain Harvest that
+        drains the pickup to processing (kept for the raw grid / power users).
+
+    Size-sorts the source at the count-implied cutoff so BOTH count and biomass
+    conserve EXACTLY: with p = count/N the graded fraction, the cutoff is
+    mu + sigma*Phi^-1(1-p) and biology.upper_truncated_split returns the conditional
+    means, giving big_count*big_avg + small_count*small_avg == N*mu (the
+    E[X] = P*E[X|>=t] + (1-P)*E[X|<t] identity). Emits the engine's
+    events.GradedHarvest (source -> pickup + retention) — the SAME shape the
+    auto-pipeline's 6N purge uses. No handling mortality (an instantaneous sort).
     """
     from statistics import NormalDist
     from .biology import upper_truncated_split
+    from .sixn import SIXN_ALL_TANKS
+    from .state import STAGE_STARVE
     warns: list[str] = []
     tag = f"MANUAL graded_harvest #{idx}"
     src = state.tanks_by_id.get(ev.from_tank)
@@ -421,7 +426,7 @@ def _apply_graded_harvest(state, ev: ManualEvent, idx: int, event_date=None,
     if src.is_empty:
         return [f"{tag}: source tank {src.location_id} is empty (nothing to grade)"]
     if not ev.destinations:
-        return [f"{tag}: no pickup (harvest-staging) tank specified"]
+        return [f"{tag}: no destination (6N / staging) tank specified"]
     if ev.batch and src.batch_id != ev.batch:
         warns.append(
             f"{tag}: source {src.location_id} holds batch {src.batch_id}, "
@@ -453,7 +458,7 @@ def _apply_graded_harvest(state, ev: ManualEvent, idx: int, event_date=None,
                 f"fish to take)"]
     if K >= src.count - 0.5:
         return [f"{tag}: count {K:,.0f} >= tank {src.location_id} population "
-                f"{src.count:,.0f} — use a plain harvest to take the whole tank"]
+                f"{src.count:,.0f} — use the plain whole-tank move/harvest instead"]
 
     # Top-K-by-size split at the count-implied cutoff (see docstring): count is
     # exact (big=K, small=N-K); biomass conserves via the conditional means.
@@ -490,15 +495,26 @@ def _apply_graded_harvest(state, ev: ManualEvent, idx: int, event_date=None,
         return warns
     if out_transfers is not None:
         out_transfers.append(gh)
-    # Chain the pickup harvest: drain the >= cutoff portion at the PICKUP weight
-    # (big_avg), NOT the source mean (would inject a biomass mismatch on the
-    # pickup tank-week and can breach the continuity BIO tolerance).
+    _ret = "source" if retention_id == src.tank_id else f"#{retention_id}"
+    if pickup_id in SIXN_ALL_TANKS:
+        # DEPURATION: the graded-out fish go to 6N to purge (off-feed) and are
+        # harvested LATER by a plain harvest from the 6N tank — NOT drained now.
+        # Freeze the 6N pickup to STARVE, exactly like the plain og_to_6n move.
+        if not pickup.is_empty:
+            pickup.stage = STAGE_STARVE
+        print(f"    {tag}: graded {n:,.0f} of {batch_id} in {src.location_id} -> "
+              f"6N {pickup.location_id} top {big_count:,.0f}@{big_avg / 1000:.2f}kg "
+              f"(depurating, off-feed), retained {small_count:,.0f}@"
+              f"{small_avg / 1000:.2f}kg in {_ret}")
+        return warns
+    # OG pickup -> direct harvest: drain the >= cutoff portion at the PICKUP weight
+    # (big_avg), NOT the source mean (would inject a biomass mismatch on the pickup
+    # tank-week and can breach the continuity BIO tolerance).
     h = Harvest(batch_id=batch_id, event_date=(event_date or state.today),
                 source_tank_id=pickup_id, count=big_count, avg_wt_g=big_avg)
     warns.extend(f"{tag}: {w}" for w in h.apply(state))
     if h.count > 0 and out_harvests is not None:
         out_harvests.append(h)
-    _ret = "source" if retention_id == src.tank_id else f"#{retention_id}"
     print(f"    {tag}: graded {n:,.0f} of {batch_id} in {src.location_id} -> "
           f"harvested top {big_count:,.0f}@{big_avg / 1000:.2f}kg (via pickup "
           f"#{pickup_id}), retained {small_count:,.0f}@{small_avg / 1000:.2f}kg "

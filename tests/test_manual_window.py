@@ -191,6 +191,42 @@ class TestGradedHarvest:
         (_i, ok, msgs), = validate_manual_events(state, [ev], **ctx)
         assert not ok and any("not empty" in m for m in msgs)
 
+    def test_graded_to_6n_depurates_conserves_no_harvest(self, hydrated):
+        # A graded cut whose pickup is a 6N tank DEPURATES (freezes the 6N tank
+        # off-feed, NO immediate harvest) instead of harvesting — the realistic
+        # OG->6N->harvest flow. Still conserves count + biomass exactly.
+        import copy
+        from forecast.sixn import SIXN_ALL_TANKS
+        from forecast.state import STAGE_STARVE
+        from forecast.manual_events import (
+            ManualEvent, ManualDest, validate_manual_events)
+        from forecast.manual_window import advance_facility_window
+        state, ctx, _fw = hydrated
+        src, _ = self._source_pickup(state)
+        sixn = next(t for t in sorted(SIXN_ALL_TANKS)
+                    if state.tanks_by_id[t].is_empty)
+        K = round(src.count * 0.4)
+        open_n, open_bio = src.count, src.count * src.avg_wt_g
+        ev = ManualEvent(type="graded_harvest", week=1, from_tank=src.tank_id,
+                         count=K, destinations=[ManualDest(tank=sixn)])
+        (_i, ok, msgs), = validate_manual_events(state, [ev], **ctx)
+        assert ok, msgs
+        sc = copy.deepcopy(state)
+        win = advance_facility_window(
+            sc, ctx["batch_by_id"], ctx["tables"], ctx["forecast_start"], 2,
+            events=[ev], control=ctx["control"], pr_closing=ctx["pr_closing"],
+            fw_records=ctx["fw_records"])
+        ghs = [e for e in win["transfer_events"] if hasattr(e, "pickup_tank_id")]
+        assert len(ghs) == 1
+        assert win["harvest_events"] == []          # depurates, NOT harvested now
+        gh = ghs[0]
+        assert abs((gh.pickup_count + gh.retention_count) - open_n) < 1.0
+        bio = (gh.pickup_count * gh.pickup_avg_wt_g
+               + gh.retention_count * gh.retention_avg_wt_g)
+        assert abs(bio - open_bio) / open_bio < 1e-6
+        pk = sc.tanks_by_id[sixn]
+        assert pk.stage == STAGE_STARVE and not pk.is_empty   # frozen, holding fish
+
     def test_full_pipeline_audits_clean(self, hydrated, tmp_path):
         import shutil
         from openpyxl import load_workbook as _lw

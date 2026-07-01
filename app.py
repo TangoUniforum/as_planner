@@ -931,6 +931,23 @@ def _mw_split_dests(picks, total, whole):
     return [ManualDest(tank=int(d), count=per) for d in picks]
 
 
+def _mw_cut_weights(avg_wt_g, cv_pct, count, k):
+    """(big_avg_g, small_avg_g) for a top-`k`-by-size cut — the SAME split the run
+    applies (forecast.biology.upper_truncated_split at the count-implied cutoff),
+    so the panel's live readout matches what will actually be moved. Returns
+    (None, None) for a degenerate cut (k<=0, k>=count, or no weight)."""
+    from statistics import NormalDist
+    from forecast.biology import upper_truncated_split
+    if not k or k <= 0 or k >= count or avg_wt_g <= 0:
+        return None, None
+    cv = cv_pct or 16.0
+    sigma = avg_wt_g * (cv / 100.0)
+    if sigma <= 0:
+        return avg_wt_g, avg_wt_g
+    z = NormalDist().inv_cdf(1.0 - k / count)
+    return upper_truncated_split(avg_wt_g, cv, avg_wt_g + sigma * z)
+
+
 def _mw_action_panel(state, ctx, rows, labels, sel, date_for):
     from forecast.sixn import SIXN_ALL_TANKS
     from forecast.manual_events import ManualDest, ManualEvent
@@ -963,7 +980,7 @@ def _mw_action_panel(state, ctx, rows, labels, sel, date_for):
     # counts don't linger when you click a different cell.
     sfx = f"{tid}_{wk}"
     act = st.radio("What do you want to do here?",
-                   ["Harvest", "Graded harvest", "Move (OG→OG)",
+                   ["Harvest", "Graded → 6N", "Move (OG→OG)",
                     "Send to 6N depuration"],
                    horizontal=True, key="mw_act")
 
@@ -978,42 +995,48 @@ def _mw_action_panel(state, ctx, rows, labels, sel, date_for):
                                 count=(None if whole else cnt)))
             st.rerun()
 
-    elif act == "Graded harvest":
-        st.caption("Harvest the **biggest N fish** (size-sorted) to processing; "
-                   "the smaller remainder keeps growing. Conserves count + "
+    elif act == "Graded → 6N":
+        st.caption("Grade out the **biggest N fish** to a 6N depuration tank "
+                   "(frozen, off-feed to purge); the smaller remainder keeps "
+                   "growing. Harvest happens later from 6N. Conserves count + "
                    "biomass exactly.")
         occ = {x.tank_id for x in rows if x.week_label == wlabel and x.count > 0}
-        empty_og = [t.tank_id for t in other_og if t.tank_id not in occ]
+        empty_6n = [t for t in sorted(SIXN_ALL_TANKS) if t not in occ]
+        other_og_ids = [t.tank_id for t in other_og if t.tank_id not in occ]
         n_big = st.number_input(
-            "Fish to harvest (the biggest N)", min_value=0.0,
+            "Fish to send to 6N (the biggest N)", min_value=0.0,
             max_value=float(r.count), value=float(int(r.count // 2)), step=1000.0,
-            key=f"mw_g_cnt_{sfx}",
+            key=f"mw_g6_cnt_{sfx}",
             help="The N largest fish are graded out at their (higher) mean weight; "
                  "the rest stay at their (lower) mean.")
-        pickup = st.selectbox(
-            "Harvest-staging tank (an empty OG tank the graded fish pass through)",
-            options=empty_og, format_func=lambda x: _mw_loc(state, x),
-            key=f"mw_g_pick_{sfx}",
-            help="A momentary staging tank — the big fish move here and are "
-                 "harvested the same week (it shows empty afterwards).",
-        ) if empty_og else None
+        # Live cut-weight readout — the SAME split the run applies.
+        _cvt = state.tanks_by_id.get(tid)
+        _big, _small = _mw_cut_weights(
+            r.avg_wt_g, (_cvt.cv_pct if _cvt else 0.0), r.count, n_big)
+        if _big is not None:
+            st.caption(f"↳ biggest **{n_big:,.0f} ≈ {_big / 1000:.2f} kg** → 6N · "
+                       f"remaining {r.count - n_big:,.0f} ≈ "
+                       f"{_small / 1000:.2f} kg retained")
+        dest6n = st.selectbox(
+            "6N depuration tank", options=empty_6n,
+            format_func=lambda x: _mw_loc(state, x), key=f"mw_g6_dest_{sfx}",
+        ) if empty_6n else None
         ret_here = st.checkbox("Keep the smaller fish in this tank", value=True,
-                               key=f"mw_g_reth_{sfx}")
+                               key=f"mw_g6_reth_{sfx}")
         ret_tank = None
         if not ret_here:
-            ret_opts = [t for t in empty_og if t != pickup]
             ret_tank = st.selectbox(
-                "Retention tank for the smaller fish", options=ret_opts,
+                "Retention tank (OG) for the smaller fish", options=other_og_ids,
                 format_func=lambda x: _mw_loc(state, x),
-                key=f"mw_g_ret_{sfx}") if ret_opts else None
-        if not empty_og:
-            st.caption("⚠ No empty OG tank available this week to stage the harvest.")
-        dests = [ManualDest(tank=int(pickup))] if pickup is not None else []
+                key=f"mw_g6_ret_{sfx}") if other_og_ids else None
+        if not empty_6n:
+            st.caption("⚠ No empty 6N depuration tank available this week.")
+        dests = [ManualDest(tank=int(dest6n))] if dest6n is not None else []
         if not ret_here and ret_tank is not None:
             dests.append(ManualDest(tank=int(ret_tank)))
-        if st.button(f"➕ Add graded harvest in week {wk}", key="mw_g_add",
+        if st.button(f"➕ Add graded 6N move in week {wk}", key="mw_g6_add",
                      type="primary",
-                     disabled=(pickup is None or not n_big or n_big <= 0)):
+                     disabled=(dest6n is None or not n_big or n_big <= 0)):
             _mw_add(ManualEvent(type="graded_harvest", week=wk, from_tank=tid,
                                 count=n_big, destinations=dests))
             st.rerun()
@@ -1116,10 +1139,15 @@ def _mw_event_summary(state, ev):
         tgt = f"target {ev.count:,.0f}" if ev.count else "all available"
         return f"Wk {ev.week}: **FW→OG** {ev.batch} → {dests} ({tgt})"
     if ev.type == "graded_harvest":
+        from forecast.sixn import SIXN_ALL_TANKS
         amt = f"{ev.count:,.0f}" if ev.count else "?"
-        pk = loc(ev.destinations[0].tank) if ev.destinations else "—"
+        pk_id = ev.destinations[0].tank if ev.destinations else None
+        pk = loc(pk_id) if pk_id is not None else "—"
         ret = (loc(ev.destinations[1].tank) if len(ev.destinations) >= 2
                else "source")
+        if pk_id in SIXN_ALL_TANKS:
+            return (f"Wk {ev.week}: **Graded → 6N** biggest {amt} from "
+                    f"{loc(ev.from_tank)} → 6N {pk}, retain smaller in {ret}")
         return (f"Wk {ev.week}: **Graded harvest** biggest {amt} from "
                 f"{loc(ev.from_tank)} (via {pk}), retain smaller in {ret}")
     return f"Wk {ev.week}: {ev.type}"

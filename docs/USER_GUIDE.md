@@ -149,8 +149,8 @@ batch, so you can see which tanks hold the same cohort and how a batch moves
 across the weeks. Rows tagged **⛔6N** are depuration. To act: **click the cell**
 for the tank and week you want — a **single click picks both** the tank (its row)
 and the week (its column) — and a panel opens *in context* showing what's actually
-in that tank (batch, fish, weight, density) and offering **Harvest / Graded
-harvest / Move / Send to 6N** with real tank pickers — no tank numbers to
+in that tank (batch, fish, weight, density) and offering **Harvest / Graded →
+6N / Move / Send to 6N** with real tank pickers — no tank numbers to
 memorise, no codes to type.
 The grid **re-draws as you script**, so you watch each operation ripple forward
 over the weeks. A **"Weeks to project / act in"** slider sets how far ahead to
@@ -182,15 +182,18 @@ grid — is one of these):
   weight. Count conserved exactly.
 - **`harvest`** — directly harvest `Count` fish from `From tank` (blank = the
   whole tank), recorded as a real harvest in that week.
-- **`graded_harvest`** — a **size-sorted** harvest: take the **biggest `Count`
-  fish** from `From tank` to processing and keep the smaller remainder growing.
-  You pick a **pickup** staging tank (an empty OG tank the graded fish pass
-  through and are harvested from — it shows empty again the same week); the
-  smaller fish stay in the source, or move to an optional **retention** tank.
-  The split is exact — the biggest `Count` leave at their (higher) mean weight,
-  the rest stay at their (lower) mean — so **both count and biomass conserve**,
-  and it reconciles in the **TankContinuityAudit** (0 drift) and
-  **InputConservationAudit** exactly like every other event.
+- **`graded_harvest`** — a **size-sorted grade**: take the **biggest `Count`
+  fish** from `From tank` and move them to the **first `To tank`**, keeping the
+  smaller remainder growing (in the source, or an optional **second `To tank`**).
+  The **destination decides what happens**: a **6N tank** → the graded fish
+  **depurate** (frozen off-feed, harvested *later* from 6N) — this is the panel's
+  **"Graded → 6N"** button and the realistic OG→6N→harvest flow, with a live
+  read-out of the **cut weight** (the average weight of the biggest `Count` you're
+  moving); an **OG tank** → the graded fish are **harvested** straight to
+  processing (raw-grid / power use). Either way the split is exact — the biggest
+  `Count` leave at their (higher) mean, the rest stay at their (lower) mean — so
+  **count + biomass conserve** and it reconciles in the **TankContinuityAudit**
+  (0 drift) + **InputConservationAudit** like every other event.
 - **`og_to_6n`** — move OG fish from `From tank` into one or more **6N
   depuration tanks** (must be 6N tanks: 61, 63, 65, 67, 69, 71). The destination
   is frozen **off-feed** (no growth, no feed) for depuration.
@@ -212,8 +215,8 @@ editor + timeline.
 | **Type** | one of the five event types above |
 | **Batch** | the FW batch id — **only** for `fw_to_og` |
 | **From tank** | source tank id — for `og_transfer` / `harvest` / `graded_harvest` / `og_to_6n` |
-| **To tanks** | destination tank id(s), comma-separated; use `tank:count` to send an explicit count to a tank, or a bare `tank` to split the row's Count evenly across the bare tanks. For `graded_harvest` the **first** tank is the pickup staging tank and an optional **second** is the retention tank |
-| **Count / target** | `harvest` = fish to harvest (blank = whole tank); `graded_harvest` = the number of **biggest** fish to harvest; `og_transfer` / `og_to_6n` = split across To tanks; `fw_to_og` = the **target** count entering seawater (the engine culls down to it) |
+| **To tanks** | destination tank id(s), comma-separated; use `tank:count` to send an explicit count to a tank, or a bare `tank` to split the row's Count evenly across the bare tanks. For `graded_harvest` the **first** tank is the graded-fish destination — a **6N tank** (depurate) or an OG tank (harvest) — and an optional **second** is the retention tank for the smaller fish |
+| **Count / target** | `harvest` = fish to harvest (blank = whole tank); `graded_harvest` = the number of **biggest** fish to grade out; `og_transfer` / `og_to_6n` = split across To tanks; `fw_to_og` = the **target** count entering seawater (the engine culls down to it) |
 | **Notes** | free text |
 
 **Reject-at-entry validation.** As you edit, each event is dry-run against your
