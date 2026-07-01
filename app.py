@@ -851,6 +851,28 @@ def _mw_grid(state, rows, labels, color_by):
     ubatches = sorted({r.batch_id for r in rows if r.count > 0})
     _pal = px.colors.qualitative.Light24
     bcolor = {b: _pal[i % len(_pal)] for i, b in enumerate(ubatches)}
+    # Per-batch BOLD FONT colour so a cohort is trackable across tanks even in Fill
+    # mode (where the background encodes density, not batch). Dark24 is a dark
+    # palette -> readable on the light/green/amber fills; on the dark over-cap reds
+    # we lighten the same hue so it stays legible without losing batch identity.
+    _fpal = px.colors.qualitative.Dark24
+    fcolor = {b: _fpal[i % len(_fpal)] for i, b in enumerate(ubatches)}
+
+    def _rgb(h):
+        if h.startswith("rgb"):
+            return tuple(int(x) for x in h[h.find("(") + 1:h.find(")")].split(","))
+        h = h.lstrip("#")
+        return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
+
+    def _lum(h):
+        r, g, b = _rgb(h)
+        return (0.299 * r + 0.587 * g + 0.114 * b) / 255.0
+
+    def _toward_white(h, t):
+        r, g, b = _rgb(h)
+        return "#%02x%02x%02x" % (round(r + (255 - r) * t),
+                                  round(g + (255 - g) * t),
+                                  round(b + (255 - b) * t))
 
     def _fill_hex(frac):
         if frac <= 0:
@@ -881,10 +903,13 @@ def _mw_grid(state, rows, labels, color_by):
                 trow.append(
                     f"{r.batch_id} · {r.avg_wt_g / 1000:.2f}kg · {r.density_kg_m3:.0f}")
                 if color_by == "batch":
-                    bg = bcolor.get(r.batch_id, "#cccccc")
+                    # background already encodes the batch; keep a dark bold font.
+                    bg, fg = bcolor.get(r.batch_id, "#cccccc"), "#1f1f1f"
                 else:
                     bg = _fill_hex((r.density_kg_m3 / cap) if cap > 0 else 0.0)
-                crow.append(f"background-color:{bg};color:#1f1f1f")
+                    base = fcolor.get(r.batch_id, "#1f1f1f")
+                    fg = _toward_white(base, 0.7) if _lum(bg) < 0.6 else base
+                crow.append(f"background-color:{bg};color:{fg};font-weight:700")
         text_grid.append(trow)
         css_grid.append(crow)
     df = pd.DataFrame(text_grid, index=ylabels, columns=labels)
@@ -1244,10 +1269,11 @@ def _manual_window_editor(uploaded):
                      "fish and how a batch moves across the weeks.")
             _cb = "batch" if _cmode.startswith("Batch") else "fill"
             st.caption(
-                ("**Each batch has its own colour** (grey = empty). "
+                ("**Each batch has its own background colour** (grey = empty). "
                  if _cb == "batch" else
-                 "**Colour = how full each tank is vs its cap** — grey empty, green "
-                 "roomy, amber near cap, red over. ")
+                 "**Background = how full each tank is vs its cap** — grey empty, "
+                 "green roomy, amber near cap, red over — and the **batch id is bold "
+                 "in its own colour** so you can follow a cohort across tanks. ")
                 + "Columns are weeks, rows are tanks (⛔6N = depuration), and each cell "
                   "shows **batch · avg weight · density**. **Click a tank's cell at the "
                   "week you want** to act on it. The grid redraws as you script.")
