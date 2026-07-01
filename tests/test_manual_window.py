@@ -126,6 +126,104 @@ class TestFaithfulFwToOgValidation:
         assert ok, msgs  # structural-only: dest is empty OG, so it passes
 
 
+class TestGradedHarvest:
+    """Manual graded harvest (top-N-by-size): the split conserves count + biomass
+    exactly, reject-at-entry gates an occupied pickup, and a full-pipeline run
+    reconciles in EVERY forecast audit (tank continuity 0-drift, 0 dropped)."""
+
+    @staticmethod
+    def _source_pickup(state):
+        from forecast.sixn import SIXN_ALL_TANKS
+        src = max((t for t in state.tanks_by_id.values()
+                   if t.type == "OG" and t.tank_id not in SIXN_ALL_TANKS
+                   and not t.is_empty), key=lambda t: t.count)
+        pickup = next(t for t in sorted(state.tanks_by_id.values(),
+                                        key=lambda t: t.tank_id)
+                      if t.type == "OG" and t.tank_id not in SIXN_ALL_TANKS
+                      and t.is_empty and t.tank_id != src.tank_id)
+        return src, pickup
+
+    def test_split_conserves_count_and_biomass(self, hydrated):
+        import copy
+        from forecast.manual_events import (
+            ManualEvent, ManualDest, validate_manual_events)
+        from forecast.manual_window import advance_facility_window
+        state, ctx, _fw = hydrated
+        src, pickup = self._source_pickup(state)
+        K = round(src.count * 0.4)
+        open_n, open_bio = src.count, src.count * src.avg_wt_g
+        ev = ManualEvent(type="graded_harvest", week=1, from_tank=src.tank_id,
+                         count=K, destinations=[ManualDest(tank=pickup.tank_id)])
+        (_i, ok, msgs), = validate_manual_events(state, [ev], **ctx)
+        assert ok, msgs
+        sc = copy.deepcopy(state)
+        win = advance_facility_window(
+            sc, ctx["batch_by_id"], ctx["tables"], ctx["forecast_start"], 2,
+            events=[ev], control=ctx["control"], pr_closing=ctx["pr_closing"],
+            fw_records=ctx["fw_records"])
+        ghs = [e for e in win["transfer_events"] if hasattr(e, "pickup_tank_id")]
+        assert len(ghs) == 1
+        gh = ghs[0]
+        assert abs((gh.pickup_count + gh.retention_count) - open_n) < 1.0   # I1
+        bio = (gh.pickup_count * gh.pickup_avg_wt_g
+               + gh.retention_count * gh.retention_avg_wt_g)
+        assert abs(bio - open_bio) / open_bio < 1e-6                        # I2
+        assert abs(gh.pickup_count - K) < 1.0
+        assert gh.pickup_avg_wt_g > gh.retention_avg_wt_g   # big class heavier
+        hv = [h for h in win["harvest_events"]
+              if h.source_tank_id == pickup.tank_id]
+        assert hv and abs(hv[0].count - K) < 1.0            # pickup drained
+        assert abs(hv[0].avg_wt_g - gh.pickup_avg_wt_g) < 1e-6   # at big weight
+
+    def test_rejects_occupied_pickup(self, hydrated):
+        from forecast.sixn import SIXN_ALL_TANKS
+        from forecast.manual_events import (
+            ManualEvent, ManualDest, validate_manual_events)
+        state, ctx, _fw = hydrated
+        src, _ = self._source_pickup(state)
+        occ = next(t for t in state.tanks_by_id.values()
+                   if t.type == "OG" and t.tank_id not in SIXN_ALL_TANKS
+                   and not t.is_empty and t.batch_id != src.batch_id
+                   and t.tank_id != src.tank_id)
+        ev = ManualEvent(type="graded_harvest", week=1, from_tank=src.tank_id,
+                         count=round(src.count * 0.3),
+                         destinations=[ManualDest(tank=occ.tank_id)])
+        (_i, ok, msgs), = validate_manual_events(state, [ev], **ctx)
+        assert not ok and any("not empty" in m for m in msgs)
+
+    def test_full_pipeline_audits_clean(self, hydrated, tmp_path):
+        import shutil
+        from openpyxl import load_workbook as _lw
+        import forecast.run as run_mod
+        state, _ctx, _fw = hydrated
+        src, pickup = self._source_pickup(state)
+        K = round(src.count * 0.4)
+        sdir = tmp_path / "scenario"
+        shutil.copytree(SCENARIO_DIR, sdir)
+        (sdir / "manual_events.yaml").write_text(
+            "events:\n  - type: graded_harvest\n    week: 1\n"
+            f"    from_tank: {src.tank_id}\n    count: {K}\n"
+            f"    destinations:\n      - {{tank: {pickup.tank_id}}}\n")
+        wb = tmp_path / "Forecast.xlsm"
+        shutil.copy(WORKBOOK, wb)
+        out = tmp_path / "out.xlsm"
+        run_mod.main(str(wb), output_path=str(out),
+                     config_dir=str(CONFIG_DIR), scenario_dir=str(sdir))
+        owb = _lw(str(out), data_only=True)
+        tc = [[c.value for c in r]
+              for r in owb["TankContinuityAudit"].iter_rows()]
+        drift = [r for r in tc
+                 if any("DRIFT" in str(c).upper() for c in r if c is not None)]
+        assert not drift, f"{len(drift)} tank-continuity DRIFT rows"
+        ratio = next((float(str(r[3])) for r in tc
+                      if r and str(r[0]) == "Count (fish)"), None)
+        assert ratio is not None and abs(ratio) < 0.3, f"facility ratio {ratio}"
+        ic = [[c.value for c in r]
+              for r in owb["InputConservationAudit"].iter_rows()]
+        assert not any("*** DROP" in str(c).upper()
+                       for r in ic for c in r if c is not None), "dropped batch"
+
+
 class TestWindowHorizonGuard:
     """A manual override window as long as (or longer than) the forecast horizon
     leaves the planner no weeks to plan; the run must reject it, not silently

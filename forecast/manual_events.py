@@ -11,16 +11,18 @@ Design (locked with the operator):
   * STARTING-STATE ONLY — events mutate the week-0 state, then the forecast
     runs forward normally. They are NOT future pins the planner must honor, so
     none of the closed-loop harvest / placement engine changes.
-  * Engine computes biology by default; partial / graded / harvest-grade are
-    explicit options (graded + harvest-grade land in a later phase).
+  * Engine computes biology by default; graded harvest (top-N-by-size) is an
+    explicit option that reuses the engine's GradedHarvest split.
 
 Each event is applied through the existing `events.py` `.apply(state)` methods,
 which already enforce conservation + the INV rules, so a refused event leaves
 the source intact (no fish lost).
 
-Phase 1 implements `og_transfer` (OG->OG move/split). `fw_to_og` and
-`og_to_6n` are recognised but deferred (they touch the FW biology path / 6N
-purge logic) — they warn-and-skip until their phase lands.
+Five event types are wired end-to-end: `og_transfer` (OG->OG move/split),
+`harvest` (plain), `og_to_6n` (move into 6N depuration), `fw_to_og` (manual
+TranOG with cull) and `graded_harvest` (size-sort a tank, harvest the biggest
+N, retain the rest growing). Each conserves count + biomass and reconciles in
+the tank-continuity + input-conservation audits.
 """
 from __future__ import annotations
 
@@ -31,17 +33,17 @@ from typing import Optional
 
 import yaml
 
-from .events import Harvest, TankAllocation, TranOGEntry, Transfer
+from .events import GradedHarvest, Harvest, TankAllocation, TranOGEntry, Transfer
 from .yaml_atomic import read_text_resilient, write_text_atomic
 
 MANUAL_EVENTS_FILE = "manual_events.yaml"
 
-# Event types recognised by this module. og_transfer + harvest are wired;
-# fw_to_og / og_to_6n are recognised but deferred to a later phase.
+# Event types recognised by this module. All five are wired end-to-end.
 TYPE_OG_TRANSFER = "og_transfer"
 TYPE_HARVEST = "harvest"
 TYPE_FW_TO_OG = "fw_to_og"
 TYPE_OG_TO_6N = "og_to_6n"
+TYPE_GRADED_HARVEST = "graded_harvest"
 
 
 @dataclass
@@ -391,6 +393,119 @@ def _apply_fw_to_og(state, ev: ManualEvent, idx: int, fw_count, fw_avg_wt_g,
     return warns, culled
 
 
+def _apply_graded_harvest(state, ev: ManualEvent, idx: int, event_date=None,
+                          out_transfers=None, out_harvests=None) -> list[str]:
+    """Manual GRADED harvest: take the biggest `ev.count` fish from the source to
+    processing, retain the smaller remainder growing (in the source, or a chosen
+    retention tank).
+
+    Size-sorts the source population at the count-implied cutoff so BOTH count and
+    biomass conserve EXACTLY: with p = count/N the harvested fraction, the cutoff
+    is mu + sigma*Phi^-1(1-p) and biology.upper_truncated_split returns the
+    conditional means, giving big_count*big_avg + small_count*small_avg == N*mu
+    (the E[X] = P*E[X|>=t] + (1-P)*E[X|<t] identity). Emits the engine's
+    events.GradedHarvest (source -> pickup staging tank + retention) CHAINED with a
+    plain events.Harvest that drains the pickup to processing — the SAME shape the
+    auto-pipeline's 6N purge uses, so all three audits reconcile it with NO audit
+    change. destinations[0] = pickup staging tank (empty OG); destinations[1]
+    (optional) = retention tank, defaulting to the source (smalls stay in place).
+    No handling mortality (a size sort is instantaneous, not a re-water transfer).
+    """
+    from statistics import NormalDist
+    from .biology import upper_truncated_split
+    warns: list[str] = []
+    tag = f"MANUAL graded_harvest #{idx}"
+    src = state.tanks_by_id.get(ev.from_tank)
+    if src is None:
+        return [f"{tag}: unknown source tank #{ev.from_tank}"]
+    if src.is_empty:
+        return [f"{tag}: source tank {src.location_id} is empty (nothing to grade)"]
+    if not ev.destinations:
+        return [f"{tag}: no pickup (harvest-staging) tank specified"]
+    if ev.batch and src.batch_id != ev.batch:
+        warns.append(
+            f"{tag}: source {src.location_id} holds batch {src.batch_id}, "
+            f"not the specified {ev.batch} — using actual batch {src.batch_id}")
+    batch_id = src.batch_id
+
+    pickup_id = ev.destinations[0].tank
+    retention_id = (ev.destinations[1].tank if len(ev.destinations) >= 2
+                    else src.tank_id)
+    pickup = state.tanks_by_id.get(pickup_id)
+    if pickup is None:
+        return [f"{tag}: unknown pickup tank #{pickup_id}"]
+    if pickup_id == src.tank_id:
+        return [f"{tag}: pickup tank must differ from the source {src.location_id}"]
+    if not pickup.is_empty and pickup.batch_id != batch_id:
+        return [f"{tag}: pickup {pickup.location_id} not empty "
+                f"(holds {pickup.batch_id})"]
+    if retention_id != src.tank_id:
+        ret = state.tanks_by_id.get(retention_id)
+        if ret is None:
+            return [f"{tag}: unknown retention tank #{retention_id}"]
+        if not ret.is_empty and ret.batch_id != batch_id:
+            return [f"{tag}: retention {ret.location_id} not empty "
+                    f"(holds {ret.batch_id})"]
+
+    K = ev.count
+    if not K or K <= 0:
+        return [f"{tag}: needs a positive harvest count (the number of biggest "
+                f"fish to take)"]
+    if K >= src.count - 0.5:
+        return [f"{tag}: count {K:,.0f} >= tank {src.location_id} population "
+                f"{src.count:,.0f} — use a plain harvest to take the whole tank"]
+
+    # Top-K-by-size split at the count-implied cutoff (see docstring): count is
+    # exact (big=K, small=N-K); biomass conserves via the conditional means.
+    mu = src.avg_wt_g
+    cv = src.cv_pct or 16.0
+    n = src.count
+    p = K / n
+    sigma = mu * (cv / 100.0)
+    if sigma <= 0:
+        big_avg = small_avg = mu
+    else:
+        z = NormalDist().inv_cdf(1.0 - p)
+        big_avg, small_avg = upper_truncated_split(mu, cv, mu + sigma * z)
+    big_count = float(K)
+    small_count = n - big_count
+
+    gh = GradedHarvest(
+        batch_id=batch_id, event_date=(event_date or state.today),
+        source_tank_id=src.tank_id,
+        pickup_tank_id=pickup_id, pickup_count=big_count,
+        pickup_avg_wt_g=big_avg, pickup_source_avg_wt_g=big_avg,
+        retention_tank_id=retention_id, retention_count=small_count,
+        retention_avg_wt_g=small_avg, cv_pct=cv)
+    pre = pickup.count
+    warns.extend(f"{tag}: {w}" for w in gh.apply(state))
+    # Reject-safety: emit ONLY if the split actually landed (GradedHarvest.apply
+    # warns-and-returns without draining on a wrong-batch dest). Otherwise the
+    # source keeps its fish and NO orphan harvest fires on an empty/foreign tank.
+    landed = (not pickup.is_empty and pickup.batch_id == batch_id
+              and pickup.count - pre >= big_count - 0.5)
+    if not landed:
+        warns.append(f"{tag}: graded split refused — source {src.location_id} "
+                     f"unchanged, no harvest emitted")
+        return warns
+    if out_transfers is not None:
+        out_transfers.append(gh)
+    # Chain the pickup harvest: drain the >= cutoff portion at the PICKUP weight
+    # (big_avg), NOT the source mean (would inject a biomass mismatch on the
+    # pickup tank-week and can breach the continuity BIO tolerance).
+    h = Harvest(batch_id=batch_id, event_date=(event_date or state.today),
+                source_tank_id=pickup_id, count=big_count, avg_wt_g=big_avg)
+    warns.extend(f"{tag}: {w}" for w in h.apply(state))
+    if h.count > 0 and out_harvests is not None:
+        out_harvests.append(h)
+    _ret = "source" if retention_id == src.tank_id else f"#{retention_id}"
+    print(f"    {tag}: graded {n:,.0f} of {batch_id} in {src.location_id} -> "
+          f"harvested top {big_count:,.0f}@{big_avg / 1000:.2f}kg (via pickup "
+          f"#{pickup_id}), retained {small_count:,.0f}@{small_avg / 1000:.2f}kg "
+          f"in {_ret}")
+    return warns
+
+
 def apply_events_for_week(state, events, week, week_start, week_label=None,
                           handling_frac=0.0, fw_lookup=None):
     """Apply every manual event scheduled for `week` (1-based) at the start of
@@ -423,6 +538,10 @@ def apply_events_for_week(state, events, week, week_start, week_label=None,
         elif ev.type == TYPE_OG_TO_6N:
             warns.extend(_apply_og_to_6n(
                 state, ev, i, event_date=week_start, out_events=transfers))
+        elif ev.type == TYPE_GRADED_HARVEST:
+            warns.extend(_apply_graded_harvest(
+                state, ev, i, event_date=week_start,
+                out_transfers=transfers, out_harvests=harvests))
         elif ev.type == TYPE_FW_TO_OG:
             fw = (fw_lookup or {}).get((ev.batch, week_label))
             if fw is None:
@@ -511,6 +630,10 @@ def validate_manual_events(state, events: list[ManualEvent], *,
             return _apply_harvest(scratch, ev, i, event_date=week_start)
         if ev.type == TYPE_OG_TO_6N:
             return _apply_og_to_6n(scratch, ev, i, event_date=week_start)
+        if ev.type == TYPE_GRADED_HARVEST:
+            # Applies to scratch (mutates it so later weeks see the post-split
+            # state) but emits nothing — faithful reject-at-entry, like fw_to_og.
+            return _apply_graded_harvest(scratch, ev, i, event_date=week_start)
         if ev.type == TYPE_FW_TO_OG:
             w = _validate_fw_to_og_structural(scratch, ev)
             if not faithful:
