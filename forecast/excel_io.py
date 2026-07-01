@@ -1999,6 +1999,11 @@ def write_tank_continuity_audit(
     for (tid_, wk_, _b), v in (realized_biology or {}).items():
         rbio_tw[(tid_, wk_)] += v[0]
         rmort_tw[(tid_, wk_)] += v[1]
+    # When the daily walker's realized biology is available (the main run), the
+    # count balance reconciles mortality against its RECORDED value (ground truth)
+    # rather than a re-modelled estimate. Absent it (e.g. the LNS drift_count gate,
+    # which passes realized_biology=None) the original modelled path runs unchanged.
+    _have_realized = realized_biology is not None
 
     # Per-(tank, week) event aggregates — counts AND biomass (kg).
     harvest_out: dict[tuple[int, str], float] = defaultdict(float)
@@ -2132,7 +2137,19 @@ def write_tank_continuity_audit(
             bio_batch = cur_batch or prev_batch
             m_pct = mort_pct.get((bio_batch, wk), 0.0) if bio_batch else 0.0
             tn_in = tranog_in.get((tid, wk), 0.0)
-            mort = 0.0 if is_starve else (prev_count + tn_in) * (m_pct / 100.0)
+            # Mortality. With realized biology available, use the RECORDED mortality
+            # the daily walker actually applied — ground truth on the true (post
+            # pre-biology-transfer) population. This fixes two opposite-signed audit
+            # drifts the old model produced: (+) full-week mortality over-charged on
+            # fish that departed mid-week pre-biology, and (-) STARVE (6N depuration)
+            # mortality zeroed while the biology really killed those fish. Both
+            # netted only by coincidence, so any 6N move broke the cancellation.
+            # Without realized biology (LNS drift_count gate) keep the old modelled
+            # estimate verbatim so that path stays byte-identical.
+            if _have_realized:
+                mort = rmort_tw.get((tid, wk), 0.0)
+            else:
+                mort = 0.0 if is_starve else (prev_count + tn_in) * (m_pct / 100.0)
             h_out = harvest_out.get((tid, wk), 0.0)
             t_out = transfer_out.get((tid, wk), 0.0)
             t_in = transfer_in.get((tid, wk), 0.0)
