@@ -832,7 +832,9 @@ def _mw_fw_avail(ctx, window_labels):
 
 def _mw_grid(state, rows, labels, color_by):
     """Colour-styled DataFrame of the projected facility (index = tank, columns =
-    weeks, cell text = batch id) for a CLICKABLE st.dataframe. color_by 'fill'
+    weeks, cell text = "batch · avg-weight · density") for a CLICKABLE st.dataframe.
+    The per-cell weight + density let you read grow-out state at a glance to decide
+    moves without clicking every tank. color_by 'fill'
     shades by density-vs-cap (green→red); 'batch' gives each batch its own colour.
     Returns (styler, ylabels, tank_by_y). Unlike a plotly heatmap, a single click
     on a dataframe row reliably emits a Streamlit selection."""
@@ -869,7 +871,8 @@ def _mw_grid(state, rows, labels, color_by):
                 trow.append("")
                 crow.append("background-color:#f0f0f0;color:#1f1f1f")
             else:
-                trow.append(str(r.batch_id))
+                trow.append(
+                    f"{r.batch_id} · {r.avg_wt_g / 1000:.2f}kg · {r.density_kg_m3:.0f}")
                 if color_by == "batch":
                     bg = bcolor.get(r.batch_id, "#cccccc")
                 else:
@@ -905,9 +908,9 @@ def _mw_action_panel(state, ctx, rows, labels, sel, date_for):
     loc = _mw_loc(state, tid)
     dt = date_for.get(wlabel)
     ds = f" · {dt.strftime('%b %d')}" if dt else ""
-    head = st.columns([6, 1])
+    head = st.columns([8, 1])
     head[0].markdown(f"#### ▶ {loc} — week {wk} ({wlabel}{ds})")
-    if head[1].button("✕ close", key="mw_close_sel"):
+    if head[1].button("✕", key="mw_close_sel", help="Close this panel"):
         st.session_state.pop("mw_sel", None)
         # bump the grid remount nonce so the selected row clears too
         st.session_state["mw_grid_nonce2"] = \
@@ -1188,8 +1191,8 @@ def _manual_window_editor(uploaded):
                  "**Colour = how full each tank is vs its cap** — grey empty, green "
                  "roomy, amber near cap, red over. ")
                 + "Columns are weeks, rows are tanks (⛔6N = depuration), and each cell "
-                  "shows its batch id. **Click a tank's cell at the week you want** to "
-                  "act on it. The grid redraws as you script.")
+                  "shows **batch · avg weight · density**. **Click a tank's cell at the "
+                  "week you want** to act on it. The grid redraws as you script.")
 
             # Clickable facility grid (left) + contextual action panel (right), side
             # by side so a cell click shows the options right next to the grid instead
