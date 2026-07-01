@@ -1,5 +1,6 @@
 openpyxl>=3.1
 # UI (Streamlit app — see app.py). Optional for CLI-only use.
-streamlit>=1.30
+# >=1.49 required: the manual-override grid uses single-cell dataframe selection.
+streamlit>=1.49
 plotly>=5.18
 pandas>=2.0

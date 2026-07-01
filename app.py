@@ -697,72 +697,553 @@ def _rows_to_manual_events(rows):
     return out
 
 
+# ---- Shared working set: one in-memory list[ManualEvent] both the visual
+# editor and the Advanced raw grid mutate. Seeded once from the YAML; a Save
+# dumps it back. (Single source of truth avoids the two surfaces clobbering each
+# other's unsaved edits at the YAML boundary.)
+
+def _mw_events():
+    from forecast.manual_events import load_manual_events
+    if "mw_events" not in st.session_state:
+        st.session_state["mw_events"] = load_manual_events(SCENARIO_DIR)
+    return st.session_state["mw_events"]
+
+
+def _mw_bump_grid():
+    """Bump the raw-grid remount nonce so it re-seeds from the working set after
+    the visual editor changes it (a data_editor keeps widget state by key)."""
+    st.session_state["mw_grid_nonce"] = st.session_state.get("mw_grid_nonce", 0) + 1
+
+
+def _mw_set(events):
+    st.session_state["mw_events"] = list(events)
+    _mw_bump_grid()
+
+
+def _mw_add(ev):
+    _mw_events().append(ev)
+    _mw_bump_grid()
+
+
+def _mw_tanks(state):
+    """All tanks in heatmap order (system, then tank id)."""
+    return sorted(state.tanks_by_id.values(),
+                  key=lambda t: (t.system_id or "", t.tank_id))
+
+
+def _mw_loc(state, tid):
+    t = state.tanks_by_id.get(int(tid))
+    return t.location_id if t else f"#{tid}"
+
+
+def _mw_sig(events, extra=""):
+    """Cheap stable signature of the working set (+ context) for caching the
+    heavy biology projection / validation across idle reruns."""
+    import hashlib
+    import json
+    from forecast.manual_events import manual_events_to_list
+    payload = json.dumps({"e": manual_events_to_list(events), "x": extra,
+                          "pr": st.session_state.get("_mw_pr_key", "")},
+                         sort_keys=True, default=str)
+    return hashlib.md5(payload.encode()).hexdigest()
+
+
+def _mw_project(state, ctx, events, n_weeks):
+    """Project the facility through `n_weeks` of the override window (operator
+    events + full biology) on a COPY of the hydrated state — the SAME engine the
+    real run uses (forecast.manual_window.advance_facility_window) — and return
+    its per-(tank, week) BatchLocationRows + the week labels. Cached by
+    (PR, events, n_weeks) so clicking around doesn't recompute biology."""
+    import copy
+    from forecast.manual_window import advance_facility_window
+    from forecast.time_grid import forecast_week_labels
+    sig = _mw_sig(events, extra=f"proj:{n_weeks}")
+    cache = st.session_state.get("_mw_proj_cache")
+    if cache and cache.get("sig") == sig:
+        return cache["rows"], cache["labels"]
+    labels = forecast_week_labels(ctx["forecast_start"], n_weeks)
+    try:
+        sc = copy.deepcopy(state)
+        win = advance_facility_window(
+            sc, ctx["batch_by_id"], ctx["tables"], ctx["forecast_start"], n_weeks,
+            events=events, control=ctx["control"], pr_closing=ctx["pr_closing"],
+            fw_records=ctx["fw_records"])
+        rows = win["batch_locations"]
+    except Exception:  # noqa: BLE001 — a bad event must not blank the view
+        rows = []
+    st.session_state["_mw_proj_cache"] = {"sig": sig, "rows": rows, "labels": labels}
+    return rows, labels
+
+
+def _mw_validate(state, ctx, events):
+    """{event_index(1-based): [messages]} for every infeasible event, faithful to
+    the run (forecast.manual_events.validate_manual_events). Cached by the working
+    set so the Save gate + per-row status don't re-run biology every rerun."""
+    from forecast.manual_events import validate_manual_events
+    if not events:
+        return {}
+    sig = _mw_sig(events, extra="val")
+    cache = st.session_state.get("_mw_val_cache")
+    if cache and cache.get("sig") == sig:
+        return cache["bad"]
+    try:
+        res = validate_manual_events(state, events, **ctx)
+        bad = {i: msgs for i, ok, msgs in res if not ok}
+    except Exception as e:  # noqa: BLE001
+        bad = {-1: [f"validation unavailable ({type(e).__name__}: {e})"]}
+    st.session_state["_mw_val_cache"] = {"sig": sig, "bad": bad}
+    return bad
+
+
+def _mw_fw_avail(ctx, window_labels):
+    """{batch_id: {week_label: (count, avg_wt_g, cv)}} for every in-flight FW
+    cohort still in freshwater somewhere in the window — the candidates a manual
+    FW→OG intake can pull from (projected exactly like the run's _build_fw_lookup,
+    but over ALL FW batches, not just ones already referenced by an event)."""
+    from collections import defaultdict
+    from forecast.biology import project_in_flight_fw_batch
+    fw_records = ctx.get("fw_records") or []
+    if not fw_records or ctx.get("control") is None:
+        return {}
+    agg = defaultdict(lambda: {"count": 0.0, "biomass_kg": 0.0})
+    for r in fw_records:
+        agg[r.batch_id]["count"] += r.closing_count
+        agg[r.batch_id]["biomass_kg"] += r.closing_biomass_kg
+    win = set(window_labels)
+    out: dict[str, dict] = {}
+    for bid, a in agg.items():
+        b_meta = ctx["batch_by_id"].get(bid)
+        if a["count"] <= 0 or b_meta is None:
+            continue
+        avg_wt = a["biomass_kg"] * 1000.0 / a["count"]
+        try:
+            states, _, _ = project_in_flight_fw_batch(
+                b_meta, ctx["tables"], ctx["control"], a["count"], avg_wt,
+                ctx["pr_closing"])
+        except Exception:  # noqa: BLE001
+            continue
+        cv = b_meta.tran_og_cv or 16.0
+        wk = {s.week_label: (s.close_count, s.close_avg_weight_g, cv)
+              for s in states if s.stage == "FW" and s.week_label in win}
+        if wk:
+            out[bid] = wk
+    return out
+
+
+def _mw_grid(state, rows, labels, color_by):
+    """Colour-styled DataFrame of the projected facility (index = tank, columns =
+    weeks, cell text = batch id) for a CLICKABLE st.dataframe. color_by 'fill'
+    shades by density-vs-cap (green→red); 'batch' gives each batch its own colour.
+    Returns (styler, ylabels, tank_by_y). Unlike a plotly heatmap, a single click
+    on a dataframe row reliably emits a Streamlit selection."""
+    from forecast.sixn import SIXN_ALL_TANKS
+    idx = {(r.tank_id, r.week_label): r for r in rows}
+    tanks = _mw_tanks(state)
+    ubatches = sorted({r.batch_id for r in rows if r.count > 0})
+    _pal = px.colors.qualitative.Light24
+    bcolor = {b: _pal[i % len(_pal)] for i, b in enumerate(ubatches)}
+
+    def _fill_hex(frac):
+        if frac <= 0:
+            return "#f0f0f0"
+        if frac < 0.8:
+            return "#a8d5a8"
+        if frac < 1.0:
+            return "#f5d49a"
+        if frac < 1.15:
+            return "#e8615e"
+        return "#7a0d0b"
+
+    ylabels, tank_by_y = [], {}
+    text_grid, css_grid = [], []
+    for t in tanks:
+        is6n = t.tank_id in SIXN_ALL_TANKS
+        yl = f"{t.location_id}" + ("  ⛔6N" if is6n else "")
+        ylabels.append(yl)
+        tank_by_y[yl] = t.tank_id
+        cap = t.max_density_kg_m3 or 0.0
+        trow, crow = [], []
+        for wk in labels:
+            r = idx.get((t.tank_id, wk))
+            if r is None or r.count <= 0:
+                trow.append("")
+                crow.append("background-color:#f0f0f0;color:#1f1f1f")
+            else:
+                trow.append(str(r.batch_id))
+                if color_by == "batch":
+                    bg = bcolor.get(r.batch_id, "#cccccc")
+                else:
+                    bg = _fill_hex((r.density_kg_m3 / cap) if cap > 0 else 0.0)
+                crow.append(f"background-color:{bg};color:#1f1f1f")
+        text_grid.append(trow)
+        css_grid.append(crow)
+    df = pd.DataFrame(text_grid, index=ylabels, columns=labels)
+    css_df = pd.DataFrame(css_grid, index=ylabels, columns=labels)
+    styler = df.style.apply(lambda _: css_df, axis=None)
+    return styler, ylabels, tank_by_y
+
+
+# ---- The contextual action panel (opens on a tank click) ----
+
+def _mw_split_dests(picks, total, whole):
+    """Build ManualDest list mirroring the run's even-split semantics: whole tank
+    -> count=None dests (engine splits the whole source); a partial total ->
+    explicit per-dest counts (the UI does the division, like the raw grid)."""
+    from forecast.manual_events import ManualDest
+    if whole or not total:
+        return [ManualDest(tank=int(d)) for d in picks]
+    per = float(total) / len(picks)
+    return [ManualDest(tank=int(d), count=per) for d in picks]
+
+
+def _mw_action_panel(state, ctx, rows, labels, sel, date_for):
+    from forecast.sixn import SIXN_ALL_TANKS
+    from forecast.manual_events import ManualEvent
+    tid, wlabel, wk = sel
+    r = next((x for x in rows if x.tank_id == tid and x.week_label == wlabel), None)
+    occupied = r is not None and r.count > 0
+    loc = _mw_loc(state, tid)
+    dt = date_for.get(wlabel)
+    ds = f" · {dt.strftime('%b %d')}" if dt else ""
+    head = st.columns([6, 1])
+    head[0].markdown(f"#### ▶ {loc} — week {wk} ({wlabel}{ds})")
+    if head[1].button("✕ close", key="mw_close_sel"):
+        st.session_state.pop("mw_sel", None)
+        # bump the grid remount nonce so the selected row clears too
+        st.session_state["mw_grid_nonce2"] = \
+            st.session_state.get("mw_grid_nonce2", 0) + 1
+        st.rerun()
+    if occupied:
+        st.caption(f"Projected here: batch **{r.batch_id}** · {r.count:,.0f} fish "
+                   f"@ {r.avg_wt_g / 1000:.2f} kg · {r.density_kg_m3:.0f} kg/m³")
+    else:
+        st.caption("Projected **empty** at this week — pick it as a destination "
+                   "in a Move or an FW→OG intake.")
+        return
+
+    other_og = [t for t in _mw_tanks(state)
+                if t.type == "OG" and t.tank_id not in SIXN_ALL_TANKS
+                and t.tank_id != tid]
+    # Scope input keys to THIS tank+week so a previous selection's destinations /
+    # counts don't linger when you click a different cell.
+    sfx = f"{tid}_{wk}"
+    act = st.radio("What do you want to do here?",
+                   ["Harvest", "Move (OG→OG)", "Send to 6N depuration"],
+                   horizontal=True, key="mw_act")
+
+    if act == "Harvest":
+        whole = st.checkbox("Harvest the whole tank", value=True, key=f"mw_h_whole_{sfx}")
+        cnt = None
+        if not whole:
+            cnt = st.number_input("Fish to harvest", min_value=0.0,
+                                  value=float(r.count), step=1000.0, key=f"mw_h_cnt_{sfx}")
+        if st.button(f"➕ Add harvest in week {wk}", key="mw_h_add", type="primary"):
+            _mw_add(ManualEvent(type="harvest", week=wk, from_tank=tid,
+                                count=(None if whole else cnt)))
+            st.rerun()
+
+    elif act == "Move (OG→OG)":
+        picks = st.multiselect(
+            "Destination grow-out tank(s)", options=[t.tank_id for t in other_og],
+            format_func=lambda x: _mw_loc(state, x), key=f"mw_m_dest_{sfx}")
+        whole = st.checkbox("Move the whole tank (split evenly)", value=True,
+                            key=f"mw_m_whole_{sfx}")
+        total = None
+        if not whole:
+            total = st.number_input("Total fish to move (split evenly across dests)",
+                                    min_value=0.0, value=float(r.count), step=1000.0,
+                                    key=f"mw_m_total_{sfx}")
+        if st.button(f"➕ Add move in week {wk}", key="mw_m_add", type="primary",
+                     disabled=not picks):
+            _mw_add(ManualEvent(type="og_transfer", week=wk, from_tank=tid,
+                                destinations=_mw_split_dests(picks, total, whole),
+                                count=(None if whole else total)))
+            st.rerun()
+
+    else:  # Send to 6N depuration
+        picks = st.multiselect(
+            "6N depuration tank(s)", options=sorted(SIXN_ALL_TANKS),
+            format_func=lambda x: _mw_loc(state, x), key=f"mw_6_dest_{sfx}")
+        whole = st.checkbox("Move the whole tank (split evenly)", value=True,
+                            key=f"mw_6_whole_{sfx}")
+        total = None
+        if not whole:
+            total = st.number_input("Total fish to send (split evenly)",
+                                    min_value=0.0, value=float(r.count), step=1000.0,
+                                    key=f"mw_6_total_{sfx}")
+        if st.button(f"➕ Add 6N move in week {wk}", key="mw_6_add", type="primary",
+                     disabled=not picks):
+            _mw_add(ManualEvent(type="og_to_6n", week=wk, from_tank=tid,
+                                destinations=_mw_split_dests(picks, total, whole),
+                                count=(None if whole else total)))
+            st.rerun()
+
+
+def _mw_fw_intake(state, ctx, rows, labels, date_for):
+    """FW→OG intake — a freshwater cohort isn't a tank yet, so it gets its own
+    picker: choose the cohort, the week, the empty OG destinations and a target
+    count (engine culls down to it). Rendered into the caller's container (no
+    inner expander — the whole editor already lives in one)."""
+    from forecast.sixn import SIXN_ALL_TANKS
+    from forecast.manual_events import ManualEvent, ManualDest
+    avail = _mw_fw_avail(ctx, labels)
+    if not avail:
+        st.caption("No in-flight freshwater cohorts are still in freshwater "
+                   "during this window.")
+        return
+    bid = st.selectbox("Freshwater cohort", options=sorted(avail), key="mw_fw_batch")
+    wk_labels = [w for w in labels if w in avail.get(bid, {})]
+    if not wk_labels:
+        st.caption("This cohort has already crossed to seawater in this window.")
+        return
+    wlabel = st.selectbox(
+        "Week to bring it in", options=wk_labels,
+        format_func=lambda w: f"{w}"
+        + (f" · {date_for[w].strftime('%b %d')}" if date_for.get(w) else ""),
+        key="mw_fw_week")
+    cnt, _wt, _cv = avail[bid][wlabel]
+    wk = labels.index(wlabel) + 1
+    st.caption(f"Projected freshwater state: ~{cnt:,.0f} fish available at "
+               f"{wlabel}. Target is the count entering seawater (the engine "
+               f"applies handling mortality + culls down to it).")
+    occ = {x.tank_id for x in rows if x.week_label == wlabel and x.count > 0}
+    empty_og = [t for t in _mw_tanks(state)
+                if t.type == "OG" and t.tank_id not in SIXN_ALL_TANKS
+                and t.tank_id not in occ]
+    picks = st.multiselect(
+        "Empty OG destination tank(s)", options=[t.tank_id for t in empty_og],
+        format_func=lambda x: _mw_loc(state, x), key="mw_fw_dest")
+    target = st.number_input("Target fish entering seawater", min_value=0.0,
+                             value=float(cnt), step=1000.0, key="mw_fw_target")
+    if st.button(f"➕ Add FW→OG intake in week {wk}", key="mw_fw_add",
+                 type="primary", disabled=not picks):
+        _mw_add(ManualEvent(type="fw_to_og", week=wk, batch=bid, count=target,
+                            destinations=[ManualDest(tank=int(d)) for d in picks]))
+        st.rerun()
+
+
+# ---- Readback timeline + save bar ----
+
+def _mw_event_summary(state, ev):
+    loc = lambda t: _mw_loc(state, t)  # noqa: E731
+    dests = ", ".join(loc(d.tank) for d in ev.destinations) or "—"
+    if ev.type == "harvest":
+        amt = f"{ev.count:,.0f} fish" if ev.count is not None else "the whole tank"
+        return f"Wk {ev.week}: **Harvest** {amt} from {loc(ev.from_tank)}"
+    if ev.type == "og_transfer":
+        amt = f"{ev.count:,.0f}" if ev.count else "whole tank"
+        return f"Wk {ev.week}: **Move** {amt} from {loc(ev.from_tank)} → {dests}"
+    if ev.type == "og_to_6n":
+        amt = f"{ev.count:,.0f}" if ev.count else "whole tank"
+        return f"Wk {ev.week}: **Send to 6N** {amt} from {loc(ev.from_tank)} → {dests}"
+    if ev.type == "fw_to_og":
+        tgt = f"target {ev.count:,.0f}" if ev.count else "all available"
+        return f"Wk {ev.week}: **FW→OG** {ev.batch} → {dests} ({tgt})"
+    return f"Wk {ev.week}: {ev.type}"
+
+
+def _mw_timeline(state, events, bad):
+    st.markdown("**Scripted operations — this window**")
+    if not events:
+        st.caption("None yet. Click a tank in the grid above (or use the FW→OG "
+                   "intake) to add your first operation.")
+        return
+    for i, ev in enumerate(events, 1):
+        c1, c2 = st.columns([10, 1])
+        problems = bad.get(i)
+        with c1:
+            if problems:
+                st.markdown(f"❌ {_mw_event_summary(state, ev)}")
+                st.caption("&nbsp;&nbsp;&nbsp;↳ " + "; ".join(problems))
+            else:
+                st.markdown(f"✅ {_mw_event_summary(state, ev)}")
+            if ev.notes:
+                st.caption(f"&nbsp;&nbsp;&nbsp;_{ev.notes}_")
+        if c2.button("🗑", key=f"mw_del_{i}", help="Delete this operation"):
+            _mw_events().pop(i - 1)
+            _mw_bump_grid()
+            st.rerun()
+
+
+def _mw_raw_grid(state):
+    """Power-user fallback: the same four event types as a flat table. Seeds from
+    and writes back to the shared working set (not the YAML directly)."""
+    st.caption(
+        "Same four event types as a raw table — for bulk edits or unequal per-tank "
+        "splits the click flow doesn't cover. **Apply to window** pushes these rows "
+        "into the visual editor + timeline above.")
+    st.caption(
+        "**og_transfer**: from_tank → to_tanks (count split evenly) · "
+        "**harvest**: from_tank, count · **og_to_6n**: from_tank → 6N to_tanks · "
+        "**fw_to_og**: batch + count=target → to_tanks. "
+        "to_tanks: comma-separated; `tank:count` for an explicit per-tank amount.")
+    nonce = st.session_state.get("mw_grid_nonce", 0)
+    base = pd.DataFrame(_manual_events_to_df_rows(_mw_events()), columns=_MANUAL_COLS)
+    edited = st.data_editor(
+        base, num_rows="dynamic", hide_index=True, use_container_width=True,
+        key=f"mw_grid_{nonce}",
+        column_config={
+            "week": st.column_config.NumberColumn("Week", min_value=1, step=1,
+                help="1-based forecast week the event fires in"),
+            "type": st.column_config.SelectboxColumn("Type",
+                options=["og_transfer", "harvest", "og_to_6n", "fw_to_og"]),
+            "batch": st.column_config.TextColumn("Batch", help="FW batch (fw_to_og)"),
+            "from_tank": st.column_config.NumberColumn("From tank", step=1),
+            "to_tanks": st.column_config.TextColumn("To tanks",
+                help="comma-separated tank IDs; tank:count for an explicit amount"),
+            "count": st.column_config.NumberColumn("Count / target", step=1000),
+            "notes": st.column_config.TextColumn("Notes"),
+        })
+    if st.button("Apply to window", key="mw_grid_apply"):
+        try:
+            _mw_set(_rows_to_manual_events(_records(edited)))
+            st.rerun()
+        except Exception as e:  # noqa: BLE001
+            st.error(f"Couldn't parse the grid: {e}")
+
+
+def _mw_save_bar(events, bad):
+    from forecast.manual_events import dump_manual_events, load_manual_events
+    n = len(events)
+    if n and not bad:
+        st.success(f"All {n} operation(s) feasible against the uploaded PR.")
+    elif bad:
+        st.warning(f"{len(bad)} operation(s) infeasible — fix the ❌ rows above "
+                   f"before saving.")
+    c1, c2, c3, _ = st.columns([1, 1, 1, 2])
+    if c1.button("💾 Save window", key="mw_save", disabled=bool(bad),
+                 help="Reject-at-entry: disabled while any operation is infeasible."):
+        try:
+            dump_manual_events(SCENARIO_DIR, events)
+            st.success(f"Saved scenario/manual_events.yaml ({n}). Click ▶ Run forecast.")
+        except Exception as e:  # noqa: BLE001
+            st.error(f"Save failed: {e}")
+    if c2.button("↻ Reload from file", key="mw_reload"):
+        _mw_set(load_manual_events(SCENARIO_DIR))
+        st.rerun()
+    if c3.button("🧹 Clear window", key="mw_clear", disabled=not n):
+        _mw_set([])
+        st.rerun()
+
+
 def _manual_window_editor(uploaded):
-    """Run-mode editor: author the week-by-week override window, validated
-    against the uploaded PR, saved to scenario/manual_events.yaml (which the run
-    reads). No Excel sheets involved."""
-    from forecast.manual_events import (
-        load_manual_events, dump_manual_events, validate_manual_events)
+    """Run-mode editor: SEE the projected facility week by week, click a tank to
+    act on it in context (harvest / move / 6N / FW→OG), validated against the
+    uploaded PR, saved to scenario/manual_events.yaml (which the run reads). The
+    flat grid lives on behind an Advanced expander. No Excel sheets involved."""
+    from forecast.time_grid import week_start as _week_start
     with st.expander("🗓 Starting setup — manual override window (optional)",
                      expanded=False):
         st.caption(
-            "Script operations week by week — the forecast EXECUTES them with full "
-            "biology (growth/mortality/feed), records them in the reports, then the "
-            "planner takes over after your last scripted week. Leave empty to let "
-            "the planner do everything.")
-        st.caption(
-            "**og_transfer**: from_tank → to_tanks (count split evenly) · "
-            "**harvest**: from_tank, count · **og_to_6n**: from_tank → 6N to_tanks · "
-            "**fw_to_og**: batch + count=target → to_tanks.")
-        base = _persist("manual_df", lambda: pd.DataFrame(
-            _manual_events_to_df_rows(load_manual_events(SCENARIO_DIR)),
-            columns=_MANUAL_COLS))
-        edited = st.data_editor(
-            base, num_rows="dynamic", hide_index=True, use_container_width=True,
-            key="manual_df_w",
-            column_config={
-                "week": st.column_config.NumberColumn("Week", min_value=1, step=1,
-                    help="1-based forecast week the event fires in"),
-                "type": st.column_config.SelectboxColumn("Type",
-                    options=["og_transfer", "harvest", "og_to_6n", "fw_to_og"]),
-                "batch": st.column_config.TextColumn("Batch", help="FW batch (fw_to_og)"),
-                "from_tank": st.column_config.NumberColumn("From tank", step=1),
-                "to_tanks": st.column_config.TextColumn("To tanks",
-                    help="comma-separated tank IDs"),
-                "count": st.column_config.NumberColumn("Count / target", step=1000),
-                "notes": st.column_config.TextColumn("Notes"),
-            })
-        events = _rows_to_manual_events(_records(edited))
-        bad = []
-        if events:
-            try:
-                state, _fw, _ctx = _hydrate_state_from_upload(uploaded)
-                for i, ok, msgs in validate_manual_events(state, events, **_ctx):
-                    if not ok:
-                        bad.append((i, msgs))
-                if bad:
-                    st.warning(f"{len(bad)} event(s) infeasible against the uploaded PR "
-                               f"— fix before saving:")
-                    for i, msgs in bad:
-                        st.caption(f"• event #{i}: " + "; ".join(msgs))
+            "See the facility projected forward and **click a tank to act on it** — "
+            "harvest it, move/split it, send it to 6N, or bring a freshwater cohort "
+            "into OG. The forecast EXECUTES your operations with full biology "
+            "(growth/mortality/feed), records them in the reports, then the planner "
+            "takes over after your last scripted week. Leave it empty to let the "
+            "planner do everything.")
+
+        try:
+            state, _fw, ctx = _hydrate_state_from_upload(uploaded)
+            import hashlib
+            st.session_state["_mw_pr_key"] = hashlib.md5(uploaded.getvalue()).hexdigest()
+            hydrated = True
+        except Exception as e:  # noqa: BLE001
+            st.warning(f"Couldn't read the facility from this PR "
+                       f"({type(e).__name__}: {e}) — the visual view needs a "
+                       f"hydratable PR. Use the raw grid below.")
+            state, ctx, hydrated = None, None, False
+
+        events = _mw_events()
+        bad = _mw_validate(state, ctx, events) if hydrated else {}
+
+        if hydrated:
+            horizon = int(getattr(ctx["control"], "horizon_weeks", 52) or 52)
+            max_ev = max((e.week or 1) for e in events) if events else 0
+            cap_view = min(max(1, horizon - 1), 26)
+            default_view = min(max(8, max_ev), cap_view)
+            if cap_view <= 1:
+                view = 1
+            else:
+                view = st.slider(
+                    "Weeks to project / act in", 1, cap_view,
+                    min(max(default_view, 1), cap_view),
+                    help="How far ahead to project the facility and let you act. "
+                         "The saved window length stays implicit — it runs through "
+                         "your last scripted operation, then the planner takes over.")
+            n_weeks = max(view, max_ev, 1)
+            rows, labels = _mw_project(state, ctx, events, n_weeks)
+            date_for = {lbl: _week_start(i, ctx["forecast_start"])
+                        for i, lbl in enumerate(labels)}
+
+            _cmode = st.radio(
+                "Colour cells by", ["Fill (density)", "Batch"], horizontal=True,
+                key="mw_color_by",
+                help="Fill = how full each tank is vs its cap (green→red). Batch = "
+                     "a distinct colour per batch, to see which tanks hold which "
+                     "fish and how a batch moves across the weeks.")
+            _cb = "batch" if _cmode.startswith("Batch") else "fill"
+            st.caption(
+                ("**Each batch has its own colour** (grey = empty). "
+                 if _cb == "batch" else
+                 "**Colour = how full each tank is vs its cap** — grey empty, green "
+                 "roomy, amber near cap, red over. ")
+                + "Columns are weeks, rows are tanks (⛔6N = depuration), and each cell "
+                  "shows its batch id. **Click a tank's cell at the week you want** to "
+                  "act on it. The grid redraws as you script.")
+
+            # Clickable facility grid (left) + contextual action panel (right), side
+            # by side so a cell click shows the options right next to the grid instead
+            # of below a tall, internally-scrolling table.
+            styler, ylabels, tank_by_y = _mw_grid(state, rows, labels, color_by=_cb)
+            gnonce = st.session_state.get("mw_grid_nonce2", 0)
+            grid_col, panel_col = st.columns([3, 2], gap="medium")
+            with grid_col:
+                # single-cell selection (Streamlit >=1.49) reliably emits the clicked
+                # (row, column), which plotly-heatmap clicks do not. _mw_grid lays the
+                # frame out rows=tanks / columns=week-labels, so one click picks BOTH
+                # the tank AND the week — no separate week control needed.
+                gev = st.dataframe(
+                    styler, use_container_width=True,
+                    height=min(760, 44 + 35 * len(ylabels)),
+                    on_select="rerun", selection_mode="single-cell",
+                    key=f"mw_grid_sel_{gnonce}")
+                try:
+                    _cells = list(gev["selection"]["cells"])
+                except Exception:  # noqa: BLE001
+                    _cells = list(
+                        getattr(getattr(gev, "selection", None), "cells", []) or [])
+                if _cells:
+                    _rowpos, _wlabel = _cells[0]
+                    if 0 <= _rowpos < len(ylabels) and _wlabel in labels:
+                        st.session_state["mw_sel"] = (
+                            tank_by_y[ylabels[_rowpos]], _wlabel,
+                            labels.index(_wlabel) + 1)
+            with panel_col:
+                sel = st.session_state.get("mw_sel")
+                if sel and sel[1] in labels:
+                    with st.container(border=True):
+                        _mw_action_panel(state, ctx, rows, labels, sel, date_for)
                 else:
-                    st.success(f"All {len(events)} event(s) feasible against the uploaded PR.")
-            except Exception as e:  # noqa: BLE001
-                st.info(f"Validation unavailable ({type(e).__name__}: {e}); save still allowed.")
-        c1, c2, _ = st.columns([1, 1, 3])
-        if c1.button("💾 Save window", key="save_manual", disabled=bool(bad),
-                     help="Reject-at-entry: disabled while any event is infeasible."):
-            try:
-                dump_manual_events(SCENARIO_DIR, events)
-                _reset_keys("manual_df")
-                st.success(f"Saved scenario/manual_events.yaml ({len(events)} event(s)). "
-                           f"Click ▶ Run forecast.")
-                st.rerun()
-            except Exception as e:  # noqa: BLE001
-                st.error(f"Save failed: {e}")
-        if c2.button("↻ Reload", key="reload_manual"):
-            _reset_keys("manual_df")
-            st.rerun()
+                    st.info("👆 Click a tank's cell in the grid to harvest it, move / "
+                            "split it, or send it to 6N — the options appear here.")
+
+            if st.toggle("🐟 FW→OG intake — bring a freshwater cohort into OG",
+                         key="mw_fw_toggle"):
+                with st.container(border=True):
+                    _mw_fw_intake(state, ctx, rows, labels, date_for)
+
+            st.divider()
+            _mw_timeline(state, events, bad)
+
+            if st.toggle("⚙ Advanced — raw event grid (power users)",
+                         key="mw_adv_toggle"):
+                with st.container(border=True):
+                    _mw_raw_grid(state)
+        else:
+            _mw_raw_grid(None)
+
+        st.divider()
+        _mw_save_bar(events, bad)
 
 
 def _og_systems_app():

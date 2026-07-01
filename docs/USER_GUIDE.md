@@ -139,6 +139,26 @@ FW→OG transfer), and only **then** let the planner take over. That's what the
 it empty to let the planner do everything (the default). What you enter is saved
 to `scenario/manual_events.yaml`.
 
+**You drive it by clicking the facility, not by filling a table.** The editor
+shows a **projected facility grid** — columns are weeks, rows are tanks, and
+**each cell is labelled by the batch it holds** so you can read it directly. A
+**"Colour cells by"** toggle switches what the cell colour means: **Fill
+(density)** — how full each tank is versus its own density cap (grey empty,
+green roomy, amber near cap, red over) — or **Batch** — a distinct colour per
+batch, so you can see which tanks hold the same cohort and how a batch moves
+across the weeks. Rows tagged **⛔6N** are depuration. To act: **click the cell**
+for the tank and week you want — a **single click picks both** the tank (its row)
+and the week (its column) — and a panel opens *in context* showing what's actually
+in that tank (batch, fish, weight, density) and offering **Harvest / Move / Send
+to 6N** with real tank pickers — no tank numbers to memorise, no codes to type.
+The grid **re-draws as you script**, so you watch each operation ripple forward
+over the weeks. A **"Weeks to project / act in"** slider sets how far ahead to
+look. Below the map: an **🐟 FW→OG intake** picker (freshwater cohorts aren't
+tanks yet), a plain-English **timeline** of everything you've scripted (with
+delete), and a **Save window** button. The old flat table still lives under **⚙
+Advanced — raw event grid** for bulk edits or unequal per-tank splits; both write
+the same YAML.
+
 **How it works:** you script operations **week by week** for weeks 1..N. In each
 scripted week the forecast **executes only your events** (the planner makes no
 decisions that week) and then runs **full biology** — growth, mortality, and
@@ -153,19 +173,8 @@ window is fully traceable — it is not a silent pre-run mutation.
 > planner must honour later — once the window ends, the closed-loop controller
 > has full control again.
 
-**The grid** (one row per event):
-
-| Column | Meaning |
-|---|---|
-| **Week** | 1-based forecast week the event fires in (start of that week) |
-| **Type** | one of the four event types below |
-| **Batch** | the FW batch id — **only** for `fw_to_og` |
-| **From tank** | source tank id — for `og_transfer` / `harvest` / `og_to_6n` |
-| **To tanks** | destination tank id(s), comma-separated; use `tank:count` to send an explicit count to a tank, or a bare `tank` to split the row's Count evenly across the bare tanks |
-| **Count / target** | `harvest` = fish to harvest (blank = whole tank); `og_transfer` / `og_to_6n` = split across To tanks; `fw_to_og` = the **target** count entering seawater (the engine culls down to it) |
-| **Notes** | free text |
-
-**The four event types:**
+**The four event types** (every operation you script — by click or in the raw
+grid — is one of these):
 
 - **`og_transfer`** — move/split OG fish from `From tank` into one or more
   `To tanks` (same batch). Pure relocation; the destination inherits the source
@@ -181,6 +190,21 @@ window is fully traceable — it is not a silent pre-run mutation.
   then a reconcile-to-target **cull**, then the big/small size-class split across
   your tanks. The cull is surfaced in the **ValidationLog** and reconciled in the
   **InputConservationAudit** FW mass-balance, so no fish go unaccounted.
+
+**Advanced — raw grid columns.** The **⚙ Advanced** table is one row per
+operation, for bulk edits or unequal per-tank splits the click flow doesn't
+cover. Edit it and press **Apply to window** to push the rows into the visual
+editor + timeline.
+
+| Column | Meaning |
+|---|---|
+| **Week** | 1-based forecast week the event fires in (start of that week) |
+| **Type** | one of the four event types above |
+| **Batch** | the FW batch id — **only** for `fw_to_og` |
+| **From tank** | source tank id — for `og_transfer` / `harvest` / `og_to_6n` |
+| **To tanks** | destination tank id(s), comma-separated; use `tank:count` to send an explicit count to a tank, or a bare `tank` to split the row's Count evenly across the bare tanks |
+| **Count / target** | `harvest` = fish to harvest (blank = whole tank); `og_transfer` / `og_to_6n` = split across To tanks; `fw_to_og` = the **target** count entering seawater (the engine culls down to it) |
+| **Notes** | free text |
 
 **Reject-at-entry validation.** As you edit, each event is dry-run against your
 uploaded PR using the **same** projection the real run uses. Infeasible events
