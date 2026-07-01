@@ -692,6 +692,13 @@ def _rows_to_manual_events(rows):
             dests = [ManualDest(tank=t) for t, c in specs]
             out.append(ManualEvent(type=typ, week=week, batch=batch, count=count,
                                    destinations=dests, notes=notes))
+        elif typ == "graded_harvest":
+            # from_tank = source, count = biggest-N to harvest, to_tanks =
+            # pickup[,retention] (retention defaults to the source).
+            dests = [ManualDest(tank=t) for t, c in specs]
+            out.append(ManualEvent(type=typ, week=week, from_tank=from_tank,
+                                   count=count, destinations=dests,
+                                   batch=batch, notes=notes))
         else:
             out.append(ManualEvent(type=typ, week=week, notes=notes))
     return out
@@ -901,7 +908,7 @@ def _mw_split_dests(picks, total, whole):
 
 def _mw_action_panel(state, ctx, rows, labels, sel, date_for):
     from forecast.sixn import SIXN_ALL_TANKS
-    from forecast.manual_events import ManualEvent
+    from forecast.manual_events import ManualDest, ManualEvent
     tid, wlabel, wk = sel
     r = next((x for x in rows if x.tank_id == tid and x.week_label == wlabel), None)
     occupied = r is not None and r.count > 0
@@ -931,7 +938,8 @@ def _mw_action_panel(state, ctx, rows, labels, sel, date_for):
     # counts don't linger when you click a different cell.
     sfx = f"{tid}_{wk}"
     act = st.radio("What do you want to do here?",
-                   ["Harvest", "Move (OG→OG)", "Send to 6N depuration"],
+                   ["Harvest", "Graded harvest", "Move (OG→OG)",
+                    "Send to 6N depuration"],
                    horizontal=True, key="mw_act")
 
     if act == "Harvest":
@@ -943,6 +951,46 @@ def _mw_action_panel(state, ctx, rows, labels, sel, date_for):
         if st.button(f"➕ Add harvest in week {wk}", key="mw_h_add", type="primary"):
             _mw_add(ManualEvent(type="harvest", week=wk, from_tank=tid,
                                 count=(None if whole else cnt)))
+            st.rerun()
+
+    elif act == "Graded harvest":
+        st.caption("Harvest the **biggest N fish** (size-sorted) to processing; "
+                   "the smaller remainder keeps growing. Conserves count + "
+                   "biomass exactly.")
+        occ = {x.tank_id for x in rows if x.week_label == wlabel and x.count > 0}
+        empty_og = [t.tank_id for t in other_og if t.tank_id not in occ]
+        n_big = st.number_input(
+            "Fish to harvest (the biggest N)", min_value=0.0,
+            max_value=float(r.count), value=float(int(r.count // 2)), step=1000.0,
+            key=f"mw_g_cnt_{sfx}",
+            help="The N largest fish are graded out at their (higher) mean weight; "
+                 "the rest stay at their (lower) mean.")
+        pickup = st.selectbox(
+            "Harvest-staging tank (an empty OG tank the graded fish pass through)",
+            options=empty_og, format_func=lambda x: _mw_loc(state, x),
+            key=f"mw_g_pick_{sfx}",
+            help="A momentary staging tank — the big fish move here and are "
+                 "harvested the same week (it shows empty afterwards).",
+        ) if empty_og else None
+        ret_here = st.checkbox("Keep the smaller fish in this tank", value=True,
+                               key=f"mw_g_reth_{sfx}")
+        ret_tank = None
+        if not ret_here:
+            ret_opts = [t for t in empty_og if t != pickup]
+            ret_tank = st.selectbox(
+                "Retention tank for the smaller fish", options=ret_opts,
+                format_func=lambda x: _mw_loc(state, x),
+                key=f"mw_g_ret_{sfx}") if ret_opts else None
+        if not empty_og:
+            st.caption("⚠ No empty OG tank available this week to stage the harvest.")
+        dests = [ManualDest(tank=int(pickup))] if pickup is not None else []
+        if not ret_here and ret_tank is not None:
+            dests.append(ManualDest(tank=int(ret_tank)))
+        if st.button(f"➕ Add graded harvest in week {wk}", key="mw_g_add",
+                     type="primary",
+                     disabled=(pickup is None or not n_big or n_big <= 0)):
+            _mw_add(ManualEvent(type="graded_harvest", week=wk, from_tank=tid,
+                                count=n_big, destinations=dests))
             st.rerun()
 
     elif act == "Move (OG→OG)":
@@ -1042,6 +1090,13 @@ def _mw_event_summary(state, ev):
     if ev.type == "fw_to_og":
         tgt = f"target {ev.count:,.0f}" if ev.count else "all available"
         return f"Wk {ev.week}: **FW→OG** {ev.batch} → {dests} ({tgt})"
+    if ev.type == "graded_harvest":
+        amt = f"{ev.count:,.0f}" if ev.count else "?"
+        pk = loc(ev.destinations[0].tank) if ev.destinations else "—"
+        ret = (loc(ev.destinations[1].tank) if len(ev.destinations) >= 2
+               else "source")
+        return (f"Wk {ev.week}: **Graded harvest** biggest {amt} from "
+                f"{loc(ev.from_tank)} (via {pk}), retain smaller in {ret}")
     return f"Wk {ev.week}: {ev.type}"
 
 
@@ -1077,7 +1132,9 @@ def _mw_raw_grid(state):
         "into the visual editor + timeline above.")
     st.caption(
         "**og_transfer**: from_tank → to_tanks (count split evenly) · "
-        "**harvest**: from_tank, count · **og_to_6n**: from_tank → 6N to_tanks · "
+        "**harvest**: from_tank, count · **graded_harvest**: from_tank, "
+        "count=biggest-N, to_tanks=pickup[,retention] · "
+        "**og_to_6n**: from_tank → 6N to_tanks · "
         "**fw_to_og**: batch + count=target → to_tanks. "
         "to_tanks: comma-separated; `tank:count` for an explicit per-tank amount.")
     nonce = st.session_state.get("mw_grid_nonce", 0)
@@ -1089,7 +1146,8 @@ def _mw_raw_grid(state):
             "week": st.column_config.NumberColumn("Week", min_value=1, step=1,
                 help="1-based forecast week the event fires in"),
             "type": st.column_config.SelectboxColumn("Type",
-                options=["og_transfer", "harvest", "og_to_6n", "fw_to_og"]),
+                options=["og_transfer", "harvest", "graded_harvest",
+                         "og_to_6n", "fw_to_og"]),
             "batch": st.column_config.TextColumn("Batch", help="FW batch (fw_to_og)"),
             "from_tank": st.column_config.NumberColumn("From tank", step=1),
             "to_tanks": st.column_config.TextColumn("To tanks",
