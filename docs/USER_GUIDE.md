@@ -149,8 +149,9 @@ batch, so you can see which tanks hold the same cohort and how a batch moves
 across the weeks. Rows tagged **⛔6N** are depuration. To act: **click the cell**
 for the tank and week you want — a **single click picks both** the tank (its row)
 and the week (its column) — and a panel opens *in context* showing what's actually
-in that tank (batch, fish, weight, density) and offering **Harvest / Move / Send
-to 6N** with real tank pickers — no tank numbers to memorise, no codes to type.
+in that tank (batch, fish, weight, density) and offering **Harvest / Graded
+harvest / Move / Send to 6N** with real tank pickers — no tank numbers to
+memorise, no codes to type.
 The grid **re-draws as you script**, so you watch each operation ripple forward
 over the weeks. A **"Weeks to project / act in"** slider sets how far ahead to
 look. Below the map: an **🐟 FW→OG intake** picker (freshwater cohorts aren't
@@ -173,7 +174,7 @@ window is fully traceable — it is not a silent pre-run mutation.
 > planner must honour later — once the window ends, the closed-loop controller
 > has full control again.
 
-**The four event types** (every operation you script — by click or in the raw
+**The five event types** (every operation you script — by click or in the raw
 grid — is one of these):
 
 - **`og_transfer`** — move/split OG fish from `From tank` into one or more
@@ -181,6 +182,15 @@ grid — is one of these):
   weight. Count conserved exactly.
 - **`harvest`** — directly harvest `Count` fish from `From tank` (blank = the
   whole tank), recorded as a real harvest in that week.
+- **`graded_harvest`** — a **size-sorted** harvest: take the **biggest `Count`
+  fish** from `From tank` to processing and keep the smaller remainder growing.
+  You pick a **pickup** staging tank (an empty OG tank the graded fish pass
+  through and are harvested from — it shows empty again the same week); the
+  smaller fish stay in the source, or move to an optional **retention** tank.
+  The split is exact — the biggest `Count` leave at their (higher) mean weight,
+  the rest stay at their (lower) mean — so **both count and biomass conserve**,
+  and it reconciles in the **TankContinuityAudit** (0 drift) and
+  **InputConservationAudit** exactly like every other event.
 - **`og_to_6n`** — move OG fish from `From tank` into one or more **6N
   depuration tanks** (must be 6N tanks: 61, 63, 65, 67, 69, 71). The destination
   is frozen **off-feed** (no growth, no feed) for depuration.
@@ -199,11 +209,11 @@ editor + timeline.
 | Column | Meaning |
 |---|---|
 | **Week** | 1-based forecast week the event fires in (start of that week) |
-| **Type** | one of the four event types above |
+| **Type** | one of the five event types above |
 | **Batch** | the FW batch id — **only** for `fw_to_og` |
-| **From tank** | source tank id — for `og_transfer` / `harvest` / `og_to_6n` |
-| **To tanks** | destination tank id(s), comma-separated; use `tank:count` to send an explicit count to a tank, or a bare `tank` to split the row's Count evenly across the bare tanks |
-| **Count / target** | `harvest` = fish to harvest (blank = whole tank); `og_transfer` / `og_to_6n` = split across To tanks; `fw_to_og` = the **target** count entering seawater (the engine culls down to it) |
+| **From tank** | source tank id — for `og_transfer` / `harvest` / `graded_harvest` / `og_to_6n` |
+| **To tanks** | destination tank id(s), comma-separated; use `tank:count` to send an explicit count to a tank, or a bare `tank` to split the row's Count evenly across the bare tanks. For `graded_harvest` the **first** tank is the pickup staging tank and an optional **second** is the retention tank |
+| **Count / target** | `harvest` = fish to harvest (blank = whole tank); `graded_harvest` = the number of **biggest** fish to harvest; `og_transfer` / `og_to_6n` = split across To tanks; `fw_to_og` = the **target** count entering seawater (the engine culls down to it) |
 | **Notes** | free text |
 
 **Reject-at-entry validation.** As you edit, each event is dry-run against your
