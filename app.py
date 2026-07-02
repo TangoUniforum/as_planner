@@ -1000,9 +1000,19 @@ def _mw_action_panel(state, ctx, rows, labels, sel, date_for):
                    "go to a 6N depuration tank (frozen, off-feed to purge, harvested "
                    "later from 6N) and the **smaller remainder moves to an OG tank** "
                    "to keep growing. Conserves count + biomass exactly.")
-        occ = {x.tank_id for x in rows if x.week_label == wlabel and x.count > 0}
-        empty_6n = [t for t in sorted(SIXN_ALL_TANKS) if t not in occ]
-        other_og_ids = [t.tank_id for t in other_og if t.tank_id not in occ]
+        # Occupied tanks at THIS week -> (batch, density); empty tanks read 0.
+        _wk = {x.tank_id: (x.batch_id, x.density_kg_m3)
+               for x in rows if x.week_label == wlabel and x.count > 0}
+        _fmt = lambda x: (f"{_mw_loc(state, x)} · "                        # noqa: E731
+                          f"{_wk.get(x, (None, 0.0))[1]:.0f} kg/m³")
+        # Destinations = EMPTY tanks OR tanks already holding THIS batch (top-up),
+        # roomiest-first (each option shows its current density in the picker).
+        def _dest_opts(tank_ids):
+            opts = [t for t in tank_ids
+                    if t not in _wk or _wk[t][0] == r.batch_id]
+            return sorted(opts, key=lambda t: _wk.get(t, (None, 0.0))[1])
+        dest_6n = _dest_opts(sorted(SIXN_ALL_TANKS))
+        dest_og = _dest_opts([t.tank_id for t in other_og])
         n_big = st.number_input(
             "Fish to send to 6N (the biggest N)", min_value=0.0,
             max_value=float(r.count), value=float(int(r.count // 2)), step=1000.0,
@@ -1018,21 +1028,21 @@ def _mw_action_panel(state, ctx, rows, labels, sel, date_for):
                        f"smaller {r.count - n_big:,.0f} ≈ "
                        f"{_small / 1000:.2f} kg → OG")
         dest6n = st.selectbox(
-            "6N depuration tank (the biggest fish go here)", options=empty_6n,
-            format_func=lambda x: _mw_loc(state, x), key=f"mw_g6_dest_{sfx}",
-        ) if empty_6n else None
+            "6N depuration tank — biggest fish (· current density)",
+            options=dest_6n, format_func=_fmt, key=f"mw_g6_dest_{sfx}",
+        ) if dest_6n else None
         # Grading empties the source, so the smaller remainder is graded OUT too and
-        # moves to its own OG tank. Both destinations are required.
+        # moves to an OG tank (empty, or one already holding this batch). Required.
         ret_tank = st.selectbox(
-            "Send the smaller fish to (empty OG tank)", options=other_og_ids,
-            format_func=lambda x: _mw_loc(state, x), key=f"mw_g6_ret_{sfx}",
-            help="Grading empties the source tank — the smaller fish move here to "
-                 "keep growing.",
-        ) if other_og_ids else None
-        if not empty_6n:
-            st.caption("⚠ No empty 6N depuration tank available this week.")
-        if not other_og_ids:
-            st.caption("⚠ No empty OG tank available to receive the smaller fish.")
+            "Send the smaller fish to — OG tank (· current density)",
+            options=dest_og, format_func=_fmt, key=f"mw_g6_ret_{sfx}",
+            help="Empty tanks (0 kg/m³) or tanks already holding this batch. "
+                 "Grading empties the source; the smaller fish move here.",
+        ) if dest_og else None
+        if not dest_6n:
+            st.caption("⚠ No empty / same-batch 6N tank available this week.")
+        if not dest_og:
+            st.caption("⚠ No empty / same-batch OG tank for the smaller fish.")
         dests = ([ManualDest(tank=int(dest6n)), ManualDest(tank=int(ret_tank))]
                  if dest6n is not None and ret_tank is not None else [])
         if st.button(f"➕ Add graded 6N move in week {wk}", key="mw_g6_add",
