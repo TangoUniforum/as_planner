@@ -775,7 +775,10 @@ def _mw_project(state, ctx, events, n_weeks):
             sc, ctx["batch_by_id"], ctx["tables"], ctx["forecast_start"], n_weeks,
             events=events, control=ctx["control"], pr_closing=ctx["pr_closing"],
             fw_records=ctx["fw_records"])
-        rows = win["batch_locations"]
+        # OPENING (start-of-week, pre-biology) snapshot so each cell shows what's in
+        # the tank WHEN you act on it — not the end-of-week grown state. Fall back
+        # to the closing snapshot for older engines without opening_locations.
+        rows = win.get("opening_locations") or win["batch_locations"]
     except Exception:  # noqa: BLE001 — a bad event must not blank the view
         rows = []
     st.session_state["_mw_proj_cache"] = {"sig": sig, "rows": rows, "labels": labels}
@@ -948,12 +951,25 @@ def _mw_cut_weights(avg_wt_g, cv_pct, count, k):
     return upper_truncated_split(avg_wt_g, cv, avg_wt_g + sigma * z)
 
 
+def _mw_occ_at(rows, wlabel):
+    """{tank_id: (batch_id, density_kg_m3)} for tanks occupied at `wlabel`."""
+    return {x.tank_id: (x.batch_id, x.density_kg_m3)
+            for x in rows if x.week_label == wlabel and x.count > 0}
+
+
+def _mw_dest_fmt(state, occ):
+    """format_func for a destination picker: 'LOC · BATCH · DENSITY' when the tank
+    holds fish at the selected week (so you see the current batch + density before
+    picking), else 'LOC · empty'. `occ` = _mw_occ_at() map."""
+    def _f(tid):
+        loc = _mw_loc(state, tid)
+        o = occ.get(tid)
+        return f"{loc} · empty" if o is None else f"{loc} · {o[0]} · {o[1]:.0f} kg/m³"
+    return _f
+
+
 def _mw_action_panel(state, ctx, rows, labels, sel, date_for):
-    # Only the 6N MAIN tanks (61/63/65) are offered as depuration destinations —
-    # the SISTER tanks (67/69/71) exist solely to hold a SECOND batch in a pair for
-    # a mixed same-week harvest; single-batch-per-tank (biomass fidelity) never
-    # uses them. SIXN_ALL_TANKS is still used to EXCLUDE all 6N from OG grow-out.
-    from forecast.sixn import SIXN_ALL_TANKS, SIXN_MAIN_TANKS
+    from forecast.sixn import SIXN_ALL_TANKS
     from forecast.manual_events import ManualDest, ManualEvent
     tid, wlabel, wk = sel
     r = next((x for x in rows if x.tank_id == tid and x.week_label == wlabel), None)
@@ -980,6 +996,10 @@ def _mw_action_panel(state, ctx, rows, labels, sel, date_for):
     other_og = [t for t in _mw_tanks(state)
                 if t.type == "OG" and t.tank_id not in SIXN_ALL_TANKS
                 and t.tank_id != tid]
+    # Current occupancy at this week + a shared picker format (LOC · batch · density,
+    # or LOC · empty) so EVERY destination dropdown shows what's in each tank.
+    occ_map = _mw_occ_at(rows, wlabel)
+    dfmt = _mw_dest_fmt(state, occ_map)
     # Scope input keys to THIS tank+week so a previous selection's destinations /
     # counts don't linger when you click a different cell.
     sfx = f"{tid}_{wk}"
@@ -1004,18 +1024,13 @@ def _mw_action_panel(state, ctx, rows, labels, sel, date_for):
                    "go to a 6N depuration tank (frozen, off-feed to purge, harvested "
                    "later from 6N) and the **smaller remainder moves to an OG tank** "
                    "to keep growing. Conserves count + biomass exactly.")
-        # Occupied tanks at THIS week -> (batch, density); empty tanks read 0.
-        _wk = {x.tank_id: (x.batch_id, x.density_kg_m3)
-               for x in rows if x.week_label == wlabel and x.count > 0}
-        _fmt = lambda x: (f"{_mw_loc(state, x)} · "                        # noqa: E731
-                          f"{_wk.get(x, (None, 0.0))[1]:.0f} kg/m³")
         # Destinations = EMPTY tanks OR tanks already holding THIS batch (top-up),
-        # roomiest-first (each option shows its current density in the picker).
+        # roomiest-first; each option shows its current batch + density.
         def _dest_opts(tank_ids):
             opts = [t for t in tank_ids
-                    if t not in _wk or _wk[t][0] == r.batch_id]
-            return sorted(opts, key=lambda t: _wk.get(t, (None, 0.0))[1])
-        dest_6n = _dest_opts(sorted(SIXN_MAIN_TANKS))   # mains only (no batch-mixing sisters)
+                    if t not in occ_map or occ_map[t][0] == r.batch_id]
+            return sorted(opts, key=lambda t: occ_map.get(t, (None, 0.0))[1])
+        dest_6n = _dest_opts(sorted(SIXN_ALL_TANKS))   # mains 61/63/65 + sisters 67/69/71
         dest_og = _dest_opts([t.tank_id for t in other_og])
         n_big = st.number_input(
             "Fish to send to 6N (the biggest N)", min_value=0.0,
@@ -1032,16 +1047,19 @@ def _mw_action_panel(state, ctx, rows, labels, sel, date_for):
                        f"smaller {r.count - n_big:,.0f} ≈ "
                        f"{_small / 1000:.2f} kg → OG")
         dest6n = st.selectbox(
-            "6N depuration tank — biggest fish (· current density)",
-            options=dest_6n, format_func=_fmt, key=f"mw_g6_dest_{sfx}",
+            "6N depuration tank — biggest fish (· batch · density)",
+            options=dest_6n, format_func=dfmt, key=f"mw_g6_dest_{sfx}",
+            help="Mains 61/63/65 + sisters 67/69/71 — empty or same-batch; each "
+                 "shows its current batch + density (a same-pair main holding a "
+                 "different batch = a mixed harvest, so watch the batch column).",
         ) if dest_6n else None
         # Grading empties the source, so the smaller remainder is graded OUT too and
         # moves to an OG tank (empty, or one already holding this batch). Required.
         ret_tank = st.selectbox(
-            "Send the smaller fish to — OG tank (· current density)",
-            options=dest_og, format_func=_fmt, key=f"mw_g6_ret_{sfx}",
-            help="Empty tanks (0 kg/m³) or tanks already holding this batch. "
-                 "Grading empties the source; the smaller fish move here.",
+            "Send the smaller fish to — OG tank (· batch · density)",
+            options=dest_og, format_func=dfmt, key=f"mw_g6_ret_{sfx}",
+            help="Empty or same-batch OG tanks. Grading empties the source; the "
+                 "smaller fish move here.",
         ) if dest_og else None
         if not dest_6n:
             st.caption("⚠ No empty / same-batch 6N tank available this week.")
@@ -1061,17 +1079,13 @@ def _mw_action_panel(state, ctx, rows, labels, sel, date_for):
         # Regular OG grow-out tanks only (the 6N depuration system is reached via
         # Send-to-6N / Graded->6N, not a plain grow-out move). Offer EMPTY tanks or
         # ones already holding this batch, each showing current density, roomiest-first.
-        _wk = {x.tank_id: (x.batch_id, x.density_kg_m3)
-               for x in rows if x.week_label == wlabel and x.count > 0}
         move_dests = sorted(
             (t.tank_id for t in other_og
-             if t.tank_id not in _wk or _wk[t.tank_id][0] == r.batch_id),
-            key=lambda t: _wk.get(t, (None, 0.0))[1])
+             if t.tank_id not in occ_map or occ_map[t.tank_id][0] == r.batch_id),
+            key=lambda t: occ_map.get(t, (None, 0.0))[1])
         picks = st.multiselect(
-            "Destination grow-out tank(s) — empty or same batch (· current density)",
-            options=move_dests, key=f"mw_m_dest_{sfx}",
-            format_func=lambda x: (f"{_mw_loc(state, x)} · "
-                                   f"{_wk.get(x, (None, 0.0))[1]:.0f} kg/m³"))
+            "Destination grow-out tank(s) — empty or same batch (· batch · density)",
+            options=move_dests, format_func=dfmt, key=f"mw_m_dest_{sfx}")
         whole = st.checkbox("Move the whole tank (split evenly)", value=True,
                             key=f"mw_m_whole_{sfx}")
         total = None
@@ -1088,8 +1102,8 @@ def _mw_action_panel(state, ctx, rows, labels, sel, date_for):
 
     else:  # Send to 6N depuration
         picks = st.multiselect(
-            "6N depuration tank(s) — mains only", options=sorted(SIXN_MAIN_TANKS),
-            format_func=lambda x: _mw_loc(state, x), key=f"mw_6_dest_{sfx}")
+            "6N depuration tank(s) — mains + sisters (· batch · density)",
+            options=sorted(SIXN_ALL_TANKS), format_func=dfmt, key=f"mw_6_dest_{sfx}")
         whole = st.checkbox("Move the whole tank (split evenly)", value=True,
                             key=f"mw_6_whole_{sfx}")
         total = None
@@ -1138,7 +1152,7 @@ def _mw_fw_intake(state, ctx, rows, labels, date_for):
                 and t.tank_id not in occ]
     picks = st.multiselect(
         "Empty OG destination tank(s)", options=[t.tank_id for t in empty_og],
-        format_func=lambda x: _mw_loc(state, x), key="mw_fw_dest")
+        format_func=_mw_dest_fmt(state, _mw_occ_at(rows, wlabel)), key="mw_fw_dest")
     target = st.number_input("Target fish entering seawater", min_value=0.0,
                              value=float(cnt), step=1000.0, key="mw_fw_target")
     if st.button(f"➕ Add FW→OG intake in week {wk}", key="mw_fw_add",
@@ -1330,8 +1344,10 @@ def _manual_window_editor(uploaded):
                  "green roomy, amber near cap, red over — and the **batch id is bold "
                  "in its own colour** so you can follow a cohort across tanks. ")
                 + "Columns are weeks, rows are tanks (⛔6N = depuration), and each cell "
-                  "shows **batch · avg weight · density**. **Click a tank's cell at the "
-                  "week you want** to act on it. The grid redraws as you script.")
+                  "shows **batch · avg weight · density** at **week-open** (start of "
+                  "the week, before that week's growth) — what's in the tank when you "
+                  "act. **Click a tank's cell at the week you want** to act on it. "
+                  "The grid redraws as you script.")
 
             # Clickable facility grid (left) + contextual action panel (right), side
             # by side so a cell click shows the options right next to the grid instead

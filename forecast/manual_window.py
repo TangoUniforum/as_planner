@@ -131,6 +131,7 @@ def advance_facility_window(state, batch_by_id, tables, forecast_start,
     labels = forecast_week_labels(forecast_start, n_weeks)
     realized: dict[tuple[int, str, str], list[float]] = {}
     batch_locations: list = []
+    opening_locations: list = []   # start-of-week (post-event, PRE-biology) snapshot
     transfer_events: list = []
     harvest_events: list = []
     tranog_events: list = []
@@ -153,6 +154,12 @@ def advance_facility_window(state, batch_by_id, tables, forecast_start,
                 rec = manual_fw_balance.setdefault(b, [0.0, 0.0])
                 rec[0] += cnt
                 rec[1] += culled
+        # OPENING snapshot: post-event but PRE-biology — the START-of-week state
+        # (before this week's growth/mortality). The editor's heatmap shows these
+        # so a cell reflects what's in the tank WHEN you act on it, not after a
+        # week of growth. (batch_locations below stays the end-of-week/closing
+        # snapshot that the run stitches into the output + audits.)
+        opening_locations.extend(_snapshot_week(state, labels[i], week_start))
         wk_realized = advance_facility_one_week(
             state, batch_by_id, tables, week_start, labels[i])
         realized.update(wk_realized)
@@ -161,6 +168,7 @@ def advance_facility_window(state, batch_by_id, tables, forecast_start,
     return {
         "realized_biology": realized,
         "batch_locations": batch_locations,
+        "opening_locations": opening_locations,
         "transfer_events": transfer_events,
         "harvest_events": harvest_events,
         "tranog_events": tranog_events,
