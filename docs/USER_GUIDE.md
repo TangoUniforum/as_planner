@@ -194,9 +194,13 @@ grid — is one of these):
   `Count` leave at their (higher) mean, the rest stay at their (lower) mean — so
   **count + biomass conserve** and it reconciles in the **TankContinuityAudit**
   (0 drift) + **InputConservationAudit** like every other event.
-- **`og_to_6n`** — move OG fish from `From tank` into one or more **6N
-  depuration tanks** (must be 6N tanks: 61, 63, 65, 67, 69, 71). The destination
-  is frozen **off-feed** (no growth, no feed) for depuration.
+- **`og_to_6n`** — move OG fish from `From tank` into a **6N depuration tank**.
+  The in-app pickers offer the **main 6N tanks only (61, 63, 65)** — one batch per
+  tank; the **sister tanks (67, 69, 71) are deliberately withheld** since they
+  exist only to hold a *second* batch in a pair for a mixed same-week harvest, and
+  single-batch-per-tank keeps biomass fidelity. The destination is frozen
+  **off-feed** (no growth, no feed) for depuration. (Graded → 6N uses the same
+  mains-only rule.)
 - **`fw_to_og`** — a manual FW→OG transfer (TranOG) of `Batch` into your chosen
   **empty OG** `To tanks`, with `Count` as the **target** entering seawater. The
   engine applies the same logic as the automatic pipeline: handling mortality,

@@ -949,7 +949,11 @@ def _mw_cut_weights(avg_wt_g, cv_pct, count, k):
 
 
 def _mw_action_panel(state, ctx, rows, labels, sel, date_for):
-    from forecast.sixn import SIXN_ALL_TANKS
+    # Only the 6N MAIN tanks (61/63/65) are offered as depuration destinations —
+    # the SISTER tanks (67/69/71) exist solely to hold a SECOND batch in a pair for
+    # a mixed same-week harvest; single-batch-per-tank (biomass fidelity) never
+    # uses them. SIXN_ALL_TANKS is still used to EXCLUDE all 6N from OG grow-out.
+    from forecast.sixn import SIXN_ALL_TANKS, SIXN_MAIN_TANKS
     from forecast.manual_events import ManualDest, ManualEvent
     tid, wlabel, wk = sel
     r = next((x for x in rows if x.tank_id == tid and x.week_label == wlabel), None)
@@ -1011,7 +1015,7 @@ def _mw_action_panel(state, ctx, rows, labels, sel, date_for):
             opts = [t for t in tank_ids
                     if t not in _wk or _wk[t][0] == r.batch_id]
             return sorted(opts, key=lambda t: _wk.get(t, (None, 0.0))[1])
-        dest_6n = _dest_opts(sorted(SIXN_ALL_TANKS))
+        dest_6n = _dest_opts(sorted(SIXN_MAIN_TANKS))   # mains only (no batch-mixing sisters)
         dest_og = _dest_opts([t.tank_id for t in other_og])
         n_big = st.number_input(
             "Fish to send to 6N (the biggest N)", min_value=0.0,
@@ -1054,19 +1058,17 @@ def _mw_action_panel(state, ctx, rows, labels, sel, date_for):
             st.rerun()
 
     elif act == "Move (OG→OG)":
-        # All OG tanks incl. the 6N system (mains 61/63/65 + sisters 67/69/71) are
-        # valid MANUAL move destinations — the 6N exclusion elsewhere is only an
-        # auto-planner heuristic. Offer EMPTY tanks or ones already holding this
-        # batch, each showing current density (0 = empty), roomiest-first.
+        # Regular OG grow-out tanks only (the 6N depuration system is reached via
+        # Send-to-6N / Graded->6N, not a plain grow-out move). Offer EMPTY tanks or
+        # ones already holding this batch, each showing current density, roomiest-first.
         _wk = {x.tank_id: (x.batch_id, x.density_kg_m3)
                for x in rows if x.week_label == wlabel and x.count > 0}
         move_dests = sorted(
-            (t.tank_id for t in _mw_tanks(state)
-             if t.type == "OG" and t.tank_id != tid
-             and (t.tank_id not in _wk or _wk[t.tank_id][0] == r.batch_id)),
+            (t.tank_id for t in other_og
+             if t.tank_id not in _wk or _wk[t.tank_id][0] == r.batch_id),
             key=lambda t: _wk.get(t, (None, 0.0))[1])
         picks = st.multiselect(
-            "Destination grow-out tank(s) — incl. 6N (· current density)",
+            "Destination grow-out tank(s) — empty or same batch (· current density)",
             options=move_dests, key=f"mw_m_dest_{sfx}",
             format_func=lambda x: (f"{_mw_loc(state, x)} · "
                                    f"{_wk.get(x, (None, 0.0))[1]:.0f} kg/m³"))
@@ -1086,7 +1088,7 @@ def _mw_action_panel(state, ctx, rows, labels, sel, date_for):
 
     else:  # Send to 6N depuration
         picks = st.multiselect(
-            "6N depuration tank(s)", options=sorted(SIXN_ALL_TANKS),
+            "6N depuration tank(s) — mains only", options=sorted(SIXN_MAIN_TANKS),
             format_func=lambda x: _mw_loc(state, x), key=f"mw_6_dest_{sfx}")
         whole = st.checkbox("Move the whole tank (split evenly)", value=True,
                             key=f"mw_6_whole_{sfx}")
