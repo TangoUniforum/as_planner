@@ -308,6 +308,64 @@ class TestManualFwToOgConservation:
         assert math.isclose(
             s.tanks_by_id[26].count + s.tanks_by_id[44].count, placed, abs_tol=1e-6)
 
+    def _state_four_empty_og(self):
+        from datetime import date as _d
+        from forecast.models import FacilityConfig, TankConfig
+        from forecast.state import FacilityState
+        cfg = FacilityConfig(tanks=[
+            TankConfig(location_id=f"OG-{t}", system_id="OG2S", tank_id=t,
+                       volume_m3=1720, max_density_kg_m3=95,
+                       max_feed_kg_day=3000, type="OG")
+            for t in (26, 44, 46, 48)])
+        return FacilityState.from_facility_config(cfg, today=_d(2026, 6, 1))
+
+    def test_explicit_grade_routes_big_and_small_to_tagged_tanks(self):
+        """size_class="big"/"small" tags route each entry grade ONLY to its own
+        tanks (heavier fish to the big tanks, lighter to the small), still
+        conserving count. The UI's two-picker flow relies on this."""
+        from datetime import date as _d
+        from forecast.manual_events import (
+            ManualEvent, ManualDest, _apply_fw_to_og)
+        s = self._state_four_empty_og()
+        fw_count = 300000.0
+        ev = ManualEvent(type="fw_to_og", week=1, batch="B49", count=250000,
+                         destinations=[
+                             ManualDest(tank=26, size_class="big"),
+                             ManualDest(tank=44, size_class="big"),
+                             ManualDest(tank=46, size_class="small"),
+                             ManualDest(tank=48, size_class="small")])
+        tranogs = []
+        warns, culled = _apply_fw_to_og(
+            s, ev, 1, fw_count, 370.0, 20.0, 0.0001,
+            event_date=_d(2026, 6, 1), out_tranog=tranogs)
+        placed = sum(d.count for e in tranogs for d in e.destinations)
+        assert math.isclose(placed + culled, fw_count, abs_tol=1e-6)
+        assert math.isclose(placed, 250000, abs_tol=1e-6)
+        # Heavier fish in the big-tagged tanks than the small-tagged tanks.
+        big_wt = min(s.tanks_by_id[26].avg_wt_g, s.tanks_by_id[44].avg_wt_g)
+        small_wt = max(s.tanks_by_id[46].avg_wt_g, s.tanks_by_id[48].avg_wt_g)
+        assert big_wt > small_wt
+        # Each grade's count split evenly across its own tanks.
+        assert math.isclose(s.tanks_by_id[26].count, s.tanks_by_id[44].count, abs_tol=1e-6)
+        assert math.isclose(s.tanks_by_id[46].count, s.tanks_by_id[48].count, abs_tol=1e-6)
+
+    def test_grade_with_no_assigned_tank_is_rejected(self):
+        """If a grade that has fish gets no tank, the transfer is rejected (no
+        fish placed) rather than silently dropped."""
+        from datetime import date as _d
+        from forecast.manual_events import (
+            ManualEvent, ManualDest, _apply_fw_to_og)
+        s = self._state_four_empty_og()
+        ev = ManualEvent(type="fw_to_og", week=1, batch="B49", count=250000,
+                         destinations=[ManualDest(tank=26, size_class="big")])
+        tranogs = []
+        warns, culled = _apply_fw_to_og(
+            s, ev, 1, 300000.0, 370.0, 20.0, 0.0001,
+            event_date=_d(2026, 6, 1), out_tranog=tranogs)
+        assert any("smaller grade" in w and "no tank" in w for w in warns)
+        assert not tranogs                       # nothing placed
+        assert s.tanks_by_id[26].is_empty        # source tank untouched
+
 
 class TestManualFwBalanceAudit:
     """The InputConservation FW mass-balance gate must reconcile a manual

@@ -55,10 +55,16 @@ class ManualDest:
     avg_wt_g — destination weight; None inherits the source weight (engine
               computes — an instantaneous start-state move carries the source
               avg weight forward).
+    size_class — for `fw_to_og` only: "big" | "small" explicitly routes this
+              tank to the bigger / smaller entry grade. None (the default, and
+              every other event type) means legacy positional grading — the
+              engine splits big to the first half of the tanks, small to the
+              rest. Mixing tagged + untagged dests on one event is rejected.
     """
     tank: int
     count: Optional[float] = None
     avg_wt_g: Optional[float] = None
+    size_class: Optional[str] = None
 
 
 @dataclass
@@ -78,14 +84,17 @@ class ManualEvent:
 def manual_events_to_list(events: list[ManualEvent]) -> list[dict]:
     out: list[dict] = []
     for e in events:
+        dests_out = []
+        for d in e.destinations:
+            dd = {"tank": d.tank, "count": d.count, "avg_wt_g": d.avg_wt_g}
+            if d.size_class:                       # omit when unset (clean YAML)
+                dd["size_class"] = d.size_class
+            dests_out.append(dd)
         out.append({
             "type": e.type,
             "week": e.week,
             "from_tank": e.from_tank,
-            "destinations": [
-                {"tank": d.tank, "count": d.count, "avg_wt_g": d.avg_wt_g}
-                for d in e.destinations
-            ],
+            "destinations": dests_out,
             "count": e.count,
             "batch": e.batch,
             "mode": e.mode,
@@ -102,6 +111,7 @@ def manual_events_from_list(data: list[dict]) -> list[ManualEvent]:
                 tank=int(x["tank"]),
                 count=(float(x["count"]) if x.get("count") is not None else None),
                 avg_wt_g=(float(x["avg_wt_g"]) if x.get("avg_wt_g") is not None else None),
+                size_class=(str(x["size_class"]) if x.get("size_class") else None),
             )
             for x in (d.get("destinations") or [])
         ]
@@ -353,8 +363,41 @@ def _apply_fw_to_og(state, ev: ManualEvent, idx: int, fw_count, fw_avg_wt_g,
         post_cull_count=cnt, post_cull_avg_wt_g=fw_avg_wt_g, cv_pct=fw_cv)
     tanks = [d.tank for d in ev.destinations]
     n = len(tanks)
+    # Explicit grading: the operator tagged each dest "big"/"small" (the UI's two
+    # pickers). Route each entry grade only to its own tanks (even split within
+    # a class). Falls back to legacy POSITIONAL grading when no dest is tagged
+    # (existing YAML / the raw grid): big -> first ceil(N/2) tanks, small -> rest.
+    big_tanks = [d.tank for d in ev.destinations
+                 if (d.size_class or "").lower() == "big"]
+    small_tanks = [d.tank for d in ev.destinations
+                   if (d.size_class or "").lower() == "small"]
+    tagged = bool(big_tanks or small_tanks)
     allocs = []
-    if n >= 2:
+    if tagged:
+        if len(big_tanks) + len(small_tanks) != n:
+            return [f"{tag}: mixing graded (big/small) and untagged destination "
+                    f"tanks isn't allowed — tag every dest or none"], 0.0
+        if split.big_class_count > 0 and not big_tanks:
+            return [f"{tag}: the bigger grade has {split.big_class_count:,.0f} "
+                    f"fish but no tank is assigned to it"], 0.0
+        if split.small_class_count > 0 and not small_tanks:
+            return [f"{tag}: the smaller grade has {split.small_class_count:,.0f} "
+                    f"fish but no tank is assigned to it"], 0.0
+        if big_tanks:
+            per_big = split.big_class_count / len(big_tanks)
+            for t in big_tanks:
+                allocs.append(TankAllocation(
+                    tank_id=t, count=per_big,
+                    avg_wt_g=split.big_class_avg_wt_g,
+                    cv_pct=split.post_cull_cv_pct, size_class="big"))
+        if small_tanks:
+            per_small = split.small_class_count / len(small_tanks)
+            for t in small_tanks:
+                allocs.append(TankAllocation(
+                    tank_id=t, count=per_small,
+                    avg_wt_g=split.small_class_avg_wt_g,
+                    cv_pct=split.post_cull_cv_pct, size_class="small"))
+    elif n >= 2:
         big_n = (n + 1) // 2
         small_n = n - big_n
         per_big = (split.big_class_count / big_n) if big_n else 0.0

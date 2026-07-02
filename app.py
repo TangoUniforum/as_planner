@@ -1187,11 +1187,36 @@ def _mw_action_panel(state, ctx, rows, labels, sel, date_for):
             st.rerun()
 
 
+def _mw_fw_split_preview(ctx, bid, fw_count, fw_avg_wt_g, fw_cv, target, event_date):
+    """(big_n, big_avg_g, small_n, small_avg_g) for the entry grade of a FW→OG
+    intake — replays the run's handling-mortality + reconcile-to-target bottom
+    cull + median size split (manual_events._apply_fw_to_og / biology), so the
+    picker preview matches exactly what will be placed. None on a bad projection."""
+    from forecast.biology import _apply_bottom_cull, compute_size_class_split
+    control = ctx.get("control")
+    hf = (control.handling_mortality_pct / 100.0) if control is not None else 0.0
+    cnt = fw_count * (1.0 - hf)
+    wt = fw_avg_wt_g
+    if cnt <= 0 or wt <= 0:
+        return None
+    if target and cnt > target:
+        cnt, wt, _cn, _cb = _apply_bottom_cull(cnt, wt, fw_cv, 1.0 - target / cnt)
+    try:
+        split = compute_size_class_split(
+            batch_id=bid, tran_og_date=event_date,
+            post_cull_count=cnt, post_cull_avg_wt_g=wt, cv_pct=fw_cv)
+    except Exception:  # noqa: BLE001
+        return None
+    return (split.big_class_count, split.big_class_avg_wt_g,
+            split.small_class_count, split.small_class_avg_wt_g)
+
+
 def _mw_fw_intake(state, ctx, rows, labels, date_for):
     """FW→OG intake — a freshwater cohort isn't a tank yet, so it gets its own
-    picker: choose the cohort, the week, the empty OG destinations and a target
-    count (engine culls down to it). Rendered into the caller's container (no
-    inner expander — the whole editor already lives in one)."""
+    picker: choose the cohort, the week, a target count (engine culls down to
+    it), and — because the cohort is graded into a bigger + smaller class on
+    entry — separate destination tanks for each grade. Rendered into the
+    caller's container (no inner expander — the editor already lives in one)."""
     from forecast.sixn import SIXN_ALL_TANKS
     from forecast.manual_events import ManualEvent, ManualDest
     avail = _mw_fw_avail(ctx, labels)
@@ -1214,19 +1239,46 @@ def _mw_fw_intake(state, ctx, rows, labels, date_for):
     st.caption(f"Projected freshwater state: ~{cnt:,.0f} fish available at "
                f"{wlabel}. Target is the count entering seawater (the engine "
                f"applies handling mortality + culls down to it).")
-    occ = {x.tank_id for x in rows if x.week_label == wlabel and x.count > 0}
-    empty_og = [t for t in _mw_tanks(state)
-                if t.type == "OG" and t.tank_id not in SIXN_ALL_TANKS
-                and t.tank_id not in occ]
-    picks = st.multiselect(
-        "Empty OG destination tank(s)", options=[t.tank_id for t in empty_og],
-        format_func=_mw_dest_fmt(state, _mw_occ_at(rows, wlabel)), key="mw_fw_dest")
     target = st.number_input("Target fish entering seawater", min_value=0.0,
                              value=float(cnt), step=1000.0, key="mw_fw_target")
+
+    # Live entry-grade preview — the two classes after handling + cull, so the
+    # operator sees the counts/weights they're placing before picking tanks.
+    prev = _mw_fw_split_preview(ctx, bid, cnt, _wt, _cv, target, date_for.get(wlabel))
+    if prev:
+        big_n, big_avg, small_n, small_avg = prev
+        st.caption(f"Entry grade → **bigger {big_n:,.0f} ≈ {big_avg / 1000:.2f} kg** · "
+                   f"**smaller {small_n:,.0f} ≈ {small_avg / 1000:.2f} kg**")
+
+    occ = {x.tank_id for x in rows if x.week_label == wlabel and x.count > 0}
+    empty_og = [t.tank_id for t in _mw_tanks(state)
+                if t.type == "OG" and t.tank_id not in SIXN_ALL_TANKS
+                and t.tank_id not in occ]
+    dfmt = _mw_dest_fmt(state, _mw_occ_at(rows, wlabel))
+    big_picks = st.multiselect(
+        "Tank(s) for the BIGGER grade", options=empty_og,
+        format_func=dfmt, key="mw_fw_big")
+    # A tank can't hold both grades — drop the big picks from the small options.
+    small_opts = [t for t in empty_og if t not in big_picks]
+    small_picks = st.multiselect(
+        "Tank(s) for the SMALLER grade", options=small_opts,
+        format_func=dfmt, key="mw_fw_small")
+
+    need_big = bool(prev and prev[0] > 0)
+    need_small = bool(prev and prev[2] > 0)
+    gaps = []
+    if need_big and not big_picks:
+        gaps.append("a tank for the bigger grade")
+    if need_small and not small_picks:
+        gaps.append("a tank for the smaller grade")
+    if gaps:
+        st.caption("⚠ Still need " + " and ".join(gaps) + ".")
+    dests = ([ManualDest(tank=int(t), size_class="big") for t in big_picks]
+             + [ManualDest(tank=int(t), size_class="small") for t in small_picks])
     if st.button(f"➕ Add FW→OG intake in week {wk}", key="mw_fw_add",
-                 type="primary", disabled=not picks):
+                 type="primary", disabled=bool(gaps) or not dests):
         _mw_add(ManualEvent(type="fw_to_og", week=wk, batch=bid, count=target,
-                            destinations=[ManualDest(tank=int(d)) for d in picks]))
+                            destinations=dests))
         st.rerun()
 
 
@@ -1246,6 +1298,13 @@ def _mw_event_summary(state, ev):
         return f"Wk {ev.week}: **Send to 6N** {amt} from {loc(ev.from_tank)} → {dests}"
     if ev.type == "fw_to_og":
         tgt = f"target {ev.count:,.0f}" if ev.count else "all available"
+        big = ", ".join(loc(d.tank) for d in ev.destinations
+                        if (d.size_class or "").lower() == "big")
+        small = ", ".join(loc(d.tank) for d in ev.destinations
+                          if (d.size_class or "").lower() == "small")
+        if big or small:
+            return (f"Wk {ev.week}: **FW→OG** {ev.batch} → bigger {big or '—'} · "
+                    f"smaller {small or '—'} ({tgt})")
         return f"Wk {ev.week}: **FW→OG** {ev.batch} → {dests} ({tgt})"
     if ev.type == "graded_harvest":
         from forecast.sixn import SIXN_ALL_TANKS
