@@ -921,6 +921,74 @@ def _mw_grid(state, rows, labels, color_by):
     return styler, ylabels, tank_by_y
 
 
+def _mw_system_rollup(state, rows, labels, tables, batch_by_id):
+    """Render, under the grid, per-SYSTEM week-open **biomass (tonnes)** and
+    **feed (kg/day)** tables (systems = rows, weeks = columns). Cells are coloured
+    green→red by fraction of the system's tank capacity (biomass = Σ volume ×
+    max_density; feed = Σ max_feed/day) so system-level capacity pressure — which
+    the per-tank grid can't show, especially FEED — is visible at a glance. Uses
+    the same OPENING (week-open) rows the grid shows; STARVE (6N) tanks feed 0."""
+    from collections import defaultdict
+    from forecast.biology import realized_feed_kg_day
+    sys_bio_cap, sys_feed_cap = defaultdict(float), defaultdict(float)
+    for t in state.tanks_by_id.values():
+        if t.type != "OG":
+            continue
+        sys_bio_cap[t.system_id] += (t.volume_m3 or 0.0) * (t.max_density_kg_m3 or 0.0)
+        sys_feed_cap[t.system_id] += (t.max_feed_kg_day_cap or 0.0)
+    systems = sorted(sys_bio_cap)
+    bio, feed = defaultdict(float), defaultdict(float)
+    for r in rows:
+        if r.count <= 0:
+            continue
+        bio[(r.system_id, r.week_label)] += r.biomass_kg
+        if getattr(r, "stage", "") != "STARVE":
+            feed[(r.system_id, r.week_label)] += realized_feed_kg_day(
+                r.avg_wt_g, r.biomass_kg, batch_by_id.get(r.batch_id), tables)
+
+    def _fill(frac):
+        if frac <= 0:
+            return "#f0f0f0"
+        if frac < 0.8:
+            return "#a8d5a8"
+        if frac < 1.0:
+            return "#f5d49a"
+        if frac < 1.15:
+            return "#e8615e"
+        return "#7a0d0b"
+
+    def _table(agg, cap, scale):
+        txt, css, idx = [], [], []
+        for s in systems:
+            idx.append(s)
+            trow, crow = [], []
+            for wk in labels:
+                v = agg.get((s, wk), 0.0)
+                trow.append(f"{v * scale:,.0f}")
+                frac = (v / cap[s]) if cap.get(s) else 0.0
+                crow.append(f"background-color:{_fill(frac)};color:#1f1f1f")
+            txt.append(trow)
+            css.append(crow)
+        idx.append("TOTAL")           # facility total (neutral, not cap-coloured)
+        trow, crow = [], []
+        for wk in labels:
+            trow.append(f"{sum(agg.get((s, wk), 0.0) for s in systems) * scale:,.0f}")
+            crow.append("background-color:#e8eaf0;color:#1f1f1f;font-weight:700")
+        txt.append(trow)
+        css.append(crow)
+        d = pd.DataFrame(txt, index=idx, columns=labels)
+        c = pd.DataFrame(css, index=idx, columns=labels)
+        return d.style.apply(lambda _: c, axis=None)
+
+    _h = min(560, 44 + 33 * (len(systems) + 1))
+    st.caption("Colour = fraction of the system's tank capacity (green roomy, amber "
+               "near cap, red over). Same week-open state as the grid.")
+    st.markdown("**Open biomass — tonnes / system / week**")
+    st.dataframe(_table(bio, sys_bio_cap, 0.001), use_container_width=True, height=_h)
+    st.markdown("**Open feed — kg/day / system / week** (6N depuration eats 0)")
+    st.dataframe(_table(feed, sys_feed_cap, 1.0), use_container_width=True, height=_h)
+
+
 # ---- The contextual action panel (opens on a tank click) ----
 
 def _mw_split_dests(picks, total, whole):
@@ -1384,6 +1452,11 @@ def _manual_window_editor(uploaded):
                 else:
                     st.info("👆 Click a tank's cell in the grid to harvest it, move / "
                             "split it, or send it to 6N — the options appear here.")
+
+            if st.toggle("📊 System rollup — open biomass + feed/day per week",
+                         key="mw_rollup_toggle"):
+                _mw_system_rollup(state, rows, labels, ctx["tables"],
+                                  ctx["batch_by_id"])
 
             if st.toggle("🐟 FW→OG intake — bring a freshwater cohort into OG",
                          key="mw_fw_toggle"):
