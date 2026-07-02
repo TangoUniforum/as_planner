@@ -996,10 +996,10 @@ def _mw_action_panel(state, ctx, rows, labels, sel, date_for):
             st.rerun()
 
     elif act == "Graded → 6N":
-        st.caption("Grade out the **biggest N fish** to a 6N depuration tank "
-                   "(frozen, off-feed to purge); the smaller remainder keeps "
-                   "growing. Harvest happens later from 6N. Conserves count + "
-                   "biomass exactly.")
+        st.caption("Grade the tank by size — it **empties**: the **biggest N fish** "
+                   "go to a 6N depuration tank (frozen, off-feed to purge, harvested "
+                   "later from 6N) and the **smaller remainder moves to an OG tank** "
+                   "to keep growing. Conserves count + biomass exactly.")
         occ = {x.tank_id for x in rows if x.week_label == wlabel and x.count > 0}
         empty_6n = [t for t in sorted(SIXN_ALL_TANKS) if t not in occ]
         other_og_ids = [t.tank_id for t in other_og if t.tank_id not in occ]
@@ -1015,28 +1015,30 @@ def _mw_action_panel(state, ctx, rows, labels, sel, date_for):
             r.avg_wt_g, (_cvt.cv_pct if _cvt else 0.0), r.count, n_big)
         if _big is not None:
             st.caption(f"↳ biggest **{n_big:,.0f} ≈ {_big / 1000:.2f} kg** → 6N · "
-                       f"remaining {r.count - n_big:,.0f} ≈ "
-                       f"{_small / 1000:.2f} kg retained")
+                       f"smaller {r.count - n_big:,.0f} ≈ "
+                       f"{_small / 1000:.2f} kg → OG")
         dest6n = st.selectbox(
-            "6N depuration tank", options=empty_6n,
+            "6N depuration tank (the biggest fish go here)", options=empty_6n,
             format_func=lambda x: _mw_loc(state, x), key=f"mw_g6_dest_{sfx}",
         ) if empty_6n else None
-        ret_here = st.checkbox("Keep the smaller fish in this tank", value=True,
-                               key=f"mw_g6_reth_{sfx}")
-        ret_tank = None
-        if not ret_here:
-            ret_tank = st.selectbox(
-                "Retention tank (OG) for the smaller fish", options=other_og_ids,
-                format_func=lambda x: _mw_loc(state, x),
-                key=f"mw_g6_ret_{sfx}") if other_og_ids else None
+        # Grading empties the source, so the smaller remainder is graded OUT too and
+        # moves to its own OG tank. Both destinations are required.
+        ret_tank = st.selectbox(
+            "Send the smaller fish to (empty OG tank)", options=other_og_ids,
+            format_func=lambda x: _mw_loc(state, x), key=f"mw_g6_ret_{sfx}",
+            help="Grading empties the source tank — the smaller fish move here to "
+                 "keep growing.",
+        ) if other_og_ids else None
         if not empty_6n:
             st.caption("⚠ No empty 6N depuration tank available this week.")
-        dests = [ManualDest(tank=int(dest6n))] if dest6n is not None else []
-        if not ret_here and ret_tank is not None:
-            dests.append(ManualDest(tank=int(ret_tank)))
+        if not other_og_ids:
+            st.caption("⚠ No empty OG tank available to receive the smaller fish.")
+        dests = ([ManualDest(tank=int(dest6n)), ManualDest(tank=int(ret_tank))]
+                 if dest6n is not None and ret_tank is not None else [])
         if st.button(f"➕ Add graded 6N move in week {wk}", key="mw_g6_add",
                      type="primary",
-                     disabled=(dest6n is None or not n_big or n_big <= 0)):
+                     disabled=(dest6n is None or ret_tank is None
+                               or not n_big or n_big <= 0)):
             _mw_add(ManualEvent(type="graded_harvest", week=wk, from_tank=tid,
                                 count=n_big, destinations=dests))
             st.rerun()

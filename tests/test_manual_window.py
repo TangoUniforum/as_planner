@@ -192,9 +192,10 @@ class TestGradedHarvest:
         assert not ok and any("not empty" in m for m in msgs)
 
     def test_graded_to_6n_depurates_conserves_no_harvest(self, hydrated):
-        # A graded cut whose pickup is a 6N tank DEPURATES (freezes the 6N tank
-        # off-feed, NO immediate harvest) instead of harvesting — the realistic
-        # OG->6N->harvest flow. Still conserves count + biomass exactly.
+        # "Graded -> 6N" (the UI form): grade the tank, biggest N -> a 6N tank to
+        # DEPURATE (frozen off-feed, NO immediate harvest), smaller remainder ->
+        # a separate OG tank, and the SOURCE EMPTIES. Realistic OG->6N->harvest
+        # flow; still conserves count + biomass exactly.
         import copy
         from forecast.sixn import SIXN_ALL_TANKS
         from forecast.state import STAGE_STARVE
@@ -205,10 +206,14 @@ class TestGradedHarvest:
         src, _ = self._source_pickup(state)
         sixn = next(t for t in sorted(SIXN_ALL_TANKS)
                     if state.tanks_by_id[t].is_empty)
+        og_ret = next(t.tank_id for t in state.tanks_by_id.values()
+                      if t.type == "OG" and t.tank_id not in SIXN_ALL_TANKS
+                      and t.is_empty and t.tank_id != src.tank_id)
         K = round(src.count * 0.4)
         open_n, open_bio = src.count, src.count * src.avg_wt_g
         ev = ManualEvent(type="graded_harvest", week=1, from_tank=src.tank_id,
-                         count=K, destinations=[ManualDest(tank=sixn)])
+                         count=K, destinations=[ManualDest(tank=sixn),
+                                                ManualDest(tank=og_ret)])
         (_i, ok, msgs), = validate_manual_events(state, [ev], **ctx)
         assert ok, msgs
         sc = copy.deepcopy(state)
@@ -224,8 +229,11 @@ class TestGradedHarvest:
         bio = (gh.pickup_count * gh.pickup_avg_wt_g
                + gh.retention_count * gh.retention_avg_wt_g)
         assert abs(bio - open_bio) / open_bio < 1e-6
+        assert sc.tanks_by_id[src.tank_id].is_empty          # source graded OUT
         pk = sc.tanks_by_id[sixn]
-        assert pk.stage == STAGE_STARVE and not pk.is_empty   # frozen, holding fish
+        assert pk.stage == STAGE_STARVE and not pk.is_empty  # 6N frozen, big fish
+        rt = sc.tanks_by_id[og_ret]
+        assert not rt.is_empty and rt.batch_id == src.batch_id  # smaller -> OG
 
     def test_full_pipeline_audits_clean(self, hydrated, tmp_path):
         import shutil
