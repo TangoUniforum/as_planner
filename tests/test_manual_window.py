@@ -392,6 +392,73 @@ class TestPurge6NFreeze:
                        for r in ic for c in r if c is not None), "dropped batch"
 
 
+class TestAutoCalibrateFw:
+    """control.auto_calibrate_fw replaces each FW batch's FW_Correction with the
+    back-solved value that lands its pre-cull avg weight on the TranOG target (the
+    Suggested_FW_Correction the Diagnostics tab reports). Verified at the solver
+    level, through config round-trip, and end-to-end (residuals -> ~0)."""
+
+    def test_solved_correction_lands_on_target(self, hydrated):
+        from forecast.biology import (
+            solve_fw_correction, _simulate_fw_avg_weight_at_tran_og)
+        _state, ctx, _fw = hydrated
+        tables = ctx["tables"]
+        b = next(b for b in ctx["batch_by_id"].values()
+                 if b.tran_og_avg_wt_g and b.tran_og_date and b.input_date)
+        s = solve_fw_correction(b, tables)
+        assert s is not None
+        w = _simulate_fw_avg_weight_at_tran_og(b, tables, s)
+        assert abs(w - b.tran_og_avg_wt_g) / b.tran_og_avg_wt_g < 0.01
+
+    def test_control_flag_roundtrips(self):
+        from forecast.config_io import (
+            load_control, control_to_dict, control_from_dict)
+        c = load_control(str(CONFIG_DIR))
+        c.auto_calibrate_fw = True
+        c.auto_calibrate_fw_min = 0.6
+        c.auto_calibrate_fw_max = 1.4
+        c2 = control_from_dict(control_to_dict(c))
+        assert c2.auto_calibrate_fw is True
+        assert c2.auto_calibrate_fw_min == 0.6
+        assert c2.auto_calibrate_fw_max == 1.4
+
+    def test_full_pipeline_drives_residuals_to_zero(self, tmp_path):
+        # With the toggle ON, every FW calibration residual in the output must be
+        # ~0 (each batch lands on its transfer target), and the run must still
+        # conserve fish.
+        import re
+        import shutil
+        from openpyxl import load_workbook as _lw
+        import forecast.run as run_mod
+        cdir = tmp_path / "config"
+        shutil.copytree(CONFIG_DIR, cdir)
+        sdir = tmp_path / "scenario"
+        shutil.copytree(SCENARIO_DIR, sdir)
+        cy = cdir / "control.yaml"
+        txt = cy.read_text()
+        txt = (re.sub(r"auto_calibrate_fw:\s*\w+", "auto_calibrate_fw: true", txt)
+               if "auto_calibrate_fw:" in txt
+               else txt.rstrip() + "\nauto_calibrate_fw: true\n")
+        cy.write_text(txt)
+        (sdir / "manual_events.yaml").write_text("events: []\n")
+        wb = tmp_path / "Forecast.xlsm"
+        shutil.copy(WORKBOOK, wb)
+        out = tmp_path / "out.xlsm"
+        run_mod.main(str(wb), output_path=str(out),
+                     config_dir=str(cdir), scenario_dir=str(sdir))
+        owb = _lw(str(out), data_only=True)
+        dg = [r for r in owb["Diagnostics"].iter_rows(values_only=True)]
+        hdr = next(r for r in dg if r and str(r[0]) == "Batch")
+        ri = hdr.index("Residual_pct")
+        resids = [r[ri] for r in dg[dg.index(hdr) + 1:]
+                  if r and r[0] and isinstance(r[ri], (int, float))]
+        assert resids, "expected FW calibration residual rows"
+        assert max(abs(v) for v in resids) < 0.1, f"worst residual {max(abs(v) for v in resids)}%"
+        tc = [[c.value for c in r]
+              for r in owb["TankContinuityAudit"].iter_rows()]
+        _assert_count_conserved(tc)
+
+
 class TestWindowHorizonGuard:
     """A manual override window as long as (or longer than) the forecast horizon
     leaves the planner no weeks to plan; the run must reject it, not silently

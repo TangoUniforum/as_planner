@@ -344,6 +344,42 @@ def main(
     }
     in_flight_ids = og_in_flight_ids | fw_in_flight_ids
     incoming_batches = [b for b in batches if b.batch_id not in in_flight_ids]
+
+    # ----- Optional: auto-calibrate FW growth to hit the transfer target -----
+    # When control.auto_calibrate_fw is on, REPLACE each FW batch's fw_correction
+    # with the back-solved value that lands its pre-cull avg weight exactly on
+    # tran_og_avg_wt_g at its transfer date — the same solve already reported as
+    # Suggested_FW_Correction in Diagnostics — applied BEFORE projection so the
+    # on-target growth flows through the whole forecast. Clamped to a sane range
+    # so the model can't silently assume absurd growth; a clamped batch is flagged.
+    fw_calib_warns: list = []
+
+    def _apply_fw_calib(_b, _solved):
+        _lo, _hi = control.auto_calibrate_fw_min, control.auto_calibrate_fw_max
+        _prev = _b.fw_correction
+        if _solved is None:
+            fw_calib_warns.append(
+                f"AUTO-FW-CALIB {_b.batch_id}: FW correction did not converge; "
+                f"kept configured {_prev:.3f}")
+            return
+        _app = min(_hi, max(_lo, _solved))
+        _b.fw_correction = _app
+        _tgt = _b.tran_og_avg_wt_g or 0.0
+        if abs(_app - _solved) > 1e-6:
+            fw_calib_warns.append(
+                f"AUTO-FW-CALIB {_b.batch_id}: landing on {_tgt:.0f}g needs "
+                f"fw_correction {_solved:.3f} — CLAMPED to {_app:.3f} "
+                f"[{_lo:.2f},{_hi:.2f}] (target likely unreachable at this growth)")
+        else:
+            fw_calib_warns.append(
+                f"AUTO-FW-CALIB {_b.batch_id}: fw_correction {_prev:.3f} -> "
+                f"{_app:.3f} to land pre-cull on {_tgt:.0f}g at transfer")
+
+    if control.auto_calibrate_fw:
+        from .biology import solve_fw_correction as _solve_fw
+        for _b in incoming_batches:
+            _apply_fw_calib(_b, _solve_fw(_b, tables))
+
     states, residuals, splits, warnings = project_all_batches(incoming_batches, tables, control)
     print(f"\n  Projected {len(states)} batch-week rows across {len({s.batch_id for s in states})} batches (incoming)")
     print(f"  TranOG size-class splits captured: {len(splits)}")
@@ -378,6 +414,12 @@ def main(
         if agg["count"] <= 0:
             continue
         avg_wt_g = agg["biomass_kg"] * 1000.0 / agg["count"]
+        if control.auto_calibrate_fw:
+            from .biology import (solve_inflight_fw_correction as _solve_ifw,
+                                  _as_date as _asd)
+            _dsi = (_asd(pr_closing) - _asd(b_meta.input_date)).days
+            _apply_fw_calib(
+                b_meta, _solve_ifw(b_meta, tables, _fw_proj_fs, avg_wt_g, _dsi))
         import dataclasses as _dc_fw
         _fw_control = _dc_fw.replace(
             control, forecast_start=_fw_proj_fs, horizon_weeks=_fw_proj_horizon)
@@ -389,6 +431,11 @@ def main(
         fw_in_flight_splits.extend(fw_splits)
     residuals.extend(fw_in_flight_residuals)
     splits.extend(fw_in_flight_splits)
+    if fw_calib_warns:
+        print(f"\n  FW auto-calibration ON — adjusted {len(fw_calib_warns)} batch(es) "
+              f"to hit the pre-cull transfer target (Diagnostics residuals -> ~0):")
+        for _w in fw_calib_warns:
+            print(f"    {_w}")
     in_flight_batches = sorted({s.batch_id for s in in_flight_states})
     print(f"  In-flight projection: {len(in_flight_states)} batch-week rows across "
           f"{len(in_flight_batches)} batches {in_flight_batches}")
@@ -711,7 +758,8 @@ def main(
         scheduler_warnings=sched_warns,
         bottlenecks=canvas.bottlenecks,
         density_violations=density_violations,
-        invariant_warnings=list(hydration_warns) + list(inv_warns) + list(manual_warns),
+        invariant_warnings=(list(hydration_warns) + list(inv_warns)
+                            + list(manual_warns) + list(fw_calib_warns)),
         placed_batches={r.batch_id for r in placement.batch_locations},
     )
     write_daily_harvest_schedule(
@@ -807,6 +855,7 @@ def main(
         len(residuals) + len(canvas.bottlenecks)
         + len(sched_warns) + len(placement.warnings)
         + len(density_violations) + len(hydration_warns) + len(inv_warns)
+        + len(fw_calib_warns)
     )
     status = "ok" if total_warnings == 0 else "warn"
     og_tank_count = sum(1 for t in facility.tanks if t.type == "OG")

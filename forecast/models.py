@@ -124,6 +124,19 @@ class ControlParams:
     placement_method: str = "greedy"
     # LNS budget: max relocations/swaps per run (only used when placement_method=="lns").
     lns_max_moves: int = 30
+    # Auto-calibrate FW growth (OPT-IN, default OFF -> shipped behaviour unchanged).
+    # When True, before projecting, each FW batch's `fw_correction` is REPLACED by
+    # the value that lands its pre-cull avg weight exactly on `tran_og_avg_wt_g` at
+    # its transfer date (the same back-solve already reported as Suggested_FW_Correction
+    # in Diagnostics) — incoming batches via solve_fw_correction, in-flight FW batches
+    # via solve_inflight_fw_correction (on their REMAINING growth). The solved value is
+    # clamped to [auto_calibrate_fw_min, auto_calibrate_fw_max] so the model can't
+    # silently assume absurd growth; a batch clamped short of target is flagged. NOTE:
+    # this makes the forecast ASSUME the growth needed to hit target (a planning
+    # assumption, not a guarantee) — a correction >1 means faster-than-nominal SGR.
+    auto_calibrate_fw: bool = False
+    auto_calibrate_fw_min: float = 0.5
+    auto_calibrate_fw_max: float = 1.5
 
 
 @dataclass

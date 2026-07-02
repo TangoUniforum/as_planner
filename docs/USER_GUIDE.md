@@ -537,6 +537,19 @@ may need re-calibrating — but it can't tell you the model's *absolute* truth.
    **both** incoming batches *and* in-flight ones already in FW at the forecast
    start, where it solves the correction on the remaining growth to TranOG) if you
    want it to hit your plan.
+   - **Or let the tool do it: the `auto_calibrate_fw` control toggle.** When on
+     (Configure → *Auto-calibrate FW to transfer target*; default **off**), the run
+     replaces every FW batch's `fw_correction` with that back-solved value **before
+     projecting**, so each batch lands its pre-cull avg weight exactly on its
+     `tran_og_avg_wt_g` target on the transfer date and the Diagnostics residuals go
+     to ~0. Applies to incoming **and** in-flight FW batches. The solved value is
+     **clamped** to `[auto_calibrate_fw_min, auto_calibrate_fw_max]` (default
+     0.5–1.5) so the model can't silently assume absurd growth; a batch that would
+     need more is capped and **flagged in the ValidationLog**. ⚠ This makes the
+     forecast *assume* the growth needed to hit target — a **planning assumption, not
+     a guarantee** the fish grow that fast (a correction > 1 means faster than the
+     nominal SGR curve). Leave it **off** to see the honest residuals and calibrate
+     by hand.
 3. **Check `Advisory`** for over-cap weeks. If biomass runs over the cap, **widen**
    `facility_biomass_deviation_pct` (more headroom below the cap); to run tighter,
    narrow it. (This replaced the old `harvest_setpoint_lookahead_weeks` walk, now

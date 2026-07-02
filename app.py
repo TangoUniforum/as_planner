@@ -76,6 +76,13 @@ def _active_config_summary(cd: dict) -> list[tuple]:
         ("Placement engine", pm.upper(),
          "greedy heuristic + rebalancer (default)" if pm == "greedy"
          else "LP-guided LNS optimal-layout refinement"),
+        ("FW auto-calibration", "ON" if bool(g("auto_calibrate_fw")) else "OFF",
+         "FW growth is auto-adjusted so each batch hits its pre-cull transfer target "
+         f"(clamped {g('auto_calibrate_fw_min', 0.5):.2f}–{g('auto_calibrate_fw_max', 1.5):.2f}) "
+         "— a planning assumption, not a guarantee"
+         if bool(g("auto_calibrate_fw"))
+         else "FW growth uses each batch's configured FW_Correction (residuals shown in "
+              "Diagnostics)"),
         ("Caps", f"biomass {g('max_biomass_kg', 0):,.0f} kg · "
                  f"feed {g('max_feed_per_day_kg', 0):,.0f} kg/day · "
                  f"harvest {g('max_harvest_per_week', 0):,.0f} fish/wk",
@@ -362,6 +369,20 @@ _CONTROL_HELP = {
     "lns_max_moves": "LNS budget: the most relocations/swaps the 'lns' placement engine "
         "will make per run (only used when placement_method = lns). Higher = chases more "
         "hot spots but slower.",
+    "auto_calibrate_fw": "Auto-calibrate freshwater growth (OPT-IN, default off). "
+        "Replaces each FW batch's FW_Correction with the value that lands its pre-cull "
+        "avg weight EXACTLY on its TranOG target at transfer (the Suggested_FW_Correction "
+        "shown in Diagnostics) — for incoming AND in-flight FW batches — so the FW "
+        "calibration residuals go to ~0. NOTE: this makes the forecast ASSUME the growth "
+        "needed to hit target (a planning assumption, NOT a guarantee the fish grow that "
+        "fast); a correction > 1 means faster-than-nominal growth. Solved values are "
+        "clamped to the [min, max] below, and any clamped (unreachable) batch is flagged.",
+    "auto_calibrate_fw_min": "Lower clamp on the auto FW correction (only used when "
+        "Auto-calibrate FW is on). A batch that would need a smaller correction is capped "
+        "here and flagged in the log.",
+    "auto_calibrate_fw_max": "Upper clamp on the auto FW correction (only used when "
+        "Auto-calibrate FW is on). A batch that would need MORE growth than this is capped "
+        "here and flagged as likely unreachable.",
 }
 
 # Friendly display labels for the Control editor (the raw field name stays the key).
@@ -398,6 +419,9 @@ _CONTROL_LABEL = {
     "harvest_grade_to_min": "Grade-harvest to the floor",
     "placement_method": "Placement engine",
     "lns_max_moves": "LNS move budget",
+    "auto_calibrate_fw": "Auto-calibrate FW to transfer target",
+    "auto_calibrate_fw_min": "  ↳ FW correction clamp — min",
+    "auto_calibrate_fw_max": "  ↳ FW correction clamp — max",
 }
 
 
@@ -840,17 +864,25 @@ def _mw_fw_avail(ctx, window_labels):
     return out
 
 
-def _mw_grid(state, rows, labels, color_by):
+def _mw_grid(state, rows, labels, color_by, batch_filter=None):
     """Colour-styled DataFrame of the projected facility (index = tank, columns =
     weeks, cell text = "batch · avg-weight · density") for a CLICKABLE st.dataframe.
     The per-cell weight + density let you read grow-out state at a glance to decide
     moves without clicking every tank. color_by 'fill'
     shades by density-vs-cap (green→red); 'batch' gives each batch its own colour.
-    Returns (styler, ylabels, tank_by_y). Unlike a plotly heatmap, a single click
-    on a dataframe row reliably emits a Streamlit selection."""
+    `batch_filter` (a set of batch ids, or None) restricts the rows to only the
+    tanks that hold one of those batches in some displayed week — so the operator
+    can focus on a few cohorts instead of the whole facility; batch COLOURS stay
+    consistent with the unfiltered view. Returns (styler, ylabels, tank_by_y).
+    Unlike a plotly heatmap, a single click on a dataframe row reliably emits a
+    Streamlit selection."""
     from forecast.sixn import SIXN_ALL_TANKS
     idx = {(r.tank_id, r.week_label): r for r in rows}
     tanks = _mw_tanks(state)
+    if batch_filter:
+        keep = {r.tank_id for r in rows
+                if r.count > 0 and r.batch_id in batch_filter}
+        tanks = [t for t in tanks if t.tank_id in keep]
     ubatches = sorted({r.batch_id for r in rows if r.count > 0})
     _pal = px.colors.qualitative.Light24
     bcolor = {b: _pal[i % len(_pal)] for i, b in enumerate(ubatches)}
@@ -1476,10 +1508,23 @@ def _manual_window_editor(uploaded):
                   "act. **Click a tank's cell at the week you want** to act on it. "
                   "The grid redraws as you script.")
 
+            # Optional batch filter — show only the tanks holding the selected
+            # cohort(s) instead of the whole facility (empty = show all).
+            _all_batches = sorted({r.batch_id for r in rows if r.count > 0})
+            _sel_batches = st.multiselect(
+                "Filter to batches (empty = whole facility)", options=_all_batches,
+                default=[], key="mw_batch_filter",
+                help="Show only the tanks that hold the selected batch(es) in some "
+                     "displayed week. Batch colours stay the same as the full view.")
+            _bf = set(_sel_batches) or None
+
             # Clickable facility grid (left) + contextual action panel (right), side
             # by side so a cell click shows the options right next to the grid instead
             # of below a tall, internally-scrolling table.
-            styler, ylabels, tank_by_y = _mw_grid(state, rows, labels, color_by=_cb)
+            styler, ylabels, tank_by_y = _mw_grid(
+                state, rows, labels, color_by=_cb, batch_filter=_bf)
+            if _bf and not ylabels:
+                st.caption("No tanks hold the selected batch(es) in this window.")
             gnonce = st.session_state.get("mw_grid_nonce2", 0)
             grid_col, panel_col = st.columns([3, 2], gap="medium")
             with grid_col:
@@ -1489,7 +1534,12 @@ def _manual_window_editor(uploaded):
                 # the tank AND the week — no separate week control needed.
                 gev = st.dataframe(
                     styler, use_container_width=True,
-                    height=min(760, 44 + 35 * len(ylabels)),
+                    # Full height: show EVERY tank row without a vertical
+                    # scrollbar so the whole facility is visible at once (tall
+                    # for large facilities, by design — weeks still scroll
+                    # horizontally). +2px avoids a residual scrollbar from
+                    # row-height rounding.
+                    height=46 + 35 * len(ylabels),
                     on_select="rerun", selection_mode="single-cell",
                     key=f"mw_grid_sel_{gnonce}")
                 try:
