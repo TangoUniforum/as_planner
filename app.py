@@ -2488,20 +2488,23 @@ def _opt_table(results) -> pd.DataFrame:
     rows = []
     for v in results:
         m = v.metrics
+        failed = bool(getattr(v, "failed", None))
         rows.append({
             "Variant": v.label,
-            "Score": round(v.score, 3),
-            "Sys_over-cap": round(m.system_overshoot, 3),
-            "Density_over-cap": round(m.density_overshoot, 3),
-            "Biomass_overshoot": round(m.biomass_overshoot, 3),
-            "Biomass_var": round(m.biomass_var, 3),
-            "Util_gap": round(m.biomass_util_gap, 3),
-            "Harvest_var": round(m.harvest_var, 3),
-            "Harvest_overshoot": round(m.harvest_overshoot, 3),
-            "Feed_load": round(m.feed_load),
-            "Transfers/fish": round(m.transfers_per_fish, 2),
-            "Wks_over_55k": m.weeks_over_harvest_cap,
-            "Conservation": "OK" if v.conservation_ok else f"FAIL ({v.dropped}/{v.overprod})",
+            "Score": None if failed else round(v.score, 3),
+            "Sys_over-cap": None if failed else round(m.system_overshoot, 3),
+            "Density_over-cap": None if failed else round(m.density_overshoot, 3),
+            "Biomass_overshoot": None if failed else round(m.biomass_overshoot, 3),
+            "Biomass_var": None if failed else round(m.biomass_var, 3),
+            "Util_gap": None if failed else round(m.biomass_util_gap, 3),
+            "Harvest_var": None if failed else round(m.harvest_var, 3),
+            "Harvest_overshoot": None if failed else round(m.harvest_overshoot, 3),
+            "Feed_load": None if failed else round(m.feed_load),
+            "Transfers/fish": None if failed else round(m.transfers_per_fish, 2),
+            "Wks_over_55k": None if failed else m.weeks_over_harvest_cap,
+            "Conservation": (f"INFEASIBLE — {v.failed[:90]}" if failed
+                             else "OK" if v.conservation_ok
+                             else f"FAIL ({v.dropped}/{v.overprod})"),
         })
     return pd.DataFrame(rows)
 
@@ -2794,15 +2797,42 @@ def _optimizer():
     if not results:
         return
 
+    # Some variants may be INFEASIBLE on this PR (the engine refused to plan them —
+    # e.g. a TranOG arrival with no free tanks). They're excluded from selection but
+    # kept in the table; surface how many so the operator sees the search wasn't clean.
+    _infeasible = [v for v in results if getattr(v, "failed", None)]
+    if _infeasible:
+        _lbls = ", ".join(v.label for v in _infeasible[:6])
+        st.warning(
+            f"⚠ **{len(_infeasible)} of {len(results)} variants were infeasible** on "
+            f"this ProductionReport (excluded from selection): {_lbls}"
+            f"{' …' if len(_infeasible) > 6 else ''}. This means the tighter/fuller "
+            f"settings can't physically place every TranOG arrival here — a "
+            f"capacity limit (add 6N depuration, raise the biomass cap, or re-time "
+            f"the TranOG schedule), not a tuning problem. See the table for each "
+            f"reason.")
+
     # Re-score instantly against the currently selected emphasis (no re-run).
     rec = optimize.recommend(results, emphasis=emphasis,
                              weights=optimize.weights_for(emphasis, custom))
-    if rec.is_capacity_bound:
+    _no_feasible = rec.best_label == "(none)"
+    if _no_feasible:
+        st.error(
+            f"**No feasible variant** on this ProductionReport — {rec.text} Every "
+            "setting hit the engine's capacity guard (each reason is in the table "
+            "below). This is a capacity limit, not a tuning problem: add 6N "
+            "depuration capacity, raise the facility biomass cap, or re-time the "
+            "TranOG arrival schedule, then re-run.")
+    elif rec.is_capacity_bound:
         st.warning(f"**Capacity-bound:** {rec.text}")
     else:
         st.success(f"**Recommendation:** {rec.text}")
 
     # ---- Feed the recommendation back into the forecast ----
+    # When nothing is feasible, `best` is an infeasible variant — the Apply panel's
+    # Save button is hidden (no overrides) and its Run button surfaces the same
+    # capacity error, so it's survivable; the error above + the table make the
+    # situation clear.
     best = next((v for v in results if v.label == rec.best_label), results[0])
     with st.container(border=True):
         st.markdown(f"**Apply & verify — `{best.label}`**")

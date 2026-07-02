@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import os
 import statistics
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields as _dc_fields
 
 import openpyxl
 import yaml
@@ -190,10 +190,15 @@ class OptVariant:
     overprod: int
     score: float = 0.0
     norm: dict = field(default_factory=dict)
+    # First line of the error when this variant could not be planned (e.g. an
+    # infeasible TranOG arrival — the engine's "refuse to drop fish" guard). A
+    # failed variant is EXCLUDED from selection (never chosen) but does NOT abort
+    # the sweep, so the search still returns the best FEASIBLE variant.
+    failed: str | None = None
 
     @property
     def conservation_ok(self) -> bool:
-        return self.dropped == 0 and self.overprod == 0
+        return self.failed is None and self.dropped == 0 and self.overprod == 0
 
 
 @dataclass
@@ -519,11 +524,44 @@ def _harvest_cap(config_dir, overrides):
     return cap
 
 
+def _infeasible_metrics() -> "Metrics":
+    """A sentinel Metrics for a variant that FAILED (couldn't be planned): every
+    objective component is a huge finite value so it can never win, and the
+    display fields are zeroed. The variant is also flagged `failed` and excluded
+    from selection via conservation_ok — this object only keeps scoring/display
+    from crashing on a variant that never produced a workbook. Built by
+    introspecting the dataclass so it survives new Metrics fields."""
+    big = 1e18
+    kw = {}
+    for f in _dc_fields(Metrics):
+        if f.name in COMPONENTS:
+            kw[f.name] = big
+        elif f.name in ("transfers_by_type", "per_system"):
+            continue                     # use the default_factory (empty dict)
+        elif f.name == "weeks_over_harvest_cap":
+            kw[f.name] = 0
+        else:
+            kw[f.name] = 0.0
+    return Metrics(**kw)
+
+
 def run_variant(label, overrides, config_dir, scenario_dir, input_path) -> OptVariant:
-    out = tuning._run_in_tempdir(label, overrides, config_dir, scenario_dir, input_path)
-    metrics, dropped, overprod = metrics_from_workbook(out, _harvest_cap(config_dir, overrides))
-    return OptVariant(label=label, overrides=dict(overrides),
-                      metrics=metrics, dropped=dropped, overprod=overprod)
+    # A single infeasible/errored variant must NOT abort the whole sweep — the
+    # optimizer's job is to find the best FEASIBLE variant, so a variant that the
+    # engine refuses to plan (e.g. a TranOG arrival with no free tanks — the
+    # "refuse to drop fish silently" guard) is caught, recorded as `failed`, and
+    # excluded from selection. The search continues over the remaining variants.
+    try:
+        out = tuning._run_in_tempdir(label, overrides, config_dir, scenario_dir, input_path)
+        metrics, dropped, overprod = metrics_from_workbook(out, _harvest_cap(config_dir, overrides))
+        return OptVariant(label=label, overrides=dict(overrides),
+                          metrics=metrics, dropped=dropped, overprod=overprod)
+    except Exception as e:  # noqa: BLE001 — reject-and-continue, don't crash the sweep
+        msg = str(e).strip()
+        reason = (msg.splitlines()[0] if msg else type(e).__name__)[:400]
+        return OptVariant(label=label, overrides=dict(overrides),
+                          metrics=_infeasible_metrics(), dropped=0, overprod=0,
+                          failed=reason)
 
 
 def overrides_yaml(overrides) -> str:
