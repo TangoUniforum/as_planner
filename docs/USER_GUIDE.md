@@ -186,6 +186,17 @@ window is fully traceable — it is not a silent pre-run mutation.
 > planner must honour later — once the window ends, the closed-loop controller
 > has full control again.
 
+> **6N is held in depuration during the window.** While 6N is in **purge mode**
+> (before `sixn_production_start` — see §4.2), every occupied 6N tank is held
+> **frozen** through the window: **no growth, no feed** (mortality still applies),
+> shown as `STARVE`/⛔6N. This matches the engine's depuration rules — the normal
+> planner harvests 6N out on its rotation within a week or two, but the window
+> runs no rotation, so without the hold those fish would wrongly grow like
+> grow-out for the whole window. The hold is **date-gated per week**, so if
+> `sixn_production_start` ever fell inside your window, 6N would grow from that
+> week on. In **6N production mode** (`sixn_growth` on, or on/after the start
+> date) 6N is *not* held — it grows normally.
+
 **The five event types** (every operation you script — by click or in the raw
 grid — is one of these):
 

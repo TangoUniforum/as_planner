@@ -21,7 +21,40 @@ from datetime import timedelta
 
 from .biology import advance_tank_one_day
 from .placement import BatchLocationRow
+from .state import STAGE_STARVE
 from .time_grid import forecast_week_labels
+
+
+def _freeze_purge_6n(state, control, week_date) -> list[int]:
+    """Depuration hold: in PURGE mode, freeze every occupied 6N tank to STARVE
+    at the start of an override week, so the window honors the engine's 6N
+    depuration rules — no growth, no feed (only mortality still applies).
+
+    Why the window needs this: the shipped pipeline hydrates every OG-type tank
+    (6N included) as a growing SW stage and relies on its purge ROTATION to
+    harvest the 6N tanks out within a week or two, so their SW growth never
+    accumulates. The manual window runs no rotation (operator events only), so
+    without this hold a PR-hydrated 6N tank would grow like a grow-out tank for
+    the whole window (the reported bug).
+
+    Gated per week-DATE on `is_purge_mode`, so a 6N->production crossing that
+    lands mid-window correctly stops freezing from that week on (weeks on/after
+    the production-start date grow normally). Only ADDS the freeze — an operator
+    og_to_6n / graded->6N destination is already STARVE and stays so; a tank is
+    never un-frozen here. Returns the ids newly frozen (for traceability).
+    """
+    if control is None:
+        return []
+    from .sixn import SIXN_ALL_TANKS, is_purge_mode
+    if not is_purge_mode(control, week_date):
+        return []
+    frozen: list[int] = []
+    for tid in sorted(SIXN_ALL_TANKS):
+        t = state.tanks_by_id.get(tid)
+        if t is not None and not t.is_empty and t.stage != STAGE_STARVE:
+            t.stage = STAGE_STARVE
+            frozen.append(tid)
+    return frozen
 
 
 def _snapshot_week(state, week_label, week_start):
@@ -139,15 +172,26 @@ def advance_facility_window(state, batch_by_id, tables, forecast_start,
     manual_fw_balance: dict[str, list[float]] = {}
     week_start = forecast_start
     for i in range(n_weeks):
-        # OPENING snapshot FIRST — the true start-of-week state, taken BEFORE
-        # this week's operations AND before its growth/mortality. So week i's
-        # grid column shows what the operator has to act ON when the week opens:
-        # for week 1 that's the raw PR-hydrated facility; for later weeks it's
-        # the prior week's close. A harvest/move scripted in week i therefore
-        # KEEPS showing the fish in week i (you still see what you acted on) and
-        # only empties the tank from week i+1 onward. (batch_locations below
-        # stays the end-of-week/closing snapshot the run stitches into the
-        # output + audits — that ordering is unchanged.)
+        # Depuration hold FIRST: in purge mode, freeze any pre-existing 6N tank
+        # to STARVE (no growth / no feed) before anything else this week, so the
+        # opening snapshot, heatmap + system rollup all show it depurating (feed
+        # excluded) and the biology walk below doesn't grow it. Gated per
+        # week-date so a mid-window 6N->production crossing stops freezing.
+        newly_frozen = _freeze_purge_6n(state, control, week_start)
+        if newly_frozen:
+            warnings.append(
+                f"6N depuration (purge mode), week {labels[i]}: held tanks "
+                f"{newly_frozen} frozen — no growth, no feed (mortality still "
+                f"applies) until the planner's purge rotation harvests them")
+        # OPENING snapshot — the true start-of-week state, taken BEFORE this
+        # week's operations AND before its growth/mortality. So week i's grid
+        # column shows what the operator has to act ON when the week opens: for
+        # week 1 that's the raw PR-hydrated facility (with 6N already held);
+        # for later weeks it's the prior week's close. A harvest/move scripted
+        # in week i therefore KEEPS showing the fish in week i (you still see
+        # what you acted on) and only empties the tank from week i+1 onward.
+        # (batch_locations below stays the end-of-week/closing snapshot the run
+        # stitches into the output + audits — that ordering is unchanged.)
         opening_locations.extend(_snapshot_week(state, labels[i], week_start))
         # Operations next — they still date into THIS week for the continuity
         # audit — then biology, then the closing snapshot.
