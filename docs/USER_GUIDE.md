@@ -154,9 +154,21 @@ in that tank (batch, fish, weight, density) and offering **Harvest / Graded →
 memorise, no codes to type.
 The grid **re-draws as you script**, so you watch each operation ripple forward
 over the weeks. A **"Weeks to project / act in"** slider sets how far ahead to
-look. Below the map: an **🐟 FW→OG intake** picker (freshwater cohorts aren't
-tanks yet), a plain-English **timeline** of everything you've scripted (with
-delete), and a **Save window** button. The old flat table still lives under **⚙
+look. Below the map: a **📊 System rollup** toggle (see below), an **🐟 FW→OG
+intake** picker (freshwater cohorts aren't tanks yet), a plain-English
+**timeline** of everything you've scripted (with delete), and a **Save window**
+button.
+
+**📊 System rollup — spotting capacity pressure.** The per-tank grid shows
+*density* per tank, but a system can be fine on every individual tank and still
+be **over its feed budget** — feed usually binds before biomass here. The
+rollup toggle opens two colour-coded tables (systems as rows, weeks as columns,
+with a facility **TOTAL** row): **open biomass** (tonnes) and **open feed**
+(kg/day, 6N depuration eats 0). Each cell is coloured by the fraction of that
+**system's** capacity it uses — biomass vs Σ(volume × density-cap), feed vs
+Σ(per-tank feed cap) — green roomy, amber near cap, red over. Same **week-open**
+state as the grid, so it reflects reality *when you act*. Use it to catch a
+system you're about to push over its feed cap before you commit the move. The old flat table still lives under **⚙
 Advanced — raw event grid** for bulk edits or unequal per-tank splits; both write
 the same YAML.
 
