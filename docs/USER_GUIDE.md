@@ -213,12 +213,28 @@ grid — is one of these):
   harvest; for single-batch-per-tank biomass fidelity, keep one batch per pair
   (the batch column lets you spot a same-pair main holding a different batch). The
   destination is frozen **off-feed** (no growth, no feed) for depuration.
-- **`fw_to_og`** — a manual FW→OG transfer (TranOG) of `Batch` into your chosen
-  **empty OG** `To tanks`, with `Count` as the **target** entering seawater. The
-  engine applies the same logic as the automatic pipeline: handling mortality,
-  then a reconcile-to-target **cull**, then the big/small size-class split across
-  your tanks. The cull is surfaced in the **ValidationLog** and reconciled in the
-  **InputConservationAudit** FW mass-balance, so no fish go unaccounted.
+- **`fw_to_og`** — a manual FW→OG transfer (TranOG): bring a **freshwater
+  cohort** into seawater. Because a cohort isn't a tank yet, it has its own
+  **🐟 FW→OG intake** panel below the grid (not a grid click). You pick:
+  - **Freshwater cohort** — only cohorts still in freshwater during the window
+    appear (projected from the FW trajectory);
+  - **Week to bring it in**;
+  - **Target fish entering seawater** — `Count`. The engine applies the same
+    logic as the automatic pipeline: **handling mortality**, then a
+    **reconcile-to-target bottom cull** (it removes the *smallest* fish down to
+    your target, which also lifts the survivors' average weight). The cull is
+    surfaced in the **ValidationLog** and reconciled in the
+    **InputConservationAudit** FW mass-balance, so no fish go unaccounted.
+  - **Where the size classes go** — on entry the cohort is graded into a
+    **bigger** and a **smaller** class (a median split, driven by the cohort's
+    size CV — you don't set the ratio). A **live preview** shows both grades
+    (*bigger N ≈ X kg · smaller N ≈ Y kg*), and **two pickers** — **"Tank(s) for
+    the BIGGER grade"** and **"Tank(s) for the SMALLER grade"** — let you send
+    each grade to its own empty OG tank(s) (a tank can't be in both; each grade's
+    count splits evenly across its tanks). *Add* is blocked until every grade
+    that has fish has a home. In the **⚙ Advanced** raw grid (which has no grade
+    pickers), an `fw_to_og` with untagged `To tanks` falls back to the legacy
+    rule — bigger grade → first half of the tanks, smaller → the rest.
 
 **Advanced — raw grid columns.** The **⚙ Advanced** table is one row per
 operation, for bulk edits or unequal per-tank splits the click flow doesn't
