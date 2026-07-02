@@ -139,9 +139,18 @@ def advance_facility_window(state, batch_by_id, tables, forecast_start,
     manual_fw_balance: dict[str, list[float]] = {}
     week_start = forecast_start
     for i in range(n_weeks):
-        # Operations FIRST (start of the week), then biology, then snapshot —
-        # so the end-of-week BatchLocations reflect the post-event, post-growth
-        # state and the events date into this week for the continuity audit.
+        # OPENING snapshot FIRST — the true start-of-week state, taken BEFORE
+        # this week's operations AND before its growth/mortality. So week i's
+        # grid column shows what the operator has to act ON when the week opens:
+        # for week 1 that's the raw PR-hydrated facility; for later weeks it's
+        # the prior week's close. A harvest/move scripted in week i therefore
+        # KEEPS showing the fish in week i (you still see what you acted on) and
+        # only empties the tank from week i+1 onward. (batch_locations below
+        # stays the end-of-week/closing snapshot the run stitches into the
+        # output + audits — that ordering is unchanged.)
+        opening_locations.extend(_snapshot_week(state, labels[i], week_start))
+        # Operations next — they still date into THIS week for the continuity
+        # audit — then biology, then the closing snapshot.
         if events:
             tr, hv, tn, w, fwb = apply_events_for_week(
                 state, events, i + 1, week_start, week_label=labels[i],
@@ -154,12 +163,6 @@ def advance_facility_window(state, batch_by_id, tables, forecast_start,
                 rec = manual_fw_balance.setdefault(b, [0.0, 0.0])
                 rec[0] += cnt
                 rec[1] += culled
-        # OPENING snapshot: post-event but PRE-biology — the START-of-week state
-        # (before this week's growth/mortality). The editor's heatmap shows these
-        # so a cell reflects what's in the tank WHEN you act on it, not after a
-        # week of growth. (batch_locations below stays the end-of-week/closing
-        # snapshot that the run stitches into the output + audits.)
-        opening_locations.extend(_snapshot_week(state, labels[i], week_start))
         wk_realized = advance_facility_one_week(
             state, batch_by_id, tables, week_start, labels[i])
         realized.update(wk_realized)
