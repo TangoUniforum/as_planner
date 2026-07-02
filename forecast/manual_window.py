@@ -25,7 +25,7 @@ from .state import STAGE_STARVE
 from .time_grid import forecast_week_labels
 
 
-def _freeze_purge_6n(state, control, week_date) -> list[int]:
+def _freeze_purge_6n(state, control, week_date) -> dict:
     """Depuration hold: in PURGE mode, freeze every occupied 6N tank to STARVE
     at the start of an override week, so the window honors the engine's 6N
     depuration rules — no growth, no feed (only mortality still applies).
@@ -41,19 +41,25 @@ def _freeze_purge_6n(state, control, week_date) -> list[int]:
     lands mid-window correctly stops freezing from that week on (weeks on/after
     the production-start date grow normally). Only ADDS the freeze — an operator
     og_to_6n / graded->6N destination is already STARVE and stays so; a tank is
-    never un-frozen here. Returns the ids newly frozen (for traceability).
+    never un-frozen here.
+
+    Returns {tank_id: (prev_stage, batch_id)} for tanks NEWLY frozen this call,
+    so the caller can (a) surface them for traceability and (b) RESTORE their
+    pre-freeze stage at the window->planner handoff — the hold is a manual-window
+    concern only and must not carry the frozen stage downstream (the auto
+    pipeline runs its own 6N rotation from a clean starting point).
     """
     if control is None:
-        return []
+        return {}
     from .sixn import SIXN_ALL_TANKS, is_purge_mode
     if not is_purge_mode(control, week_date):
-        return []
-    frozen: list[int] = []
+        return {}
+    frozen: dict = {}
     for tid in sorted(SIXN_ALL_TANKS):
         t = state.tanks_by_id.get(tid)
         if t is not None and not t.is_empty and t.stage != STAGE_STARVE:
+            frozen[tid] = (t.stage, t.batch_id)
             t.stage = STAGE_STARVE
-            frozen.append(tid)
     return frozen
 
 
@@ -170,6 +176,7 @@ def advance_facility_window(state, batch_by_id, tables, forecast_start,
     tranog_events: list = []
     warnings: list[str] = []
     manual_fw_balance: dict[str, list[float]] = {}
+    purge_hold: dict = {}   # tank_id -> (pre-freeze stage, batch) for handoff restore
     week_start = forecast_start
     for i in range(n_weeks):
         # Depuration hold FIRST: in purge mode, freeze any pre-existing 6N tank
@@ -177,12 +184,16 @@ def advance_facility_window(state, batch_by_id, tables, forecast_start,
         # opening snapshot, heatmap + system rollup all show it depurating (feed
         # excluded) and the biology walk below doesn't grow it. Gated per
         # week-date so a mid-window 6N->production crossing stops freezing.
+        # The hold is restored at the handoff below (it must not go downstream).
         newly_frozen = _freeze_purge_6n(state, control, week_start)
+        for tid, info in newly_frozen.items():
+            purge_hold.setdefault(tid, info)   # keep the FIRST-freeze original
         if newly_frozen:
             warnings.append(
                 f"6N depuration (purge mode), week {labels[i]}: held tanks "
-                f"{newly_frozen} frozen — no growth, no feed (mortality still "
-                f"applies) until the planner's purge rotation harvests them")
+                f"{sorted(newly_frozen)} frozen — no growth, no feed (mortality "
+                f"still applies); restored to the auto pipeline's starting state "
+                f"at the window handoff (the planner runs its own 6N rotation)")
         # OPENING snapshot — the true start-of-week state, taken BEFORE this
         # week's operations AND before its growth/mortality. So week i's grid
         # column shows what the operator has to act ON when the week opens: for
@@ -212,6 +223,19 @@ def advance_facility_window(state, batch_by_id, tables, forecast_start,
         realized.update(wk_realized)
         batch_locations.extend(_snapshot_week(state, labels[i], week_start))
         week_start = week_start + timedelta(days=7)
+    # Handoff: undo the purge hold on the RETURNED state so the auto pipeline
+    # starts from its expected condition and runs its OWN 6N rotation — the hold
+    # is a manual-window concern only and must not propagate downstream. The
+    # window's closing snapshots (batch_locations, taken inside the loop) keep
+    # STARVE, so the window weeks stay correct in the output + audits; only the
+    # live state the planner inherits is restored. Restore a tank ONLY if it is
+    # still the same depurating batch we froze (an operator og_to_6n / graded->6N
+    # that landed on it, or a harvest that emptied it, is left untouched).
+    for tid, (orig_stage, orig_batch) in purge_hold.items():
+        t = state.tanks_by_id.get(tid)
+        if (t is not None and not t.is_empty
+                and t.stage == STAGE_STARVE and t.batch_id == orig_batch):
+            t.stage = orig_stage
     return {
         "realized_biology": realized,
         "batch_locations": batch_locations,

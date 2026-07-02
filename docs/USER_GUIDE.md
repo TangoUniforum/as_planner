@@ -196,6 +196,13 @@ window is fully traceable — it is not a silent pre-run mutation.
 > `sixn_production_start` ever fell inside your window, 6N would grow from that
 > week on. In **6N production mode** (`sixn_growth` on, or on/after the start
 > date) 6N is *not* held — it grows normally.
+>
+> The hold is a **manual-window concern only.** It does **not** carry downstream:
+> at the handoff, each held 6N tank is restored to its normal stage so the auto
+> planner starts from a clean condition and runs **its own** 6N rotation. Only the
+> **depurated (un-grown) weight** carries forward — that *is* the starting state
+> the manual inputs produce, so the auto pipeline correctly builds on lighter,
+> purged 6N fish.
 
 **The five event types** (every operation you script — by click or in the raw
 grid — is one of these):
