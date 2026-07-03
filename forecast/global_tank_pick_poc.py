@@ -244,6 +244,7 @@ def pick_tanks(
     control: ControlParams,
     facility: FacilityConfig,
     grow_q_by_week: Optional[dict] = None,
+    initial_tank_state=None,
 ) -> TankPickResult:
     """Realize the converged L1->L3 plan as specific physical tanks.
 
@@ -319,6 +320,22 @@ def pick_tanks(
 
     # ---- Running physical tank state. tank_id -> _Occ (or absent = empty). ----
     state: dict[int, _Occ] = {}
+    if initial_tank_state is not None:
+        # Seed the opening week's PRIOR occupancy from a handed-over tank state
+        # (the manual override window's CLOSE). The first planned week then
+        # CONTINUES those batches — the placement anchors their prior tanks and
+        # emits transfers for any relocation — instead of re-stocking them from
+        # empty via TranOG. This makes the manual->global hand-off reconcile in
+        # the TankContinuityAudit rather than reading as vanish (manual tanks) +
+        # restock (global TranOG). Empty run (no manual window) -> unchanged.
+        for tid, tank in initial_tank_state.tanks_by_id.items():
+            if getattr(tank, "is_empty", False) or tank.count <= 0:
+                continue
+            state[tid] = _Occ(
+                batch_id=tank.batch_id, count=tank.count,
+                biomass_kg=tank.biomass_kg,
+                avg_wt_g=(tank.biomass_kg * 1000.0 / tank.count
+                          if tank.count > 0 else 0.0))
 
     batch_locations: list[TankLocRow] = []
     transfers: list[TankTransfer] = []

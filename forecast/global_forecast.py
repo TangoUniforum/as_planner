@@ -97,6 +97,7 @@ def build_tables(
     *,
     fw_inflight: Optional[dict] = None,
     grow_q_by_week: Optional[dict] = None,
+    initial_tank_state=None,
 ) -> GlobalForecastTables:
     """Convert a converged `run_loop` LoopResult into excel_io-ready structures.
 
@@ -117,7 +118,8 @@ def build_tables(
     # ---- REAL specific-tank pick (step #2): physical tanks + transfers +
     #      harvest events + audit-closing realized biology / mortality. ----
     pick = tankpick.pick_tanks(loop_result, control, facility,
-                               grow_q_by_week=grow_q_by_week)
+                               grow_q_by_week=grow_q_by_week,
+                               initial_tank_state=initial_tank_state)
 
     # ---- FW/EGG biology rows (the validated projectors) ----
     fw_states = _fw_biology_states(batches, tables, control, fw_inflight=fw_inflight)

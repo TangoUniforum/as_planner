@@ -177,11 +177,20 @@ def _apply_manual_window(input_path, scenario_dir, control, tables, facility,
     fs_date = fs.date() if hasattr(fs, "date") else fs
     state = FacilityState.from_facility_config(facility, today=fs_date)
     hydrate_facility_state(state, og_records, batches)
+    # Snapshot the PR-hydrated OPENING (pre-window) as a second, un-advanced state
+    # so the TankContinuityAudit can open the first manual week from the real
+    # in-flight tanks instead of from 0 (else every opening batch reads as a
+    # +drift on the manual window's week 1 — the +2.07M boundary artifact).
+    init_state = FacilityState.from_facility_config(facility, today=fs_date)
+    hydrate_facility_state(init_state, og_records, batches)
     bbid = {b.batch_id: b for b in batches}
     window_n = max((e.week or 1) for e in events)
     win = advance_facility_window(
         state, bbid, tables, fs_date, window_n, events=events, control=control,
         pr_closing=pr_closing, fw_records=fw_records)
+    # `state` is now the manual window's CLOSE (last manual week) — the tank
+    # positions the global plan must CONTINUE from (not re-stock), so the W27
+    # hand-off reconciles as transfers rather than vanish+restock.
     # Aggregate the post-window tanks into the Global engine's seed dicts.
     og_agg = defaultdict(lambda: [0.0, 0.0])
     purge_agg = defaultdict(lambda: [0.0, 0.0])
@@ -211,6 +220,8 @@ def _apply_manual_window(input_path, scenario_dir, control, tables, facility,
         "harvest_events": win.get("harvest_events", []),
         "tranog_events": win.get("tranog_events", []),
         "realized_biology": win.get("realized_biology", {}),
+        "initial_state": init_state,   # W23 audit opening (pre-window PR tanks)
+        "window_close_state": state,   # W27 pick continuation (manual close tanks)
     }
     return (new_og, new_fw, new_purge, new_start,
             control.horizon_weeks - window_n, win.get("warnings", []), window_n, stitch)
@@ -271,7 +282,9 @@ def run_global(input_path, output_path, config_dir, scenario_dir, *,
             grow_q = _solve_cpsat_q(result, facility, system_limits, control,
                                     cpsat_time)
         gft = gf.build_tables(result, batches, tables, control, facility,
-                              fw_inflight=fw_inflight, grow_q_by_week=grow_q)
+                              fw_inflight=fw_inflight, grow_q_by_week=grow_q,
+                              initial_tank_state=(_mw_stitch or {}).get(
+                                  "window_close_state"))
         # Stitch the MANUAL WINDOW weeks into the output so the timeline OPENS with
         # the operator's starting-state work (transfers/harvests + biology), then the
         # global plan. The manual rows/events are read-compatible with the writers
@@ -298,7 +311,8 @@ def run_global(input_path, output_path, config_dir, scenario_dir, *,
                   f"{len(_mw_stitch['harvest_events'])} harvest event(s).")
         cons = gf.conservation_summary(gft)
         _emit_workbook(gft, result, batches, tables, control, facility,
-                       _facility_limits, cons, Path(output_path))
+                       _facility_limits, cons, Path(output_path),
+                       initial_state=(_mw_stitch or {}).get("initial_state"))
     finally:
         _l3._OVERSTOCK_DENSITY_PCT, _l3._OVERSTOCK_MAX_WT_G = _prev
     return 0
@@ -330,7 +344,8 @@ def _solve_cpsat_q(result, facility, system_limits, control, time_limit):
 
 
 def _emit_workbook(gft, result, batches, tables, control, facility,
-                   facility_limits, cons, out_path: Path) -> None:
+                   facility_limits, cons, out_path: Path,
+                   initial_state=None) -> None:
     from openpyxl import Workbook
     from forecast.excel_io import (
         write_advisory, write_batch_locations, write_batch_plan,
@@ -360,7 +375,8 @@ def _emit_workbook(gft, result, batches, tables, control, facility,
     _audit_wb = Workbook()
     write_tank_continuity_audit(
         _audit_wb, bl, gft.mort_states, hv, gft.transfer_events,
-        grade_events=[], tranog_events=gft.tranog_events, initial_state=None,
+        grade_events=[], tranog_events=gft.tranog_events,
+        initial_state=initial_state,
         realized_biology=gft.realized_biology)
     n_tank_drift, n_bio_drift, fac_count_signed, fac_count_abs = \
         _scan_audit_drift(_audit_wb["TankContinuityAudit"])
@@ -467,7 +483,8 @@ def _emit_workbook(gft, result, batches, tables, control, facility,
     # TranOG + Harvest events (proves 0 TANK_DRIFT / 0 BIO_DRIFT).
     write_tank_continuity_audit(
         wb, bl, gft.mort_states, hv, gft.transfer_events,
-        grade_events=[], tranog_events=gft.tranog_events, initial_state=None,
+        grade_events=[], tranog_events=gft.tranog_events,
+        initial_state=initial_state,
         realized_biology=gft.realized_biology)
 
     # Order: RunConfig first.
