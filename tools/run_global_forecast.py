@@ -163,7 +163,7 @@ def _apply_manual_window(input_path, scenario_dir, control, tables, facility,
     events = load_manual_events(str(scenario_dir))
     if not events:
         return (inflight_og, fw_inflight, purge_inflight,
-                control.forecast_start, control.horizon_weeks, [], 0)
+                control.forecast_start, control.horizon_weeks, [], 0, None)
     from forecast.excel_io import load_workbook
     from forecast.production_report import (
         read_production_report, hydrate_facility_state)
@@ -201,8 +201,19 @@ def _apply_manual_window(input_path, scenario_dir, control, tables, facility,
     new_fw = {bid: v for bid, v in fw_inflight.items() if bid not in transferred}
     ns = win["new_start"]
     new_start = _dt(ns.year, ns.month, ns.day)
+    # STITCH bundle: the manual weeks' per-tank rows + events, read-compatible with
+    # the Global writers (placement.BatchLocationRow == TankLocRow read shape;
+    # events.Transfer/Harvest/TranOGEntry == TankTransfer/Harvest/TranOG). Prepended
+    # to gft so the output timeline OPENS with the manual work, then the global plan.
+    stitch = {
+        "batch_locations": win.get("batch_locations", []),
+        "transfer_events": win.get("transfer_events", []),
+        "harvest_events": win.get("harvest_events", []),
+        "tranog_events": win.get("tranog_events", []),
+        "realized_biology": win.get("realized_biology", {}),
+    }
     return (new_og, new_fw, new_purge, new_start,
-            control.horizon_weeks - window_n, win.get("warnings", []), window_n)
+            control.horizon_weeks - window_n, win.get("warnings", []), window_n, stitch)
 
 
 def run_global(input_path, output_path, config_dir, scenario_dir, *,
@@ -222,6 +233,7 @@ def run_global(input_path, output_path, config_dir, scenario_dir, *,
     batches = load_batches(str(scenario_dir))
     _facility_limits, system_limits = load_limits(str(scenario_dir))
     inflight_og, fw_inflight, purge_inflight = {}, {}, {}
+    _mw_stitch = None   # manual-window rows/events to prepend into the output
     if not no_pr:
         inflight_og, fw_inflight, derived_start, purge_inflight = _hydrate_pr(
             Path(input_path), batches)
@@ -232,7 +244,7 @@ def run_global(input_path, output_path, config_dir, scenario_dir, *,
         # resulting state — same starting point the controller honors. No events =>
         # unchanged. FW re-anchoring is approximate for now (fine when no fw_to_og).
         (inflight_og, fw_inflight, purge_inflight, _mw_start, _mw_horizon,
-         _mw_warns, _mw_weeks) = _apply_manual_window(
+         _mw_warns, _mw_weeks, _mw_stitch) = _apply_manual_window(
             input_path, scenario_dir, control, tables, facility, batches,
             inflight_og, fw_inflight, purge_inflight)
         if _mw_weeks:
@@ -260,6 +272,30 @@ def run_global(input_path, output_path, config_dir, scenario_dir, *,
                                     cpsat_time)
         gft = gf.build_tables(result, batches, tables, control, facility,
                               fw_inflight=fw_inflight, grow_q_by_week=grow_q)
+        # Stitch the MANUAL WINDOW weeks into the output so the timeline OPENS with
+        # the operator's starting-state work (transfers/harvests + biology), then the
+        # global plan. The manual rows/events are read-compatible with the writers
+        # (BatchLocationRow == TankLocRow; events.* == Tank* shapes), so BatchLocations
+        # / HarvestPlan / TransferPlan all show the manual weeks first. Prepended (the
+        # writers sort by week). This does NOT touch the ReconciliationReport — that
+        # is L1's per-batch conservation of the GLOBAL plan (still residual ~0); the
+        # manual window conserves in its own right (it is the controller's audited
+        # advance). The per-tank TankContinuityAudit stays an advisory cross-check.
+        if _mw_stitch:
+            gft.batch_locations = (list(_mw_stitch["batch_locations"])
+                                   + list(gft.batch_locations))
+            gft.harvest_events = (list(_mw_stitch["harvest_events"])
+                                  + list(gft.harvest_events))
+            gft.transfer_events = (list(_mw_stitch["transfer_events"])
+                                   + list(gft.transfer_events))
+            gft.tranog_events = (list(_mw_stitch["tranog_events"])
+                                 + list(gft.tranog_events))
+            if isinstance(getattr(gft, "realized_biology", None), dict):
+                gft.realized_biology.update(_mw_stitch["realized_biology"])
+            print(f"  Stitched the manual override window into the output: "
+                  f"{len(_mw_stitch['batch_locations'])} BatchLocations rows, "
+                  f"{len(_mw_stitch['transfer_events'])} transfer + "
+                  f"{len(_mw_stitch['harvest_events'])} harvest event(s).")
         cons = gf.conservation_summary(gft)
         _emit_workbook(gft, result, batches, tables, control, facility,
                        _facility_limits, cons, Path(output_path))
