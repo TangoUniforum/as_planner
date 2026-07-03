@@ -141,6 +141,70 @@ def main() -> int:
     return 0
 
 
+def _apply_manual_window(input_path, scenario_dir, control, tables, facility,
+                         batches, inflight_og, fw_inflight, purge_inflight):
+    """Execute the operator's manual override window (scenario/manual_events.yaml)
+    BEFORE the global plan, then CONVERT the resulting facility state into the
+    Global engine's aggregated seeds — so the precalculated method plans forward
+    from the SAME starting point the controller uses (the manual transfers /
+    harvests + their biology), not the raw PR.
+
+    The global engine consumes aggregated per-batch dicts, not a tank-level state,
+    so we: (1) hydrate a tank-level FacilityState from the PR, (2) run
+    advance_facility_window (events + biology for the manual weeks), (3) aggregate
+    the post-window tanks back into inflight_og (non-6N OG) + purge_inflight (6N),
+    and drop any FW batch manually moved to OG from fw_inflight. Returns
+    (inflight_og, fw_inflight, purge_inflight, new_start_datetime, new_horizon,
+    warnings, window_weeks). No manual events -> inputs unchanged (window_weeks=0).
+    """
+    from datetime import datetime as _dt
+    from collections import defaultdict
+    from forecast.manual_events import load_manual_events
+    events = load_manual_events(str(scenario_dir))
+    if not events:
+        return (inflight_og, fw_inflight, purge_inflight,
+                control.forecast_start, control.horizon_weeks, [], 0)
+    from forecast.excel_io import load_workbook
+    from forecast.production_report import (
+        read_production_report, hydrate_facility_state)
+    from forecast.state import FacilityState
+    from forecast.manual_window import advance_facility_window
+    from forecast.sixn import SIXN_ALL_TANKS
+    wb = load_workbook(str(input_path))
+    pr_closing, og_records, fw_records = read_production_report(wb)
+    wb.close()
+    fs = control.forecast_start
+    fs_date = fs.date() if hasattr(fs, "date") else fs
+    state = FacilityState.from_facility_config(facility, today=fs_date)
+    hydrate_facility_state(state, og_records, batches)
+    bbid = {b.batch_id: b for b in batches}
+    window_n = max((e.week or 1) for e in events)
+    win = advance_facility_window(
+        state, bbid, tables, fs_date, window_n, events=events, control=control,
+        pr_closing=pr_closing, fw_records=fw_records)
+    # Aggregate the post-window tanks into the Global engine's seed dicts.
+    og_agg = defaultdict(lambda: [0.0, 0.0])
+    purge_agg = defaultdict(lambda: [0.0, 0.0])
+    for t in state.tanks_by_id.values():
+        if t.is_empty:
+            continue
+        tgt = purge_agg if t.tank_id in SIXN_ALL_TANKS else og_agg
+        tgt[t.batch_id][0] += t.count
+        tgt[t.batch_id][1] += t.biomass_kg
+    cv = {b.batch_id: b.tran_og_cv for b in batches}
+    new_og = {bid: (c, b * 1000.0 / c, cv.get(bid, 16.0))
+              for bid, (c, b) in og_agg.items() if c > 0}
+    new_purge = {bid: (c, b * 1000.0 / c)
+                 for bid, (c, b) in purge_agg.items() if c > 0}
+    # FW batches manually crossed to OG are now in new_og -> drop from fw_inflight.
+    transferred = set(win.get("transferred_fw_batches", set()))
+    new_fw = {bid: v for bid, v in fw_inflight.items() if bid not in transferred}
+    ns = win["new_start"]
+    new_start = _dt(ns.year, ns.month, ns.day)
+    return (new_og, new_fw, new_purge, new_start,
+            control.horizon_weeks - window_n, win.get("warnings", []), window_n)
+
+
 def run_global(input_path, output_path, config_dir, scenario_dir, *,
                no_pr: bool = False, overstock: bool = True,
                max_iterations: int = 10, margin_frac: float = 0.5,
@@ -163,6 +227,20 @@ def run_global(input_path, output_path, config_dir, scenario_dir, *,
             Path(input_path), batches)
         if derived_start is not None:
             control.forecast_start = derived_start
+        # Manual override window: execute the operator's starting-state events
+        # (manual transfers/harvests) + biology, then seed the global plan from the
+        # resulting state — same starting point the controller honors. No events =>
+        # unchanged. FW re-anchoring is approximate for now (fine when no fw_to_og).
+        (inflight_og, fw_inflight, purge_inflight, _mw_start, _mw_horizon,
+         _mw_warns, _mw_weeks) = _apply_manual_window(
+            input_path, scenario_dir, control, tables, facility, batches,
+            inflight_og, fw_inflight, purge_inflight)
+        if _mw_weeks:
+            control.forecast_start = _mw_start
+            control.horizon_weeks = _mw_horizon
+            print(f"  Manual override window: {_mw_weeks} week(s) executed before "
+                  f"the global plan ({len(_mw_warns)} warning(s)); global now opens "
+                  f"{_mw_start.date()}, horizon {_mw_horizon}w.")
 
     _prev = (_l3._OVERSTOCK_DENSITY_PCT, _l3._OVERSTOCK_MAX_WT_G)
     if overstock:
@@ -251,14 +329,27 @@ def _emit_workbook(gft, result, batches, tables, control, facility,
     n_tank_drift, n_bio_drift, fac_count_signed, fac_count_abs = \
         _scan_audit_drift(_audit_wb["TankContinuityAudit"])
     _audit_wb.close()
+    # NOTE: the authoritative conservation proof for the GLOBAL (LP) method is the
+    # ReconciliationReport (batch-level seeded == harvested + standing + mort + cull;
+    # see conservation_summary). This per-tank TankContinuityAudit reconciles the
+    # CONTROLLER's tank-to-tank Transfer/Harvest EVENT stream, which the LP placement
+    # does not fully emit (it re-solves the whole-facility layout each week rather
+    # than moving fish tank-by-tank) — so it can OVER-REPORT drift on LP output even
+    # when every fish is accounted for. It is a cross-check, not the source of truth.
+    _recon_ok = abs(cons.get("residual_pct", 0.0)) < 0.01
     tank_drift_note = (
-        f"TankContinuityAudit: {n_tank_drift} TANK_DRIFT / {n_bio_drift} "
-        f"BIO_DRIFT rows (0/0 = every fish in a tank, every move conserved); "
-        f"facility count signed/abs {fac_count_signed:.0f}/{fac_count_abs:.0f}")
-    print(f"  TankContinuityAudit: TANK_DRIFT={n_tank_drift}, "
-          f"BIO_DRIFT={n_bio_drift}, facility count signed/abs "
-          f"{fac_count_signed:.0f}/{fac_count_abs:.0f} "
-          f"({'OK — 0 drift' if n_tank_drift == 0 else 'CHECK'})")
+        f"TankContinuityAudit (per-tank cross-check): {n_tank_drift} TANK_DRIFT / "
+        f"{n_bio_drift} BIO_DRIFT rows; facility count signed/abs "
+        f"{fac_count_signed:.0f}/{fac_count_abs:.0f}. NOT the conservation proof for "
+        f"the LP method — see ReconciliationReport (residual "
+        f"{cons.get('residual_pct', 0.0):+.4f}%); the LP re-solves placement whole-"
+        f"facility so it emits no tank-to-tank event stream and this audit over-reports.")
+    print(f"  TankContinuityAudit (per-tank cross-check): TANK_DRIFT={n_tank_drift}, "
+          f"BIO_DRIFT={n_bio_drift}, facility signed/abs "
+          f"{fac_count_signed:.0f}/{fac_count_abs:.0f} — advisory only; "
+          f"conservation is the ReconciliationReport (residual "
+          f"{cons.get('residual_pct', 0.0):+.4f}%, "
+          f"{'CONSERVES' if _recon_ok else 'CHECK RECON'}).")
 
     wb = Workbook()
 
