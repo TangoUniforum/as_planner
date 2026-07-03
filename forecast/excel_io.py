@@ -1027,6 +1027,7 @@ def _build_batch_week_ledger(
     batch_locations, harvest_events, batch_week_states,
     transfer_events=None, batches=None, tables=None, hog_yield=0.0,
     hog_overrides=None, sixn_move_in_feed=None,
+    tranog_events=None, og_mort_states=None,
 ):
     """Assemble a per-(batch, week) open/close production ledger.
 
@@ -1082,6 +1083,18 @@ def _build_batch_week_ledger(
             moved = getattr(ev, "count_transferred", 0.0)
         xfer[(ev.batch_id, iso_week_label(ev.event_date))] += moved
 
+    # TranOG fresh-stocking inflow per (batch, week): fish ENTERING OG from FW /
+    # appearing in-flight, with NO chained OG predecessor (opening OG balance 0).
+    # Credited as input at a genuine FW->OG boundary week only (open reset to 0
+    # there) — a two-engine handoff where the FW projection's count does not flow
+    # by count into the pick's realized OG entry. (Global reports only; the
+    # controller passes no tranog_events -> this map stays empty.)
+    tranog_in: dict[tuple, float] = defaultdict(float)
+    for ev in (tranog_events or ()):
+        wk = iso_week_label(ev.event_date)
+        for d in getattr(ev, "destinations", []):
+            tranog_in[(ev.batch_id, wk)] += getattr(d, "count", 0.0)
+
     # Cull / mortality% / input / biology fallback, keyed by (batch, week).
     cull: dict[tuple, dict] = defaultdict(lambda: {"count": 0.0, "bio": 0.0})
     mortpct: dict[tuple, float] = {}
@@ -1109,6 +1122,14 @@ def _build_batch_week_ledger(
         # would re-introduce phantom unharvested fish (see close_vals gate).
         if s.stage in ("FW", "EGG") and s.feed_kg_week and key not in rl:
             feed[key] += s.feed_kg_week
+
+    # OG-phase weekly mortality % (the pick's per-OG-batch-week rate). fw_states
+    # cover only FW weeks, so OG weeks would otherwise read mort=0 and leak the
+    # ~decline into Count_Check. Fill OG weeks only; setdefault never overrides an
+    # FW-state rate (FW weeks and OG weeks don't collide anyway). Controller passes
+    # no og_mort_states -> no-op.
+    for ms in (og_mort_states or ()):
+        mortpct.setdefault((ms.batch_id, ms.week_label), ms.mortality_pct_weekly)
 
     def close_vals(key):
         e = rl.get(key)
@@ -1161,10 +1182,27 @@ def _build_batch_week_ledger(
                            else s0.avg_weight_g)
                     obio = (s0.open_biomass_kg if getattr(s0, "open_biomass_kg", 0.0) > 0
                             else s0.biomass_kg)
+                elif (b, wk) in tranog_in:
+                    # In-flight OG batch's first ledger week entered via TranOG with
+                    # no opening balance -> reset open to 0 (inflow credited below).
+                    oc, owt, obio = 0.0, 0.0, 0.0
                 else:
                     oc, owt, obio = cc, cwt, cbio
             else:
-                oc, owt, obio, _ = close_vals((b, weeks[i - 1]))
+                prev_wk = weeks[i - 1]
+                prev_s = bio_state.get((b, prev_wk))
+                prev_is_fw_proj = (prev_s is not None
+                                   and prev_s.stage in ("FW", "EGG")
+                                   and (b, prev_wk) not in rl)
+                if (b, wk) in tranog_in and (b, wk) in rl and prev_is_fw_proj:
+                    # FW->OG boundary: the pick FRESH-STOCKS the whole OG entry via
+                    # TranOG; the OG opening balance is 0 (the FW projection is a
+                    # separate track whose close does not flow by COUNT into OG).
+                    # Reset open + credit the inflow (below); chaining the FW close
+                    # here would leave the two-engine handoff gap as a residual.
+                    oc, owt, obio = 0.0, 0.0, 0.0
+                else:
+                    oc, owt, obio, _ = close_vals((b, prev_wk))
             h = harv.get((b, wk), {"count": 0.0, "gross": 0.0, "wt_sum": 0.0})
             cu = cull.get((b, wk), {"count": 0.0, "bio": 0.0})
             # Mortality count: for a FW/EGG PROJECTION week (close comes from the
@@ -1180,7 +1218,7 @@ def _build_batch_week_ledger(
             else:
                 mort_count = oc * mortpct.get((b, wk), 0.0) / 100.0
             mort_bio = mort_count * owt / 1000.0
-            input_count = inputc.get((b, wk), 0.0)
+            input_count = inputc.get((b, wk), 0.0) + tranog_in.get((b, wk), 0.0)
             input_bio = input_count * owt / 1000.0
             xf = xfer.get((b, wk), 0.0)
             harv_gross = h["gross"]
@@ -1249,6 +1287,8 @@ def write_weekly_report(
     hog_yield: float = 0.0,
     hog_overrides=None,
     sixn_move_in_feed=None,
+    tranog_events=None,
+    og_mort_states=None,
     sheet_name: str = "WeeklyReport",
 ) -> None:
     """Per-(week, batch) open/close production ledger (matches reference format).
@@ -1268,7 +1308,8 @@ def write_weekly_report(
     rows = _build_batch_week_ledger(
         batch_locations, harvest_events, batch_week_states,
         transfer_events, batches, tables, hog_yield, hog_overrides,
-        sixn_move_in_feed=sixn_move_in_feed)
+        sixn_move_in_feed=sixn_move_in_feed,
+        tranog_events=tranog_events, og_mort_states=og_mort_states)
     for d in rows:
         ws.append([scenario_name, d["week"], d["week_start"], d["batch"]]
                   + _ledger_value_cells(d))
@@ -1289,6 +1330,8 @@ def write_monthly_report(
     hog_overrides=None,
     forecast_start=None,
     sixn_move_in_feed=None,
+    tranog_events=None,
+    og_mort_states=None,
     sheet_name: str = "MonthlyReport",
 ) -> None:
     """Per-(month, batch) open/close production ledger (matches reference format).
@@ -1312,7 +1355,8 @@ def write_monthly_report(
     weekly = _build_batch_week_ledger(
         batch_locations, harvest_events, batch_week_states,
         transfer_events, batches, tables, hog_yield, hog_overrides,
-        sixn_move_in_feed=sixn_move_in_feed)
+        sixn_move_in_feed=sixn_move_in_feed,
+        tranog_events=tranog_events, og_mort_states=og_mort_states)
 
     # Roll the weekly ledger up to calendar months, splitting any week that
     # straddles a month boundary into its true month. CONTINUOUS flows (growth,

@@ -464,11 +464,15 @@ def _emit_workbook(gft, result, batches, tables, control, facility,
                    batches=batch_by_id, tables=tables)
     write_weekly_report(wb, bl, hv, list(gft.fw_states),
                         batches=batch_by_id, tables=tables,
-                        scenario_name=control.scenario_name, hog_yield=hog)
+                        scenario_name=control.scenario_name, hog_yield=hog,
+                        tranog_events=gft.tranog_events,
+                        og_mort_states=gft.mort_states)
     write_monthly_report(wb, bl, hv, list(gft.fw_states),
                          batches=batch_by_id, tables=tables,
                          scenario_name=control.scenario_name, hog_yield=hog,
-                         forecast_start=fs_date)
+                         forecast_start=fs_date,
+                         tranog_events=gft.tranog_events,
+                         og_mort_states=gft.mort_states)
 
     # ---- L1-native StandingTrace + ReconciliationReport (the conservation). ----
     _write_standing_trace(wb, gft, control)
