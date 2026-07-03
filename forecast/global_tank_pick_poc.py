@@ -85,7 +85,7 @@ from .global_planner_l2_poc import GROWOUT_SYSTEMS, NURSERY_SYSTEMS, PURGE_SYSTE
 from .global_planner_l3_poc import L3Result, smallest_og_tank_kg
 from .global_planner_poc import PlannerResult
 from .models import ControlParams, FacilityConfig
-from .sixn import SIXN_PAIRS
+from .sixn import SIXN_PAIRS, is_purge_mode
 from .time_grid import parse_iso_label
 
 
@@ -260,6 +260,12 @@ def pick_tanks(
     tank_sys = _tank_system(facility)
     sixn_order = _sixn_tank_order()
     sixn_set = set(sixn_order)
+    # DIAGNOSTIC (6N-only-in-purge probe): total harvest count L1 demanded during
+    # purge that could NOT be sourced from 6N tanks (the overflow that today leaks
+    # to production tanks, violating the 6N-only rule).
+    _purge_h_demand = 0.0
+    _purge_h_from6n = 0.0
+    _purge_h_shortfall = 0.0
 
     # ---- L3 grow-out demand: per (week, system, batch) -> tank count + standing.
     # Index placements; also gather the per-(batch, week) L1 standing so per-tank
@@ -272,12 +278,24 @@ def pick_tanks(
         placements_by_week.setdefault(p.week, []).append(p)
         week_label[p.week] = p.week_label
 
-    # Per-(batch, week) grow-out standing (NON-purge rows).
+    # Per-(batch, week) grow-out standing (NON-purge rows). A batch can carry TWO
+    # non-purge rows in one week: its on-feed population AND its off-feed
+    # in-place production hold (L1 step 8b, sixn=False). Both physically occupy
+    # grow-out tanks, so SUM them (count + biomass) rather than overwrite — else
+    # the pick places only one and the other vanishes from every tank (a large
+    # production-mode TANK_DRIFT). avg_wt is the blended (biomass-weighted) mean.
     standing: dict[tuple[str, int], tuple[float, float, float]] = {}
     for r in l1.batch_standing:
         if getattr(r, "in_purge", False) or r.biomass_kg <= 1e-9:
             continue
-        standing[(r.batch_id, r.week)] = (r.count, r.biomass_kg, r.avg_wt_g)
+        key = (r.batch_id, r.week)
+        prev = standing.get(key)
+        if prev is None:
+            standing[key] = (r.count, r.biomass_kg, r.avg_wt_g)
+        else:
+            c = prev[0] + r.count
+            b = prev[1] + r.biomass_kg
+            standing[key] = (c, b, (b * 1000.0 / c if c > 1e-9 else r.avg_wt_g))
 
     # Per-(batch, week) 6N purge-hold standing.
     purge_rows: dict[int, list] = {}
@@ -363,48 +381,62 @@ def pick_tanks(
             for b, ids in prev_by_batch.items()
         }
 
-        # ---- PASS 1: choose SWAP-FREE physical tanks per (batch, system). ----
-        # A tank may be occupied by a batch this week ONLY if it was EMPTY last
-        # week (free_clean) or that SAME batch already held it (kept / free_mine).
-        # A tank a DIFFERENT batch held last week is NEVER reused this week: a
-        # same-week A->B swap charges B's mortality rate against A's residual count
-        # in the per-(tank, week) audit and cannot reconcile. Such a tank goes
-        # fallow. If a system runs out of swap-free tanks the batch takes FEWER
-        # tanks there and its standing packs DENSER (flagged) — never swap, never
-        # overwrite another batch, never drop.
+        # ---- PASS 0: CONTINUITY ANCHOR (never-drop). Reserve each standing
+        # batch's OWN prior non-6N tanks FIRST — before the per-system greedy below
+        # can hand them to another batch and strand this one. That peak-week
+        # starvation dropped whole batches for weeks (e.g. B62 unplaced W27-W34
+        # while every physical tank was taken). Anchoring is conflict-free — a tank
+        # has exactly one prior occupant — so it also PREVENTS the illegal same-week
+        # A->B swap L3 implicitly asks for when it relocates a batch to a new
+        # system. Anchors count toward the batch's L3 tank demand (only the
+        # shortfall is filled in Pass 1) and register under each tank's ACTUAL
+        # system so Pass 2's even-split covers them.
         chosen_by_ps: dict[tuple[str, str], list[int]] = {}
         actual_total: dict[str, int] = {}
+        want_by_batch = dict(batch_total_tanks)
+        for bid in sorted(want_by_batch):
+            sc, _, _ = standing.get((bid, w), (0.0, 0.0, 0.0))
+            if sc <= 1e-9:
+                continue
+            mine = sorted(t for t in prev_avail.get(bid, []) if t not in used_tanks)
+            keep = mine[:max(1, want_by_batch.get(bid, 1))]
+            for tid in keep:
+                used_tanks.add(tid)
+                prev_avail[bid].remove(tid)
+                chosen_by_ps.setdefault((bid, tank_sys.get(tid)), []).append(tid)
+                actual_total[bid] = actual_total.get(bid, 0) + 1
+
+        # ---- PASS 1: fill each batch UP TO its L3 tank demand with SWAP-FREE tanks
+        # in L3's preferred system — EMPTY last week (free_clean) or the SAME batch's
+        # (free_mine); a tank a DIFFERENT batch held last week is never reused (a
+        # same-week swap cannot reconcile in the per-(tank, week) audit). Pass-0
+        # anchors already count toward actual_total, so only the total SHORTFALL is
+        # placed here — a batch that kept enough prior tanks takes none. A system
+        # out of swap-free tanks packs denser (flagged) — never swap, never
+        # overwrite another batch, never drop.
         for p in plist:
             batch_id = p.batch_id
             system = p.system_id
-            want = p.tanks
             sys_ids = sys_tank_ids.get(system, [])
-            if not sys_ids or want <= 0:
+            if not sys_ids or p.tanks <= 0:
                 continue
-            kept_in_sys = [t for t in prev_avail.get(batch_id, [])
-                           if tank_sys.get(t) == system and t not in used_tanks]
-            kept_in_sys.sort()
-            if len(kept_in_sys) >= want:
-                chosen = kept_in_sys[:want]
-            else:
-                chosen = list(kept_in_sys)
-                need = want - len(chosen)
-                free = [t for t in sys_ids
-                        if t not in used_tanks and t not in chosen]
-                free_clean = [t for t in free if t not in prev_state]
-                free_mine = [t for t in free
-                             if t in prev_state
-                             and prev_state[t].batch_id == batch_id]
-                chosen.extend((free_clean + free_mine)[:need])
-                if len(chosen) < want:
-                    # Swap-free shortfall: pack denser this week (flagged below).
-                    week_oversub = True
-            for tid in chosen:
+            need = want_by_batch.get(batch_id, p.tanks) - actual_total.get(batch_id, 0)
+            if need <= 0:
+                continue
+            free = [t for t in sys_ids if t not in used_tanks]
+            free_clean = [t for t in free if t not in prev_state]
+            free_mine = [t for t in free
+                         if t in prev_state and prev_state[t].batch_id == batch_id]
+            add = (free_clean + free_mine)[:need]
+            for tid in add:
                 used_tanks.add(tid)
                 if tid in prev_avail.get(batch_id, []):
                     prev_avail[batch_id].remove(tid)
-            chosen_by_ps[(batch_id, system)] = chosen
-            actual_total[batch_id] = actual_total.get(batch_id, 0) + len(chosen)
+            if add:
+                chosen_by_ps.setdefault((batch_id, system), []).extend(add)
+                actual_total[batch_id] = actual_total.get(batch_id, 0) + len(add)
+            if actual_total.get(batch_id, 0) < want_by_batch.get(batch_id, p.tanks):
+                week_oversub = True
 
         # ---- DENSITY-RELIEF SPREAD (CROSS-SYSTEM, minimize density). ----
         # After the base placement, an over-dense batch claims its next tank to
@@ -577,9 +609,19 @@ def pick_tanks(
         fallow = {tid for tid, occ in prev_state.items()
                   if tid in sixn_set and occ.batch_id not in held_batches}
         sixn_free = [t for t in sixn_order if t not in fallow]  # claim order
-        # First, honour continuity: re-seat batches on their prior 6N tanks.
+        # Claim order: DESCENDING biomass, so a large live depuration cohort is
+        # seated before near-spent tails. A sub-1-fish tail claims NO 6N tank — it
+        # is the tolerated near-harvest tail — so it cannot hog a whole tank via
+        # continuity and strand a big cohort (the bug that dropped B51's ~60k fish
+        # while three ZERO-count tails held tanks 61/69/71, mislabelling the loss
+        # as mortality). n_need = ceil(biomass / sixn_cap) as before.
+        claim_order = sorted(held, key=lambda r: -r.biomass_kg)
         sixn_assigned: dict[str, list[int]] = {}
-        for r in sorted(held, key=lambda r: r.batch_id):
+        # First, honour continuity: re-seat live cohorts on their prior 6N tanks.
+        for r in claim_order:
+            if r.count < 1.0:
+                sixn_assigned[r.batch_id] = []
+                continue
             n_need = max(1, math.ceil(r.biomass_kg / sixn_cap))
             keep = [t for t in prev_sixn_by_batch.get(r.batch_id, [])
                     if t in sixn_free][:n_need]
@@ -587,14 +629,16 @@ def pick_tanks(
                 sixn_free.remove(t)
             sixn_assigned[r.batch_id] = keep
         # Then claim additional 6N tanks (main-then-sister) for any shortfall.
-        for r in sorted(held, key=lambda r: r.batch_id):
+        for r in claim_order:
+            if r.count < 1.0:
+                continue
             n_need = max(1, math.ceil(r.biomass_kg / sixn_cap))
             cur = sixn_assigned.get(r.batch_id, [])
             while len(cur) < n_need and sixn_free:
                 cur.append(sixn_free.pop(0))
             sixn_assigned[r.batch_id] = cur
             if len(cur) < n_need:
-                week_oversub = True   # 6N pool over-subscribed (rare)
+                week_oversub = True   # 6N pool genuinely over-subscribed (rare)
 
         for r in held:
             tanks = sixn_assigned.get(r.batch_id, [])
@@ -647,6 +691,10 @@ def pick_tanks(
         t_out_kg: dict[int, float] = {}
         t_in_kg: dict[int, float] = {}
         tn_in_kg: dict[int, float] = {}
+        # Per PRIOR tank: the mortality COUNT the pick applied (prev count * mp).
+        # The audit credits this (via realized_biology[..][1]); without it every
+        # batch's weekly deaths read as negative drift.
+        mort_ct_by_tank: dict[int, float] = {}
 
         all_batches = set(new_by_batch) | set(prev_by_batch)
         for batch_id in sorted(all_batches):
@@ -667,16 +715,23 @@ def pick_tanks(
                     batch_id=batch_id, week_label=wl,
                     mortality_pct_weekly=100.0 * mp))
 
-            # ---- (b) post-mortality survivors available per PRIOR tank.
+            # ---- (b) post-mortality survivors available per PRIOR tank. The
+            # complement (prev * mp) is the deaths applied in that tank — record
+            # it so the audit can credit mortality (else it reads as drift).
             avail = {t: prev_state[t].count * (1.0 - mp) for t in old_tanks}
+            for t in old_tanks:
+                mort_ct_by_tank[t] = prev_state[t].count * mp
 
             # ---- (c) HARVEST: draw from survivors (6N STARVE tanks first — the
             # just-released depuration pairs). Empties those tanks; the audit
             # zeroes them via harvest_out.
             if h_cnt > 1e-9 and old_tanks:
+                _ws_date = ws.date() if hasattr(ws, "date") else ws
+                _purge_wk = is_purge_mode(control, _ws_date)
                 starve_first = ([t for t in old_tanks if t in sixn_set]
                                 + [t for t in old_tanks if t not in sixn_set])
                 drawn_c = 0.0
+                _from6n = 0.0
                 for t in starve_first:
                     if h_cnt - drawn_c <= 1e-9:
                         break
@@ -691,6 +746,12 @@ def pick_tanks(
                     h_out_kg[t] = h_out_kg.get(t, 0.0) + take_kg
                     avail[t] -= take_c
                     drawn_c += take_c
+                    if t in sixn_set:
+                        _from6n += take_c
+                if _purge_wk:
+                    _purge_h_demand += drawn_c
+                    _purge_h_from6n += _from6n
+                    _purge_h_shortfall += max(0.0, drawn_c - _from6n)
 
             # ---- (d) TRANSFERS: match remaining survivors (supply) to this
             # week's per-tank demand. Self-match a retained tank first (no
@@ -752,15 +813,33 @@ def pick_tanks(
             base = (open_kg - h_out_kg.get(tid, 0.0) - t_out_kg.get(tid, 0.0)
                     + t_in_kg.get(tid, 0.0) + tn_in_kg.get(tid, 0.0))
             net = occ.biomass_kg - base
-            realized_biology[(tid, wl, occ.batch_id)] = (net, 0.0)
+            realized_biology[(tid, wl, occ.batch_id)] = (
+                net, mort_ct_by_tank.pop(tid, 0.0))
         # Tanks that EMPTIED this week were zeroed by mortality + harvest_out +
-        # transfer_out; no realized_biology row needed (audit only grows occupied
-        # tanks). STARVE (6N) tanks are off-feed: net should be ~0 there, which it
-        # is (held biomass is frozen week to week).
+        # transfer_out. The audit still reconciles a zero-out row for the departed
+        # batch, so credit the deaths applied in that tank (else they read as
+        # negative drift). net biomass = 0 there (the tank closed empty). STARVE
+        # (6N) tanks are off-feed: net ~0 (held biomass frozen week to week).
+        for tid, mct in mort_ct_by_tank.items():
+            if mct <= 1e-9:
+                continue
+            pocc = prev_state.get(tid)
+            if pocc is None:
+                continue
+            prev = realized_biology.get((tid, wl, pocc.batch_id))
+            realized_biology[(tid, wl, pocc.batch_id)] = (
+                (prev[0] if prev else 0.0), (prev[1] if prev else 0.0) + mct)
 
         if week_oversub:
             oversub_weeks.append(wl)
         state = new_state
+
+    if _purge_h_demand > 0:
+        print(f"  [6N-RULE PROBE] purge-mode harvest: {_purge_h_demand:,.0f} fish "
+              f"demanded; {_purge_h_from6n:,.0f} from 6N ({100*_purge_h_from6n/_purge_h_demand:.0f}%); "
+              f"{_purge_h_shortfall:,.0f} would OVERFLOW to production tanks "
+              f"({100*_purge_h_shortfall/_purge_h_demand:.0f}% from production tanks — "
+              f"the 6N-only-rule violation; should be ~0).")
 
     return TankPickResult(
         batch_locations=batch_locations,

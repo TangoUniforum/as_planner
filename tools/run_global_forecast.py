@@ -373,19 +373,23 @@ def _emit_workbook(gft, result, batches, tables, control, facility,
     # than moving fish tank-by-tank) — so it can OVER-REPORT drift on LP output even
     # when every fish is accounted for. It is a cross-check, not the source of truth.
     _recon_ok = abs(cons.get("residual_pct", 0.0)) < 0.01
+    # The per-tank audit is a REAL proof: with the specific-tank pick's complete
+    # event stream (stocking, transfers, harvests, per-tank mortality) it must
+    # reconcile open+events==close for every (tank, week). 0 TANK_DRIFT means
+    # every fish is accounted per tank; nonzero is a genuine gap to INVESTIGATE,
+    # not an artifact. (BIO_DRIFT is the kg cross-check; batch-level conservation
+    # is separately proven by the ReconciliationReport.)
+    _tank_clean = (n_tank_drift == 0 and abs(fac_count_signed) < 1.0)
+    _verdict = ("PASS — every fish accounted per tank, per week"
+                if _tank_clean else
+                "INVESTIGATE — per-tank count flow does not reconcile")
     tank_drift_note = (
-        f"TankContinuityAudit (per-tank cross-check): {n_tank_drift} TANK_DRIFT / "
-        f"{n_bio_drift} BIO_DRIFT rows; facility count signed/abs "
-        f"{fac_count_signed:.0f}/{fac_count_abs:.0f}. NOT the conservation proof for "
-        f"the LP method — see ReconciliationReport (residual "
-        f"{cons.get('residual_pct', 0.0):+.4f}%); the LP re-solves placement whole-"
-        f"facility so it emits no tank-to-tank event stream and this audit over-reports.")
-    print(f"  TankContinuityAudit (per-tank cross-check): TANK_DRIFT={n_tank_drift}, "
-          f"BIO_DRIFT={n_bio_drift}, facility signed/abs "
-          f"{fac_count_signed:.0f}/{fac_count_abs:.0f} — advisory only; "
-          f"conservation is the ReconciliationReport (residual "
-          f"{cons.get('residual_pct', 0.0):+.4f}%, "
-          f"{'CONSERVES' if _recon_ok else 'CHECK RECON'}).")
+        f"TankContinuityAudit (per-tank cross-check): {_verdict}. "
+        f"TANK_DRIFT={n_tank_drift}, BIO_DRIFT={n_bio_drift}, facility count "
+        f"signed/abs {fac_count_signed:.0f}/{fac_count_abs:.0f}. Batch-level "
+        f"ReconciliationReport residual {cons.get('residual_pct', 0.0):+.4f}% "
+        f"({'CONSERVES' if _recon_ok else 'CHECK RECON'}).")
+    print("  " + tank_drift_note)
 
     wb = Workbook()
 
