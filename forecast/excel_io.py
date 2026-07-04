@@ -1106,7 +1106,15 @@ def _build_batch_week_ledger(
         bio_state[key] = s
         mortpct[key] = s.mortality_pct_weekly
         mortc[key] = getattr(s, "mort_count_week", 0.0)
-        if s.cull_count_week > 0:
+        # Credit an FW-projection cull ONLY on a week NOT realized in OG
+        # (BatchLocations). fw_states are FW/EGG-only and rl is OG-only, so a
+        # genuine FW->OG reconciliation cull is consumed on the FW-projection
+        # fallback close at a non-OG week; if `key` IS in rl the close already
+        # comes from realized OG (no cull), so an fw_states cull there is spurious
+        # double-tracking (a batch advanced into OG yet still FW-projected — e.g.
+        # a manual-window in-flight batch left in fw_inflight). Mirrors the same
+        # `key not in rl` guard already used for FW feed below.
+        if s.cull_count_week > 0 and key not in rl:
             cull[key]["count"] += s.cull_count_week
             cull[key]["bio"] += s.cull_biomass_kg_week
         if s.week_from_input == 0:

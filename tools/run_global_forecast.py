@@ -220,11 +220,57 @@ def _apply_manual_window(input_path, scenario_dir, control, tables, facility,
         "harvest_events": win.get("harvest_events", []),
         "tranog_events": win.get("tranog_events", []),
         "realized_biology": win.get("realized_biology", {}),
+        "opening_locations": win.get("opening_locations", []),  # manual-week ledger opens
         "initial_state": init_state,   # W23 audit opening (pre-window PR tanks)
         "window_close_state": state,   # W27 pick continuation (manual close tanks)
     }
     return (new_og, new_fw, new_purge, new_start,
             control.horizon_weeks - window_n, win.get("warnings", []), window_n, stitch)
+
+
+def _build_manual_week_states(opening_locations, realized_biology):
+    """Synthesize per-(batch, manual-week) BatchWeekState rows so the WeeklyReport/
+    MonthlyReport ledger reconciles the manual override window (W23-W26).
+
+    fw_states cover only FW/EGG weeks and the pick's mort_states cover only the
+    GLOBAL weeks (W27+), so the manual weeks' IN-FLIGHT OG batches would open from
+    their close (a manual harvest then reads as -Count_Check) and their OG-phase
+    mortality would be uncredited. Each synth row carries the start-of-week PR
+    opening (opening_locations, a start-of-week PRE-biology snapshot) AND the
+    realized weekly mortality (realized_biology mort_count) in one object, so the
+    ledger's open-lift and mortality-credit stay coupled (fixing one without the
+    other would flip a currently-cancelling row). stage='SW' + week_from_input=1
+    keep the ledger on its realized-OG path (no FW feed/fallback, not a stocking
+    week). Global-only: the base run has no manual window and never calls this.
+    """
+    from collections import defaultdict
+    from forecast.models import BatchWeekState
+    op = defaultdict(lambda: {"count": 0.0, "bio": 0.0, "ws": None})
+    for r in opening_locations:
+        e = op[(r.batch_id, r.week_label)]
+        e["count"] += r.count
+        e["bio"] += r.biomass_kg
+        e["ws"] = r.week_start
+    mort = defaultdict(float)
+    for (_tid, wl, bid), (_bio_delta, mort_ct) in (realized_biology or {}).items():
+        mort[(bid, wl)] += mort_ct
+    out = []
+    for (bid, wl), e in op.items():
+        c = e["count"]
+        if c <= 0:
+            continue
+        wt = e["bio"] * 1000.0 / c
+        mc = mort.get((bid, wl), 0.0)
+        out.append(BatchWeekState(
+            batch_id=bid, week_label=wl, week_start=e["ws"],
+            days_since_input=0, week_from_input=1,
+            count=c, avg_weight_g=wt, biomass_kg=e["bio"],
+            feed_kg_day=0.0, feed_kg_week=0.0, sgr_pct_day=0.0, fcr=0.0,
+            stage="SW", feed_type="",
+            mortality_pct_weekly=(100.0 * mc / c),
+            open_count=c, open_avg_weight_g=wt, open_biomass_kg=e["bio"],
+            mort_count_week=mc))
+    return out
 
 
 def run_global(input_path, output_path, config_dir, scenario_dir, *,
@@ -310,9 +356,13 @@ def run_global(input_path, output_path, config_dir, scenario_dir, *,
                   f"{len(_mw_stitch['transfer_events'])} transfer + "
                   f"{len(_mw_stitch['harvest_events'])} harvest event(s).")
         cons = gf.conservation_summary(gft)
+        _mw_states = (_build_manual_week_states(
+            _mw_stitch.get("opening_locations", []),
+            _mw_stitch.get("realized_biology", {})) if _mw_stitch else [])
         _emit_workbook(gft, result, batches, tables, control, facility,
                        _facility_limits, cons, Path(output_path),
-                       initial_state=(_mw_stitch or {}).get("initial_state"))
+                       initial_state=(_mw_stitch or {}).get("initial_state"),
+                       manual_week_states=_mw_states)
     finally:
         _l3._OVERSTOCK_DENSITY_PCT, _l3._OVERSTOCK_MAX_WT_G = _prev
     return 0
@@ -345,7 +395,7 @@ def _solve_cpsat_q(result, facility, system_limits, control, time_limit):
 
 def _emit_workbook(gft, result, batches, tables, control, facility,
                    facility_limits, cons, out_path: Path,
-                   initial_state=None) -> None:
+                   initial_state=None, manual_week_states=None) -> None:
     from openpyxl import Workbook
     from forecast.excel_io import (
         write_advisory, write_batch_locations, write_batch_plan,
@@ -462,12 +512,16 @@ def _emit_workbook(gft, result, batches, tables, control, facility,
                                 batch_by_id)
     write_advisory(wb, bl, hv, facility_limits, control,
                    batches=batch_by_id, tables=tables)
-    write_weekly_report(wb, bl, hv, list(gft.fw_states),
+    # Manual-window synth states FIRST so a genuine fw_state on a colliding
+    # (batch, week) overwrites them (last-write-wins in the ledger's bio_state /
+    # mortpct); base run has manual_week_states=[] -> byte-identical to fw_states.
+    _bws = list(manual_week_states or []) + list(gft.fw_states)
+    write_weekly_report(wb, bl, hv, _bws,
                         batches=batch_by_id, tables=tables,
                         scenario_name=control.scenario_name, hog_yield=hog,
                         tranog_events=gft.tranog_events,
                         og_mort_states=gft.mort_states)
-    write_monthly_report(wb, bl, hv, list(gft.fw_states),
+    write_monthly_report(wb, bl, hv, _bws,
                          batches=batch_by_id, tables=tables,
                          scenario_name=control.scenario_name, hog_yield=hog,
                          forecast_start=fs_date,
