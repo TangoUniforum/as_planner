@@ -725,6 +725,10 @@ def plan(
     feed_cap = control.max_feed_per_day_kg
     min_wt = control.min_harvest_weight_g
     max_harvest_fish = control.max_harvest_per_week
+    # Contract MIN weekly harvest (fish). The facility must never miss a weekly
+    # harvest: draw at least this many fish every week even when biomass is under
+    # cap (the controller applies the same clamp at placement.py:1139). 0 = off.
+    min_harvest_fish = getattr(control, "min_harvest_per_week", 0) or 0
     # The staged harvest tank can be packed to harvest_tank_density_pct of the
     # normal control density (operator allowance: fish about to be harvested can
     # exceed the running production density). This sets the one-tank/week ceiling.
@@ -803,6 +807,35 @@ def plan(
                 purge_buffer.setdefault(_k, []).append({
                     "batch_id": _bid, "count": _c / _nrel,
                     "biomass_kg": _c / _nrel * _wt / 1000.0, "avg_wt_g": _wt})
+
+    # ASSUME A PRIMED 6N at forecast start (operator directive: "what we have
+    # today is not important — follow the constraints"). The handover 6N snapshot
+    # can be UNDER-primed (e.g. the July PR handed over only ~145k kg), which
+    # starves the first _PURGE_HOLD_WEEKS of harvest so biomass drifts OVER cap
+    # while the depuration pipeline fills from empty. Model the 6N at its steady
+    # operating fill instead: top up EACH of the first _PURGE_HOLD_WEEKS release
+    # slots to ~one harvest-tank's throughput (og_ceiling) by DRAWING the shortfall
+    # from the largest harvest-ready grow-out fish (top-down, >= min_wt, FIFO by
+    # age). CONSERVING: those fish are already in the grow-out seeds, so this only
+    # MOVES them into the buffer (reduces `work`) exactly like the in-week draw —
+    # it never adds to seeded_count. Result: harvest is at the steady rate from
+    # week 1 (>= the contract min), so the facility rides UP TO and UNDER the cap
+    # with no startup ramp/overshoot.
+    if model_purge_hold and is_purge_mode(control, fs):
+        for _k in range(_PURGE_HOLD_WEEKS):
+            _have = sum(e["biomass_kg"] for e in purge_buffer.get(_k, []))
+            _need = max(0.0, og_ceiling - _have)
+            for s in seeds_fifo:
+                if _need <= 1e-6:
+                    break
+                got_c, got_kg = work[s.batch_id].harvest_top_kg(_need, min_wt)
+                if got_kg > 1e-9:
+                    purge_buffer.setdefault(_k, []).append({
+                        "batch_id": s.batch_id, "count": got_c,
+                        "biomass_kg": got_kg,
+                        "avg_wt_g": (got_kg * 1000.0 / got_c if got_c > 0 else 0.0),
+                        "sixn": True})
+                    _need -= got_kg
 
     for w in range(horizon):
         ws, we = week_range(w, fs)
@@ -979,7 +1012,14 @@ def plan(
             pair_ceiling = 2.0 * og_ceiling
             weekly_ceiling = min(pair_ceiling, fish_ceiling_kg)
 
-        draw_target = min(required, weekly_ceiling)
+        # MIN-HARVEST FLOOR (contract): never miss a weekly harvest — draw AT
+        # LEAST min_harvest_per_week fish (as kg at the eligible mean weight) even
+        # when biomass is under cap, so the facility maintains its steady contract
+        # harvest AND primes the 6N pipeline from week 1 (which also keeps biomass
+        # from drifting over cap while the pipeline ramps). Capped by the weekly
+        # ceiling and by the mass actually eligible (>= min_wt) to harvest.
+        min_floor_kg = min(min_harvest_fish * elig_mean_wt / 1000.0, eligible_kg)
+        draw_target = min(max(required, min_floor_kg), weekly_ceiling)
         # If required exceeds the ceiling and it's arrival-driven, push the
         # overflow earlier (redistribute to the previous week's debt).
         if required > weekly_ceiling and binding in ("arrival", "predraw") and w > 0:
