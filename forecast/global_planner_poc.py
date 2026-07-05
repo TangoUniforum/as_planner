@@ -822,9 +822,40 @@ def plan(
     # week 1 (>= the contract min), so the facility rides UP TO and UNDER the cap
     # with no startup ramp/overshoot.
     if model_purge_hold and is_purge_mode(control, fs):
+        _first_label = iso_week_label(fs)
+        # Per-slot prime target = one harvest-tank (og_ceiling) PLUS a share of any
+        # handover EXCESS-over-cap, so an over-cap starting state (e.g. from an
+        # under-harvested manual window) is drawn back UNDER the cap from week 1
+        # rather than riding over it while the L1's own draws lag. Bounded by the
+        # max harvest rate (contract max fish * the eligible mean weight) so we
+        # never prime beyond a physically/contractually harvestable week. An
+        # under-cap handover has excess 0 -> primes to one tank (no over-harvest).
+        _grow0 = sum(work[s.batch_id].biomass_kg()
+                     for s in seeds if s.og_entry_week == 0)
+        _held0 = sum(e["biomass_kg"] for rel in purge_buffer.values() for e in rel)
+        _excess = max(0.0, (_grow0 + _held0
+                            + fw_bio_by_label.get(_first_label, 0.0))
+                      - _bio_cap_for(_first_label))
+        _e_kg = sum(work[s.batch_id].eligible_mass_kg(min_wt)
+                    for s in seeds if s.og_entry_week == 0)
+        _e_ct = sum(sum(c for ww, c in zip(work[s.batch_id].weights,
+                                           work[s.batch_id].counts) if ww >= min_wt)
+                    for s in seeds if s.og_entry_week == 0)
+        _mean_wt = (_e_kg * 1000.0 / _e_ct) if _e_ct > 0 else min_wt
+        _prime_max = max_harvest_fish * _mean_wt / 1000.0
+        # The peak sits at the HANDOVER week (first release slot), so shed the
+        # excess EARLIEST-slot-first (fill buffer[0] up to the max harvest rate,
+        # overflow to buffer[1], ...) rather than spreading it — spreading only
+        # lands half the shed on the peak week. A small (0.5%) margin absorbs the
+        # handover week's own growth so it lands strictly under, not exactly on.
+        _remaining = (_excess + 0.005 * _bio_cap_for(_first_label)
+                      if _excess > 0 else 0.0)
         for _k in range(_PURGE_HOLD_WEEKS):
+            _slot_extra = min(_remaining, max(0.0, _prime_max - og_ceiling))
+            _remaining -= _slot_extra
+            _slot_target = og_ceiling + _slot_extra
             _have = sum(e["biomass_kg"] for e in purge_buffer.get(_k, []))
-            _need = max(0.0, og_ceiling - _have)
+            _need = max(0.0, _slot_target - _have)
             for s in seeds_fifo:
                 if _need <= 1e-6:
                     break
