@@ -173,6 +173,7 @@ class Metrics:
     biomass_cap: float
     system_load: float
     feed_peak: float
+    density_peak: float
     weeks_over_harvest_cap: int
     transfers_by_type: dict = field(default_factory=dict)
     per_system: dict = field(default_factory=dict)
@@ -385,6 +386,30 @@ def _density_overshoot(wb):
     return (over / tot) if tot else 0.0
 
 
+def _density_peak(wb):
+    """The single HIGHEST per-tank density (kg/m3) across BatchLocations (OG6N
+    depuration excluded). A COMPLEMENT to _density_overshoot (a fraction): a PEAK
+    surfaces one physically-impossible tank — e.g. a placement collapse cramming
+    a whole batch into one tank at 600+ kg/m3 — that a fraction dilutes to ~0."""
+    if "BatchLocations" not in wb.sheetnames:
+        return 0.0
+    ws = wb["BatchLocations"]
+    cols = _col_map(ws, lambda r: r and str(r[0]).strip() == "Week"
+                    and any(str(c).strip().startswith("Density") for c in r if c))
+    di = _find_col(cols, "Density", default=8)
+    si = _find_col(cols, "System", default=4)
+    peak = 0.0
+    for i, row in enumerate(ws.iter_rows(values_only=True), 1):
+        if i < 5 or not row or row[0] is None:
+            continue
+        if len(row) > si and row[si] == "OG6N":
+            continue
+        dens = row[di] if len(row) > di else None
+        if isinstance(dens, (int, float)):
+            peak = max(peak, dens)
+    return peak
+
+
 def _system_peak(wb):
     """The single HOTTEST (system, week) load across biomass AND feed, as a
     fraction of cap (OG6N depuration excluded). Minimizing this = no hot spots —
@@ -456,6 +481,7 @@ def metrics_from_workbook(out_path, harvest_cap) -> tuple["Metrics", int, int]:
         biomass_cap=bcap,
         system_load=system_load,
         feed_peak=max(feed) if feed else 0.0,
+        density_peak=_density_peak(wb),
         weeks_over_harvest_cap=sum(1 for x in fish if x > harvest_cap),
         transfers_by_type=by_type,
         per_system=per_out,
