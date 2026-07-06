@@ -571,13 +571,21 @@ def pick_tanks(
                 tanks_by_b.setdefault(b, []).append(t)
             for b, tankset in tanks_by_b.items():
                 cnt, bio, avg = standing.get((b, w), (0.0, 0.0, 0.0))
-                volsum = sum(tank_vol_m3.get(t, 0.0) for t in tankset) or 1.0
+                # Split by the SOLVER's per-tank q (the BALANCED distribution it
+                # optimized to hold the per-system caps), NOT evenly by volume. An
+                # even split DISCARDS that balance: when a batch spans systems,
+                # equal-per-tank piles biomass into a system the solver kept light,
+                # pushing it over its cap — the pipeline's 107% residual even though
+                # the solver's own layout had 0 over-cap slack. Scaling the solver's
+                # q to the pick's exact `bio` keeps count + biomass conserved and the
+                # per-tank density under the (solver-proved) cap.
+                qsum = sum(qw.get((b, t), 0.0) for t in tankset) or 1.0
                 for t in tankset:
-                    vf = tank_vol_m3.get(t, 0.0) / volsum
-                    pkg = bio * vf
+                    qf = qw.get((b, t), 0.0) / qsum
+                    pkg = bio * qf
                     volm = tank_vol_m3.get(t, 0.0)
                     over = (pkg / volm if volm > 0 else 0.0) > tank_maxd.get(t, 1e9)
-                    new_state[t] = _Occ(batch_id=b, count=cnt * vf, biomass_kg=pkg,
+                    new_state[t] = _Occ(batch_id=b, count=cnt * qf, biomass_kg=pkg,
                                         avg_wt_g=avg, oversub=over)
                     used_tanks.add(t)
                     if over:

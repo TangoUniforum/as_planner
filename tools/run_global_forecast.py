@@ -136,7 +136,7 @@ def main() -> int:
                 else Path(args.workbook).with_name(
                     Path(args.workbook).stem + "_GLOBAL.xlsx"))
     _emit_workbook(gft, result, batches, tables, control, facility,
-                   _facility_limits, cons, out_path)
+                   _facility_limits, cons, out_path, system_limits=system_limits)
     print(f"\n  Wrote {out_path}")
     return 0
 
@@ -362,7 +362,7 @@ def run_global(input_path, output_path, config_dir, scenario_dir, *,
         _emit_workbook(gft, result, batches, tables, control, facility,
                        _facility_limits, cons, Path(output_path),
                        initial_state=(_mw_stitch or {}).get("initial_state"),
-                       manual_week_states=_mw_states)
+                       manual_week_states=_mw_states, system_limits=system_limits)
     finally:
         _l3._OVERSTOCK_DENSITY_PCT, _l3._OVERSTOCK_MAX_WT_G = _prev
     return 0
@@ -372,37 +372,60 @@ def _solve_cpsat_q(result, facility, system_limits, control, time_limit):
     """Run the CP-SAT full-horizon optimal placement on L1's standing and return
     {week: {(batch, tank): kg}} for the optimal grow-out layout (0-swap)."""
     from collections import defaultdict
-    from forecast.global_placement_milp_poc import solve_cpsat
-    og = {t.tank_id: t.system_id for t in facility.tanks
-          if t.type == "OG" and t.system_id != "OG6N"}
-    tvol = {t.tank_id: t.max_density_kg_m3 * t.volume_m3 for t in facility.tanks
-            if t.type == "OG" and t.system_id != "OG6N"}
-    vol = {t.tank_id: t.volume_m3 for t in facility.tanks
-           if t.type == "OG" and t.system_id != "OG6N"}
+    from forecast.global_placement_milp_poc import solve_cpsat_perweek
+    from forecast.sixn import SIXN_MAIN_TANKS
+    # Grow-out placement pool = the 11 nursery+grow-out systems PLUS OG6N's 3 MAIN
+    # tanks (61/63/65); the per-week solver adds those mains only in production-mode
+    # weeks (33->36) and leaves them out in purge weeks. OG6N sisters (67/69/71)
+    # are never production, so they are excluded entirely here.
+    def _in_pool(t):
+        return t.type == "OG" and (t.system_id != "OG6N"
+                                   or t.tank_id in SIXN_MAIN_TANKS)
+    og = {t.tank_id: t.system_id for t in facility.tanks if _in_pool(t)}
+    tvol = {t.tank_id: t.max_density_kg_m3 * t.volume_m3
+            for t in facility.tanks if _in_pool(t)}
+    vol = {t.tank_id: t.volume_m3 for t in facility.tanks if _in_pool(t)}
     by_week, wl_of = defaultdict(dict), {}
     for r in result.final_l1.batch_standing:
         if getattr(r, "in_purge", False) or r.biomass_kg <= 1e-9:
             continue
-        by_week[r.week][r.batch_id] = (r.biomass_kg, r.feed_kg_day, r.avg_wt_g)
+        # SUM a batch's multiple non-purge rows for one week (on-feed population +
+        # off-feed in-place hold on grading weeks) instead of overwriting — else
+        # CP-SAT sizes the batch on ONE row's biomass while the specific-tank pick
+        # applies the SUM, cramming the full biomass into too few tanks (the
+        # single-tank / 3x-per-system-cap collapse). Blend avg_wt count-consistent.
+        cur = by_week[r.week].get(r.batch_id)
+        if cur is None:
+            by_week[r.week][r.batch_id] = (r.biomass_kg, r.feed_kg_day, r.avg_wt_g)
+        else:
+            b0, f0, a0 = cur
+            c0 = (b0 * 1000.0 / a0) if a0 > 1e-9 else 0.0
+            c1 = (r.biomass_kg * 1000.0 / r.avg_wt_g) if r.avg_wt_g > 1e-9 else 0.0
+            b = b0 + r.biomass_kg
+            c = c0 + c1
+            by_week[r.week][r.batch_id] = (
+                b, f0 + r.feed_kg_day, (b * 1000.0 / c) if c > 1e-9 else a0)
         wl_of[r.week] = r.week_label
-    q, info = solve_cpsat(by_week, og, tvol, vol, wl_of, system_limits, control,
-                          time_limit=time_limit, verbose=True)
-    print(f"  [CP-SAT optimal placement] status={info['status']} "
-          f"obj={info.get('obj')} bound={info.get('bound')} "
-          f"slack={info.get('slack_kg')} over={info.get('over_kg')}")
+    q, info = solve_cpsat_perweek(by_week, og, tvol, vol, wl_of, system_limits,
+                                  control, time_limit=10.0, verbose=True)
+    print(f"  [CP-SAT per-week placement] worst_gap={info['worst_gap']*100:.2f}% "
+          f"infeasible={info['n_infeasible']} slack={info.get('slack_kg'):,.0f} kg "
+          f"solve={info.get('solve_s'):.0f}s")
     return q
 
 
 def _emit_workbook(gft, result, batches, tables, control, facility,
                    facility_limits, cons, out_path: Path,
-                   initial_state=None, manual_week_states=None) -> None:
+                   initial_state=None, manual_week_states=None,
+                   system_limits=None) -> None:
     from openpyxl import Workbook
     from forecast.excel_io import (
         write_advisory, write_batch_locations, write_batch_plan,
         write_facility_map, write_feed_forecast_monthly,
         write_feed_forecast_weekly, write_harvest_plan_output,
         write_harvest_plan_report, write_harvest_report,
-        write_monthly_report, write_tank_continuity_audit,
+        write_input_conservation_audit, write_monthly_report,
+        write_system_limits_audit, write_tank_continuity_audit,
         write_transfer_plan_output, write_weekly_report,
     )
 
@@ -537,6 +560,17 @@ def _emit_workbook(gft, result, batches, tables, control, facility,
     write_batch_locations(wb, bl)
     write_transfer_plan_output(wb, gft.transfer_events,
                                tranog_events=gft.tranog_events, grade_events=[])
+    # Per-batch input conservation (every stocked batch has a realized fate) +
+    # per-(week, system) realized biomass/feed vs the system caps. These two
+    # audits are written for the CONTROLLER too; emitting them here gives the
+    # GLOBAL workbook the SAME sheet set, so the cross-method RunComparison scorer
+    # (forecast.optimize.metrics_from_workbook) reads real per-system + transfer
+    # figures instead of silently scoring zeros for the missing sheets.
+    write_input_conservation_audit(wb, batches, bl, hv, control,
+                                   tranog_events=gft.tranog_events)
+    if system_limits is not None:
+        write_system_limits_audit(wb, bl, batch_by_id, tables,
+                                  system_limits, control)
     # The REAL continuity audit over the emitted BatchLocations + Transfers +
     # TranOG + Harvest events (proves 0 TANK_DRIFT / 0 BIO_DRIFT).
     write_tank_continuity_audit(

@@ -156,12 +156,54 @@ def per_tank_capacity_kg(
 
 
 def n_tanks_per_system(facility: FacilityConfig) -> dict[str, int]:
-    """Count of OG tanks present in each OG system."""
+    """Count of OG tanks present in each OG system (raw physical inventory)."""
     counts: dict[str, int] = {}
     for t in facility.tanks:
         if t.type == "OG":
             counts[t.system_id] = counts.get(t.system_id, 0) + 1
     return counts
+
+
+def production_tanks_per_system(
+    facility: FacilityConfig, control: ControlParams, week_label: str
+) -> dict[str, int]:
+    """Per-system PRODUCTION tank count for `week_label`, 6N-mode-aware.
+
+    The 11 NURSERY+GROWOUT systems always contribute their full tank count. OG6N
+    is special: its 3 MAIN tanks (61/63/65) are production grow-out ONLY in 6N
+    PRODUCTION mode (>= sixn_production_start); in purge mode they are depuration
+    staging, not production. Its 3 SISTER tanks (67/69/71) are NEVER production in
+    either mode — they exist so two batches can be staged for harvest the same
+    week without co-mingling, and stay reserved for that in production mode too.
+    So this returns 33 production tanks in purge mode, 36 in production mode.
+    """
+    from .sixn import SIXN_SISTER_TANKS
+    purge = _is_purge_week(week_label, control)
+    counts: dict[str, int] = {}
+    for t in facility.tanks:
+        if t.type != "OG":
+            continue
+        if t.system_id == "OG6N":
+            if t.tank_id in SIXN_SISTER_TANKS:
+                continue                      # sisters: harvest-staging, never prod
+            if purge:
+                continue                      # mains: depuration staging in purge mode
+            counts["OG6N"] = counts.get("OG6N", 0) + 1   # main, production mode
+        else:
+            counts[t.system_id] = counts.get(t.system_id, 0) + 1
+    return counts
+
+
+def production_systems_for_week(
+    facility: FacilityConfig, control: ControlParams, week_label: str
+) -> list[str]:
+    """OG systems that can hold PRODUCTION fish in `week_label` (mode-aware).
+
+    Canonical conveyor order; OG6N appended as a grow-out system only when its
+    mains are production (6N production mode)."""
+    n = production_tanks_per_system(facility, control, week_label)
+    ordered = NURSERY_SYSTEMS + GROWOUT_SYSTEMS + ["OG6N"]
+    return [s for s in ordered if n.get(s, 0) > 0]
 
 
 # ---------------------------------------------------------------------------
@@ -203,53 +245,23 @@ def available_tanks_for_week(
       * 6N PRODUCTION mode (week >= sixn_production_start): every OG production
         tank feeds, so 6N counts toward BOTH budgets.
 
-    On THIS facility the conveyor geometry is: the 11 NURSERY+GROWOUT systems
-    are the production placement pool (33 tanks, all feeding), and OG6N (6 tanks)
-    is a SEPARATE harvest-staging / depuration pool that L3 does NOT stock
-    production fish into. So:
+    Facility geometry (see forecast.sixn / production_tanks_per_system):
+      * PURGE mode (< sixn_production_start): the 11 NURSERY+GROWOUT systems =
+        33 feeding production tanks. OG6N's 3 mains are depuration staging (not a
+        production target) and its 3 sisters are harvest housing -> 0 production.
+      * PRODUCTION mode (>= sixn_production_start): the same 33 PLUS OG6N's 3
+        MAIN tanks become grow-out production = 36. OG6N's 3 sisters stay harvest
+        housing (never production).
 
-      * The placement pool = 11 NURSERY+GROWOUT systems = 33 feeding tanks.
-        None of these 33 are 6N purge tanks, so biomass_tanks == feed_tanks ==
-        33 in BOTH modes here. (The spec's "33 incl. 2 6N off-feed" shape
-        assumed 6N sat INSIDE the placement systems; here it is a distinct pool,
-        so the off-feed adjustment has nothing to subtract from the 33.)
-
-    The mode-aware STARVE logic is kept STRUCTURAL (so a facility whose
-    placement pool DID contain purge tanks would get the off-feed subtraction):
-    `feed_tanks` excludes placement-pool tanks that are 6N purge this week;
-    `biomass_tanks` includes them. The PURGE_SYSTEMS (6N) outside the placement
-    pool are reported separately and not added — they are not stocking targets.
-    Counts are derived from the facility's real OG inventory so a re-sized
+    So this returns 33 in purge mode, 36 in production mode. Every production
+    tank feeds (off-feed pre-harvest starvation is a transient per-tank state, not
+    a capacity change, and is bounded by the per-system feed cap separately), so
+    biomass_tanks == feed_tanks == the production count. Counts derive from the
+    facility's real OG inventory (via production_tanks_per_system) so a re-sized
     facility stays correct.
     """
-    n_by_sys = n_tanks_per_system(facility)
-    prod_systems = set(NURSERY_SYSTEMS) | set(GROWOUT_SYSTEMS)
-    purge_systems = set(PURGE_SYSTEMS)
-    purge_week = _is_purge_week(week_label, control)
-
-    biomass_tanks = 0
-    feed_tanks = 0
-    for s, n in n_by_sys.items():
-        if s in prod_systems:
-            # In-pool production tank: feeds + holds biomass in both modes.
-            biomass_tanks += n
-            feed_tanks += n
-        elif s in purge_systems:
-            # 6N depuration/staging pool: NOT a placement target on this
-            # facility, so it adds NO realizable placement capacity. (Kept here
-            # explicitly so the geometry is documented; if a future facility
-            # folds 6N into the placement pool, move it into prod_systems and
-            # the off-feed STARVE subtraction below applies.)
-            continue
-    # STARVE adjustment (structural): any placement-pool tank that is a 6N purge
-    # tank this week holds biomass but does not feed. On this facility there are
-    # none in-pool, so this is a no-op; it preserves the spec's semantics for a
-    # facility where 6N IS a placement system.
-    if purge_week:
-        in_pool_purge = sum(n for s, n in n_by_sys.items()
-                            if s in prod_systems and s in purge_systems)
-        feed_tanks -= in_pool_purge
-    return biomass_tanks, feed_tanks
+    prod = sum(production_tanks_per_system(facility, control, week_label).values())
+    return prod, prod
 
 
 @dataclass
@@ -286,36 +298,78 @@ def build_tank_demand(
     _dt = getattr(control, "density_target_pct", 1.0) or 1.0
     hard_cap = op_cap / _dt                            # the smallest-OG hard cap
 
-    # Pass 1: RAW whole-tank count per (batch, week), with the selective
-    # over-stock lever (light batches concentrate toward the hard cap).
-    raw: list[tuple] = []                              # (row, raw_tanks)
+    # AGGREGATE the non-purge standing per (batch, week) FIRST. L1 can emit TWO
+    # non-purge rows for one (batch, week) — the on-feed population AND the
+    # off-feed "in-place production hold" spun off when a batch grades before
+    # harvest. The specific-tank pick SUMS both into a single per-batch-week
+    # standing (global_tank_pick_poc.py), so the whole-tank demand MUST be sized
+    # on the SAME sum. Sizing per-row and then indexing by (batch, week)
+    # downstream (by_bw / the place-all-tanks equality) dropped one row — the
+    # batch got too few tanks and the pick crammed the FULL biomass into them
+    # (a single tank at ~3x the per-system cap on grading weeks). Summing here
+    # is byte-identical on single-row weeks.
+    agg: "dict[tuple, dict]" = {}
+    order: list[tuple] = []
     for r in l1.batch_standing:
         if r.biomass_kg <= 1e-9 or getattr(r, "in_purge", False):
             continue
+        key = (r.batch_id, r.week)
+        e = agg.get(key)
+        if e is None:
+            agg[key] = {"wl": r.week_label, "bio": r.biomass_kg,
+                        "feed": r.feed_kg_day, "cnt": r.count,
+                        "avg": r.avg_wt_g, "n": 1}
+            order.append(key)
+        else:
+            e["bio"] += r.biomass_kg
+            e["feed"] += r.feed_kg_day
+            e["cnt"] += r.count
+            e["n"] += 1
+
+    # Pass 1: RAW whole-tank count per (batch, week), with the selective
+    # over-stock lever (light batches concentrate toward the hard cap).
+    raw: list[tuple] = []      # (batch, week, week_label, bio, feed, avg, raw_tanks)
+    for key in order:
+        bid, wk = key
+        e = agg[key]
+        bio, feed, cnt = e["bio"], e["feed"], e["cnt"]
+        # DUST: a near-harvest batch-week rounded below 1 kg (a handful of fish)
+        # does NOT claim a whole tank — the specific-tank pick consolidates it onto
+        # a prior/shared tank (its dust-fallback, global_tank_pick_poc.py ~586).
+        # Counting it as a whole tank here inflated the demand by ~1 tank per
+        # depleting old batch each week and drove the loop's phantom
+        # over-subscription. Skip it so the whole-tank demand matches the realized
+        # placement (fish still conserve — they ride a shared tank, not a fresh one).
+        if bio < 1.0:
+            continue
+        # single-row weeks keep the row's own avg_wt (byte-identical); a merged
+        # batch-week uses the count-weighted mean, matching the pick's blend.
+        avg = e["avg"] if e["n"] == 1 else (bio * 1000.0 / cnt if cnt > 1e-9
+                                            else e["avg"])
         cap = op_cap
         if (_OVERSTOCK_DENSITY_PCT is not None
-                and r.avg_wt_g <= (_OVERSTOCK_MAX_WT_G or float("inf"))):
+                and avg <= (_OVERSTOCK_MAX_WT_G or float("inf"))):
             cap = hard_cap * _OVERSTOCK_DENSITY_PCT
-        raw.append((r, max(1, math.ceil(r.biomass_kg / cap))))
+        raw.append((bid, wk, e["wl"], bio, feed, avg, max(1, math.ceil(bio / cap))))
 
     # Pass 2: ANTICIPATORY pre-expand — a batch's tank count is the MAX over the
     # next _LOOKAHEAD_EXPAND_WEEKS weeks, so it secures the upcoming peak tank
     # early (while clean) and holds it. per_tank biomass/feed use the CURRENT
     # biomass split over the (possibly larger) held tank count -> lower density in
     # the lead-in, no last-minute cram. 0 = off (byte-identical).
-    raw_by_bw = {(r.batch_id, r.week): t for r, t in raw}
+    raw_by_bw = {(bid, wk): t for (bid, wk, _wl, _b, _f, _a, t) in raw}
     rows: list[TankDemandRow] = []
-    for r, t in raw:
+    for (bid, wk, wl, bio, feed, avg, t) in raw:
         if _LOOKAHEAD_EXPAND_WEEKS > 0:
-            t = max([t] + [raw_by_bw.get((r.batch_id, r.week + k), 0)
+            t = max([t] + [raw_by_bw.get((bid, wk + k), 0)
                            for k in range(1, _LOOKAHEAD_EXPAND_WEEKS + 1)])
         rows.append(TankDemandRow(
-            week=r.week, week_label=r.week_label, batch_id=r.batch_id,
-            tier=_tier_for_weight(r.avg_wt_g), tanks=t,
-            biomass_kg=r.biomass_kg, feed_kg_day=r.feed_kg_day,
-            avg_wt_g=r.avg_wt_g,
-            per_tank_biomass_kg=r.biomass_kg / t,
-            per_tank_feed_kg_day=r.feed_kg_day / t,
+            week=wk, week_label=wl, batch_id=bid,
+            tier=_tier_for_weight(avg), tanks=t,
+            biomass_kg=bio, feed_kg_day=feed,
+            avg_wt_g=avg,
+            per_tank_biomass_kg=bio / t,
+            per_tank_feed_kg_day=feed / t,
         ))
     return rows
 

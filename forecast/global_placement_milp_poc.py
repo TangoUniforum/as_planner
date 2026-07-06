@@ -354,6 +354,131 @@ def solve_full_horizon(
     return q_by_w, info
 
 
+def solve_cpsat_perweek(
+    by_week, og_tanks, tank_vol, vol, wl_of, system_limits, control,
+    time_limit=4.0, workers=8, verbose=True,
+):
+    """PER-WEEK placement — decomposes the intractable full-horizon MILP so the
+    optimality GAP is fixed at the root (each week is a small MILP that reaches
+    ~0 gap in seconds, vs the monolith's ~12,000x gap it can never prove down).
+
+    Each week solves to (near-)optimality with:
+      * HARD per-tank density (q <= tank_vol) and one-batch-per-tank;
+      * soft per-system biomass + feed caps with a per-system min-max BALANCE
+        term (zb/zf) -> EVEN inter-system distribution (no over-cap system beside
+        an empty one);
+      * SOFT continuity threaded sequentially: a batch may relocate (keeps the
+        per-week problems feasible), penalised as a transfer (fresh stocking into
+        an empty tank is cheaper than displacing another batch);
+      * OG6N mains (61/63/65) join the grow-out pool ONLY in production-mode weeks
+        (sisters never; purge-mode weeks leave 6N to the depuration flow).
+
+    Objective priority: meet caps (soft slack) >> balance systems >> fewest moves.
+    Returns (q_by_w {w: {(b,t): kg}}, info) with the same shape as solve_cpsat.
+    """
+    from ortools.sat.python import cp_model
+    from .global_planner_l3_poc import _is_purge_week
+    from .sixn import SIXN_MAIN_TANKS
+    gset = set(GROWOUT_SYSTEMS) | {"OG6N"}    # OG6N mains are a grow-out (final) system
+    nset = set(NURSERY_SYSTEMS)
+    weeks = sorted(by_week)
+    q_by_w: dict = {}
+    prev_tb: dict = {}                         # tank_id -> batch (last week's occupant)
+    worst_gap = 0.0
+    n_infeasible = 0
+    total_slack = 0.0
+    t_solve = 0.0
+    for w in weeks:
+        purge = _is_purge_week(wl_of[w], control)
+        # tanks available for grow-out placement this week (drop OG6N in purge weeks)
+        og_w = {t: s for t, s in og_tanks.items()
+                if not (purge and s == "OG6N")}
+        items = {b: v for b, v in by_week[w].items() if v[0] > 1e-9}
+        m = cp_model.CpModel()
+        x: dict = {}
+        q: dict = {}
+        for b, (bio, feed, avg) in items.items():
+            B = int(round(bio))
+            for t in _eligible_tanks(avg, og_w, gset, nset):
+                x[b, t] = m.NewBoolVar(f"x_{b}_{t}")
+                q[b, t] = m.NewIntVar(0, B, f"q_{b}_{t}")
+                m.Add(q[b, t] <= B * x[b, t])
+                m.Add(q[b, t] <= int(tank_vol[t]))        # HARD density cap
+        # place all of each batch's biomass
+        infeasible = False
+        for b, (bio, feed, avg) in items.items():
+            cells = [t for t in og_w if (b, t) in q]
+            if not cells:
+                infeasible = True
+                break
+            m.Add(sum(q[b, t] for t in cells) == int(round(bio)))
+        if infeasible:
+            n_infeasible += 1
+            q_by_w[w] = {}
+            continue
+        # one batch per tank
+        for t in og_w:
+            bs = [b for b in items if (b, t) in x]
+            if bs:
+                m.Add(sum(x[b, t] for b in bs) <= 1)
+        # per-system soft caps + BALANCE (min-max load across systems)
+        sl = []
+        zb = m.NewIntVar(0, 5000, "zb")
+        zf = m.NewIntVar(0, 5000, "zf")
+        for s in sorted({og_w[t] for t in og_w}):
+            cells = [(b, t) for (b, t) in q if og_w[t] == s]
+            if not cells:
+                continue
+            bcap = int(_scap(METRIC_BIOMASS, wl_of[w], s, system_limits,
+                             _DEFAULT_BIO_CAP))
+            sb = m.NewIntVar(0, 10 ** 8, f"sb_{s}")
+            sl.append(sb)
+            sys_bio = sum(q[b, t] for (b, t) in cells)
+            m.Add(sys_bio <= bcap + sb)
+            if bcap > 0:
+                m.Add(100 * sys_bio <= zb * bcap)
+            fcap = int(_scap(METRIC_FEED_DAY, wl_of[w], s, system_limits,
+                             _DEFAULT_FEED_CAP) * 1000)
+            sys_feed = sum(q[b, t] * int(by_week[w][b][1] / by_week[w][b][0] * 1000)
+                           for (b, t) in cells)
+            sf = m.NewIntVar(0, 10 ** 8, f"sf_{s}")
+            sl.append(sf)
+            m.Add(sys_feed <= fcap + sf * 1000)
+            if fcap > 0:
+                m.Add(100 * sys_feed <= zf * fcap)
+        tr_stock = [x[b, t] for (b, t) in x if prev_tb.get(t) is None]
+        tr_swap = [x[b, t] for (b, t) in x if prev_tb.get(t) not in (None, b)]
+        m.Minimize(10 ** 6 * sum(sl)
+                   + 100 * (zb + zf)
+                   + sum(tr_stock)
+                   + 3 * sum(tr_swap))
+        solver = cp_model.CpSolver()
+        solver.parameters.max_time_in_seconds = float(time_limit)
+        solver.parameters.num_search_workers = int(workers)
+        st = solver.Solve(m)
+        t_solve += solver.WallTime()
+        if st in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+            gap = (abs(solver.ObjectiveValue() - solver.BestObjectiveBound())
+                   / max(1.0, abs(solver.ObjectiveValue())))
+            worst_gap = max(worst_gap, gap)
+            qv = {(b, t): solver.Value(q[b, t]) for (b, t) in q
+                  if solver.Value(q[b, t]) > 0}
+            total_slack += sum(solver.Value(v) for v in sl)
+            q_by_w[w] = qv
+            prev_tb = {t: b for (b, t) in qv}
+        else:
+            n_infeasible += 1
+            q_by_w[w] = {}
+    info = {"status": "per-week", "worst_gap": worst_gap,
+            "n_infeasible": n_infeasible, "slack_kg": total_slack,
+            "solve_s": t_solve, "over_kg": 0}
+    if verbose:
+        print(f"  [CP-SAT per-week] {len(weeks)} weeks, worst gap "
+              f"{worst_gap * 100:.2f}%, {n_infeasible} infeasible, "
+              f"slack {total_slack:,.0f} kg, {t_solve:.0f}s solve")
+    return q_by_w, info
+
+
 def solve_cpsat(
     by_week, og_tanks, tank_vol, vol, wl_of, system_limits, control,
     time_limit=300.0, workers=8, verbose=True,

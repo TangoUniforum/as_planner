@@ -955,15 +955,17 @@ def plan(
         # per-week override when given (else the flat facility cap).
         wk_bio_cap = _bio_cap_for(label)
         need_biomass = max(0.0, standing - wk_bio_cap)
-        # ANTICIPATORY pacing (purge mode): a drawn fish is MOVED into the 6N
-        # hold and keeps counting as standing until it RELEASES `_hold_weeks`
-        # later — so drawing this week barely moves this week's standing
-        # (grow-out -> held) and the relief lags by the hold. Reactive drawing
-        # therefore overshoots the cap. Also draw against the grow-out PROJECTED
-        # forward to the release week (frozen FW + held excluded — the drawn fish
-        # are off-feed and don't grow), so we start early enough that the release
-        # lands before the true total breaches.
-        if model_purge_hold and _purge and grow_biomass > 0:
+        # ANTICIPATORY pacing (BOTH 6N modes): a drawn fish is held off-feed — in
+        # the 6N pool (purge mode) or in-place (production-mode starvation) — and
+        # keeps counting as standing until it RELEASES `_hold_weeks` later, so
+        # drawing this week barely moves this week's standing and the relief LAGS
+        # by the hold. Reactive drawing therefore overshoots the cap. This was
+        # gated to purge mode only, which left PRODUCTION mode (2028+) with no
+        # look-ahead — it rode ~5% OVER the cap. Both modes have the same lag, so
+        # draw against the grow-out PROJECTED forward to the release week (frozen
+        # FW + held excluded — off-feed fish don't grow) so the release lands
+        # before the true total breaches. held_biomass is 0 in production mode.
+        if model_purge_hold and grow_biomass > 0:
             _tb = _tg = 0.0
             for _s in seeds:
                 if not entered[_s.batch_id]:
@@ -976,7 +978,16 @@ def plan(
                 _tb += _b
                 _tg += _b * (1.0 + _sgr / 100.0) ** 7
             _wk_factor = (_tg / _tb) if _tb > 0 else 1.0
-            _proj_grow = grow_biomass * (_wk_factor ** _hold_weeks)
+            _gross = grow_biomass * (_wk_factor ** _hold_weeks)
+            # Projecting the FULL current grow-out forward `_hold_weeks` assumes NO
+            # intermediate harvest — but the on-feed pool is continuously drawn
+            # down to hold the cap, so the gross projection over-estimates the
+            # release-week standing and over-harvests, landing the plan ~3% UNDER
+            # the cap. Discount by ~half the cap-holding drawdown (grow * (factor-1)
+            # per week over the hold) so the plan TARGETS the cap (precalc should
+            # sit as close to 100% as the math allows), not a margin below it.
+            _draw_offset = 0.5 * grow_biomass * (_wk_factor - 1.0) * _hold_weeks
+            _proj_grow = max(grow_biomass, _gross - _draw_offset)
             # The purge backlog (held, off-feed, ~steady) still occupies the cap
             # at the release week, so the grow-out must be drawn against
             # (cap - FW - held), not (cap - FW). Subtracting held is what brings

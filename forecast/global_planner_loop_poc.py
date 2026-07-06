@@ -292,19 +292,15 @@ def run_loop(
             converged = True
             break
 
-        # Lower each over-subscribed week's ceiling by the over-subscription in
-        # kg (+ margin). Tighten relative to the week's CURRENT standing so the
-        # ceiling actually bites (standing may sit below the prior ceiling).
+        # Residual tank over-subscription (rare now the dust-counting artifact is
+        # fixed and L1's in-both-modes anticipation holds the biomass cap): shed it
+        # MARGIN-FREE. The phantom that needed the old half-tank margin-search is
+        # gone, so no buffer.
         for o in over_weeks:
             cur = ceiling.get(o.week_label, facility_cap)
-            # kg to shed = tanks_over whole tanks (+ margin) of capacity.
-            shed = (o.tanks_over + margin_frac) * per_tank
-            # Target the lower of (current ceiling - shed) and
-            # (standing - shed): bind to whichever is active so a non-biting
-            # ceiling still drops.
+            shed = o.tanks_over * per_tank
             target = min(cur, o.standing_kg) - shed
-            new_ceiling = min(cur, target)
-            ceiling[o.week_label] = max(0.0, new_ceiling)
+            ceiling[o.week_label] = max(0.0, min(cur, target))
 
     # Final summary from the last iteration.
     fin = iterations[-1]
