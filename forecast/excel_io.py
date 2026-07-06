@@ -2844,3 +2844,330 @@ def write_system_limits_audit(
     for c, w in widths.items():
         ws.column_dimensions[get_column_letter(c)].width = w
     return nb, nf, worst_b, worst_f
+
+
+def write_run_comparison(wb, records, *, pr_name="", generated=None,
+                         sheet_name="RunComparison"):
+    """Legible side-by-side comparison of several planning methods run on the
+    SAME inputs (same manual override window + control rules; only the method
+    differs). One column per method, one labeled row per metric.
+
+    `records` is a list of per-method dicts (see tools/run_compare.py), each:
+        key, label, family, blurb : method identity
+        failed        : None, or an error string (run/scoring failed)
+        elapsed       : wall seconds
+        workbook      : filename of this method's full workbook (for drill-in)
+        dropped, overprod : conservation gate (both 0 == PASS)
+        metrics       : forecast.optimize.Metrics (or None if failed)
+        harvest       : dict with n_weeks / min_week / max_week /
+                        weeks_below_min / zero_weeks / min_harvest
+
+    Winner per metric is highlighted GREEN, but ONLY among methods that PASS
+    conservation (a method that loses fish is never called 'best'). There is no
+    single overall winner — which method is best depends on the operator's
+    objective (hold the cap vs flatten vs minimize feed/handling), so the sheet
+    shows every dimension rather than collapsing to one score.
+    """
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+
+    if sheet_name in wb.sheetnames:
+        del wb[sheet_name]
+    ws = wb.create_sheet(sheet_name)
+
+    # ---- palette ----
+    C_TITLE = PatternFill("solid", fgColor="1F4E78")
+    C_FAMILY = PatternFill("solid", fgColor="DDEBF7")
+    C_SECT = PatternFill("solid", fgColor="D9E1F2")
+    C_WIN = PatternFill("solid", fgColor="C6EFCE")
+    C_PASS = PatternFill("solid", fgColor="C6EFCE")
+    C_PART = PatternFill("solid", fgColor="FFEB9C")
+    C_FAIL = PatternFill("solid", fgColor="FFC7CE")
+    F_TITLE = Font(bold=True, color="FFFFFF", size=13)
+    F_SUB = Font(italic=True, color="444444", size=9)
+    F_HDR = Font(bold=True)
+    F_SECT = Font(bold=True, color="1F4E78")
+    F_PASS = Font(bold=True, color="006100")
+    F_PART = Font(bold=True, color="9C6500")
+    F_FAIL = Font(bold=True, color="9C0006")
+    F_GREY = Font(color="B0B0B0")
+    thin = Side(style="thin", color="BFBFBF")
+    BORDER = Border(left=thin, right=thin, top=thin, bottom=thin)
+    RIGHT = Alignment(horizontal="right")
+    LEFT = Alignment(horizontal="left", vertical="top", wrap_text=True)
+    CENTER = Alignment(horizontal="center")
+
+    n = len(records)
+    first_m = 3                      # first method column (A=label, B=unit)
+    last_m = first_m + n - 1
+    last_col = get_column_letter(last_m)
+
+    def _gate(rec):
+        """PASS / PARTIAL / FAIL, using the driver's per-method verdict when
+        present (it reads each method's OWN authoritative conservation proof —
+        the batch-level ReconciliationReport for Global, the tank-by-tank audit
+        for the Controller). Falls back to dropped/overprod for synthetic rows.
+        PARTIAL = mass conserved but some stocked fish left unplaced in tanks."""
+        g = rec.get("gate")
+        if g:
+            return g
+        if rec.get("failed") is not None or rec.get("metrics") is None:
+            return "FAIL"
+        return ("PASS" if rec.get("dropped", 0) == 0
+                and rec.get("overprod", 0) == 0 else "FAIL")
+
+    def _ok(rec):
+        # Winner-eligible = a COMPLETE, mass-conserving plan. A PARTIAL plan
+        # (fish unplaced) or a FAIL is never crowned "best" on any metric.
+        return rec.get("metrics") is not None and _gate(rec) == "PASS"
+
+    # ---- title + subtitle ----
+    gen = generated or datetime.now().isoformat(timespec="seconds")
+    ws["A1"] = (f"RUN COMPARISON  —  {n} method(s), identical inputs "
+                f"(same manual override window + control rules)")
+    ws.merge_cells(f"A1:{last_col}1")
+    ws["A1"].fill = C_TITLE
+    ws["A1"].font = F_TITLE
+    ws["A1"].alignment = Alignment(vertical="center")
+    ws.row_dimensions[1].height = 24
+    ws["A2"] = (f"Generated {gen}"
+                + (f"  ·  PR: {pr_name}" if pr_name else "")
+                + "   ·   Winner per metric highlighted GREEN among methods that "
+                  "PASS conservation.  'Best overall' depends on your objective — "
+                  "compare the dimensions below.")
+    ws.merge_cells(f"A2:{last_col}2")
+    ws["A2"].font = F_SUB
+    ws["A2"].alignment = Alignment(wrap_text=True, vertical="top")
+    ws.row_dimensions[2].height = 28
+
+    # ---- family header (row 4) + method header (row 5) ----
+    r_fam, r_hdr = 4, 5
+    ws.cell(r_fam, 1, "").fill = C_FAMILY
+    # merge contiguous same-family runs
+    i = 0
+    while i < n:
+        fam = records[i].get("family", "")
+        j = i
+        while j + 1 < n and records[j + 1].get("family", "") == fam:
+            j += 1
+        c0, c1 = first_m + i, first_m + j
+        cell = ws.cell(r_fam, c0, fam)
+        if c1 > c0:
+            ws.merge_cells(start_row=r_fam, start_column=c0,
+                           end_row=r_fam, end_column=c1)
+        cell.fill = C_FAMILY
+        cell.font = F_HDR
+        cell.alignment = CENTER
+        i = j + 1
+
+    ws.cell(r_hdr, 1, "Metric").font = F_HDR
+    ws.cell(r_hdr, 2, "Unit / better").font = F_HDR
+    ws.cell(r_hdr, 2).alignment = LEFT
+    for k, rec in enumerate(records):
+        cell = ws.cell(r_hdr, first_m + k, rec.get("label", rec["key"]))
+        cell.font = F_HDR
+        cell.alignment = Alignment(wrap_text=True, horizontal="center",
+                                   vertical="top")
+        cell.border = BORDER
+
+    # ---- conservation gate (row 6) — the hard gate, most prominent ----
+    r = 6
+    ws.cell(r, 1, "CONSERVATION GATE").font = Font(bold=True, size=11)
+    ws.cell(r, 2, "PASS = conserves + all placed").font = F_SUB
+    ws.cell(r, 2).alignment = LEFT
+    for k, rec in enumerate(records):
+        cell = ws.cell(r, first_m + k)
+        cell.border = BORDER
+        cell.alignment = CENTER
+        if rec.get("failed") is not None:
+            cell.value = "RUN FAILED"
+            cell.fill = C_FAIL
+            cell.font = F_FAIL
+        else:
+            g = _gate(rec)
+            if g == "PASS":
+                cell.value = "PASS"
+                cell.fill = C_PASS
+                cell.font = F_PASS
+            elif g == "PARTIAL":
+                ub = (rec.get("placement") or {}).get("unplaced_batches", 0)
+                cell.value = f"PARTIAL — {ub} batch(es) unplaced"
+                cell.fill = C_PART
+                cell.font = F_PART
+            else:
+                d, o = rec.get("dropped", 0), rec.get("overprod", 0)
+                cell.value = f"FAIL (drop {d}, over {o})"
+                cell.fill = C_FAIL
+                cell.font = F_FAIL
+
+    # ---- metric rows ----
+    def g_metric(attr):
+        return lambda rec: (getattr(rec["metrics"], attr)
+                            if rec.get("metrics") is not None else None)
+
+    def g_pct_cap_peak(rec):
+        m = rec.get("metrics")
+        if m is None or not m.biomass_cap:
+            return None
+        return 100.0 * m.overall_peak_biomass / m.biomass_cap
+
+    def g_util(rec):
+        m = rec.get("metrics")
+        if m is None or not m.biomass_cap:
+            return None
+        return 100.0 * m.overall_mean_biomass / m.biomass_cap
+
+    def g_harv(field):
+        return lambda rec: (rec.get("harvest") or {}).get(field)
+
+    def g_place(field):
+        return lambda rec: (rec.get("placement") or {}).get(field)
+
+    f_kg = lambda v: f"{v:,.0f}"
+    f_int = lambda v: f"{v:,.0f}"
+    f_pct = lambda v: f"{v:.1f}%"
+    f_cv = lambda v: f"{v:.3f}"
+    f_ratio = lambda v: f"{v:.3f}"
+    f_sec = lambda v: f"{v:,.0f}s"
+
+    # (kind, ...) — "sect": section header; "row": metric row
+    # metric row = (label, unit_dir, direction, getter, fmt)
+    #   direction: "low" lower-is-better, "high" higher-is-better, None neutral
+    SPEC = [
+        ("sect", "REALIZED PLACEMENT (are all stocked fish in tanks?)"),
+        ("row", "Batches not placed in tanks", "count · ↓ · 0 = complete", "low", g_place("unplaced_batches"), f_int),
+        ("row", "Fish not placed in tanks", "stocked fish · ↓", "low", g_place("unplaced_fish"), f_int),
+        ("sect", "BIOMASS vs the facility cap"),
+        ("row", "Peak facility biomass", "kg", None, g_metric("overall_peak_biomass"), f_kg),
+        ("row", "Peak biomass vs cap", "% of cap · ≤100 · ↓", "low", g_pct_cap_peak, f_pct),
+        ("row", "Mean biomass utilization", "% of cap · ↑ (use it)", "high", g_util, f_pct),
+        ("sect", "HARVEST — every week, min→max (contract)"),
+        ("row", "Harvest weeks", "weeks", None, g_harv("n_weeks"), f_int),
+        ("row", "Min weekly harvest", "fish · ↑ (never starve)", "high", g_harv("min_week"), f_int),
+        ("row", "Max weekly harvest", "fish", None, g_harv("max_week"), f_int),
+        ("row", "Weeks below min-harvest", "weeks · ↓", "low", g_harv("weeks_below_min"), f_int),
+        ("row", "Zero-harvest weeks", "weeks · must be 0", "low", g_harv("zero_weeks"), f_int),
+        ("row", "Weeks over harvest cap", "weeks · ↓", "low", g_metric("weeks_over_harvest_cap"), f_int),
+        ("sect", "CAP COMPLIANCE (per-system + per-tank)"),
+        ("row", "System over-cap cells", "% of cells · ↓", "low",
+         lambda r: (None if r.get("metrics") is None else 100.0 * r["metrics"].system_overshoot), f_pct),
+        ("row", "Density over-cap cells", "% of cells · ↓", "low",
+         lambda r: (None if r.get("metrics") is None else 100.0 * r["metrics"].density_overshoot), f_pct),
+        ("row", "Hottest system load", "% of cap · ↓", "low",
+         lambda r: (None if r.get("metrics") is None else 100.0 * r["metrics"].system_peak), f_pct),
+        ("row", "Max per-tank density", "kg/m³ · ↓ · ≤95", "low", g_metric("density_peak"), f_kg),
+        ("sect", "STEADINESS (flatness — lower = smoother)"),
+        ("row", "Biomass variability", "CV+swing · ↓", "low", g_metric("biomass_var"), f_cv),
+        ("row", "Harvest variability", "CV · ↓", "low", g_metric("harvest_var"), f_cv),
+        ("row", "Feed variability", "CV+swing · ↓", "low", g_metric("feed_var"), f_cv),
+        ("sect", "COST / HANDLING"),
+        ("row", "Mean daily feed", "kg/day · ↓", "low", g_metric("feed_load"), f_kg),
+        ("row", "Transfers per fish", "moves/fish · ↓", "low", g_metric("transfers_per_fish"), f_ratio),
+        ("sect", "RUN"),
+        ("row", "Wall time", "seconds", None, lambda r: r.get("elapsed"), f_sec),
+    ]
+
+    r = 8
+    for item in SPEC:
+        if item[0] == "sect":
+            ws.cell(r, 1, item[1]).font = F_SECT
+            ws.cell(r, 1).fill = C_SECT
+            for c in range(2, last_m + 1):
+                ws.cell(r, c).fill = C_SECT
+            r += 1
+            continue
+        _, label, unit, direction, getter, fmt = item
+        ws.cell(r, 1, label).alignment = LEFT
+        ws.cell(r, 2, unit).font = F_SUB
+        ws.cell(r, 2).alignment = LEFT
+        # winners among conservation-OK methods
+        vals = {}
+        for k, rec in enumerate(records):
+            if not _ok(rec):
+                continue
+            v = getter(rec)
+            if isinstance(v, (int, float)):
+                vals[k] = v
+        winners = set()
+        if direction and vals:
+            best = min(vals.values()) if direction == "low" else max(vals.values())
+            winners = {k for k, v in vals.items() if abs(v - best) < 1e-9}
+        for k, rec in enumerate(records):
+            cell = ws.cell(r, first_m + k)
+            cell.border = BORDER
+            cell.alignment = RIGHT
+            v = getter(rec)
+            if not isinstance(v, (int, float)):
+                cell.value = "—"
+                cell.font = F_GREY
+            elif k in winners:
+                cell.value = fmt(v)
+                cell.fill = C_WIN
+                cell.font = Font(bold=True, color="006100")
+            elif not _ok(rec):
+                # PARTIAL / FAIL plan: show the number but grey it — computed on
+                # an incomplete or non-conserving plan, so not directly comparable.
+                cell.value = fmt(v)
+                cell.font = F_GREY
+            else:
+                cell.value = fmt(v)
+        r += 1
+
+    # ---- method legend (plain-language) ----
+    r += 1
+    ws.cell(r, 1, "METHODS").font = Font(bold=True, size=11)
+    r += 1
+    ws.cell(r, 1, "Key").font = F_HDR
+    ws.cell(r, 2, "Method").font = F_HDR
+    ws.cell(r, 3, "How it plans  ·  full workbook  ·  runtime").font = F_HDR
+    ws.merge_cells(start_row=r, start_column=3, end_row=r, end_column=last_m)
+    r += 1
+    for rec in records:
+        ws.cell(r, 1, rec["key"]).alignment = LEFT
+        ws.cell(r, 1).font = Font(bold=True)
+        ws.cell(r, 2, rec.get("label", "")).alignment = LEFT
+        detail = rec.get("blurb", "")
+        if rec.get("failed") is not None:
+            detail += f"   [RUN FAILED: {rec['failed']}]"
+        else:
+            wb_name = rec.get("workbook", "")
+            el = rec.get("elapsed")
+            detail += (f"   ·   workbook: {wb_name}"
+                       + (f"   ·   {el:,.0f}s" if isinstance(el, (int, float)) else ""))
+        cell = ws.cell(r, 3, detail)
+        cell.alignment = LEFT
+        ws.merge_cells(start_row=r, start_column=3, end_row=r, end_column=last_m)
+        ws.row_dimensions[r].height = 30
+        r += 1
+
+    # ---- notes ----
+    r += 1
+    for note in (
+        "Notes:",
+        "• All methods run from the SAME manual override window (scenario/manual_events.yaml) "
+        "and the SAME control rules — only the planning method differs, so columns are comparable.",
+        "• CONSERVATION GATE — PASS = every stocked fish is both conserved (mass) AND placed in a "
+        "tank. PARTIAL = mass conserved but some fish left unplaced in the realized layout (see the "
+        "'not placed in tanks' rows). FAIL = fish lost/created, or the run errored. Each method is "
+        "judged on its OWN authoritative proof (Global: batch-level ReconciliationReport; "
+        "Controller: tank-by-tank audit).",
+        "• GREEN = best on that row among PASS methods only. PARTIAL/FAIL numbers are greyed — "
+        "they are computed on an incomplete or non-conserving plan, so they are not a valid 'best'.",
+        "• There is no single 'best' column: hold-the-cap (peak vs cap, utilization), flatness "
+        "(variability rows) and cost (feed, transfers) trade against each other. Pick the method "
+        "that wins the dimensions you care about, among PASS methods.",
+        "• Open a method's own workbook (see METHODS above) for its full sheets "
+        "(Advisory, HarvestPlan, per-tank continuity, ReconciliationReport, etc.).",
+    ):
+        ws.cell(r, 1, note).font = F_SUB
+        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=last_m)
+        ws.cell(r, 1).alignment = LEFT
+        ws.row_dimensions[r].height = 26
+        r += 1
+
+    # ---- widths + freeze ----
+    ws.column_dimensions["A"].width = 26
+    ws.column_dimensions["B"].width = 22
+    for k in range(n):
+        ws.column_dimensions[get_column_letter(first_m + k)].width = 18
+    ws.freeze_panes = ws.cell(r_hdr + 1, first_m)
+    return ws
