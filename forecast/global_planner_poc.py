@@ -992,8 +992,14 @@ def plan(
             # at the release week, so the grow-out must be drawn against
             # (cap - FW - held), not (cap - FW). Subtracting held is what brings
             # the true total to the cap instead of cap+held.
+            # Hold ONE deviation band BELOW the cap (like the shipped controller).
+            # The anticipation targets the flat cap exactly, but the 2-week purge-
+            # hold lag lets grow-out regrow into a sawtooth that crests ~1% OVER
+            # the cap. Aiming a band low turns the crest into ~100% instead of
+            # ~101% — only ever harvests slightly more/earlier, never a zero week.
+            _target_cap = wk_bio_cap * (1.0 - control.facility_biomass_deviation_pct)
             need_biomass = max(need_biomass,
-                               (_proj_grow + fw_bio + held_biomass) - wk_bio_cap)
+                               (_proj_grow + fw_bio + held_biomass) - _target_cap)
 
         # need_feed: remove top mass until feed/day <= feed_cap. Feed scales
         # ~linearly with biomass at the heavy end; approximate the kg to shed
