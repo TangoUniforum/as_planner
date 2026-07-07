@@ -1063,16 +1063,32 @@ def _run_sixn_purge_week(
     from FIFO production, pushes the filled pair to the back. Returns the new
     resting pair (the one just harvested) for the caller to carry forward.
     """
+    # Determine this week's harvest + fill pairs.
     if not pair_queue:
-        warnings.append(f"{week_label}: 6N purge queue empty — no harvest this week")
-        return resting_pair
-
-    harvest_pair = pair_queue.pop(0)
-    # Wed-fill / Fri-harvest: the move-in fills the RESTING pair, never the pair
-    # harvested this week. Degenerate fallback (no resting pair — e.g. all pairs
-    # stocked at start, no fallow slot) refills the harvested pair as before.
-    fill_pair = resting_pair if resting_pair is not None else harvest_pair
-    new_resting = harvest_pair if resting_pair is not None else None
+        # BOOTSTRAP / CONTINUE the round-robin from an EMPTY 6N. The pipeline can start
+        # empty — a fresh facility, or (the common case) the PR-hydrated 6N drained by
+        # the operator's manual starting-window before the forecast opens. With no
+        # stocked pair to harvest, run a SEED week: no harvest, just fill the fallow
+        # (resting) pair with a market-ready growout cohort (the move-in below), enqueue
+        # it, and it is harvested a purge-cycle later — so the round-robin RE-STARTS and
+        # harvest resumes. Without this the rotation stays frozen (returns every week) ->
+        # ZERO harvest in purge mode -> the facility fills and TranOG arrivals can't be
+        # placed. Winddown (no refill) or no fallow slot: as before, nothing to seed.
+        if not refill or resting_pair is None:
+            warnings.append(f"{week_label}: 6N purge queue empty — no harvest this week")
+            return resting_pair
+        harvest_pair = ()               # seed week: nothing to harvest this week
+        fill_pair = resting_pair
+        new_resting = next((p for p in SIXN_PAIRS
+                            if p != fill_pair and pair_combined_count(state, p) == 0),
+                           None)
+    else:
+        harvest_pair = pair_queue.pop(0)
+        # Wed-fill / Fri-harvest: the move-in fills the RESTING pair, never the pair
+        # harvested this week. Degenerate fallback (no resting pair — e.g. all pairs
+        # stocked at start, no fallow slot) refills the harvested pair as before.
+        fill_pair = resting_pair if resting_pair is not None else harvest_pair
+        new_resting = harvest_pair if resting_pair is not None else None
 
     # 1. Harvest the harvested pair's contents (both tanks if occupied).
     pair_drain_count = 0.0
