@@ -356,7 +356,7 @@ def solve_full_horizon(
 
 def solve_cpsat_perweek(
     by_week, og_tanks, tank_vol, vol, wl_of, system_limits, control,
-    time_limit=4.0, workers=8, verbose=True,
+    time_limit=4.0, workers=8, verbose=True, det_time=30.0,
 ):
     """PER-WEEK placement — decomposes the intractable full-horizon MILP so the
     optimality GAP is fixed at the root (each week is a small MILP that reaches
@@ -453,8 +453,19 @@ def solve_cpsat_perweek(
                    + sum(tr_stock)
                    + 3 * sum(tr_swap))
         solver = cp_model.CpSolver()
-        solver.parameters.max_time_in_seconds = float(time_limit)
+        # Reproducible + CONVERGED placement. A wall-clock cutoff stops the
+        # multi-worker portfolio at a machine-dependent point with whatever
+        # ~2.6%-gap incumbent won the race — the source of the observed
+        # 100.2%-vs-107.1% hottest-system swing across identical inputs. A FIXED
+        # worker count + fixed seed + a DETERMINISTIC work budget make the solve
+        # bit-identical run-to-run, and the larger budget lets each week close
+        # its optimality gap (reach the balanced optimum, not a lucky incumbent).
+        # max_time_in_seconds stays only as a wall-clock SAFETY, not the binding
+        # stop criterion.
+        solver.parameters.random_seed = 42
         solver.parameters.num_search_workers = int(workers)
+        solver.parameters.max_deterministic_time = float(det_time)
+        solver.parameters.max_time_in_seconds = float(time_limit)
         st = solver.Solve(m)
         t_solve += solver.WallTime()
         if st in (cp_model.OPTIMAL, cp_model.FEASIBLE):

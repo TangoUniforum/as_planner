@@ -406,8 +406,12 @@ def _solve_cpsat_q(result, facility, system_limits, control, time_limit):
             by_week[r.week][r.batch_id] = (
                 b, f0 + r.feed_kg_day, (b * 1000.0 / c) if c > 1e-9 else a0)
         wl_of[r.week] = r.week_label
+    # Deterministic budget (det_time) is the binding stop criterion; the passed
+    # wall-clock time_limit is only a per-week safety cap (was hardcoded to 10.0,
+    # which ignored the caller's cpsat_time AND left the ~2.6% gap open).
     q, info = solve_cpsat_perweek(by_week, og, tvol, vol, wl_of, system_limits,
-                                  control, time_limit=10.0, verbose=True)
+                                  control, det_time=30.0,
+                                  time_limit=float(time_limit), verbose=True)
     print(f"  [CP-SAT per-week placement] worst_gap={info['worst_gap']*100:.2f}% "
           f"infeasible={info['n_infeasible']} slack={info.get('slack_kg'):,.0f} kg "
           f"solve={info.get('solve_s'):.0f}s")
