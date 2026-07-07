@@ -829,12 +829,17 @@ def pick_tanks(
 
         # ---- realized_biology: per (tank, week) net biomass (growth-minus-mort)
         # = close - (open - h_out_kg - t_out_kg + t_in_kg + tranog_kg). Closes the
-        # biomass balance EXACTLY. open is the prior close only if the SAME batch
-        # held the tank (else 0 — a turnover tank's prior batch left cleanly).
+        # biomass balance EXACTLY. `open` is the prior TANK biomass REGARDLESS of
+        # which batch held it: on an A->B swap the departing A leaves this tank via
+        # h_out_kg / t_out_kg, so the basis MUST include A's open biomass. Zeroing
+        # it on a batch change (the old rule) stranded A's out-debit and inflated
+        # the arriving batch's net by A's WHOLE biomass — which the per-tank audit
+        # then double-booked against its own prev_biomass (the swap-row BIO_DRIFT,
+        # a -0.94 facility biomass ratio). prev_occ is None only for a genuinely
+        # empty prior tank, where open = 0 is correct.
         for tid, occ in new_state.items():
             prev_occ = prev_state.get(tid)
-            open_kg = (prev_occ.biomass_kg if
-                       (prev_occ and prev_occ.batch_id == occ.batch_id) else 0.0)
+            open_kg = prev_occ.biomass_kg if prev_occ is not None else 0.0
             base = (open_kg - h_out_kg.get(tid, 0.0) - t_out_kg.get(tid, 0.0)
                     + t_in_kg.get(tid, 0.0) + tn_in_kg.get(tid, 0.0))
             net = occ.biomass_kg - base
