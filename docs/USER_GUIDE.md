@@ -961,6 +961,17 @@ layers:
   tanks (heavier batches stay at operating density). It cuts density-over-cap tank-weeks
   ~30%.
 
+**Optimal placement (CP-SAT, optional).** Ticking *Optimal placement* in the app (or
+`--optimal` on the CLI) swaps the greedy L3 heuristic for an OR-Tools **CP-SAT** solve of
+each week's tank layout. It drives per-tank density to the cap (**~100 kg/m³**, where the
+heuristic leaves it 300+ and the controller ~123), places **every batch to a real tank**
+(no envelope residual, full conservation PASS), and minimizes system-load variance. The
+trade is **more transfers** (~1.9/fish vs ~0.8 heuristic / ~0.7 controller — it moves
+fish to keep density even) and a **~30-min** solve for a 52-week horizon (the heuristic LP
+is ~4 min). A fixed per-week deterministic budget + seed make the solve *quality*
+reproducible (~0.8% optimality gap); equally-optimal layouts can differ tank-for-tank.
+Output is stamped `_planned_OPTIMAL.xlsx`.
+
 **What's guaranteed.** Conservation is exact (seeded == harvested + standing +
 mortality + cull, 0.0000%); `TankContinuityAudit` shows **0 TANK_DRIFT**; L1 holds the
 true total within limits every week. The output is the standard workbook via the shared
@@ -973,9 +984,13 @@ filename.
   ReconciliationReport) but **not** BiologyProjection, ValidationLog, YearlySummary,
   TransferTemplate, or Control — so those app tabs render **empty** for a Global run.
   The density heatmap + violation/worst-density/harvest KPIs work for both methods.
-- The residual per-tank **density over-cap is a structural capacity limit** — the
-  *same* one the controller hits (§7.1: it's a stocking/capacity problem, not a tuning
-  one). No placement engine removes it without lowering the stocking target.
+- The residual per-tank **density over-cap** the *heuristic* leaves is a **placement
+  concentration**, not a hard capacity wall: the optimal CP-SAT mode (above) balances the
+  whole facility at once and drives peak density back to the cap (~100 kg/m³ vs the
+  heuristic's 300+), at the cost of more transfers. Within the *controller*, though, no
+  tuning knob removes it (§7.1: it's a stocking problem, not a controller-tuning one) —
+  only a global re-placement does, and only while total biomass stays under total
+  density-capacity.
 - It runs an LP per week, so it's **slower** than the controller (though fast once L1 is
   within limits).
 

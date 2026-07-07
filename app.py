@@ -1939,26 +1939,29 @@ with st.sidebar:
     _global_optimal = False
     _cpsat_time = 300.0
     if _is_global:
-        st.caption("⚠ Global is the experimental precalculated engine — the "
-                   "BatchLocations/Transfers are real (0-drift). Heuristic mode "
-                   "leaves some per-tank density over-cap (the structural limit the "
-                   "controller also hits); the optimal mode below removes it.")
+        st.caption("⚠ Global is the experimental precalculated engine — "
+                   "BatchLocations/Transfers are real (0-drift). The default "
+                   "heuristic placement concentrates per-tank density well over cap; "
+                   "the optimal mode below drives it back to the cap (~100 kg/m³) at "
+                   "the cost of more transfers and a ~30-min solve.")
         _global_optimal = st.checkbox(
-            "Optimal placement (CP-SAT) — fills tanks, 0 over-cap, low variance",
+            "Optimal placement (CP-SAT) — density at cap, low variance, fully placed",
             value=False, key="global_optimal",
-            help="Solves the WHOLE-horizon tank layout as ONE precalculated "
-                 "optimization (OR-Tools CP-SAT): keeps tanks as full as 0-drift "
-                 "allows (~90% — the remainder is the mandatory fallow week between "
-                 "batches in a tank), spreads biomass to low EVEN density (0 "
-                 "over-cap, worst ~94 vs the controller's 176), and minimizes "
-                 "system-load variance. Determined proportional-volume split; 0 "
-                 "TANK_DRIFT, audited. SLOWER — minutes, not seconds.")
+            help="Places each week's grow-out layout with OR-Tools CP-SAT instead "
+                 "of the greedy heuristic. Drives per-tank density to the cap "
+                 "(~100 kg/m³, where the greedy heuristic leaves it 300+ over-cap), "
+                 "holds facility biomass at ~100%, places every batch to a real "
+                 "tank (full conservation PASS), and minimizes system-load "
+                 "variance. Trade-off: MORE transfers per fish (~1.9 vs ~0.8 "
+                 "heuristic / ~0.7 controller) — it moves fish to keep density even. "
+                 "A fixed per-week deterministic budget + fixed seed make the solve "
+                 "QUALITY reproducible (~0.8% optimality gap); equally-optimal "
+                 "layouts can differ tank-for-tank. 0 TANK_DRIFT, audited. SLOWER — "
+                 "~30 min for a 52-week horizon (heuristic LP ~4 min; controller, "
+                 "seconds).")
         if _global_optimal:
-            _cpsat_time = float(st.slider(
-                "CP-SAT solve budget (seconds)", 60, 900, 300, 60,
-                key="cpsat_time",
-                help="More time tightens the optimum (fewer transfers); fill "
-                     "plateaus past ~300s, so 300s is a good default."))
+            st.caption("CP-SAT runs a fixed, tuned deterministic budget per week — "
+                       "no tuning needed. Expect ~30 min for a full 52-week horizon.")
     if _cfg_ok:
         from forecast.config_io import load_control, control_to_dict
         _render_active_config(
@@ -2993,8 +2996,8 @@ if uploaded is not None:
 if (run_clicked or st.session_state.pop("_pending_run", False)) and uploaded is not None:
     _method = ("global_optimal" if (_is_global and _global_optimal)
                else "global" if _is_global else "controller")
-    _spin = ("Running GLOBAL OPTIMAL (CP-SAT whole-horizon solve) — this takes "
-             f"~{int(_cpsat_time)}s plus setup, please wait..."
+    _spin = ("Running GLOBAL OPTIMAL (per-week CP-SAT placement) — ~30 min for a "
+             "full 52-week horizon, please wait..."
              if _method == "global_optimal"
              else "Running GLOBAL (precalculated L1→L3) planner — LP per week, slower..."
              if _is_global else "Running forecast pipeline...")

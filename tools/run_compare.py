@@ -96,14 +96,25 @@ def _conservation_verdict(out_path):
                 unplaced_f = int(m.group(2).replace(",", ""))
                 break
 
-    if "ReconciliationReport" in sheets:            # -> Global: mass gate
-        residual_pct = None
+    # BOTH engines emit a sheet named 'ReconciliationReport', but of different
+    # shape: Global's carries a FACILITY summary row (seeded == harvested +
+    # standing + mortality + cull) whose last column is the mass residual %; the
+    # Controller's is a per-(batch, week) balance table with NO FACILITY row.
+    # Key the gate off the FACILITY row's PRESENCE, not the sheet name — else the
+    # Controller wrongly takes the mass-gate branch, finds no residual, and FAILs
+    # a run that conserves perfectly.
+    facility_row = None
+    if "ReconciliationReport" in sheets:
         for row in wb["ReconciliationReport"].iter_rows(values_only=True):
             if row and str(row[0]).strip().upper() == "FACILITY":
-                try:
-                    residual_pct = float(row[-1])
-                except (TypeError, ValueError):
-                    residual_pct = None
+                facility_row = row
+                break
+
+    if facility_row is not None:                    # -> Global: mass gate
+        try:
+            residual_pct = float(facility_row[-1])
+        except (TypeError, ValueError):
+            residual_pct = None
         wb.close()
         mass_ok = residual_pct is not None and abs(residual_pct) < 0.01
         gate = ("FAIL" if not mass_ok else
@@ -185,6 +196,16 @@ def run_compare(input_path, *, config_dir=None, scenario_dir=None,
               f"peak {metrics.overall_peak_biomass:,.0f} kg, "
               f"transfers/fish {metrics.transfers_per_fish:.3f}")
 
+    def _written(wb_path):
+        # run.main coerces the output extension to the workbook's content type
+        # (.xlsm when it kept a VBA archive from an .xlsm template, else .xlsx),
+        # so a controller run we asked to save '.xlsx' lands on disk as '.xlsm'.
+        # Score whichever file actually exists.
+        if wb_path.exists():
+            return wb_path
+        alt = wb_path.with_suffix(".xlsm")
+        return alt if alt.exists() else wb_path
+
     records = []
     for i, m in enumerate(roster, 1):
         wb_path = out_dir / f"{stem}_{m.key}.xlsx"
@@ -195,10 +216,12 @@ def run_compare(input_path, *, config_dir=None, scenario_dir=None,
                "placement": None}
         print(f"[{i}/{len(roster)}] {m.key} — {m.label} ...", flush=True)
         try:
-            if reuse and wb_path.exists() and wb_path.stat().st_size > 0:
+            cached = _written(wb_path)
+            if reuse and cached.exists() and cached.stat().st_size > 0:
                 rec["elapsed"] = elapsed_cache.get(m.key)
-                print(f"    reusing cached workbook {wb_path.name}")
-                _score(rec, wb_path)
+                rec["workbook"] = cached.name
+                print(f"    reusing cached workbook {cached.name}")
+                _score(rec, cached)
             else:
                 rc, elapsed = _methods.run_method(
                     m, input_path, wb_path, config_dir, scenario_dir, quiet=quiet)
@@ -210,7 +233,9 @@ def run_compare(input_path, *, config_dir=None, scenario_dir=None,
                     print(f"    FAILED rc={rc} ({elapsed:.0f}s)")
                 else:
                     print(f"    done {elapsed:.0f}s", flush=True)
-                    _score(rec, wb_path)
+                    written = _written(wb_path)
+                    rec["workbook"] = written.name
+                    _score(rec, written)
         except Exception as e:                                   # noqa: BLE001
             rec["failed"] = f"{type(e).__name__}: {e}"
             print(f"    FAILED: {rec['failed']}")
