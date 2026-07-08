@@ -177,6 +177,23 @@ class Metrics:
     weeks_over_harvest_cap: int
     transfers_by_type: dict = field(default_factory=dict)
     per_system: dict = field(default_factory=dict)
+    # --- additive comparison metrics: tank usage + inter/intra-system balance ---
+    # Grow-out tank FOOTPRINT (OG6N depuration excluded): how many tanks the plan
+    # actually occupies FW->OG. Peak = the busiest week, mean = average over weeks.
+    tank_footprint_peak: float = 0.0
+    tank_footprint_mean: float = 0.0
+    # Per-batch tank PATH: distinct grow-out tanks a batch passes through over its
+    # life (relocation footprint, complements transfers_per_fish). Mean + worst.
+    batch_tank_path_mean: float = 0.0
+    batch_tank_path_max: float = 0.0
+    # BETWEEN-system balance: per week, spread of biomass/feed ACROSS OG systems
+    # (CV + max-min range), reported mean-over-weeks and peak-week. High = one
+    # system carrying far more than another (a placement-balance failure).
+    between_system: dict = field(default_factory=dict)
+    # WITHIN-system balance: per (system, week), spread of biomass/feed ACROSS the
+    # tanks of a system (CV + range), aggregated mean + peak. Per-tank feed is the
+    # system's reported feed apportioned by biomass x a size-declining rate shape.
+    within_system: dict = field(default_factory=dict)
 
     def component(self, name):
         return getattr(self, name)
@@ -434,6 +451,128 @@ def _system_peak(wb):
     return peak
 
 
+def _batchloc_rows(wb):
+    """Yield per-tank {week, batch, tank, system, avgwt, biomass} from
+    BatchLocations, OG6N depuration EXCLUDED (consistent with the density/system
+    metrics) and empty rows skipped. Columns located by name (reorder-safe)."""
+    if "BatchLocations" not in wb.sheetnames:
+        return
+    ws = wb["BatchLocations"]
+    cols = _col_map(ws, lambda r: r and str(r[0]).strip() == "Week"
+                    and any(str(c).strip().startswith("Biomass") for c in r if c))
+    wi = _find_col(cols, "Week", default=0)
+    bi = _find_col(cols, "Batch", default=2)
+    ti = _find_col(cols, "Tank", default=3)
+    si = _find_col(cols, "System", default=4)
+    ai = _find_col(cols, "AvgWt", "Avg", default=6)
+    mi = _find_col(cols, "Biomass", default=7)
+    for i, row in enumerate(ws.iter_rows(values_only=True), 1):
+        if i < 5 or not row or row[wi] is None:
+            continue
+        if len(row) > si and row[si] == "OG6N":
+            continue
+        bio = row[mi] if len(row) > mi else None
+        if not isinstance(bio, (int, float)) or bio <= 0:
+            continue
+        w = row[ai] if len(row) > ai and isinstance(row[ai], (int, float)) else 0.0
+        yield {"week": row[wi], "batch": row[bi] if len(row) > bi else None,
+               "tank": row[ti] if len(row) > ti else None,
+               "system": row[si] if len(row) > si else None,
+               "avgwt": w, "biomass": bio}
+
+
+def _tank_footprint(wb):
+    """Grow-out tank FOOTPRINT (OG6N excluded): (peak, mean) count of distinct
+    occupied tanks per week — how many tanks the plan actually uses FW->OG."""
+    by_week = {}
+    for r in _batchloc_rows(wb):
+        by_week.setdefault(r["week"], set()).add(r["tank"])
+    counts = [len(s) for s in by_week.values()]
+    return (float(max(counts)), statistics.mean(counts)) if counts else (0.0, 0.0)
+
+
+def _batch_tank_path(wb):
+    """Per-batch tank PATH (OG6N excluded): (mean, max) distinct grow-out tanks a
+    batch passes through over its life — the relocation footprint per batch."""
+    by_batch = {}
+    for r in _batchloc_rows(wb):
+        by_batch.setdefault(r["batch"], set()).add(r["tank"])
+    paths = [len(s) for s in by_batch.values() if s]
+    return (statistics.mean(paths), float(max(paths))) if paths else (0.0, 0.0)
+
+
+def _system_by_week(wb):
+    """{week: {system: (biomass_kg, feed_kg_day)}} from SystemLimitsAudit, OG6N
+    depuration excluded (a purge hold, not a grow-out load)."""
+    out = {}
+    if "SystemLimitsAudit" not in wb.sheetnames:
+        return out
+    for d in _table(
+            wb["SystemLimitsAudit"],
+            lambda r: r and r[0] == "Week" and len(r) > 1 and r[1] == "System",
+            lambda r: _is_week(r[0])):
+        sysid = d.get("System")
+        if sysid == "OG6N":
+            continue
+        b = d.get("Biomass_kg"); f = d.get("Feed_kg_day")
+        out.setdefault(d.get("Week"), {})[sysid] = (
+            b if isinstance(b, (int, float)) else 0.0,
+            f if isinstance(f, (int, float)) else 0.0)
+    return out
+
+
+def _mean_peak(xs):
+    return (statistics.mean(xs), max(xs)) if xs else (0.0, 0.0)
+
+
+def _between_system_spread(wb):
+    """How EVEN load is ACROSS systems: per week, CV and range (max-min) across the
+    OG systems' biomass and feed; mean-over-weeks + peak-week for each."""
+    bcv, brng, fcv, frng = [], [], [], []
+    for sysmap in _system_by_week(wb).values():
+        bios = [v[0] for v in sysmap.values()]
+        feeds = [v[1] for v in sysmap.values()]
+        if len(bios) >= 2:
+            bcv.append(_cv(bios)); brng.append(max(bios) - min(bios))
+            fcv.append(_cv(feeds)); frng.append(max(feeds) - min(feeds))
+    bcm, bcp = _mean_peak(bcv); brm, brp = _mean_peak(brng)
+    fcm, fcp = _mean_peak(fcv); frm, frp = _mean_peak(frng)
+    return {"bio_cv_mean": bcm, "bio_cv_peak": bcp,
+            "bio_range_mean": brm, "bio_range_peak": brp,
+            "feed_cv_mean": fcm, "feed_cv_peak": fcp,
+            "feed_range_mean": frm, "feed_range_peak": frp}
+
+
+def _within_system_variation(wb):
+    """How EVEN load is WITHIN a system, across its tanks: for each (system, week),
+    CV and range of per-tank biomass and per-tank feed, aggregated mean + peak.
+    Per-tank feed = the system's REPORTED feed apportioned across its tanks by
+    biomass x a size-declining rate shape (w**-1/3), so it stays calibrated to the
+    real system total while reflecting that big-fish tanks eat less per kg."""
+    sbw = _system_by_week(wb)                 # {week: {sys: (bio, feed)}}
+    cells = {}                                # (system, week) -> [(biomass, avgwt)]
+    for r in _batchloc_rows(wb):
+        cells.setdefault((r["system"], r["week"]), []).append((r["biomass"], r["avgwt"]))
+    bcv, brng, fcv, frng = [], [], [], []
+    for (sysid, wk), tanks in cells.items():
+        if len(tanks) < 2:
+            continue
+        bios = [t[0] for t in tanks]
+        bcv.append(_cv(bios)); brng.append(max(bios) - min(bios))
+        sys_feed = sbw.get(wk, {}).get(sysid, (0.0, 0.0))[1]
+        shape = [b * (w ** (-1.0 / 3.0) if w and w > 0 else 0.0) for b, w in tanks]
+        tot = sum(shape)
+        if sys_feed > 0 and tot > 0:
+            feeds = [sys_feed * s / tot for s in shape]
+            fcv.append(_cv(feeds)); frng.append(max(feeds) - min(feeds))
+    bcm, bcp = _mean_peak(bcv); brm, brp = _mean_peak(brng)
+    fcm, fcp = _mean_peak(fcv); frm, frp = _mean_peak(frng)
+    return {"bio_cv_mean": bcm, "bio_cv_peak": bcp,
+            "bio_range_mean": brm, "bio_range_peak": brp,
+            "feed_cv_mean": fcm, "feed_cv_peak": fcp,
+            "feed_range_mean": frm, "feed_range_peak": frp}
+
+
 def metrics_from_workbook(out_path, harvest_cap) -> tuple["Metrics", int, int]:
     wb = openpyxl.load_workbook(out_path, data_only=True)
     bio, feed, bcap, fcap, per = _biomass_and_feed(wb)
@@ -464,6 +603,11 @@ def metrics_from_workbook(out_path, harvest_cap) -> tuple["Metrics", int, int]:
                 system_load = max(system_load, peak_s / cap)
     biomass_var = (statistics.mean(sys_cvs) if sys_cvs else 0.0) + _swing(bio)
 
+    fp_peak, fp_mean = _tank_footprint(wb)
+    path_mean, path_max = _batch_tank_path(wb)
+    between = _between_system_spread(wb)
+    within = _within_system_variation(wb)
+
     metrics = Metrics(
         biomass_overshoot=overshoot,
         biomass_var=biomass_var,
@@ -485,6 +629,12 @@ def metrics_from_workbook(out_path, harvest_cap) -> tuple["Metrics", int, int]:
         weeks_over_harvest_cap=sum(1 for x in fish if x > harvest_cap),
         transfers_by_type=by_type,
         per_system=per_out,
+        tank_footprint_peak=fp_peak,
+        tank_footprint_mean=fp_mean,
+        batch_tank_path_mean=path_mean,
+        batch_tank_path_max=path_max,
+        between_system=between,
+        within_system=within,
     )
     dropped, overprod = tuning._conservation(out_path)
     return metrics, dropped, overprod
@@ -562,7 +712,8 @@ def _infeasible_metrics() -> "Metrics":
     for f in _dc_fields(Metrics):
         if f.name in COMPONENTS:
             kw[f.name] = big
-        elif f.name in ("transfers_by_type", "per_system"):
+        elif f.name in ("transfers_by_type", "per_system",
+                        "between_system", "within_system"):
             continue                     # use the default_factory (empty dict)
         elif f.name == "weeks_over_harvest_cap":
             kw[f.name] = 0

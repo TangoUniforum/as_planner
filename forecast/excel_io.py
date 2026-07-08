@@ -3022,11 +3022,20 @@ def write_run_comparison(wb, records, *, pr_name="", generated=None,
     def g_place(field):
         return lambda rec: (rec.get("placement") or {}).get(field)
 
+    def g_between(field):
+        return lambda rec: (rec["metrics"].between_system.get(field)
+                            if rec.get("metrics") is not None else None)
+
+    def g_within(field):
+        return lambda rec: (rec["metrics"].within_system.get(field)
+                            if rec.get("metrics") is not None else None)
+
     f_kg = lambda v: f"{v:,.0f}"
     f_int = lambda v: f"{v:,.0f}"
     f_pct = lambda v: f"{v:.1f}%"
     f_cv = lambda v: f"{v:.3f}"
     f_ratio = lambda v: f"{v:.3f}"
+    f_1 = lambda v: f"{v:,.1f}"
     f_sec = lambda v: f"{v:,.0f}s"
 
     # (kind, ...) — "sect": section header; "row": metric row
@@ -3055,10 +3064,22 @@ def write_run_comparison(wb, records, *, pr_name="", generated=None,
         ("row", "Hottest system load", "% of cap · ↓", "low",
          lambda r: (None if r.get("metrics") is None else 100.0 * r["metrics"].system_peak), f_pct),
         ("row", "Max per-tank density", "kg/m³ · ↓ · ≤95", "low", g_metric("density_peak"), f_kg),
+        ("sect", "TANK USAGE (FW→OG footprint + moves; OG6N excluded)"),
+        ("row", "Grow-out tanks used (mean)", "tanks · context", None, g_metric("tank_footprint_mean"), f_1),
+        ("row", "Grow-out tanks used (peak)", "tanks · context", None, g_metric("tank_footprint_peak"), f_int),
+        ("row", "Tanks per batch (mean)", "tanks/batch · ↓ (fewer moves)", "low", g_metric("batch_tank_path_mean"), f_1),
+        ("row", "Tanks per batch (worst)", "tanks/batch · ↓", "low", g_metric("batch_tank_path_max"), f_int),
         ("sect", "STEADINESS (flatness — lower = smoother)"),
         ("row", "Biomass variability", "CV+swing · ↓", "low", g_metric("biomass_var"), f_cv),
         ("row", "Harvest variability", "CV · ↓", "low", g_metric("harvest_var"), f_cv),
         ("row", "Feed variability", "CV+swing · ↓", "low", g_metric("feed_var"), f_cv),
+        ("sect", "BALANCE — between systems (even load across systems)"),
+        ("row", "Between-system biomass CV", "CV · ↓ (even)", "low", g_between("bio_cv_mean"), f_cv),
+        ("row", "Between-system feed CV", "CV · ↓ (even)", "low", g_between("feed_cv_mean"), f_cv),
+        ("row", "Between-system biomass gap (peak)", "kg · ↓", "low", g_between("bio_range_peak"), f_kg),
+        ("sect", "BALANCE — within systems (even load across tanks)"),
+        ("row", "Within-system biomass CV", "CV · ↓ (even)", "low", g_within("bio_cv_mean"), f_cv),
+        ("row", "Within-system feed CV", "CV · ↓ (even)", "low", g_within("feed_cv_mean"), f_cv),
         ("sect", "COST / HANDLING"),
         ("row", "Mean daily feed", "kg/day · ↓", "low", g_metric("feed_load"), f_kg),
         ("row", "Transfers per fish", "moves/fish · ↓", "low", g_metric("transfers_per_fish"), f_ratio),

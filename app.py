@@ -1863,12 +1863,14 @@ with st.sidebar:
     app_mode = st.radio(
         "Mode",
         ["Run forecast", "Configure (models & control)", "Tune (density knobs)",
-         "Optimize (multi-objective)"],
+         "Optimize (multi-objective)", "Compare & Choose (all methods)"],
         help="Run forecast: upload a PR and run. Configure: edit the app's "
              "biology models, facility, control, batches, and limits. "
              "Tune: sweep the controller knobs and read the per-batch "
              "density distribution. Optimize: sweep knobs and rank variants on a "
-             "selectable objective (walk the line + minimize feed/handling).",
+             "selectable objective (walk the line + minimize feed/handling). "
+             "Compare & Choose: run all planning methods, grade them on several "
+             "lenses, and pick which plan becomes the report.",
         key="app_mode",
     )
     with st.expander("ℹ️ Which mode? — Run vs Tune vs Optimize"):
@@ -1885,6 +1887,12 @@ with st.sidebar:
             "once** (flat biomass, feed, handling, cap compliance) on a *selectable* "
             "weighted objective, ranks variants, and applies the best. **Many axes**, and "
             "it finds knob *combinations* a single-axis sweep can't.\n"
+            "- **Compare & Choose (all methods)** — runs the *different engines* "
+            "(Controller, Global heuristic, Global optimal CP-SAT) on one PR, grades "
+            "them on several lenses (fewest moves, steadiest harvest, between/within-"
+            "system balance, density, footprint) with hard-rule badges, and lets you "
+            "pick which whole plan becomes the report. Unlike Tune/Optimize (same "
+            "engine, different knobs), this compares *engines*.\n"
             "- **Configure** — hand-edit the models, control knobs, facility, batches, and "
             "limits (every knob has a tooltip).\n\n"
             "**Tune and Optimize don't use a different engine** — they run *the same "
@@ -2970,6 +2978,185 @@ def _optimizer():
             for s, d in sorted(ps.items())])
         st.dataframe(psd, use_container_width=True, hide_index=True)
 
+
+# ============================================================
+# Compare & Choose board — run the methods, grade, pick the plan
+# ============================================================
+
+# Grading lenses: (label, getter(res)->value [lower is better], one-line blurb).
+_BOARD_LENSES = [
+    ("Fewest fish moves", lambda r: r["_score"]["metrics"].transfers_per_fish,
+     "least handling / stress"),
+    ("Steadiest harvest", lambda r: r["_score"]["metrics"].harvest_var,
+     "flattest weekly harvest"),
+    ("Most balanced across systems",
+     lambda r: r["_score"]["metrics"].between_system.get("bio_cv_mean"),
+     "even load system-to-system"),
+    ("Most even within systems",
+     lambda r: r["_score"]["metrics"].within_system.get("bio_cv_mean"),
+     "even load tank-to-tank"),
+    ("Tightest density", lambda r: r["_score"]["metrics"].density_peak,
+     "most density headroom"),
+    ("Smallest tank footprint", lambda r: r["_score"]["metrics"].tank_footprint_mean,
+     "fewest grow-out tanks used"),
+    ("Fastest run", lambda r: r.get("elapsed"), "least wall time"),
+]
+
+
+def _board_score(out_path):
+    """Metrics + HARD-GATE status for one method's output workbook. Gates are
+    pass/fail badges shown on every method; a method that fails Conserves is
+    excluded from winning a lens (it lost fish), the rest are warning flags the
+    operator weighs. Reuses the compare lobby's authoritative verdicts."""
+    import yaml as _yaml
+    from forecast import optimize as _opt
+    from tools.run_compare import _conservation_verdict, _harvest_extras
+    with open(CONFIG_DIR / "control.yaml") as _f:
+        _cfg = _yaml.safe_load(_f) or {}
+    hv_cap = float(_cfg.get("max_harvest_per_week", 55000) or 55000)
+    min_hv = float(_cfg.get("min_harvest_per_week", 0) or 0)
+    m, _dropped, _overprod = _opt.metrics_from_workbook(out_path, hv_cap)
+    verdict = _conservation_verdict(out_path)
+    harv = _harvest_extras(out_path, min_hv)
+    # "No empty week": the HARD contract rule is "never a NEAR-EMPTY week". A week a
+    # little under the floor (a pinned startup week, or 15 fish short of rounding) is
+    # not a breach; a crater (e.g. 377 fish) is. Flag only weeks below a quarter of
+    # the floor so the badge isolates real craters from benign sub-floor weeks.
+    near_empty = 0.25 * min_hv
+    min_wk = harv.get("min_week", 0) or 0
+    # "Under cap": a method riding its DESIGNED deviation band (~0.5% crest) is at the
+    # cap, not over it; only a material overshoot fails. Tolerance = the band + margin.
+    dev = float(_cfg.get("facility_biomass_deviation_pct", 0.005) or 0.005)
+    cap_tol = 1.0 + max(dev, 0.005) + 0.01
+    under_cap = (m.overall_peak_biomass <= m.biomass_cap * cap_tol) if m.biomass_cap else True
+    gates = {
+        "Conserves": verdict["gate"] != "FAIL",
+        "Fully placed": verdict.get("unplaced_batches", 0) == 0,
+        "No empty week": (min_wk >= near_empty) if min_hv else True,
+        "Under cap": under_cap,
+    }
+    return {"metrics": m, "verdict": verdict, "harvest": harv, "gates": gates}
+
+
+def _board_badges(gates):
+    return "  ".join(f"{'✅' if ok else '⚠️'} {name}" for name, ok in gates.items())
+
+
+def _compare_and_choose():
+    st.header("⚖️ Compare & Choose — run the methods, pick the plan")
+    st.caption(
+        "Runs the planning methods on your PR, grades them on several lenses, and "
+        "lets **you** pick which plan becomes the report. Each plan is internally "
+        "consistent (0-drift, tank continuity) — you choose a whole plan, not a "
+        "splice. The hard rules (conserves · fully placed · harvest floor · under "
+        "cap) show as badges on every method, so a low-transfer plan can't hide a "
+        "contract breach.")
+
+    _cfg_ok = _config_ready() and _scenario_ready()
+    _pr_ok = pr is not None and pr["ok"]
+    if not _cfg_ok:
+        st.info("No config yet — set it up in **Configure** first.")
+        return
+    if not _pr_ok:
+        st.info("Upload a valid **ProductionReport** in the sidebar first.")
+        return
+
+    include_milp = st.checkbox(
+        "Include the optimal CP-SAT placement (~30 min — tightest density, most "
+        "balanced across systems)", value=True, key="board_milp")
+    st.caption("Controller (~30s) + Global heuristic (~4 min) always run. Uncheck "
+               "the CP-SAT for a fast 2-method compare.")
+
+    if st.button("▶ Run all methods & compare", type="primary",
+                 use_container_width=True):
+        roster = [("controller", "Controller (reactive)"),
+                  ("global", "Global (heuristic LP)")]
+        if include_milp:
+            roster.append(("global_optimal", "Global (optimal CP-SAT)"))
+        results = {}
+        bar = st.progress(0.0, text="Starting…")
+        for i, (mkey, mlabel) in enumerate(roster):
+            bar.progress(i / len(roster), text=f"Running {mlabel}…")
+            with st.spinner(f"Running {mlabel} — CP-SAT can take ~30 min…"):
+                res = _run_with_workbook_bytes(
+                    uploaded.getvalue(), uploaded.name,
+                    config_dir=str(CONFIG_DIR), scenario_dir=str(SCENARIO_DIR),
+                    method=mkey, cpsat_time=300.0)
+            if res.get("ok") and res.get("output_path"):
+                try:
+                    res["_score"] = _board_score(res["output_path"])
+                except Exception as e:  # noqa: BLE001
+                    res["_score"] = None
+                    res["_score_err"] = str(e)
+            res["_label"] = mlabel
+            results[mkey] = res
+        bar.progress(1.0, text="Done")
+        st.session_state["_board_results"] = results
+
+    results = st.session_state.get("_board_results")
+    if not results:
+        return
+
+    scored = {k: v for k, v in results.items() if v.get("ok") and v.get("_score")}
+    for k, v in results.items():
+        if k not in scored:
+            st.error(f"**{v.get('_label', k)}** failed: "
+                     f"{v.get('error') or v.get('_score_err') or 'no output produced'}")
+    if not scored:
+        return
+
+    # ---- Grading-lens cards: who wins each (conservation-passers only) ----
+    st.subheader("Grading lenses — who wins each")
+    eligible = {k: v for k, v in scored.items()
+                if v["_score"]["gates"]["Conserves"]}
+    pool = eligible or scored
+    cols = st.columns(2)
+    for i, (label, getter, blurb) in enumerate(_BOARD_LENSES):
+        vals = {}
+        for k, v in pool.items():
+            try:
+                x = getter(v)
+            except Exception:  # noqa: BLE001
+                x = None
+            if isinstance(x, (int, float)):
+                vals[k] = x
+        if not vals:
+            continue
+        win_k = min(vals, key=vals.get)
+        win = scored[win_k]
+        with cols[i % 2].container(border=True):
+            st.markdown(f"**{label}** — *{blurb}*")
+            st.markdown(f"→ **{win['_label']}**  ·  `{vals[win_k]:,.3f}`")
+            st.caption(_board_badges(win["_score"]["gates"]))
+
+    # ---- Per-method summary + pick ----
+    st.subheader("Pick the plan for your report")
+    for k, v in scored.items():
+        m = v["_score"]["metrics"]
+        with st.container(border=True):
+            c1, c2 = st.columns([3, 1])
+            with c1:
+                st.markdown(f"**{v['_label']}**  ·  {v.get('elapsed', 0):.0f}s")
+                st.caption(_board_badges(v["_score"]["gates"]))
+                st.caption(
+                    f"peak {m.overall_peak_biomass / (m.biomass_cap or 1) * 100:.0f}% cap"
+                    f"  ·  {m.transfers_per_fish:.2f} moves/fish"
+                    f"  ·  density {m.density_peak:.0f}"
+                    f"  ·  between-sys CV {m.between_system.get('bio_cv_mean', 0):.3f}"
+                    f"  ·  within-sys CV {m.within_system.get('bio_cv_mean', 0):.3f}")
+            with c2:
+                if st.button("Use this plan", key=f"board_pick_{k}",
+                             use_container_width=True):
+                    st.session_state.result = v
+                    st.session_state.result["_run_label"] = \
+                        f"Compare & Choose — {v['_label']}"
+                    st.session_state["_goto_run_mode"] = True
+                    st.rerun()
+
+
+if app_mode.startswith("Compare"):
+    _compare_and_choose()
+    st.stop()
 
 if app_mode.startswith("Configure"):
     _config_editor()
