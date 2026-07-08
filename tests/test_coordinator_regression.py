@@ -239,6 +239,36 @@ def test_output_sanity(run_outputs):
     assert bad_count == 0, f"{bad_count} negative count rows"
 
 
+def test_no_harvest_craters(run_outputs):
+    """No NEAR-EMPTY mid-horizon harvest week — the steady-harvest contract rule.
+
+    The controller must never leave a mid-horizon week effectively empty: the
+    L1-envelope diagnostic (2026-07-08) proved the market-ready SUPPLY exists at
+    the controller's crater weeks (L1 holds 30-47k where the controller drops to
+    a few hundred), so a near-empty week is a pacing failure, not a shortage.
+
+    Excludes the first 6 weeks (operator-pinned startup handoff) and treats only
+    a week below a QUARTER of the harvest floor as a crater (a week merely a few
+    fish under the floor is rounding, not a breach) — matching the Compare &
+    Choose board's "No empty week" gate. This is the RED gate the anti-crater
+    hybrid (L1 envelope -> controller harvest target) must turn green; on a PR
+    that does not crater it is a forward-lock against a regression.
+    """
+    import yaml
+    from forecast.optimize import _harvest_weekly_fish
+    cfg = yaml.safe_load((CONFIG_DIR / "control.yaml").read_text()) or {}
+    floor = float(cfg.get("min_harvest_per_week", 0) or 0)
+    if floor <= 0:
+        pytest.skip("no min_harvest_per_week floor configured")
+    wb = _load(run_outputs)
+    weekly = _harvest_weekly_fish(wb)
+    craters = [(i, int(c)) for i, c in enumerate(weekly)
+               if i >= 6 and c < 0.25 * floor]
+    assert not craters, (
+        f"near-empty mid-horizon harvest weeks (< 25% of the {floor:,.0f} floor): "
+        f"{craters} — the steady-harvest contract rule is breached")
+
+
 # ---- Determinism guard (2026-06-05) ----
 # The forecast must be identical regardless of PYTHONHASHSEED. A
 # set-of-strings iteration in phase_d without a deterministic tiebreak

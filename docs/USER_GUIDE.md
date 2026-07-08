@@ -785,6 +785,41 @@ trades feed ↔ density; a layout respecting all caps provably exists (it fits i
 tanks), but finding it perfectly needs a constraint *solver*, not a greedy pass —
 leveling gets most of the way, the optimizer tells you how far.
 
+### 7.4 Compare & Choose — run every method, pick the plan (`Mode → Compare & Choose`)
+
+Instead of committing to one engine up front, this mode runs the planning methods on
+your PR, **grades them on several lenses, and lets *you* pick which plan becomes the
+report**. Each method's plan is internally consistent (0-drift, tank continuity), so
+you choose a *whole* plan — never a splice.
+
+- **What runs.** Controller (~30s) and the Global heuristic LP (~4 min) always; the
+  optimal CP-SAT placement (~30 min) is an opt-in checkbox — uncheck it for a fast
+  two-method compare.
+- **Grading lenses** (each card shows the winning method + its value): fewest fish
+  moves, steadiest harvest, most balanced *across* systems, most even *within* systems,
+  tightest density, smallest tank footprint, fastest run. A lens only ranks methods
+  that pass the hard gates.
+- **Hard-gate badges** show on *every* method so a soft win can't hide a hard breach:
+  **Conserves** · **Fully placed** · **No empty week** · **Under cap**. A plan that
+  fails *Conserves* can't win a lens; the rest are flags you weigh. **Use this plan**
+  loads that method's plan into the report tabs + download.
+- **New comparison metrics** (also rows in the `RunComparison` sheet): **tank footprint**
+  (occupied grow-out tanks/week), **tanks per batch** (distinct tanks a batch passes
+  through FW→OG — a count view of transfers), **between-system** biomass/feed spread
+  (CV + range *across* systems — placement balance), and **within-system** biomass/feed
+  variation (CV + range *across the tanks* of a system). Per-tank feed is the system's
+  reported feed apportioned by biomass × a size-declining rate shape.
+
+> **Known controller behavior the "No empty week" gate surfaces.** On some PRs (e.g. a
+> particular July arrival schedule) the reactive controller leaves a few **near-empty
+> mid-horizon harvest weeks** — a cohort-timing gap it doesn't smooth *even though the
+> supply exists*: an L1-envelope diagnostic (2026-07-08) shows the tankless planner
+> holds 30–47k at the exact weeks the controller drops to a few hundred. It is a pacing
+> gap, not a shortage, and it is **PR-specific** (the reference PR does not exhibit it).
+> Until an anti-crater fix lands, if steady weekly harvest is critical for such a PR,
+> pick the **Global** plan on the board — it paces the whole horizon and holds the
+> floor. The regression `test_no_harvest_craters` guards this invariant.
+
 ---
 
 ## 8. Key facts to remember
