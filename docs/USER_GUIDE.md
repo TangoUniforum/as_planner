@@ -37,11 +37,13 @@ streamlit run app.py
 ```
 Opens `localhost:8501`. Flow: **upload** a Production Report → **▶ Run forecast**
 → review KPIs + tabs → **download** the output workbook. The sidebar **Mode**
-selector has four windows: **Run forecast**, **Configure** (edit Control
+selector has five windows: **Run forecast**, **Configure** (edit Control
 parameters and per-batch models before running), **Tune (density knobs)** (sweep
-the controller knobs and read the per-batch density distribution — §7.1), and
+the controller knobs and read the per-batch density distribution — §7.1),
 **Optimize (multi-objective)** (rank knob variants on a selectable walk-the-line /
-feed / handling objective — §7.2).
+feed / handling objective — §7.2), and **Compare & Choose (all methods)** (run
+every planning engine on one PR, grade them on several lenses, and pick which plan
+becomes the report — §7.4).
 
 In **Run forecast** mode the sidebar also has a **Planning method** selector:
 **Controller (validated)** — the default closed-loop planner (§4) — or **Global
@@ -51,9 +53,9 @@ both and compare apples-to-apples.
 
 ### CLI
 ```
-python -m forecast.run <input.xlsm> [output.xlsm] --config-dir config --scenario-dir scenario
+python -m forecast.run --workbook <input.xlsm> [--output <output.xlsm>] --config-dir config --scenario-dir scenario
 ```
-If `output` is omitted it defaults to the input path (in-place; the app always
+If `--output` is omitted it defaults to the input path (in-place; the app always
 uses a fresh file). Config + scenario come from YAML in `config/` and `scenario/`.
 
 ---
@@ -74,9 +76,15 @@ the PR sets the *start state*, the scenario sets the *batches and their biology*
 ### 3.2 Control parameters (`config/control.yaml` / Control sheet)
 Facility-wide knobs read into `ControlParams`:
 
+> **"Typical" = the code (dataclass) default.** Your `config/control.yaml` is the
+> operating value a run actually uses and may set a different number — it is the
+> source of truth (e.g. the shipped config turns `harvest_grade_to_min` and
+> `min_transfer_count` **on**, which the dataclass leaves off). Check `control.yaml`
+> or **Configure → Control** in the app for what a given run will do.
+
 | Knob | Meaning | Typical |
 |---|---|---|
-| `horizon_weeks` | forecast length | 140 |
+| `horizon_weeks` | forecast length | 130 |
 | `max_biomass_kg` | facility biomass cap — checked against **TOTAL** facility biomass (FW + OG + 6N purge), per-week overrides in FacilityLimits | (config default; overridable per week) |
 | `max_feed_per_day_kg` | facility daily feed cap — checked against total **feeding** (SW + FW) feed/day; off-feed purge fish excluded (§4.1) | (config default) |
 | `max_harvest_per_week` | weekly harvest/processing ceiling (fish) | 55,000 |
@@ -345,7 +353,7 @@ direct production harvest across the whole purge period**, biomass utilisation ~
 ### 4.3 The tuning knob: `facility_biomass_deviation_pct`
 A **Control parameter** (config/control.yaml, or the app's Configure → Control). It is
 the **± tolerance band around the cap**, and it now sets how close the setpoint runs:
-- **Smaller** (e.g. 0.01 = ±1% ≈ ±39 t on the 3.9M cap) → runs **tighter** to the cap
+- **Smaller** (e.g. 0.01 = ±1% ≈ ±38 t on the 3.8M cap) → runs **tighter** to the cap
   (higher utilisation), more risk of a brief touch above it.
 - **Larger** → more headroom (safer, lower utilisation).
 
@@ -507,6 +515,10 @@ mode (see `tests/test_coordinator_regression.py`):
    beyond ~2% (the band absorbs the FW→SW transition week) flags in
    `InputConservationAudit`. Reconciles from each batch's first projected FW count, not
    the egg seed — the egg→startfeed phase is pre-horizon for in-flight batches.
+7. **No near-empty mid-horizon harvest week (steady-harvest contract)** — every week
+   past the startup handoff harvests **> 25 % of the `min_harvest_per_week` floor**; a
+   crater (a cohort-timing gap the controller fails to smooth) fails the gate
+   (`test_no_harvest_craters`). PR-specific, so on most inputs it is a forward-lock.
 
 > **One benign accounting approximation (6N depuration).** Off-feed depuration
 > (STARVE) tank-weeks take real mortality, but the per-tank continuity audit
@@ -793,12 +805,12 @@ report**. Each method's plan is internally consistent (0-drift, tank continuity)
 you choose a *whole* plan — never a splice.
 
 - **What runs.** Controller (~30s) and the Global heuristic LP (~4 min) always; the
-  optimal CP-SAT placement (~30 min) is an opt-in checkbox — uncheck it for a fast
-  two-method compare.
+  optimal CP-SAT placement (~30 min) is a checkbox that is **on by default** — uncheck
+  it for a fast two-method compare.
 - **Grading lenses** (each card shows the winning method + its value): fewest fish
   moves, steadiest harvest, most balanced *across* systems, most even *within* systems,
   tightest density, smallest tank footprint, fastest run. A lens only ranks methods
-  that pass the hard gates.
+  that pass the *Conserves* gate; the other three badges are advisory flags, not filters.
 - **Hard-gate badges** show on *every* method so a soft win can't hide a hard breach:
   **Conserves** · **Fully placed** · **No empty week** · **Under cap**. A plan that
   fails *Conserves* can't win a lens; the rest are flags you weigh. **Use this plan**
@@ -855,7 +867,7 @@ Everything the app does can be run from the terminal — useful for understandin
 pipeline (a direct run **narrates every stage to the console**) and for scripting.
 
 ```powershell
-# The app (visual: Run / Configure / Tune / Optimize)
+# The app (visual: Run / Configure / Tune / Optimize / Compare & Choose)
 streamlit run app.py
 
 # A single forecast, directly — prints the full stage-by-stage narration
@@ -997,7 +1009,8 @@ layers:
   ~30%.
 
 **Optimal placement (CP-SAT, optional).** Ticking *Optimal placement* in the app (or
-`--optimal` on the CLI) swaps the greedy L3 heuristic for an OR-Tools **CP-SAT** solve of
+picking the *Global optimal* engine in **Compare & Choose**; there is no `--optimal`
+CLI flag) swaps the greedy L3 heuristic for an OR-Tools **CP-SAT** solve of
 each week's tank layout. It drives per-tank density to the cap (**~100 kg/m³**, where the
 heuristic leaves it 300+ and the controller ~123), places **every batch to a real tank**
 (no envelope residual, full conservation PASS), and minimizes system-load variance. The
@@ -1010,8 +1023,9 @@ Output is stamped `_planned_OPTIMAL.xlsx`.
 **What's guaranteed.** Conservation is exact (seeded == harvested + standing +
 mortality + cull, 0.0000%); `TankContinuityAudit` shows **0 TANK_DRIFT**; L1 holds the
 true total within limits every week. The output is the standard workbook via the shared
-writers, with a `RunConfig` "GLOBAL METHOD EXPORT" stamp and a `_planned_GLOBAL.xlsx`
-filename.
+writers, with a `RunConfig` "GLOBAL METHOD EXPORT" stamp. The app names it
+`_planned_GLOBAL.xlsx` (`_planned_OPTIMAL.xlsx` for optimal placement); the CLI
+`tools.run_global_forecast` writes `<stem>_GLOBAL.xlsx`.
 
 **Honest limitations.**
 - It emits the core sheets (HarvestPlan, FeedForecast, Advisory, WeeklyReport,
