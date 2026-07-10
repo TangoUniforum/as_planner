@@ -154,7 +154,30 @@ shows a **projected facility grid** — columns are weeks, rows are tanks, and
 (density)** — how full each tank is versus its own density cap (grey empty,
 green roomy, amber near cap, red over) — or **Batch** — a distinct colour per
 batch, so you can see which tanks hold the same cohort and how a batch moves
-across the weeks. Rows tagged **⛔6N** are depuration. To act: **click the cell**
+across the weeks. Rows tagged **⛔6N** are depuration.
+
+Each cell shows **batch · average weight · density**. A **"Show tank state at"**
+toggle picks *when* in the week that snapshot is taken. **Week open** (the
+default) is the **start-of-week** state — before that week's growth *and* before
+your scripted events run — i.e. exactly what's in the tank at the moment you
+click to act on it. **Week close** is the **end-of-week** state — after growth
+and after your events run — so you can see what actually **holds fish and what's
+empty at the end of each week** (a tank you harvest or move shows empty in that
+week). The rule of thumb: **script in Week open** (weights and occupancy are the
+values you're acting on), **inspect end-of-week room in Week close**.
+
+**Transfers light up both ends.** In the week a move fires, the tank that holds
+the fish *in the current view* is shown **solid with a trailing arrow** (**⇢**
+the fish are leaving, **⇠** they arrived), and the counterpart tank — empty in
+that view — shows a faint **ghost arrow** naming where the fish went or came
+from. So an **OG→OG** relocation or an **OG→6N** send reads at a glance in one
+column, instead of having to compare the open and close views. (Biomass is only
+counted at the solid end, so density/fill scans stay honest. A move the engine
+*refuses* — e.g. the 1 kg-lock on intra-OG1/2 transfers — moves no fish, so no
+arrows are drawn and the refusal shows in the timeline. An **FW→OG intake** has
+no source tank, so it only ever appears at its destination.)
+
+To act: **click the cell**
 for the tank and week you want — a **single click picks both** the tank (its row)
 and the week (its column) — and a panel opens *in context* showing what's actually
 in that tank (batch, fish, weight, density) and offering **Harvest / Graded →
@@ -167,15 +190,35 @@ intake** picker (freshwater cohorts aren't tanks yet), a plain-English
 **timeline** of everything you've scripted (with delete), and a **Save window**
 button.
 
+**⚠ Most out of bounds — recommended actions.** At the top of the right-hand
+panel, a recommendations box reads the current projection against the caps and
+lists what's **most out of bounds**, ranked worst-first — per-system **feed**,
+per-system **biomass**, per-tank **density**, and **facility** biomass (the same
+caps the System rollup shades against). Each line names the breach (value / cap /
+%) and a **relief action**: *harvest* the heaviest tank in the offending system
+when it's at harvest weight, else *move* it to the grow-out system with the most
+feed headroom (never into 6N depuration), and *split* a tank that's over its own
+density cap. A recurring breach is collapsed to its **worst week** so the list
+shows distinct problems. Press **▶** on any line to jump straight to that tank
+and act. Because it reads the live projection, the breaches **shrink as you
+script** — so it doubles as your "am I done yet?" check (empty = everything is
+within limits across the window).
+
 **📊 System rollup — spotting capacity pressure.** The per-tank grid shows
 *density* per tank, but a system can be fine on every individual tank and still
 be **over its feed budget** — feed usually binds before biomass here. The
 rollup toggle opens two colour-coded tables (systems as rows, weeks as columns,
-with a facility **TOTAL** row): **open biomass** (tonnes) and **open feed**
-(kg/day, 6N depuration eats 0). Each cell is coloured by the fraction of that
-**system's** capacity it uses — biomass vs Σ(volume × density-cap), feed vs
-Σ(per-tank feed cap) — green roomy, amber near cap, red over. Same **week-open**
-state as the grid, so it reflects reality *when you act*. Use it to catch a
+with a facility **TOTAL** row): **biomass** (tonnes) and **feed** (kg/day, 6N
+depuration eats 0). Each cell is coloured by the fraction of that **system's**
+capacity it uses — biomass vs Σ(volume × density-cap), feed vs Σ(per-tank feed
+cap) — green roomy, amber near cap, red over. A neutral **FW (freshwater)** row
+adds the standing freshwater cohorts (biomass = count × projected FW weight;
+feed = the FW-stage projected daily feed): those fish are fed in the freshwater
+area and don't draw on any OG system's capacity, so the row is **shown uncoloured
+and folded only into the facility TOTAL** — giving a whole-site biomass and
+feed-demand figure, not OG-cap pressure. Both tables follow the same **Week open
+/ Week close** choice as the grid (the toggle labels it, e.g. *open biomass*), so
+they reflect the same moment you're reading above. Use it to catch a
 system you're about to push over its feed cap before you commit the move. The old flat table still lives under **⚙
 Advanced — raw event grid** for bulk edits or unequal per-tank splits; both write
 the same YAML.
@@ -244,7 +287,12 @@ grid — is one of these):
   **🐟 FW→OG intake** panel below the grid (not a grid click). You pick:
   - **Freshwater cohort** — only cohorts still in freshwater during the window
     appear (projected from the FW trajectory);
-  - **Week to bring it in**;
+  - **Week to bring it in**. Once picked, a small **Planned vs. This intake**
+    table compares the cohort's originally-scheduled transfer (the PR's
+    `tran_og_date` / `tran_og_avg_wt_g`) with your choice — **transfer week** and
+    **average weight** side by side — and a one-line read-out flags the deltas
+    (e.g. *12 wk earlier · 0.29 kg lighter than planned*), so you can see at a
+    glance that pulling a cohort in early means placing much lighter fish;
   - **Target fish entering seawater** — `Count`. The engine applies the same
     logic as the automatic pipeline: **handling mortality**, then a
     **reconcile-to-target bottom cull** (it removes the *smallest* fish down to
@@ -438,7 +486,7 @@ matters.
 | **HarvestPlan Report** | per-year blocks, per-batch Units/AvWt/Biomass by month + **bottom monthly TOTAL row** | **monthly sales planning** (HOG tonnes landed per month) |
 | **YearlySummary** | facility-wide per-year: harvest count/HOG t/gross t/avg wt, feed t, peak+mean biomass, utilization | **year-over-year trends** |
 | **TransferTemplate** | (A) the canonical batch journey through seawater; (B) per-batch summary: SW entry week + weeks-from-start, entry weight/count/density, peak tank footprint, peak density (×cap) + Density_Status flag, harvest window + weight | **the general plan at a glance** — which batches enter when, their footprint, density risk, and harvest timing |
-| **Daily Harvest Schedule** | weekly harvest split Mon–Fri | daily ops |
+| **Daily Harvest Schedule** | each week's harvest — **all tanks combined** — split evenly Mon–Fri (blended avg weights), with a per-week **Total** row and a blank line between weeks; Tank/Batch list every contributor | daily ops |
 | **WeeklyReport / MonthlyReport** | per-(batch, week/month) open/close ledger (count, weight, biomass, SGR, feed, FCR, mortality, harvest, transfers, checks) | detailed batch accounting |
 | **FeedForecastWeekly / Monthly** | feed by feed-type × period matrix | feed ordering |
 | **Advisory** | per-week capacity table: biomass/feed vs caps + excess + OK/REDUCE | capacity headroom + over-cap weeks |
@@ -482,7 +530,7 @@ selected and what it does.
 - **Overview** — advisory issues + tank-occupancy heatmap + per-system biomass + **realized** per-system feed (read from `SystemLimitsAudit`, with the per-system feed-cap line). This is the *fed plan after harvest/FIFO* — **not** the `BiologyProjection` per-batch feed, which is the unharvested projection (fish growing along the curve, ignoring harvest/caps) and runs far higher (10k+ vs a realized ~3–4k). If a feed line looks like it spikes to 5–10× the cap, you're looking at projection feed, not the plan.
 - **Per-Batch** — per-batch weight/biomass/density/losses over a period slider
 - **Period Summary** — facility biomass, weekly harvest, active batches, density
-- **Harvest** — totals, per-week stacked harvest, avg harvest weight, **monthly HOG rollup (sales planning)**
+- **Harvest** — totals, per-week stacked harvest, avg harvest weight, **monthly HOG rollup (sales planning)**, and a **Daily harvest schedule** table — each week's harvest with **all tanks combined**, split evenly across its five operating days (Mon–Fri), with a shaded per-week **Total** row and a blank line between weeks (the same as the *Daily Harvest Schedule* Excel sheet)
 - **Yearly** — HOG tonnes / feed / peak biomass / count per year
 - **Plan** — the **production-flow template** (TransferTemplate §A: the canonical seawater journey every batch follows — FW → OG1/2 nursery → 1 kg lock → grow-out fan-out → finishing → harvest drain) at the top, then the **per-batch plan summary** (§B): entry timing, footprint, harvest window, with a **density-risk highlight** + peak-density-per-batch chart (OVER CAP flagged)
 

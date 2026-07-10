@@ -779,34 +779,68 @@ def _mw_sig(events, extra=""):
     return hashlib.md5(payload.encode()).hexdigest()
 
 
-def _mw_project(state, ctx, events, n_weeks):
+def _mw_project(state, ctx, events, n_weeks, view="open"):
     """Project the facility through `n_weeks` of the override window (operator
     events + full biology) on a COPY of the hydrated state — the SAME engine the
     real run uses (forecast.manual_window.advance_facility_window) — and return
-    its per-(tank, week) BatchLocationRows + the week labels. Cached by
-    (PR, events, n_weeks) so clicking around doesn't recompute biology."""
+    (rows, labels, moves) for `view`:
+
+      view="open"  → start-of-week, pre-event, pre-biology snapshot (what's in
+                     the tank WHEN you click to act on it).
+      view="close" → end-of-week, post-event, post-biology snapshot (what holds
+                     fish and what's empty at week's end; a tank you harvest or
+                     move shows empty here).
+
+    `moves` is the view-independent list of tank→tank relocations that happened
+    in the window (OG→OG splits and OG→6N sends), one dict per Transfer:
+    {"week": label, "src": tank_id, "dests": [tank_id,...], "batch", "count"}.
+    The grid uses it to light up BOTH ends of a move in the week it fires — the
+    end that actually holds the fish in this view solid, the counterpart end as
+    a ghost arrow — so a relocation is legible without diffing open vs close.
+
+    Both snapshots + the moves come from ONE projection and are cached together
+    by (PR, events, n_weeks), so toggling the view or clicking around never
+    recomputes biology."""
     import copy
+    from datetime import timedelta
     from forecast.manual_window import advance_facility_window
     from forecast.time_grid import forecast_week_labels
-    sig = _mw_sig(events, extra=f"proj:{n_weeks}")
-    cache = st.session_state.get("_mw_proj_cache")
-    if cache and cache.get("sig") == sig:
-        return cache["rows"], cache["labels"]
-    labels = forecast_week_labels(ctx["forecast_start"], n_weeks)
-    try:
-        sc = copy.deepcopy(state)
-        win = advance_facility_window(
-            sc, ctx["batch_by_id"], ctx["tables"], ctx["forecast_start"], n_weeks,
-            events=events, control=ctx["control"], pr_closing=ctx["pr_closing"],
-            fw_records=ctx["fw_records"])
-        # OPENING (start-of-week, pre-biology) snapshot so each cell shows what's in
-        # the tank WHEN you act on it — not the end-of-week grown state. Fall back
-        # to the closing snapshot for older engines without opening_locations.
-        rows = win.get("opening_locations") or win["batch_locations"]
-    except Exception:  # noqa: BLE001 — a bad event must not blank the view
-        rows = []
-    st.session_state["_mw_proj_cache"] = {"sig": sig, "rows": rows, "labels": labels}
-    return rows, labels
+    # "proj3" (bump on every cached-schema change) so a stale cache from an
+    # older schema can never satisfy this {sig,open,close,labels,moves} read.
+    sig = _mw_sig(events, extra=f"proj3:{n_weeks}")  # view is NOT in the sig:
+    cache = st.session_state.get("_mw_proj_cache")    # one projection feeds both
+    if not (cache and cache.get("sig") == sig):
+        labels = forecast_week_labels(ctx["forecast_start"], n_weeks)
+        moves: list[dict] = []
+        try:
+            sc = copy.deepcopy(state)
+            win = advance_facility_window(
+                sc, ctx["batch_by_id"], ctx["tables"], ctx["forecast_start"],
+                n_weeks, events=events, control=ctx["control"],
+                pr_closing=ctx["pr_closing"], fw_records=ctx["fw_records"])
+            # Fall back to the closing snapshot for older engines without an
+            # opening_locations, and vice-versa, so neither view blanks out.
+            open_rows = win.get("opening_locations") or win["batch_locations"]
+            close_rows = win.get("batch_locations") or open_rows
+            # Each Transfer is dated at its week's start (forecast_start + i*7),
+            # the same arithmetic the window loop uses — map it back to a label.
+            label_by_date = {ctx["forecast_start"] + timedelta(days=7 * i): lbl
+                             for i, lbl in enumerate(labels)}
+            for tr in (win.get("transfer_events") or []):
+                lbl = label_by_date.get(getattr(tr, "event_date", None))
+                dests = [a.tank_id for a in getattr(tr, "destinations", []) or []]
+                if lbl is None or not dests:
+                    continue
+                moves.append({"week": lbl, "src": tr.source_tank_id,
+                              "dests": dests, "batch": tr.batch_id,
+                              "count": getattr(tr, "count_transferred", 0.0)})
+        except Exception:  # noqa: BLE001 — a bad event must not blank the view
+            open_rows, close_rows = [], []
+        cache = {"sig": sig, "open": open_rows, "close": close_rows,
+                 "labels": labels, "moves": moves}
+        st.session_state["_mw_proj_cache"] = cache
+    rows = cache["close"] if view == "close" else cache["open"]
+    return rows, cache["labels"], cache.get("moves", [])
 
 
 def _mw_validate(state, ctx, events):
@@ -864,7 +898,50 @@ def _mw_fw_avail(ctx, window_labels):
     return out
 
 
-def _mw_grid(state, rows, labels, color_by, batch_filter=None):
+def _mw_fw_load(ctx, window_labels):
+    """{week_label: {"open_bio": kg, "close_bio": kg, "feed": kg/day}} summed over
+    every in-flight FW cohort still in freshwater in the window — the standing FW
+    LOAD to fold into the system rollup as an "FW" row + into the facility total.
+
+    Same projection as _mw_fw_avail, but keeps biomass + feed. The feed figure is
+    the projection's own stage-correct daily feed (FW-stage SGR/FCR while the fish
+    are in freshwater) — NOT realized_feed_kg_day, which assumes seawater. FW fish
+    are fed in the freshwater area, not from OG feed capacity, so the rollup shows
+    this row neutral (uncapped) and only rolls it into the neutral TOTAL."""
+    from collections import defaultdict
+    from forecast.biology import project_in_flight_fw_batch
+    fw_records = ctx.get("fw_records") or []
+    if not fw_records or ctx.get("control") is None:
+        return {}
+    agg = defaultdict(lambda: {"count": 0.0, "biomass_kg": 0.0})
+    for r in fw_records:
+        agg[r.batch_id]["count"] += r.closing_count
+        agg[r.batch_id]["biomass_kg"] += r.closing_biomass_kg
+    win = set(window_labels)
+    out: dict[str, dict] = defaultdict(
+        lambda: {"open_bio": 0.0, "close_bio": 0.0, "feed": 0.0})
+    for bid, a in agg.items():
+        b_meta = ctx["batch_by_id"].get(bid)
+        if a["count"] <= 0 or b_meta is None:
+            continue
+        avg_wt = a["biomass_kg"] * 1000.0 / a["count"]
+        try:
+            states, _, _ = project_in_flight_fw_batch(
+                b_meta, ctx["tables"], ctx["control"], a["count"], avg_wt,
+                ctx["pr_closing"])
+        except Exception:  # noqa: BLE001
+            continue
+        for s in states:
+            if s.stage != "FW" or s.week_label not in win:
+                continue
+            rec = out[s.week_label]
+            rec["open_bio"] += s.open_biomass_kg or s.biomass_kg
+            rec["close_bio"] += s.close_biomass_kg or s.biomass_kg
+            rec["feed"] += s.feed_kg_day
+    return dict(out)
+
+
+def _mw_grid(state, rows, labels, color_by, batch_filter=None, moves=None):
     """Colour-styled DataFrame of the projected facility (index = tank, columns =
     weeks, cell text = "batch · avg-weight · density") for a CLICKABLE st.dataframe.
     The per-cell weight + density let you read grow-out state at a glance to decide
@@ -873,15 +950,50 @@ def _mw_grid(state, rows, labels, color_by, batch_filter=None):
     `batch_filter` (a set of batch ids, or None) restricts the rows to only the
     tanks that hold one of those batches in some displayed week — so the operator
     can focus on a few cohorts instead of the whole facility; batch COLOURS stay
-    consistent with the unfiltered view. Returns (styler, ylabels, tank_by_y).
-    Unlike a plotly heatmap, a single click on a dataframe row reliably emits a
-    Streamlit selection."""
+    consistent with the unfiltered view.
+
+    `moves` (from _mw_project) lights up BOTH ends of a relocation in the week it
+    fires: the tank that holds the fish in this snapshot gets a solid cell with a
+    trailing arrow (⇢ leaving / ⇠ arrived), and the counterpart tank — empty in
+    this snapshot — gets a faint GHOST cell naming where the fish went / came
+    from. So a move reads at a glance instead of by diffing open vs close.
+
+    Returns (styler, ylabels, tank_by_y). Unlike a plotly heatmap, a single click
+    on a dataframe row reliably emits a Streamlit selection."""
+    from collections import defaultdict
     from forecast.sixn import SIXN_ALL_TANKS
     idx = {(r.tank_id, r.week_label): r for r in rows}
+    loc_by_tank = {t.tank_id: t.location_id for t in state.tanks_by_id.values()}
+
+    def _uniq(seq):
+        seen, out = set(), []
+        for x in seq:
+            if x not in seen:
+                seen.add(x)
+                out.append(x)
+        return ",".join(out)
+
+    # Per-(tank, week) move markers: out_to = where this tank's fish LEAVE to;
+    # in_from = where a tank's fish ARRIVE from. Keyed by location label so the
+    # arrow text reads OG1N/6N-63 (what the operator sees), not a raw tank id.
+    out_to: dict = defaultdict(list)
+    in_from: dict = defaultdict(list)
+    for m in (moves or []):
+        wk, src = m["week"], m["src"]
+        out_to[(src, wk)].extend(loc_by_tank.get(d, f"#{d}") for d in m["dests"])
+        for d in m["dests"]:
+            in_from[(d, wk)].append(loc_by_tank.get(src, f"#{src}"))
+
     tanks = _mw_tanks(state)
     if batch_filter:
         keep = {r.tank_id for r in rows
                 if r.count > 0 and r.batch_id in batch_filter}
+        # keep both ends of a filtered batch's moves, even where a snapshot shows
+        # the tank empty (the ghost end) — else half the move would vanish.
+        for m in (moves or []):
+            if m["batch"] in batch_filter:
+                keep.add(m["src"])
+                keep.update(m["dests"])
         tanks = [t for t in tanks if t.tank_id in keep]
     ubatches = sorted({r.batch_id for r in rows if r.count > 0})
     _pal = px.colors.qualitative.Light24
@@ -931,12 +1043,17 @@ def _mw_grid(state, rows, labels, color_by, batch_filter=None):
         trow, crow = [], []
         for wk in labels:
             r = idx.get((t.tank_id, wk))
-            if r is None or r.count <= 0:
-                trow.append("")
-                crow.append("background-color:#f0f0f0;color:#1f1f1f")
-            else:
+            outs = out_to.get((t.tank_id, wk))
+            ins = in_from.get((t.tank_id, wk))
+            if r is not None and r.count > 0:
+                # Solid occupancy cell. If this tank is a move end THIS week,
+                # trail an arrow: ⇢ when the fish here are leaving (open view of
+                # a source), ⇠ when they arrived (close view of a destination).
+                arrow = (f"  ⇢{_uniq(outs)}" if outs
+                         else f"  ⇠{_uniq(ins)}" if ins else "")
                 trow.append(
-                    f"{r.batch_id} · {r.avg_wt_g / 1000:.2f}kg · {r.density_kg_m3:.0f}")
+                    f"{r.batch_id} · {r.avg_wt_g / 1000:.2f}kg · "
+                    f"{r.density_kg_m3:.0f}{arrow}")
                 if color_by == "batch":
                     # background already encodes the batch; keep a dark bold font.
                     bg, fg = bcolor.get(r.batch_id, "#cccccc"), "#1f1f1f"
@@ -945,6 +1062,16 @@ def _mw_grid(state, rows, labels, color_by, batch_filter=None):
                     base = fcolor.get(r.batch_id, "#1f1f1f")
                     fg = _toward_white(base, 0.7) if _lum(bg) < 0.6 else base
                 crow.append(f"background-color:{bg};color:{fg};font-weight:700")
+            elif outs or ins:
+                # GHOST counterpart: this end is empty in THIS snapshot, but a
+                # move touched it this week — show where the fish went / came
+                # from so both ends of the relocation are visible in one column.
+                trow.append(f"⇢ {_uniq(outs)}" if outs else f"⇠ {_uniq(ins)}")
+                crow.append("background-color:#e3e7f0;color:#3a4a7a;"
+                            "font-style:italic;font-weight:600")
+            else:
+                trow.append("")
+                crow.append("background-color:#f0f0f0;color:#1f1f1f")
         text_grid.append(trow)
         css_grid.append(crow)
     df = pd.DataFrame(text_grid, index=ylabels, columns=labels)
@@ -953,13 +1080,17 @@ def _mw_grid(state, rows, labels, color_by, batch_filter=None):
     return styler, ylabels, tank_by_y
 
 
-def _mw_system_rollup(state, rows, labels, tables, batch_by_id):
-    """Render, under the grid, per-SYSTEM week-open **biomass (tonnes)** and
-    **feed (kg/day)** tables (systems = rows, weeks = columns). Cells are coloured
+def _mw_system_rollup(state, rows, labels, tables, batch_by_id, ctx=None,
+                      view="open"):
+    """Render, under the grid, per-SYSTEM **biomass (tonnes)** and **feed
+    (kg/day)** tables (systems = rows, weeks = columns). Cells are coloured
     green→red by fraction of the system's tank capacity (biomass = Σ volume ×
     max_density; feed = Σ max_feed/day) so system-level capacity pressure — which
-    the per-tank grid can't show, especially FEED — is visible at a glance. Uses
-    the same OPENING (week-open) rows the grid shows; STARVE (6N) tanks feed 0."""
+    the per-tank grid can't show, especially FEED — is visible at a glance.
+
+    Follows the grid's Week open / Week close `view`. When `ctx` is supplied, a
+    neutral **FW (freshwater)** row folds the standing freshwater cohorts into
+    each table + the facility TOTAL (see _mw_fw_load); STARVE (6N) tanks feed 0."""
     from collections import defaultdict
     from forecast.biology import realized_feed_kg_day
     sys_bio_cap, sys_feed_cap = defaultdict(float), defaultdict(float)
@@ -978,6 +1109,14 @@ def _mw_system_rollup(state, rows, labels, tables, batch_by_id):
             feed[(r.system_id, r.week_label)] += realized_feed_kg_day(
                 r.avg_wt_g, r.biomass_kg, batch_by_id.get(r.batch_id), tables)
 
+    # Standing FW load as a neutral row folded into the TOTAL (biomass matches the
+    # view's open/close snapshot; feed is the FW-stage projected daily feed).
+    fw = _mw_fw_load(ctx, labels) if ctx else {}
+    fw_bio = {wk: v["open_bio" if view == "open" else "close_bio"]
+              for wk, v in fw.items()}
+    fw_feed = {wk: v["feed"] for wk, v in fw.items()}
+    FW_LABEL = "FW (freshwater)"
+
     def _fill(frac):
         if frac <= 0:
             return "#f0f0f0"
@@ -989,7 +1128,9 @@ def _mw_system_rollup(state, rows, labels, tables, batch_by_id):
             return "#e8615e"
         return "#7a0d0b"
 
-    def _table(agg, cap, scale):
+    def _table(agg, cap, scale, extra=None):
+        # extra = {wk: raw_value} for a neutral (uncapped) FW row folded into the
+        # facility TOTAL — FW fish aren't in an OG system, so no cap fraction.
         txt, css, idx = [], [], []
         for s in systems:
             idx.append(s)
@@ -1001,10 +1142,22 @@ def _mw_system_rollup(state, rows, labels, tables, batch_by_id):
                 crow.append(f"background-color:{_fill(frac)};color:#1f1f1f")
             txt.append(trow)
             css.append(crow)
+        if extra:
+            idx.append(FW_LABEL)
+            trow, crow = [], []
+            for wk in labels:
+                trow.append(f"{extra.get(wk, 0.0) * scale:,.0f}")
+                crow.append("background-color:#eef1e8;color:#3a4a2a;"
+                            "font-style:italic")
+            txt.append(trow)
+            css.append(crow)
         idx.append("TOTAL")           # facility total (neutral, not cap-coloured)
         trow, crow = [], []
         for wk in labels:
-            trow.append(f"{sum(agg.get((s, wk), 0.0) for s in systems) * scale:,.0f}")
+            tot = sum(agg.get((s, wk), 0.0) for s in systems)
+            if extra:
+                tot += extra.get(wk, 0.0)
+            trow.append(f"{tot * scale:,.0f}")
             crow.append("background-color:#e8eaf0;color:#1f1f1f;font-weight:700")
         txt.append(trow)
         css.append(crow)
@@ -1012,13 +1165,157 @@ def _mw_system_rollup(state, rows, labels, tables, batch_by_id):
         c = pd.DataFrame(css, index=idx, columns=labels)
         return d.style.apply(lambda _: c, axis=None)
 
-    _h = min(560, 44 + 33 * (len(systems) + 1))
-    st.caption("Colour = fraction of the system's tank capacity (green roomy, amber "
-               "near cap, red over). Same week-open state as the grid.")
-    st.markdown("**Open biomass — tonnes / system / week**")
-    st.dataframe(_table(bio, sys_bio_cap, 0.001), use_container_width=True, height=_h)
-    st.markdown("**Open feed — kg/day / system / week** (6N depuration eats 0)")
-    st.dataframe(_table(feed, sys_feed_cap, 1.0), use_container_width=True, height=_h)
+    _w = "open" if view == "open" else "close"
+    _nrows = len(systems) + 1 + (1 if fw else 0)
+    _h = min(560, 44 + 33 * _nrows)
+    _fwnote = (f" The **{FW_LABEL}** row is standing freshwater cohorts — fed in "
+               "the FW area (no OG cap), shown neutral and folded only into the "
+               "TOTAL." if fw else "")
+    st.caption(f"Colour = fraction of each OG system's tank capacity (green roomy, "
+               f"amber near cap, red over).{_fwnote} Same week-{_w} state as the grid.")
+    st.markdown(f"**{_w.capitalize()} biomass — tonnes / system / week**")
+    st.dataframe(_table(bio, sys_bio_cap, 0.001, fw_bio if fw else None),
+                 use_container_width=True, height=_h)
+    st.markdown(f"**{_w.capitalize()} feed — kg/day / system / week** "
+                f"(6N depuration eats 0)")
+    st.dataframe(_table(feed, sys_feed_cap, 1.0, fw_feed if fw else None),
+                 use_container_width=True, height=_h)
+
+
+def _mw_recommendations(state, rows, labels, ctx):
+    """Rank the projected window's cap breaches (most out of bounds FIRST) and
+    suggest a relief action for each — harvest the heaviest tank in the offending
+    system when it's at harvest weight, else move it to the system with the most
+    feed headroom; a per-tank density breach recommends splitting that tank.
+
+    Covers per-system FEED, per-system BIOMASS, per-tank DENSITY and FACILITY
+    biomass, all against the SAME caps the System-rollup shows (tank-derived
+    system caps + the Control facility cap). Reads the current `rows`, so as the
+    operator scripts harvests/moves the breaches shrink. Returns a list of
+    {frac, week, wk_idx, tank_id, msg, action} sorted by severity (value ÷ cap)."""
+    from collections import defaultdict
+    from forecast.biology import realized_feed_kg_day
+    from forecast.sixn import SIXN_ALL_TANKS
+    control, tables = ctx.get("control"), ctx.get("tables")
+    batch_by_id = ctx.get("batch_by_id") or {}
+    min_hg = float(getattr(control, "min_harvest_weight_g", 0) or 0)
+    fac_bio_cap = float(getattr(control, "max_biomass_kg", 0) or 0)
+
+    sys_bio_cap, sys_feed_cap, tank_cap = defaultdict(float), defaultdict(float), {}
+    # 6N systems are depuration (off-feed, harvest-staging) — never a valid relief
+    # destination and not grow-out feed/biomass constraints, so exclude them.
+    sixn_systems = {t.system_id for t in state.tanks_by_id.values()
+                    if t.tank_id in SIXN_ALL_TANKS}
+    for t in state.tanks_by_id.values():
+        if t.type != "OG":
+            continue
+        sys_bio_cap[t.system_id] += (t.volume_m3 or 0.0) * (t.max_density_kg_m3 or 0.0)
+        sys_feed_cap[t.system_id] += (t.max_feed_kg_day_cap or 0.0)
+        tank_cap[t.tank_id] = t.max_density_kg_m3 or 0.0
+
+    sys_bio, sys_feed, fac_bio = (defaultdict(float), defaultdict(float),
+                                  defaultdict(float))
+    rows_by_sw, rows_by_w = defaultdict(list), defaultdict(list)
+    for r in rows:
+        if r.count <= 0:
+            continue
+        sys_bio[(r.system_id, r.week_label)] += r.biomass_kg
+        fac_bio[r.week_label] += r.biomass_kg
+        rows_by_sw[(r.system_id, r.week_label)].append(r)
+        rows_by_w[r.week_label].append(r)
+        if getattr(r, "stage", "") != "STARVE":
+            sys_feed[(r.system_id, r.week_label)] += realized_feed_kg_day(
+                r.avg_wt_g, r.biomass_kg, batch_by_id.get(r.batch_id), tables)
+
+    def _loc(tid):
+        t = state.tanks_by_id.get(tid)
+        return t.location_id if t else f"#{tid}"
+
+    def _heaviest(rws):
+        cand = [x for x in rws if x.count > 0 and x.tank_id not in SIXN_ALL_TANKS]
+        return max(cand, key=lambda x: x.avg_wt_g) if cand else None
+
+    def _roomiest_feed(wk, exclude):
+        best, best_head = None, 0.0
+        for s, cap in sys_feed_cap.items():
+            if s == exclude or s in sixn_systems:  # never relocate INTO 6N
+                continue
+            head = cap - sys_feed.get((s, wk), 0.0)
+            if head > best_head:
+                best, best_head = s, head
+        return best, best_head
+
+    def _shed_action(rws, sysid, wk):
+        """Harvest the heaviest ready tank, else move it to a roomier system."""
+        tank = _heaviest(rws)
+        if tank is None:
+            return "no non-6N tank here to relieve — check 6N / FW inflow", None
+        loc = _loc(tank.tank_id)
+        if tank.avg_wt_g >= min_hg > 0:
+            return (f"**Harvest {loc}** ({tank.batch_id} @ "
+                    f"{tank.avg_wt_g / 1000:.2f} kg)"), tank.tank_id
+        dest, head = _roomiest_feed(wk, sysid)
+        if dest and head > 0:
+            return (f"**Move {loc} → {dest}** (feed room ~{head:,.0f} kg/day) — "
+                    f"too light to harvest ({tank.avg_wt_g / 1000:.2f} kg)"), tank.tank_id
+        return (f"**Move {loc} off {sysid}** — no system has feed headroom, "
+                f"consider 6N"), tank.tank_id
+
+    breaches = []
+    for (s, wk), used in sys_feed.items():
+        cap = sys_feed_cap.get(s, 0.0)
+        if s not in sixn_systems and cap > 0 and used > cap:
+            breaches.append(("feed", s, wk, used, cap))
+    for (s, wk), used in sys_bio.items():
+        cap = sys_bio_cap.get(s, 0.0)
+        if s not in sixn_systems and cap > 0 and used > cap:
+            breaches.append(("sysbio", s, wk, used, cap))
+    for r in rows:
+        if r.count <= 0 or r.tank_id in SIXN_ALL_TANKS:
+            continue
+        cap = tank_cap.get(r.tank_id, 0.0)
+        if cap > 0 and r.density_kg_m3 > cap:
+            breaches.append(("dens", r.tank_id, r.week_label, r.density_kg_m3, cap))
+    for wk, used in fac_bio.items():
+        if fac_bio_cap > 0 and used > fac_bio_cap:
+            breaches.append(("facbio", None, wk, used, fac_bio_cap))
+
+    out = []
+    for kind, where, wk, used, cap in breaches:
+        frac = used / cap if cap else 0.0
+        wk_idx = labels.index(wk) + 1 if wk in labels else 0
+        if kind == "feed":
+            act, tid = _shed_action(rows_by_sw.get((where, wk), []), where, wk)
+            msg = (f"**{where}** feed {used:,.0f} / {cap:,.0f} kg/day "
+                   f"({frac * 100:.0f}%)")
+        elif kind == "sysbio":
+            act, tid = _shed_action(rows_by_sw.get((where, wk), []), where, wk)
+            msg = (f"**{where}** biomass {used / 1000:.1f} / {cap / 1000:.1f} t "
+                   f"({frac * 100:.0f}%)")
+        elif kind == "dens":
+            tid = where
+            act = f"**Split {_loc(where)}** — move part to an empty / roomier tank"
+            msg = (f"**{_loc(where)}** density {used:.0f} / {cap:.0f} kg/m³ "
+                   f"({frac * 100:.0f}%)")
+        else:  # facbio — only harvest reduces the facility total
+            tank = _heaviest(rows_by_w.get(wk, []))
+            tid = tank.tank_id if tank else None
+            act = (f"**Harvest {_loc(tid)}** (heaviest ready, {tank.batch_id} @ "
+                   f"{tank.avg_wt_g / 1000:.2f} kg)"
+                   if tank and tank.avg_wt_g >= min_hg > 0
+                   else "**Harvest facility-wide** — total over cap")
+            msg = (f"**Facility** biomass {used / 1000:.1f} / {cap / 1000:.1f} t "
+                   f"({frac * 100:.0f}%)")
+        out.append({"frac": frac, "week": wk, "wk_idx": wk_idx, "tank_id": tid,
+                    "msg": msg, "action": act,
+                    "key": (kind, where if where is not None else "FAC")})
+    # Collapse a breach that recurs across weeks to its WORST week, so the top-N
+    # shows distinct problems instead of one tank repeated every week.
+    worst = {}
+    for o in out:
+        if o["key"] not in worst or o["frac"] > worst[o["key"]]["frac"]:
+            worst[o["key"]] = o
+    return sorted(worst.values(), key=lambda x: -x["frac"])
 
 
 # ---- The contextual action panel (opens on a tank click) ----
@@ -1268,6 +1565,38 @@ def _mw_fw_intake(state, ctx, rows, labels, date_for):
         key="mw_fw_week")
     cnt, _wt, _cv = avail[bid][wlabel]
     wk = labels.index(wlabel) + 1
+
+    # Planned vs. current: the batch's originally-scheduled TranOG (from the PR /
+    # scenario) next to what you're actually picking, so you can see how far off
+    # the plan — in timing and in size — this intake is.
+    from forecast.time_grid import iso_week_label, _as_date
+    b_meta = ctx["batch_by_id"].get(bid)
+    # tran_og_date may be a datetime; normalise to date so it subtracts cleanly
+    # against the (date) week-starts below.
+    _pd = getattr(b_meta, "tran_og_date", None) if b_meta else None
+    p_date = _as_date(_pd) if _pd else None
+    p_wt = getattr(b_meta, "tran_og_avg_wt_g", None) if b_meta else None
+    p_week = iso_week_label(p_date) if p_date else "—"
+    p_wt_s = f"{p_wt / 1000:.2f} kg" if p_wt else "—"
+    st.markdown(
+        "| | Transfer week | Avg weight |\n"
+        "|---|---|---|\n"
+        f"| **Planned** (PR) | {p_week} | {p_wt_s} |\n"
+        f"| **This intake** | {wlabel} (wk {wk}) | {_wt / 1000:.2f} kg |")
+    # One-line read-out of the deltas that matter operationally.
+    notes = []
+    cur_date = date_for.get(wlabel)
+    if p_date and cur_date:
+        dwk = round((cur_date - p_date).days / 7)
+        notes.append("same week as planned" if dwk == 0 else
+                     f"{abs(dwk)} wk {'earlier' if dwk < 0 else 'later'} than planned")
+    if p_wt:
+        dwt = (_wt - p_wt) / 1000.0
+        notes.append("on planned weight" if abs(dwt) < 0.005 else
+                     f"{abs(dwt):.2f} kg {'lighter' if dwt < 0 else 'heavier'} "
+                     f"than planned")
+    if notes:
+        st.caption("↳ " + " · ".join(notes))
     st.caption(f"Projected freshwater state: ~{cnt:,.0f} fish available at "
                f"{wlabel}. Target is the count entering seawater (the engine "
                f"applies handling mortality + culls down to it).")
@@ -1446,6 +1775,17 @@ def _manual_window_editor(uploaded):
     uploaded PR, saved to scenario/manual_events.yaml (which the run reads). The
     flat grid lives on behind an Advanced expander. No Excel sheets involved."""
     from forecast.time_grid import week_start as _week_start
+    # The section-toggle widgets (rollup / FW intake / advanced) render BELOW the
+    # clickable grid + action panel. When an action-panel button (add harvest/
+    # move/6N, close ✕) or a timeline delete calls st.rerun(), the script aborts
+    # BEFORE those toggles are re-instantiated that run — and Streamlit drops the
+    # state of any keyed widget it didn't render, snapping the toggles back to
+    # off (their content vanishes while the switch still looks on). Re-touching
+    # the keys here, at the top (which always runs), keeps their state across
+    # such a rerun. (Verified against a headless Streamlit repro.)
+    for _tk in ("mw_rollup_toggle", "mw_fw_toggle", "mw_adv_toggle"):
+        if _tk in st.session_state:
+            st.session_state[_tk] = st.session_state[_tk]
     with st.expander("🗓 Starting setup — manual override window (optional)",
                      expanded=False):
         st.caption(
@@ -1485,7 +1825,18 @@ def _manual_window_editor(uploaded):
                          "The saved window length stays implicit — it runs through "
                          "your last scripted operation, then the planner takes over.")
             n_weeks = max(view, max_ev, 1)
-            rows, labels = _mw_project(state, ctx, events, n_weeks)
+            _vmode = st.radio(
+                "Show tank state at", ["Week open", "Week close"],
+                horizontal=True, key="mw_view_at",
+                help="Week open = start-of-week, before that week's growth AND "
+                     "before your scripted events run — what's in the tank when "
+                     "you click to act on it. Week close = end-of-week, after "
+                     "growth and after your events run — so you can see what "
+                     "holds fish and what's empty at week's end (a tank you "
+                     "harvest or move shows empty here, at the week you act).")
+            _view = "close" if _vmode.startswith("Week close") else "open"
+            rows, labels, moves = _mw_project(
+                state, ctx, events, n_weeks, view=_view)
             date_for = {lbl: _week_start(i, ctx["forecast_start"])
                         for i, lbl in enumerate(labels)}
 
@@ -1496,6 +1847,13 @@ def _manual_window_editor(uploaded):
                      "a distinct colour per batch, to see which tanks hold which "
                      "fish and how a batch moves across the weeks.")
             _cb = "batch" if _cmode.startswith("Batch") else "fill"
+            _when = (
+                "**week-open** (start of the week, before that week's growth and "
+                "before your scripted events) — what's in the tank when you act"
+                if _view == "open" else
+                "**week-close** (end of the week, after growth and after your "
+                "scripted events) — what holds fish and what's empty at week's "
+                "end; a tank you harvest or move shows empty here")
             st.caption(
                 ("**Each batch has its own background colour** (grey = empty). "
                  if _cb == "batch" else
@@ -1503,9 +1861,12 @@ def _manual_window_editor(uploaded):
                  "green roomy, amber near cap, red over — and the **batch id is bold "
                  "in its own colour** so you can follow a cohort across tanks. ")
                 + "Columns are weeks, rows are tanks (⛔6N = depuration), and each cell "
-                  "shows **batch · avg weight · density** at **week-open** (start of "
-                  "the week, before that week's growth) — what's in the tank when you "
-                  "act. **Click a tank's cell at the week you want** to act on it. "
+                  "shows **batch · avg weight · density** at " + _when + ". "
+                  "A **move lights up both ends in its week**: the tank that holds "
+                  "the fish in this view is solid with an arrow (**⇢** leaving / "
+                  "**⇠** arrived), and the counterpart tank shows a faint **ghost "
+                  "arrow** naming where the fish went / came from. "
+                  "**Click a tank's cell at the week you want** to act on it. "
                   "The grid redraws as you script.")
 
             # Optional batch filter — show only the tanks holding the selected
@@ -1522,7 +1883,7 @@ def _manual_window_editor(uploaded):
             # by side so a cell click shows the options right next to the grid instead
             # of below a tall, internally-scrolling table.
             styler, ylabels, tank_by_y = _mw_grid(
-                state, rows, labels, color_by=_cb, batch_filter=_bf)
+                state, rows, labels, color_by=_cb, batch_filter=_bf, moves=moves)
             if _bf and not ylabels:
                 st.caption("No tanks hold the selected batch(es) in this window.")
             gnonce = st.session_state.get("mw_grid_nonce2", 0)
@@ -1554,6 +1915,35 @@ def _manual_window_editor(uploaded):
                             tank_by_y[ylabels[_rowpos]], _wlabel,
                             labels.index(_wlabel) + 1)
             with panel_col:
+                # Recommendations — what's most out of bounds this window and the
+                # relief action, ranked worst-first. Reads the current projection,
+                # so it updates as you script events. ▶ jumps to that tank.
+                _recs = _mw_recommendations(state, rows, labels, ctx)
+                with st.container(border=True):
+                    st.markdown("**⚠ Most out of bounds — recommended actions**")
+                    if not _recs:
+                        st.caption("✓ Every tank, system and the facility are "
+                                   "within limits across this window.")
+                    else:
+                        st.caption("Ranked by how far over cap. **▶** jumps to the "
+                                   "tank so you can act on it.")
+                        for _i, _rc in enumerate(_recs[:6]):
+                            _sev = "🔴" if _rc["frac"] >= 1.15 else "🟠"
+                            _ca, _cb = st.columns([9, 1])
+                            _ca.markdown(
+                                f"{_sev} **Wk {_rc['wk_idx']}** · {_rc['msg']}  \n"
+                                f"↳ {_rc['action']}")
+                            if (_rc["tank_id"] is not None
+                                    and _rc["week"] in labels
+                                    and _cb.button("▶", key=f"mw_rec_{_i}",
+                                                   help="Select this tank")):
+                                st.session_state["mw_sel"] = (
+                                    _rc["tank_id"], _rc["week"],
+                                    labels.index(_rc["week"]) + 1)
+                                st.rerun()
+                        if len(_recs) > 6:
+                            st.caption(f"… and {len(_recs) - 6} more breach(es).")
+
                 sel = st.session_state.get("mw_sel")
                 if sel and sel[1] in labels:
                     with st.container(border=True):
@@ -1562,10 +1952,11 @@ def _manual_window_editor(uploaded):
                     st.info("👆 Click a tank's cell in the grid to harvest it, move / "
                             "split it, or send it to 6N — the options appear here.")
 
-            if st.toggle("📊 System rollup — open biomass + feed/day per week",
-                         key="mw_rollup_toggle"):
+            _roll_when = "open" if _view == "open" else "close"
+            if st.toggle(f"📊 System rollup — {_roll_when} biomass + feed/day "
+                         f"per week", key="mw_rollup_toggle"):
                 _mw_system_rollup(state, rows, labels, ctx["tables"],
-                                  ctx["batch_by_id"])
+                                  ctx["batch_by_id"], ctx=ctx, view=_view)
 
             if st.toggle("🐟 FW→OG intake — bring a freshwater cohort into OG",
                          key="mw_fw_toggle"):
@@ -2251,14 +2642,16 @@ def _parse_output_workbook(path: Path) -> dict:
             gross_kg = row[5]
             gross_avg_kg = row[4]
             hog_kg = row[8] if len(row) > 8 and isinstance(row[8], (int, float)) else None
+            hog_avg_kg = row[7] if len(row) > 7 and isinstance(row[7], (int, float)) else None
             if isinstance(cnt, (int, float)) and isinstance(gross_kg, (int, float)):
                 harvest_count += cnt
                 harvest_kg += gross_kg
                 harvest_events.append({
-                    "Week": row[0], "Batch": row[1],
+                    "Week": row[0], "Batch": row[1], "Tank": row[2],
                     "Count": cnt, "Gross_kg": gross_kg,
                     "Avg_wt_kg": gross_avg_kg,
                     "HOG_kg": hog_kg if hog_kg is not None else 0.0,
+                    "HOG_avg_kg": hog_avg_kg,
                 })
 
     # Validation warnings now live in ValidationLog ("# | Category | Detail",
@@ -2602,6 +2995,65 @@ def _harvest_mode_label(config_dir) -> str:
         return (f"level-load ON (K={c.get('harvest_smooth_lookahead_weeks')}, "
                 f"setpoint={c.get('harvest_setpoint_lookahead_weeks')})")
     return "level-load OFF (default controller)"
+
+
+def _daily_harvest_table(he_df):
+    """Per-day (Mon–Fri) breakout of the WEEK's total harvest for the Harvest tab.
+
+    All tanks harvesting in the same ISO week are COMBINED into one block: their
+    count + biomass are summed and split evenly across the five operating days,
+    with blended average weights (total biomass ÷ total fish), a **Total** row,
+    and a blank row before the next week. The Tank/Batch columns list every tank
+    and batch that contributed. Returns (DataFrame, {total-row positions},
+    {blank-row positions}) so the caller can shade the totals."""
+    import datetime as _dt
+    cols = ["Week", "Date", "Tank", "Batch", "Count", "Live kg",
+            "Avg live (kg)", "HOG kg", "Avg HOG (kg)"]
+    rows: list[dict] = []
+    total_pos, blank_pos = set(), set()
+    if he_df.empty or "Week" not in he_df.columns:
+        return pd.DataFrame(rows, columns=cols), total_pos, blank_pos
+    df = he_df.copy()
+    df["Week"] = df["Week"].astype(str)
+
+    def _num(s):
+        return float(pd.to_numeric(s, errors="coerce").fillna(0).sum())
+
+    for wk in sorted(df["Week"].unique()):
+        sub = df[df["Week"] == wk]
+        try:
+            y, w = int(wk[:4]), int(wk[6:8])
+            days = [_dt.date.fromisocalendar(y, w, 1) + _dt.timedelta(days=i)
+                    for i in range(5)]
+        except Exception:  # noqa: BLE001 — a non-week label just gets skipped
+            continue
+        cnt = _num(sub["Count"])
+        gross = _num(sub["Gross_kg"]) if "Gross_kg" in sub else 0.0
+        hog = _num(sub["HOG_kg"]) if "HOG_kg" in sub else 0.0
+        live_avg = gross / cnt if cnt else 0.0     # blended live kg/fish
+        hog_avg = hog / cnt if cnt else 0.0         # blended HOG kg/fish
+        tanks = (", ".join(str(int(t)) if float(t).is_integer() else str(t)
+                           for t in sorted(sub["Tank"].dropna().unique()))
+                 if "Tank" in sub else "")
+        bats = (", ".join(sorted(sub["Batch"].dropna().astype(str).unique()))
+                if "Batch" in sub else "")
+        n = len(days)
+        for d in days:
+            rows.append({
+                "Week": wk, "Date": d.strftime("%Y-%m-%d"),
+                "Tank": tanks, "Batch": bats,
+                "Count": f"{round(cnt / n):,}", "Live kg": f"{round(gross / n):,}",
+                "Avg live (kg)": f"{live_avg:.2f}",
+                "HOG kg": f"{round(hog / n):,}", "Avg HOG (kg)": f"{hog_avg:.2f}"})
+        total_pos.add(len(rows))
+        rows.append({
+            "Week": wk, "Date": "Total", "Tank": tanks, "Batch": bats,
+            "Count": f"{round(cnt):,}", "Live kg": f"{round(gross):,}",
+            "Avg live (kg)": f"{live_avg:.2f}", "HOG kg": f"{round(hog):,}",
+            "Avg HOG (kg)": f"{hog_avg:.2f}"})
+        blank_pos.add(len(rows))
+        rows.append({c: "" for c in cols})
+    return pd.DataFrame(rows, columns=cols), total_pos, blank_pos
 
 
 def _quick_viz(r):
@@ -3753,6 +4205,28 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
                                  title="Fish harvested per month")
                     fig.update_layout(height=320, yaxis_title="fish", xaxis_title="")
                     st.plotly_chart(fig, use_container_width=True)
+
+            # Daily harvest schedule — each weekly tank-harvest split Mon–Fri,
+            # with a per-week Total row and a blank line between weeks.
+            st.markdown("**Daily harvest schedule (Mon–Fri)**")
+            st.caption(
+                "**All tanks harvesting in a week are combined**, then split "
+                "evenly across the five operating days (Mon–Fri), with a **Total** "
+                "row per week and a blank line between weeks. Tank/Batch list every "
+                "tank + batch that contributed; average weights are blended (total "
+                "biomass ÷ total fish). Same as the Excel 'Daily Harvest Schedule' "
+                "sheet.")
+            _dh, _totpos, _blankpos = _daily_harvest_table(he_df)
+            if _dh.empty:
+                st.info("No datable harvest events for a daily breakout.")
+            else:
+                def _hl_totals(row):
+                    if row.name in _totpos:
+                        return ["background-color:#e8eaf0;font-weight:700"] * len(row)
+                    return [""] * len(row)
+                st.dataframe(_dh.style.apply(_hl_totals, axis=1),
+                             hide_index=True, use_container_width=True,
+                             height=min(760, 44 + 35 * len(_dh)))
 
             with st.expander("Raw harvest events"):
                 st.dataframe(he_df, hide_index=True, use_container_width=True)

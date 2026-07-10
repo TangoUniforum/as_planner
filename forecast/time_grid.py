@@ -170,9 +170,11 @@ def working_day_month_split(event_date, forecast_start=None) -> dict[tuple[int, 
     in, never the totals or the fish (cf. the legacy "Target" rule, which
     chased MonthlyTargets and mis-credited boundary weeks).
 
-    `forecast_start`, when given, clips Mon-Fri days before the horizon
-    (matching write_daily_harvest_schedule) so a partial first week is
-    attributed only over its in-horizon working days.
+    `forecast_start` is an optional legacy clip of Mon-Fri days before the
+    horizon. It is DEFAULT-OFF and the report callers no longer pass it:
+    manual override-window harvests are dated before the shifted forecast_start,
+    and clipping collapsed whole boundary weeks into one month/year. (The Daily
+    Harvest Schedule split it once mirrored also dropped its clip.)
     """
     d = _as_date(event_date)
     monday = d - timedelta(days=d.weekday())

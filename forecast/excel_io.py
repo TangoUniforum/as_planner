@@ -483,8 +483,11 @@ def write_harvest_plan_report(
         hog_yield = facility_limits_hog.get(iso_week_label(ev.event_date), default_hog_yield)
         hog_kg = ev.count * ev.avg_wt_g / 1000.0 * hog_yield
         # Split the week's harvest across the months its Mon-Fri working days
-        # fall into (boundary weeks split by working-day fraction).
-        for (yr, mo), frac in working_day_month_split(ev.event_date, forecast_start).items():
+        # fall into (boundary weeks split by working-day fraction). No
+        # forecast_start clip: manual override-window harvests are dated BEFORE
+        # the shifted forecast_start, and clipping would dump a whole boundary
+        # week into one month/year (same class as the Daily Harvest Schedule bug).
+        for (yr, mo), frac in working_day_month_split(ev.event_date).items():
             e = agg[(yr, ev.batch_id, mo)]
             e["count"] += ev.count * frac
             e["hog_kg"] += hog_kg * frac
@@ -690,49 +693,74 @@ def write_daily_harvest_schedule(
     facility_limits_hog: dict,
     sheet_name: str = "Daily Harvest Schedule",
 ) -> None:
-    """Mon-Fri split of weekly harvests with HOG conversions.
+    """Mon-Fri split of each week's COMBINED harvest with HOG conversions.
 
-    Each Harvest event is distributed evenly across the Mon-Fri operating
-    days of its ISO week. Days before `forecast_start` or after the
-    horizon are dropped.
+    All Harvest events in the same ISO week are combined: their count + live
+    biomass are summed and distributed evenly across that week's five Mon-Fri
+    operating days, with blended average weights (total biomass / total fish),
+    a per-week Total row, and a blank separator. The Tank/Batch columns list
+    every tank/batch that contributed. No forecast_start clip (manual override
+    weeks are dated before the shifted start and must show their full 5 days).
     """
+    from collections import defaultdict
     from datetime import timedelta
+    from openpyxl.styles import Font
     if sheet_name in wb.sheetnames:
         del wb[sheet_name]
     ws = wb.create_sheet(sheet_name)
     ws.append(["DAILY HARVEST SCHEDULE"])
-    ws.append([f"Weekly harvests split Mon-Fri. Forecast start {forecast_start}"])
+    ws.append([f"Each week's harvest (all tanks combined) split Mon-Fri. "
+               f"Forecast start {forecast_start}"])
     ws.append([])
     ws.append([
         "Year", "Week", "Date", "Tank", "Batch", "Count (fish)",
         "Weight (kg HOG)", "Avg Weight (kg HOG)", "Live Weight (kg)",
     ])
 
-    fs = forecast_start.date() if hasattr(forecast_start, "date") else forecast_start
-    events_sorted = sorted(harvest_events, key=lambda e: (e.event_date, e.source_tank_id))
-    for ev in events_sorted:
+    # Combine every harvest event by ISO week.
+    by_week: dict = defaultdict(
+        lambda: {"count": 0.0, "live_kg": 0.0, "tanks": set(), "batches": set(),
+                 "ev_date": None})
+    for ev in harvest_events:
         ev_date = ev.event_date.date() if hasattr(ev.event_date, "date") else ev.event_date
-        # Mon-Fri of this event's ISO week, filtered to forecast horizon.
+        rec = by_week[iso_week_label(ev_date)]
+        rec["count"] += ev.count
+        rec["live_kg"] += ev.count * ev.avg_wt_g / 1000.0
+        rec["tanks"].add(ev.source_tank_id)
+        rec["batches"].add(ev.batch_id)
+        if rec["ev_date"] is None or ev_date < rec["ev_date"]:
+            rec["ev_date"] = ev_date
+
+    for wk_label in sorted(by_week):
+        rec = by_week[wk_label]
+        ev_date = rec["ev_date"]
         monday = ev_date - timedelta(days=ev_date.weekday())
-        mon_fri = [monday + timedelta(days=i) for i in range(5) if monday + timedelta(days=i) >= fs]
-        if not mon_fri:
-            mon_fri = [ev_date]  # fall back to event date itself
-        per_day_count = ev.count / len(mon_fri)
-        per_day_live_kg = per_day_count * ev.avg_wt_g / 1000.0
-        wk_label = iso_week_label(ev_date)
+        mon_fri = [monday + timedelta(days=i) for i in range(5)]
+        n_days = len(mon_fri)
+        cnt, live_kg = rec["count"], rec["live_kg"]
         hog_yield = facility_limits_hog.get(wk_label, default_hog_yield)
-        per_day_hog_kg = per_day_live_kg * hog_yield
-        hog_avg_kg = (ev.avg_wt_g / 1000.0) * hog_yield
+        hog_kg = live_kg * hog_yield
+        hog_avg_kg = (live_kg / cnt * hog_yield) if cnt else 0.0  # blended
+        tanks = ", ".join(str(t) for t in sorted(rec["tanks"]))
+        batches = ", ".join(sorted(rec["batches"]))
         iso_y, iso_w, _ = ev_date.isocalendar()
         for d in mon_fri:
             ws.append([
-                iso_y, iso_w, d, ev.source_tank_id, ev.batch_id,
-                round(per_day_count, 0),
-                round(per_day_hog_kg, 0),
+                iso_y, iso_w, d, tanks, batches,
+                round(cnt / n_days, 0),
+                round(hog_kg / n_days, 0),
                 round(hog_avg_kg, 3),
-                round(per_day_live_kg, 0),
+                round(live_kg / n_days, 0),
             ])
-    widths = {1: 6, 2: 6, 3: 12, 4: 6, 5: 8, 6: 12, 7: 15, 8: 17, 9: 14}
+        ws.append([
+            iso_y, iso_w, "Total", tanks, batches,
+            round(cnt, 0), round(hog_kg, 0), round(hog_avg_kg, 3),
+            round(live_kg, 0),
+        ])
+        for cell in ws[ws.max_row]:
+            cell.font = Font(bold=True)
+        ws.append([])
+    widths = {1: 6, 2: 6, 3: 12, 4: 14, 5: 14, 6: 12, 7: 15, 8: 17, 9: 14}
     for c, w in widths.items():
         ws.column_dimensions[get_column_letter(c)].width = w
 
@@ -1407,8 +1435,9 @@ def write_monthly_report(
             wkd = _wk_date(w)
             if wkd is None:
                 continue  # unparseable week — cannot attribute, skip (rare)
-            split_c = calendar_day_month_split(wkd)               # daily flows
-            split_w = working_day_month_split(wkd, forecast_start)  # harvest
+            split_c = calendar_day_month_split(wkd)   # daily flows
+            split_w = working_day_month_split(wkd)     # harvest (no fs clip —
+            #        pre-start manual weeks must split by working day like the rest)
             oc, ob = w["open_count"], w["open_bio"]
             hc, hg = w["harv_count"], w["harv_gross"]
             dc, db = w["close_count"] - oc, w["close_bio"] - ob
