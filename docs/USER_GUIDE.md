@@ -204,6 +204,22 @@ and act. Because it reads the live projection, the breaches **shrink as you
 script** — so it doubles as your "am I done yet?" check (empty = everything is
 within limits across the window).
 
+**🤖 Co-pilot — let the forecast propose the next week (v1a).** A toggle at the
+bottom of the window turns on a human-in-the-loop planner. You script the start
+and trend by hand; when you want help, press **"Recommend week N+1"** and the
+co-pilot runs the planners forward from your window (**respect mode** — your
+scripted transfers are never changed) and proposes the *next* week's operations:
+**harvest + 6N staging from the validated controller** (pre-ticked — these are
+the load-bearing, contract/cap moves) and an **optimised OG↔OG transfer plan from
+the global optimiser** (ranked biggest-first, *opt-in* — the optimiser's first
+week is often a full layout transition, so you tick only the moves you want).
+Approve the ticked moves and they're appended as week N+1's operations, extending
+your window by a week; run it again for the week after, and so on. Each run takes
+**~1 minute** (it runs both planners). The engine (`forecast/copilot.py`) is
+UI-free by design, so this loop is portable to a future desktop build. *Planned
+next (v1b): genuinely ranked transfer **options** side-by-side, each tagged by the
+priority it serves (contract → caps → utilisation → transfers).*
+
 **📊 System rollup — spotting capacity pressure.** The per-tank grid shows
 *density* per tank, but a system can be fine on every individual tank and still
 be **over its feed budget** — feed usually binds before biomass here. The

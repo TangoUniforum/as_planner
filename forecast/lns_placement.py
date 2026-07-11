@@ -95,6 +95,64 @@ def system_peak(batch_locations, batch_by_id, tables, system_limits):
     return peak
 
 
+def system_score(batch_locations, batch_by_id, tables, system_limits, grow):
+    """Lexicographic objective (lower is better, in priority order):
+      peak  — the single hottest load fraction (biomass or feed, excl OG6N);
+      area  — the TOTAL over-cap overage, Σ max(0, frac - 1) across every cell;
+      cv    — mean between-grow-out-system load-fraction CV per week (balance).
+
+    `peak` preserves the original single-objective behaviour. The `area` and `cv`
+    tiers are what let LNS add value on a capacity-bound (tank-full) facility: a
+    peak-neutral swap can relieve OTHER over-cap cells (area) and even the load
+    system-to-system (cv) even when the single hottest cell can't be lowered."""
+    sb, sf, cap = system_loads(batch_locations, batch_by_id, tables, system_limits)
+    frac: dict = defaultdict(float)
+    for (wk, sysid), bio in sb.items():
+        if sysid == "OG6N":
+            continue
+        bc = cap(wk, sysid, "biomass")
+        if bc and bc > 0:
+            frac[(wk, sysid)] = max(frac[(wk, sysid)], bio / bc)
+    for (wk, sysid), feed in sf.items():
+        if sysid == "OG6N":
+            continue
+        fc = cap(wk, sysid, "feed_per_day")
+        if fc and fc > 0:
+            frac[(wk, sysid)] = max(frac[(wk, sysid)], feed / fc)
+    peak = max(frac.values(), default=0.0)
+    area = sum(max(0.0, f - 1.0) for f in frac.values())
+    byweek: dict = defaultdict(list)
+    for (wk, sysid), f in frac.items():
+        if sysid in grow:
+            byweek[wk].append(f)
+    cvs = []
+    for fs in byweek.values():
+        if len(fs) >= 2:
+            m = sum(fs) / len(fs)
+            if m > 0:
+                var = sum((x - m) ** 2 for x in fs) / len(fs)
+                cvs.append((var ** 0.5) / m)
+    cv = sum(cvs) / len(cvs) if cvs else 0.0
+    return (peak, area, cv)
+
+
+def _better(new, base, *, peak_eps=1e-9, area_eps=1e-3, cv_eps=5e-3):
+    """Accept `new` over `base` iff it NEVER worsens the peak and strictly improves
+    the lexicographic (peak, area, cv) objective by at least the per-tier epsilon.
+    So a move can be taken to relieve total over-cap area or even the load even
+    when the single hottest cell is pinned at the capacity floor — but a move that
+    would raise the peak, or only churns CV by a trivial amount, is rejected."""
+    if new[0] > base[0] + peak_eps:
+        return False                       # hard rule: never raise the peak
+    if new[0] < base[0] - peak_eps:
+        return True                        # strictly lower peak — always good
+    if new[1] < base[1] - area_eps:
+        return True                        # peak tied, less total over-cap area
+    if new[1] > base[1] + area_eps:
+        return False                       # peak tied, MORE area — reject
+    return new[2] < base[2] - cv_eps       # peak + area tied, better balance
+
+
 # --------------------------------------------------------------------------- #
 # Conservation gate — reuse the REAL continuity audit so our reconciliation can
 # never diverge from the one the regression test locks.
@@ -300,7 +358,13 @@ def refine_realized(placement, *, initial_state, batch_week_states, control,
     start_peak = system_peak(placement.batch_locations, batch_meta, tables, system_limits)
     g_batches = {r.batch_id for r in placement.batch_locations}
     work = copy.deepcopy(placement)                    # greedy stays untouched
-    base_peak = start_peak
+    # Lexicographic objective (peak, over-cap area, balance CV): peak is the
+    # original single-objective behaviour; the area + CV tiers let peak-neutral
+    # swaps relieve TOTAL overage and even the load on a full facility, where the
+    # single hottest cell can't be lowered by any move.
+    start_score = system_score(placement.batch_locations, batch_meta, tables,
+                               system_limits, grow)
+    base_score = start_score
 
     weeks = sorted({r.week_label for r in work.batch_locations})
     week_index = {w: i for i, w in enumerate(weeks)}
@@ -361,12 +425,13 @@ def refine_realized(placement, *, initial_state, batch_week_states, control,
                 continue
             relmap = {(seg.batch_id, seg.tank_id, w): target for w in seg.week_labels}
             _relabel(work, relmap, tank_by_id)
-            new_peak = system_peak(work.batch_locations, batch_meta, tables, system_limits)
-            ok = (new_peak < base_peak - 1e-9
+            new_score = system_score(work.batch_locations, batch_meta, tables,
+                                     system_limits, grow)
+            ok = (_better(new_score, base_score)
                   and {r.batch_id for r in work.batch_locations} >= g_batches
                   and drift_count(work, batch_week_states, initial_state) == 0)
             if ok:
-                base_peak = new_peak
+                base_score = new_score
                 moves += 1
                 did = True
                 break
@@ -394,13 +459,13 @@ def refine_realized(placement, *, initial_state, batch_week_states, control,
                     relmap.update({(sb_seg.batch_id, sb_seg.tank_id, w): seg.tank_id
                                    for w in sb_seg.week_labels})
                     _relabel(work, relmap, tank_by_id)
-                    new_peak = system_peak(work.batch_locations, batch_meta, tables,
-                                           system_limits)
-                    ok = (new_peak < base_peak - 1e-9
+                    new_score = system_score(work.batch_locations, batch_meta,
+                                             tables, system_limits, grow)
+                    ok = (_better(new_score, base_score)
                           and {r.batch_id for r in work.batch_locations} >= g_batches
                           and drift_count(work, batch_week_states, initial_state) == 0)
                     if ok:
-                        base_peak = new_peak
+                        base_score = new_score
                         moves += 1
                         did = True
                         break
@@ -419,6 +484,8 @@ def refine_realized(placement, *, initial_state, batch_week_states, control,
             or {r.batch_id for r in work.batch_locations} < g_batches):
         print("  LNS placement: final safety gate failed; greedy stands", file=sys.stderr)
         return None
-    print(f"  LNS placement: ACCEPTED — {moves} relocation(s), hot spot "
-          f"{start_peak:.3f} -> {base_peak:.3f}")
+    print(f"  LNS placement: ACCEPTED — {moves} move(s): peak "
+          f"{start_score[0]:.3f}->{base_score[0]:.3f}, over-cap area "
+          f"{start_score[1]:.2f}->{base_score[1]:.2f}, balance CV "
+          f"{start_score[2]:.3f}->{base_score[2]:.3f}")
     return work

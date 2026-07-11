@@ -1769,6 +1769,108 @@ def _mw_save_bar(events, bad):
         st.rerun()
 
 
+def _mw_copilot(uploaded, events):
+    """Human-in-the-loop co-pilot (v1a). Runs the planners forward from the
+    scripted window (respect mode — your transfers are fixed) and recommends the
+    NEXT week: harvest + 6N staging from the validated controller (pre-ticked,
+    load-bearing) and an optimised OG<->OG transfer plan from the global optimiser
+    (ranked, opt-in). Ticked moves append as that week's operations, extending the
+    window by one week — then run it again for the week after. Engine is
+    forecast.copilot (UI-free); this is just the shell."""
+    import tempfile
+    from forecast.copilot import propose_next_week, to_manual_events
+    from forecast.manual_events import dump_manual_events
+    _n = max((e.week or 1) for e in events) if events else 0
+    st.caption(
+        "Runs the controller + global optimiser forward from your window — your "
+        "transfers stay fixed — and recommends the **next** week. Harvest + 6N "
+        "staging come from the validated controller (pre-ticked); the OG↔OG "
+        "transfer plan comes from the global optimiser (ranked, opt-in). Tick what "
+        "you want, approve, and it's added as that week's ops — then run again for "
+        "the week after. **~1 min per run.**")
+    if st.button(f"🤖 Recommend week {_n + 1}", key="mw_cp_run", type="primary"):
+        try:
+            dump_manual_events(SCENARIO_DIR, events)
+        except Exception as e:  # noqa: BLE001
+            st.error(f"Couldn't save your events first: {e}")
+            return
+        tmp = Path(tempfile.gettempdir()) / "copilot_pr.xlsm"
+        tmp.write_bytes(uploaded.getvalue())
+        with st.spinner(f"Running the controller + global optimiser for "
+                        f"week {_n + 1}… (~1 min)"):
+            try:
+                st.session_state["mw_cp_prop"] = propose_next_week(
+                    str(tmp), str(CONFIG_DIR), str(SCENARIO_DIR))
+                st.session_state["mw_cp_nonce"] = \
+                    st.session_state.get("mw_cp_nonce", 0) + 1
+            except Exception as e:  # noqa: BLE001
+                st.session_state.pop("mw_cp_prop", None)
+                st.error(f"Co-pilot failed: {type(e).__name__}: {e}")
+                return
+
+    prop = st.session_state.get("mw_cp_prop")
+    if prop is None:
+        return
+    for _w in prop.warnings:
+        st.caption(f"⚠ {_w}")
+    if prop.is_empty():
+        st.info(f"The planners recommend no moves for {prop.week_label}.")
+        return
+
+    st.markdown(f"**Recommended for {prop.week_label}** — ticked moves add as "
+                f"week {prop.window_week}:")
+    _nonce = st.session_state.get("mw_cp_nonce", 0)
+    picks: list = []
+
+    def _ck(m, i, label, default):
+        key = f"mw_cp_pick_{_nonce}_{i}"
+        c1, c2 = st.columns([1, 16])
+        c1.checkbox("pick", value=default, key=key, label_visibility="collapsed")
+        c2.markdown(label)
+        picks.append((m, key))
+
+    i = 0
+    if prop.harvest_recs:
+        st.markdown("**① Harvest — controller (contract / caps)**")
+        for m in prop.harvest_recs:
+            _ck(m, i, f"Harvest **{m.from_loc}** · {m.batch} · "
+                      f"{m.count:,.0f} fish @ {m.avg_wt_kg:.2f} kg", True)
+            i += 1
+    if prop.sixn_recs:
+        st.markdown("**② Stage into 6N for harvest — controller**")
+        for m in prop.sixn_recs:
+            _ck(m, i, f"**{m.from_loc} → {m.to_loc}** · {m.batch} · "
+                      f"{m.count:,.0f} fish", True)
+            i += 1
+    for opt in prop.transfer_options:
+        mv = sorted(opt.moves, key=lambda x: -x.count)
+        st.markdown(f"**③ OG↔OG transfers — {opt.label}** · _{opt.why}_ "
+                    f"— {len(mv)} moves (the optimiser's full transition; "
+                    f"tick the ones you want)")
+        for m in mv:
+            _ck(m, i, f"**{m.from_loc} → {m.to_loc}** · {m.batch} · "
+                      f"{m.count:,.0f} fish · _{m.note}_", False)
+            i += 1
+
+    if st.button(f"✓ Approve ticked → add to week {prop.window_week}",
+                 key="mw_cp_approve", type="primary"):
+        chosen = [m for m, key in picks if st.session_state.get(key)]
+        if not chosen:
+            st.warning("Nothing ticked — tick at least one move to approve.")
+        else:
+            for ev in to_manual_events(chosen, prop.window_week):
+                _mw_add(ev)
+            try:
+                dump_manual_events(SCENARIO_DIR, _mw_events())
+            except Exception:  # noqa: BLE001
+                pass
+            st.session_state.pop("mw_cp_prop", None)
+            st.success(f"Added {len(chosen)} operation(s) to week "
+                       f"{prop.window_week}. Run me again for week "
+                       f"{prop.window_week + 1}.")
+            st.rerun()
+
+
 def _manual_window_editor(uploaded):
     """Run-mode editor: SEE the projected facility week by week, click a tank to
     act on it in context (harvest / move / 6N / FW→OG), validated against the
@@ -1783,7 +1885,8 @@ def _manual_window_editor(uploaded):
     # off (their content vanishes while the switch still looks on). Re-touching
     # the keys here, at the top (which always runs), keeps their state across
     # such a rerun. (Verified against a headless Streamlit repro.)
-    for _tk in ("mw_rollup_toggle", "mw_fw_toggle", "mw_adv_toggle"):
+    for _tk in ("mw_rollup_toggle", "mw_fw_toggle", "mw_adv_toggle",
+                "mw_copilot_toggle"):
         if _tk in st.session_state:
             st.session_state[_tk] = st.session_state[_tk]
     with st.expander("🗓 Starting setup — manual override window (optional)",
@@ -1962,6 +2065,11 @@ def _manual_window_editor(uploaded):
                          key="mw_fw_toggle"):
                 with st.container(border=True):
                     _mw_fw_intake(state, ctx, rows, labels, date_for)
+
+            if st.toggle("🤖 Co-pilot — let the forecast propose the next week",
+                         key="mw_copilot_toggle"):
+                with st.container(border=True):
+                    _mw_copilot(uploaded, events)
 
             st.divider()
             _mw_timeline(state, events, bad)
@@ -2467,6 +2575,21 @@ def _run_with_workbook_bytes(
     out_path = work_dir / out_name
     in_path.write_bytes(input_bytes)
 
+    # controller_lns = the validated controller with the LNS placement pass.
+    # Apply placement_method=lns via a throwaway config COPY so the user's
+    # control.yaml is never touched (mirrors forecast.methods.run_method).
+    run_config_dir = config_dir
+    if method == "controller_lns" and config_dir:
+        import shutil
+        import yaml as _yaml
+        _tmpcfg = work_dir / "config_lns"
+        shutil.copytree(config_dir, _tmpcfg)
+        _cy = _tmpcfg / "control.yaml"
+        _d = _yaml.safe_load(_cy.read_text()) or {}
+        _d["placement_method"] = "lns"
+        _cy.write_text(_yaml.safe_dump(_d, sort_keys=False))
+        run_config_dir = str(_tmpcfg)
+
     # Run the pipeline, capturing console output for display.
     t0 = time.time()
     captured = io.StringIO()
@@ -2479,7 +2602,7 @@ def _run_with_workbook_bytes(
                                 cpsat_time=cpsat_time)
             else:
                 rc = run_pipeline(input_path=in_path, output_path=out_path,
-                                  config_dir=config_dir, scenario_dir=scenario_dir)
+                                  config_dir=run_config_dir, scenario_dir=scenario_dir)
     except Exception as e:
         return {
             "ok": False,
@@ -3346,8 +3469,13 @@ def _optimizer():
             cc1, cc2, cc3 = st.columns(3)
             cc1.metric("Conservation", "PASS ✓" if ok else "FAIL ✗",
                        help=f"{run_out['dropped']} dropped / {run_out['overprod']} over-produced")
-            cc2.metric("Harvest CV", f"{run_out['cv']:.3f}")
-            cc3.metric("Weeks over 55k", run_out["over"])
+            cc2.metric("Harvest CV", f"{run_out['cv']:.3f}",
+                       help="How lumpy the weekly harvest is (coefficient of "
+                            "variation). Lower = steadier week-to-week; 0 = a "
+                            "perfectly flat harvest.")
+            cc3.metric("Weeks over 55k", run_out["over"],
+                       help="Number of weeks whose harvest exceeds the 55,000-fish "
+                            "processing ceiling — spikes your plant has to absorb.")
             st.download_button(
                 "⬇ Download optimized forecast workbook",
                 data=r["output_bytes"], file_name="Forecast_optimized.xlsm",
@@ -3516,12 +3644,16 @@ def _compare_and_choose():
     include_milp = st.checkbox(
         "Include the optimal CP-SAT placement (~30 min — tightest density, most "
         "balanced across systems)", value=True, key="board_milp")
-    st.caption("Controller (~30s) + Global heuristic (~4 min) always run. Uncheck "
-               "the CP-SAT for a fast 2-method compare.")
+    st.caption("Controller, Controller + LNS, and Global heuristic always run "
+               "(~30s / ~30s / ~4 min). Uncheck the CP-SAT for a faster compare. "
+               "On a capacity-bound config (facility full at peak) **Controller + "
+               "LNS usually matches plain Controller** — LNS only diverges when "
+               "there's tank slack to relocate/swap into.")
 
     if st.button("▶ Run all methods & compare", type="primary",
                  use_container_width=True):
         roster = [("controller", "Controller (reactive)"),
+                  ("controller_lns", "Controller + LNS"),
                   ("global", "Global (heuristic LP)")]
         if include_milp:
             roster.append(("global_optimal", "Global (optimal CP-SAT)"))
@@ -3559,6 +3691,37 @@ def _compare_and_choose():
 
     # ---- Grading-lens cards: who wins each (conservation-passers only) ----
     st.subheader("Grading lenses — who wins each")
+    with st.expander("ℹ️ What do the badges, metrics and lenses mean?"):
+        st.markdown(
+            "**Hard-gate badges** (✅ pass · ⚠️ flag) — the non-negotiables every "
+            "plan is judged on first:\n"
+            "- **Conserves** — no fish lost or created; mass balance ties out "
+            "(0 drift). ⚠️ = the plan lost fish, which disqualifies it from winning "
+            "any lens.\n"
+            "- **Fully placed** — every batch got tanks; none dropped for lack of "
+            "space.\n"
+            "- **No empty week** — never a near-empty harvest week (meets the weekly "
+            "contract floor); ⚠️ = a crater week.\n"
+            "- **Under cap** — facility biomass stays within its cap plus the "
+            "designed deviation band; ⚠️ = a real overshoot.\n\n"
+            "**Per-method metrics** (lower is better on all of these):\n"
+            "- **peak % cap** — the single busiest *system-week's* biomass/feed "
+            "load vs that system's cap. 100% = right at the cap; over 100% = a "
+            "system runs hot that week.\n"
+            "- **moves/fish** — tank-to-tank transfers ÷ fish placed. Lower = less "
+            "handling, stress and labour.\n"
+            "- **density** — the worst per-tank density (kg/m³) reached anywhere; "
+            "compare to your ~95 kg/m³ cap. Lower = more headroom.\n"
+            "- **between-sys CV** — how *evenly* biomass is spread **system-to-"
+            "system**. 0 = perfectly balanced; higher = some systems packed while "
+            "others sit light.\n"
+            "- **within-sys CV** — the same, but **tank-to-tank inside** each "
+            "system.\n\n"
+            "**Grading lenses** — each card names the method that's best on one "
+            "axis (fewest moves, steadiest harvest, most balanced, tightest "
+            "density, smallest footprint, fastest). No method wins them all — the "
+            "board shows the trade-offs so **you** pick the plan that fits your "
+            "priority, then press **Use this plan**.")
     eligible = {k: v for k, v in scored.items()
                 if v["_score"]["gates"]["Conserves"]}
     pool = eligible or scored
@@ -4137,9 +4300,14 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
             tot_count = he_df["Count"].sum()
             avg_kg = tot_kg / tot_count if tot_count else 0
             k1, k2, k3 = st.columns(3)
-            k1.metric("Total harvest", f"{tot_kg/1000:,.1f} t")
-            k2.metric("Total fish", f"{tot_count:,.0f}")
-            k3.metric("Avg weight at harvest", f"{avg_kg:.2f} kg")
+            k1.metric("Total harvest", f"{tot_kg/1000:,.1f} t",
+                      help="Total gross (live) biomass harvested across the whole "
+                           "forecast horizon.")
+            k2.metric("Total fish", f"{tot_count:,.0f}",
+                      help="Total number of fish harvested across the horizon.")
+            k3.metric("Avg weight at harvest", f"{avg_kg:.2f} kg",
+                      help="Harvest-weighted average LIVE weight per fish "
+                           "(total kg ÷ total fish).")
 
             c1, c2 = st.columns(2)
             with c1:
@@ -4288,11 +4456,17 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
             peak_col = next((c for c in pf.columns if c.startswith("Peak_Density")), None)
             n_over = int((pf[status_col] == "OVER CAP").sum()) if status_col else 0
             c1, c2, c3 = st.columns(3)
-            c1.metric("Batches", len(pf))
-            c2.metric("Density risk (OVER CAP)", n_over)
+            c1.metric("Batches", len(pf),
+                      help="Number of production batches in this plan.")
+            c2.metric("Density risk (OVER CAP)", n_over,
+                      help="How many batches peak ABOVE the density cap at some "
+                           "point in grow-out — the cohorts to watch for crowding.")
             if peak_col:
                 worst = pd.to_numeric(pf[peak_col], errors="coerce").max()
-                c3.metric("Worst peak density", f"{worst:.2f}× cap" if pd.notna(worst) else "—")
+                c3.metric("Worst peak density", f"{worst:.2f}× cap" if pd.notna(worst) else "—",
+                          help="The single highest peak density any batch reaches, "
+                               "as a multiple of its tank's cap (1.0× = right at "
+                               "cap, 1.3× = 30% over).")
 
             def _hl(row):
                 over = status_col and row.get(status_col) == "OVER CAP"
@@ -4330,10 +4504,18 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
             pick = st.selectbox("Batch", [p["Batch"] for p in bplans], key="batchplan_pick")
             bp = next(p for p in bplans if p["Batch"] == pick)
             m1, m2, m3, m4 = st.columns(4)
-            m1.metric("SW entry", bp["SW_entry"])
-            m2.metric("Peak tanks", bp["Peak_tanks"])
-            m3.metric("Harvest window", bp["Harvest_window"])
-            m4.metric("HOG (t)", f"{bp['HOG_t']:.0f}")
+            m1.metric("SW entry", bp["SW_entry"],
+                      help="The week this batch enters seawater (its FW→OG / "
+                           "TranOG transfer).")
+            m2.metric("Peak tanks", bp["Peak_tanks"],
+                      help="The most grow-out tanks this batch occupies at once — "
+                           "its peak facility footprint.")
+            m3.metric("Harvest window", bp["Harvest_window"],
+                      help="The span of weeks over which this batch is harvested "
+                           "out.")
+            m4.metric("HOG (t)", f"{bp['HOG_t']:.0f}",
+                      help="Total head-on-gutted tonnes this batch yields over its "
+                           "harvest window.")
             st.dataframe(pd.DataFrame(bp["milestones"]), hide_index=True,
                          use_container_width=True)
             # Flat export (one row per batch-milestone) for sharing/review.

@@ -714,7 +714,8 @@ def write_daily_harvest_schedule(
     ws.append([])
     ws.append([
         "Year", "Week", "Date", "Tank", "Batch", "Count (fish)",
-        "Weight (kg HOG)", "Avg Weight (kg HOG)", "Live Weight (kg)",
+        "Weight (kg HOG)", "Avg Weight (kg HOG)",
+        "Live Weight (kg)", "Avg Weight (kg live)",
     ])
 
     # Combine every harvest event by ISO week.
@@ -740,7 +741,8 @@ def write_daily_harvest_schedule(
         cnt, live_kg = rec["count"], rec["live_kg"]
         hog_yield = facility_limits_hog.get(wk_label, default_hog_yield)
         hog_kg = live_kg * hog_yield
-        hog_avg_kg = (live_kg / cnt * hog_yield) if cnt else 0.0  # blended
+        live_avg_kg = (live_kg / cnt) if cnt else 0.0            # blended live kg/fish
+        hog_avg_kg = live_avg_kg * hog_yield                     # blended HOG kg/fish
         tanks = ", ".join(str(t) for t in sorted(rec["tanks"]))
         batches = ", ".join(sorted(rec["batches"]))
         iso_y, iso_w, _ = ev_date.isocalendar()
@@ -751,16 +753,17 @@ def write_daily_harvest_schedule(
                 round(hog_kg / n_days, 0),
                 round(hog_avg_kg, 3),
                 round(live_kg / n_days, 0),
+                round(live_avg_kg, 3),
             ])
         ws.append([
             iso_y, iso_w, "Total", tanks, batches,
             round(cnt, 0), round(hog_kg, 0), round(hog_avg_kg, 3),
-            round(live_kg, 0),
+            round(live_kg, 0), round(live_avg_kg, 3),
         ])
         for cell in ws[ws.max_row]:
             cell.font = Font(bold=True)
         ws.append([])
-    widths = {1: 6, 2: 6, 3: 12, 4: 14, 5: 14, 6: 12, 7: 15, 8: 17, 9: 14}
+    widths = {1: 6, 2: 6, 3: 12, 4: 14, 5: 14, 6: 12, 7: 15, 8: 17, 9: 14, 10: 17}
     for c, w in widths.items():
         ws.column_dimensions[get_column_letter(c)].width = w
 
