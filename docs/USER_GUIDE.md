@@ -873,8 +873,17 @@ you choose a *whole* plan — never a splice.
   it for a fast two-method compare.
 - **Grading lenses** (each card shows the winning method + its value): fewest fish
   moves, steadiest harvest, most balanced *across* systems, most even *within* systems,
-  tightest density, smallest tank footprint, fastest run. A lens only ranks methods
-  that pass the *Conserves* gate; the other three badges are advisory flags, not filters.
+  tightest density, **best welfare / product quality**, smallest tank footprint, fastest
+  run. A lens only ranks methods that pass the *Conserves* gate; the other three badges
+  are advisory flags, not filters.
+- **Product-quality (welfare) view of density.** Beyond the pass/fail-vs-cap numbers,
+  every method now reports the density your fish were actually **reared at** — the
+  biomass-weighted average density over grow-out — and the share of biomass that spent
+  time **above the ~80 kg/m³ welfare line** (a soft line below the 95 hard cap). Lower =
+  gentler rearing = better welfare / flesh quality, at a cost in throughput (fewer fish /
+  more tanks). It shows on the board (a lens + the per-method line), on every **Run**
+  (the *Reared density* KPI), and as an **Optimize** objective — pick the *"Product
+  quality"* emphasis preset to have the optimizer trade packing for gentler rearing.
 - **Hard-gate badges** show on *every* method so a soft win can't hide a hard breach:
   **Conserves** · **Fully placed** · **No empty week** · **Under cap**. A plan that
   fails *Conserves* can't win a lens; the rest are flags you weigh. **Use this plan**

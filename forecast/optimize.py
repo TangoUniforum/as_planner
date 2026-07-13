@@ -105,6 +105,7 @@ COMPONENTS = [
     "system_overshoot",    # per-system feed+biomass over-cap (compliance)
     "density_overshoot",   # per-tank density over-cap (compliance)
     "system_peak",         # hottest single (system, week) load — the HOT SPOT
+    "crowded_biomass_fraction",  # product QUALITY: grow-out biomass reared over the welfare line
 ]
 
 # Selectable emphasis presets (component -> weight; 0 drops out).
@@ -148,6 +149,15 @@ EMPHASIS_PRESETS = {
                        "harvest_var": 1, "harvest_overshoot": 1,
                        "biomass_overshoot": 1, "density_overshoot": 1,
                        "biomass_util_gap": 0},
+    # Product quality / welfare: minimize the biomass reared above the welfare
+    # density line above all else, then compliance + flatness — and DROP the
+    # "press to the cap" reward (util_gap), because gentler rearing is the goal,
+    # not packing. The deliberate counterweight to throughput/footprint.
+    "Product quality": {"crowded_biomass_fraction": 3, "density_overshoot": 2,
+                        "system_overshoot": 1, "biomass_overshoot": 1,
+                        "biomass_var": 1, "harvest_var": 1,
+                        "transfers_per_fish": 0.5, "feed_load": 0.5,
+                        "feed_var": 0.5, "biomass_util_gap": 0},
     "Balanced": {c: 1 for c in COMPONENTS},
 }
 DEFAULT_EMPHASIS = "Walk the line"
@@ -194,6 +204,14 @@ class Metrics:
     # tanks of a system (CV + range), aggregated mean + peak. Per-tank feed is the
     # system's reported feed apportioned by biomass x a size-declining rate shape.
     within_system: dict = field(default_factory=dict)
+    # --- product-QUALITY (welfare) view of density; OG6N depuration excluded ---
+    # crowded_biomass_fraction (objective) = fraction of grow-out biomass-weeks
+    # reared ABOVE the welfare density line (~80 kg/m3, below the 95 hard cap).
+    # mean_rearing_density = biomass-weighted mean density the product experienced.
+    # crowded_fish_weeks = Σ fish x weeks spent over the line (operator-legible).
+    crowded_biomass_fraction: float = 0.0
+    mean_rearing_density: float = 0.0
+    crowded_fish_weeks: float = 0.0
 
     def component(self, name):
         return getattr(self, name)
@@ -427,6 +445,54 @@ def _density_peak(wb):
     return peak
 
 
+WELFARE_DENSITY_KG_M3 = 80.0   # soft welfare/quality line, below the ~95 hard cap
+
+
+def _density_quality(wb, welfare=WELFARE_DENSITY_KG_M3):
+    """Product-QUALITY view of per-tank density (OG6N depuration excluded). Reads
+    the realized density on every BatchLocations (batch, week, tank) row and, vs
+    the `welfare` threshold (kg/m3 — a SOFT line below the ~95 hard cap), returns:
+
+      mean_density  — biomass-weighted mean rearing density: the density the
+                      PRODUCT actually experienced (lower = gentler rearing =
+                      better welfare / flesh quality);
+      crowded_fw    — crowded FISH-WEEKS: Σ fish in tank-weeks over the line
+                      ("how many fish spent how long crowded");
+      crowded_frac  — fraction of grow-out BIOMASS-weeks spent over the line
+                      (scale-free — the objective term).
+
+    All three drop when a plan keeps fish lower/longer, which costs throughput
+    (fewer fish / more tanks): that trade is exactly the point."""
+    if "BatchLocations" not in wb.sheetnames:
+        return (0.0, 0.0, 0.0)
+    ws = wb["BatchLocations"]
+    cols = _col_map(ws, lambda r: r and str(r[0]).strip() == "Week"
+                    and any(str(c).strip().startswith("Density") for c in r if c))
+    di = _find_col(cols, "Density", default=8)
+    si = _find_col(cols, "System", default=4)
+    mi = _find_col(cols, "Biomass", default=7)
+    ci = _find_col(cols, "Count", default=5)
+    sum_bd = sum_b = crowded_b = crowded_fw = 0.0
+    for i, row in enumerate(ws.iter_rows(values_only=True), 1):
+        if i < 5 or not row or row[0] is None:
+            continue
+        if len(row) > si and row[si] == "OG6N":
+            continue
+        dens = row[di] if len(row) > di else None
+        bio = row[mi] if len(row) > mi else None
+        if not isinstance(dens, (int, float)) or not isinstance(bio, (int, float)) or bio <= 0:
+            continue
+        sum_bd += dens * bio
+        sum_b += bio
+        if dens > welfare:
+            crowded_b += bio
+            cnt = row[ci] if len(row) > ci and isinstance(row[ci], (int, float)) else 0.0
+            crowded_fw += cnt          # each row ≈ one week of occupancy -> fish-weeks
+    mean_d = (sum_bd / sum_b) if sum_b else 0.0
+    frac = (crowded_b / sum_b) if sum_b else 0.0
+    return (mean_d, crowded_fw, frac)
+
+
 def _system_peak(wb):
     """The single HOTTEST (system, week) load across biomass AND feed, as a
     fraction of cap (OG6N depuration excluded). Minimizing this = no hot spots —
@@ -573,7 +639,8 @@ def _within_system_variation(wb):
             "feed_range_mean": frm, "feed_range_peak": frp}
 
 
-def metrics_from_workbook(out_path, harvest_cap) -> tuple["Metrics", int, int]:
+def metrics_from_workbook(out_path, harvest_cap,
+                          welfare_density=WELFARE_DENSITY_KG_M3) -> tuple["Metrics", int, int]:
     wb = openpyxl.load_workbook(out_path, data_only=True)
     bio, feed, bcap, fcap, per = _biomass_and_feed(wb)
     fish = _harvest_weekly_fish(wb)
@@ -607,6 +674,7 @@ def metrics_from_workbook(out_path, harvest_cap) -> tuple["Metrics", int, int]:
     path_mean, path_max = _batch_tank_path(wb)
     between = _between_system_spread(wb)
     within = _within_system_variation(wb)
+    mean_rear_d, crowded_fw, crowded_frac = _density_quality(wb, welfare_density)
 
     metrics = Metrics(
         biomass_overshoot=overshoot,
@@ -635,6 +703,9 @@ def metrics_from_workbook(out_path, harvest_cap) -> tuple["Metrics", int, int]:
         batch_tank_path_max=path_max,
         between_system=between,
         within_system=within,
+        crowded_biomass_fraction=crowded_frac,
+        mean_rearing_density=mean_rear_d,
+        crowded_fish_weeks=crowded_fw,
     )
     dropped, overprod = tuning._conservation(out_path)
     return metrics, dropped, overprod

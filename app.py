@@ -2844,10 +2844,16 @@ def _parse_output_workbook(path: Path) -> dict:
         for r, k in labels.items():
             status[k] = ws.cell(row=r, column=2).value
 
+    from forecast.optimize import _density_quality, WELFARE_DENSITY_KG_M3
+    _q_mean, _q_fw, _q_frac = _density_quality(wb, WELFARE_DENSITY_KG_M3)
     return {
         "violations": len(violations),
         "worst_density": max(violations, default=0.0),
         "growout_density_cap": growout_cap,
+        "mean_rearing_density": _q_mean,
+        "crowded_biomass_fraction": _q_frac,
+        "crowded_fish_weeks": _q_fw,
+        "welfare_density": WELFARE_DENSITY_KG_M3,
         "system_biomass_cap": sys_cap_biomass,
         "harvest_kg": harvest_kg,
         "harvest_count": harvest_count,
@@ -3577,6 +3583,9 @@ _BOARD_LENSES = [
      "even load tank-to-tank"),
     ("Tightest density", lambda r: r["_score"]["metrics"].density_peak,
      "most density headroom"),
+    ("Best welfare / product quality",
+     lambda r: r["_score"]["metrics"].crowded_biomass_fraction,
+     "least product reared above the welfare density line"),
     ("Smallest tank footprint", lambda r: r["_score"]["metrics"].tank_footprint_mean,
      "fewest grow-out tanks used"),
     ("Fastest run", lambda r: r.get("elapsed"), "least wall time"),
@@ -3716,7 +3725,12 @@ def _compare_and_choose():
             "system**. 0 = perfectly balanced; higher = some systems packed while "
             "others sit light.\n"
             "- **within-sys CV** — the same, but **tank-to-tank inside** each "
-            "system.\n\n"
+            "system.\n"
+            "- **reared … kg/m³ (…% crowded)** — the **product-quality** view: the "
+            "biomass-weighted average density your fish were *reared at*, and the "
+            "fraction of grow-out biomass that spent time **above the welfare line** "
+            "(~80 kg/m³, below the hard cap). Lower = gentler rearing = better "
+            "welfare / flesh quality — but usually means fewer fish / more tanks.\n\n"
             "**Grading lenses** — each card names the method that's best on one "
             "axis (fewest moves, steadiest harvest, most balanced, tightest "
             "density, smallest footprint, fastest). No method wins them all — the "
@@ -3758,7 +3772,9 @@ def _compare_and_choose():
                     f"  ·  {m.transfers_per_fish:.2f} moves/fish"
                     f"  ·  density {m.density_peak:.0f}"
                     f"  ·  between-sys CV {m.between_system.get('bio_cv_mean', 0):.3f}"
-                    f"  ·  within-sys CV {m.within_system.get('bio_cv_mean', 0):.3f}")
+                    f"  ·  within-sys CV {m.within_system.get('bio_cv_mean', 0):.3f}"
+                    f"  ·  reared {m.mean_rearing_density:.0f} kg/m³ "
+                    f"({m.crowded_biomass_fraction * 100:.0f}% crowded)")
             with c2:
                 if st.button("Use this plan", key=f"board_pick_{k}",
                              use_container_width=True):
@@ -3850,16 +3866,26 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
     top_kpi, top_dl = st.columns([3, 1])
     with top_kpi:
         st.subheader("Summary")
-        k1, k2, k3, k4 = st.columns(4)
+        k1, k2, k3, k4, k5 = st.columns(5)
         k1.metric("Violations", r["violations"],
                   help="Tanks where realized density exceeds that tank's own "
                        "density cap (per-tank, from facility config; the OG6N "
                        "depuration pool is excluded).")
         k2.metric("Worst density", f"{r['worst_density']:.1f} kg/m³",
                   help="Highest per-tank density across the horizon")
-        k3.metric("Total harvest", f"{r['harvest_kg']/1000:,.1f} t",
+        _wl = r.get("welfare_density", 80)
+        k3.metric("Reared density",
+                  f"{r.get('mean_rearing_density', 0):.0f} kg/m³",
+                  help=f"Product-quality view: the biomass-weighted average density "
+                       f"your fish were REARED at over grow-out (lower = gentler = "
+                       f"better welfare / flesh quality). The delta shows the share "
+                       f"of biomass that spent time above the {_wl:.0f} kg/m³ "
+                       f"welfare line.",
+                  delta=f"{r.get('crowded_biomass_fraction', 0) * 100:.0f}% crowded",
+                  delta_color="inverse")
+        k4.metric("Total harvest", f"{r['harvest_kg']/1000:,.1f} t",
                   help="Sum of all harvest events across the horizon")
-        k4.metric("Run time", f"{r['elapsed']:.1f}s")
+        k5.metric("Run time", f"{r['elapsed']:.1f}s")
     with top_dl:
         st.subheader("Output")
         st.download_button(
