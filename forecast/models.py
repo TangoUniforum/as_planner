@@ -60,6 +60,12 @@ class ControlParams:
     # split trigger, and the PR-concentration advisory/action gate.
     # 0.85 leaves 15% headroom for growth between weekly checks.
     density_target_pct: float = 0.85
+    # Product-quality WELFARE density line (kg/m3), a SOFT threshold below the hard
+    # per-tank cap (~95). Fish reared above it are "crowded" — the metric that
+    # reports/optimizes how gently the product was reared (Run KPI, Compare "Best
+    # welfare" lens, Optimize "Product quality" preset). Does NOT constrain the
+    # plan; it only measures/scores. 80 is the accepted salmon welfare line.
+    density_welfare_threshold_kg_m3: float = 80.0
     # Realized-rebalancer budgets (moves/week). 0 disables the pass. VARQTY
     # moves a precise count of fish off over-cap systems; SPLIT fans over-dense
     # batches into free tanks. Exposed as Control knobs so they can be swept

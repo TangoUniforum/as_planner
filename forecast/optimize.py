@@ -771,6 +771,20 @@ def _harvest_cap(config_dir, overrides):
     return cap
 
 
+def _welfare_density(config_dir, overrides):
+    """Effective welfare density line (kg/m3) for a variant — the quality metric's
+    soft threshold, from control.yaml (or a sweep override), default 80."""
+    wl = WELFARE_DENSITY_KG_M3
+    try:
+        with open(os.path.join(config_dir, "control.yaml")) as f:
+            wl = float(yaml.safe_load(f).get("density_welfare_threshold_kg_m3", wl) or wl)
+    except (OSError, ValueError, TypeError):
+        pass
+    if "density_welfare_threshold_kg_m3" in overrides:
+        wl = float(overrides["density_welfare_threshold_kg_m3"])
+    return wl
+
+
 def _infeasible_metrics() -> "Metrics":
     """A sentinel Metrics for a variant that FAILED (couldn't be planned): every
     objective component is a huge finite value so it can never win, and the
@@ -801,7 +815,9 @@ def run_variant(label, overrides, config_dir, scenario_dir, input_path) -> OptVa
     # excluded from selection. The search continues over the remaining variants.
     try:
         out = tuning._run_in_tempdir(label, overrides, config_dir, scenario_dir, input_path)
-        metrics, dropped, overprod = metrics_from_workbook(out, _harvest_cap(config_dir, overrides))
+        metrics, dropped, overprod = metrics_from_workbook(
+            out, _harvest_cap(config_dir, overrides),
+            welfare_density=_welfare_density(config_dir, overrides))
         return OptVariant(label=label, overrides=dict(overrides),
                           metrics=metrics, dropped=dropped, overprod=overprod)
     except Exception as e:  # noqa: BLE001 — reject-and-continue, don't crash the sweep

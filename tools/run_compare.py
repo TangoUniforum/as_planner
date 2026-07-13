@@ -164,6 +164,7 @@ def run_compare(input_path, *, config_dir=None, scenario_dir=None,
         cfg = yaml.safe_load(f) or {}
     min_harvest = float(cfg.get("min_harvest_per_week", 0) or 0)
     harvest_cap = float(cfg.get("max_harvest_per_week", 55000) or 55000)
+    welfare_density = float(cfg.get("density_welfare_threshold_kg_m3", 80) or 80)
 
     print(f"RUN COMPARISON — {len(roster)} method(s) on {input_path.name}")
     print(f"  config={config_dir}  scenario={scenario_dir}")
@@ -180,7 +181,8 @@ def run_compare(input_path, *, config_dir=None, scenario_dir=None,
         elapsed_cache = {}
 
     def _score(rec, wb_path):
-        metrics, _d, _o = _opt.metrics_from_workbook(str(wb_path), harvest_cap)
+        metrics, _d, _o = _opt.metrics_from_workbook(str(wb_path), harvest_cap,
+                                                     welfare_density=welfare_density)
         verdict = _conservation_verdict(str(wb_path))
         rec["metrics"] = metrics
         rec["dropped"] = verdict["dropped"]

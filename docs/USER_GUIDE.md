@@ -879,7 +879,8 @@ you choose a *whole* plan — never a splice.
 - **Product-quality (welfare) view of density.** Beyond the pass/fail-vs-cap numbers,
   every method now reports the density your fish were actually **reared at** — the
   biomass-weighted average density over grow-out — and the share of biomass that spent
-  time **above the ~80 kg/m³ welfare line** (a soft line below the 95 hard cap). Lower =
+  time **above the welfare line** — a soft density threshold you set in **Configure →
+  Control** (`density_welfare_threshold_kg_m3`, default 80, below the 95 hard cap). Lower =
   gentler rearing = better welfare / flesh quality, at a cost in throughput (fewer fish /
   more tanks). It shows on the board (a lens + the per-method line), on every **Run**
   (the *Reared density* KPI), and as an **Optimize** objective — pick the *"Product

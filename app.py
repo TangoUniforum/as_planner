@@ -323,6 +323,11 @@ _CONTROL_HELP = {
         "7 = one weekly step (clean single-cohort pipeline).",
     "density_target_pct": "Per-tank density target as a fraction of the cap — how full "
         "to pack each tank. 0.9 = fill to 90% of the density cap.",
+    "density_welfare_threshold_kg_m3": "Welfare density line (kg/m³) — a SOFT quality "
+        "threshold below the hard cap (~95). Fish reared above it count as 'crowded'. "
+        "The Run 'Reared density' KPI, the Compare 'Best welfare' lens, and the Optimize "
+        "'Product quality' preset all measure against it. It only scores/reports — it "
+        "does NOT constrain the plan. 80 is the accepted salmon welfare line.",
     "rebalance_varqty_budget": "Variable-quantity rebalancer moves per week: shave a "
         "PRECISE count of fish off an over-cap system. 0 = off (opt-in; small benefit "
         "for the extra transfers).",
@@ -408,6 +413,7 @@ _CONTROL_LABEL = {
     "global_buffer_pct": "System-cap buffer (R29)",
     "starvation_period_days": "In-place purge length (days)",
     "density_target_pct": "Density target (% of cap)",
+    "density_welfare_threshold_kg_m3": "Welfare density line (kg/m³)",
     "rebalance_balance_budget": "Rebalancer moves / week",
     "rebalance_split_budget": "Split-pass moves / week",
     "rebalance_varqty_budget": "Variable-qty moves / week",
@@ -2845,7 +2851,13 @@ def _parse_output_workbook(path: Path) -> dict:
             status[k] = ws.cell(row=r, column=2).value
 
     from forecast.optimize import _density_quality, WELFARE_DENSITY_KG_M3
-    _q_mean, _q_fw, _q_frac = _density_quality(wb, WELFARE_DENSITY_KG_M3)
+    _wl = WELFARE_DENSITY_KG_M3
+    try:                                    # operator's welfare line from Configure
+        from forecast.config_io import load_control
+        _wl = float(load_control(CONFIG_DIR).density_welfare_threshold_kg_m3)
+    except Exception:  # noqa: BLE001
+        pass
+    _q_mean, _q_fw, _q_frac = _density_quality(wb, _wl)
     return {
         "violations": len(violations),
         "worst_density": max(violations, default=0.0),
@@ -2853,7 +2865,7 @@ def _parse_output_workbook(path: Path) -> dict:
         "mean_rearing_density": _q_mean,
         "crowded_biomass_fraction": _q_frac,
         "crowded_fish_weeks": _q_fw,
-        "welfare_density": WELFARE_DENSITY_KG_M3,
+        "welfare_density": _wl,
         "system_biomass_cap": sys_cap_biomass,
         "harvest_kg": harvest_kg,
         "harvest_count": harvest_count,
@@ -3604,7 +3616,9 @@ def _board_score(out_path):
         _cfg = _yaml.safe_load(_f) or {}
     hv_cap = float(_cfg.get("max_harvest_per_week", 55000) or 55000)
     min_hv = float(_cfg.get("min_harvest_per_week", 0) or 0)
-    m, _dropped, _overprod = _opt.metrics_from_workbook(out_path, hv_cap)
+    welfare = float(_cfg.get("density_welfare_threshold_kg_m3", 80) or 80)
+    m, _dropped, _overprod = _opt.metrics_from_workbook(out_path, hv_cap,
+                                                        welfare_density=welfare)
     verdict = _conservation_verdict(out_path)
     harv = _harvest_extras(out_path, min_hv)
     # "No empty week": the HARD contract rule is "never a NEAR-EMPTY week". A week a
