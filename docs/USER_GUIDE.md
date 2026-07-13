@@ -885,6 +885,13 @@ you choose a *whole* plan — never a splice.
   more tanks). It shows on the board (a lens + the per-method line), on every **Run**
   (the *Reared density* KPI), and as an **Optimize** objective — pick the *"Product
   quality"* emphasis preset to have the optimizer trade packing for gentler rearing.
+- **Stocking-for-quality frontier** (`Mode → Tune`, below the density-knob sweep). On a
+  tank-full facility the density knobs can't lower density — the real quality lever is
+  stocking **fewer fish**. This sweeps a stocking cut across your **future** batches
+  (fish already in the facility are fixed) and plots the trade: fewer fish rear gentler
+  (lower experienced density) but yield less harvest. Each point runs the full forecast.
+  Example read: *10% fewer future fish → reared ~1 kg/m³ gentler for ~700 t less
+  harvest* — you choose where on the curve to sit.
 - **Hard-gate badges** show on *every* method so a soft win can't hide a hard breach:
   **Conserves** · **Fully placed** · **No empty week** · **Under cap**. A plan that
   fails *Conserves* can't win a lens; the rest are flags you weigh. **Use this plan**

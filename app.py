@@ -2904,6 +2904,84 @@ def _results_to_frame(results) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _stocking_frontier_section():
+    """Stocking-for-quality frontier: sweep a stocking CUT across FUTURE batches
+    and plot the quality-vs-volume trade — the lever that works when the density
+    knobs can't (a tank-full facility). Engine = forecast.stocking_frontier."""
+    import plotly.graph_objects as pgo
+    st.divider()
+    st.subheader("🌿 Stocking-for-quality frontier")
+    st.caption(
+        "When the facility is **tank-full** the density knobs above can't lower "
+        "density — the real quality lever is stocking **fewer fish**. This sweeps a "
+        "stocking cut across your **future** batches (fish already in the facility "
+        "are fixed) and shows the trade: fewer fish rear **gentler** (lower "
+        "experienced density) but yield **less harvest**. Each point runs the full "
+        "forecast (~20s); your config/scenario/PR are never touched.")
+    _fd = st.radio("Frontier depth", ["Quick (0, 10%)",
+                                      "Full (0, 5, 10, 15, 20%)"],
+                   horizontal=True, key="frontier_depth")
+    reductions = ((0.0, 0.10) if _fd.startswith("Quick")
+                  else (0.0, 0.05, 0.10, 0.15, 0.20))
+    if st.button(f"▶ Run stocking frontier ({len(reductions)} runs, "
+                 f"~{len(reductions) * 20 // 60 + 1} min)", key="frontier_go"):
+        from forecast.config_io import load_control
+        from forecast.stocking_frontier import stocking_frontier
+        _wl = 80.0
+        try:
+            _wl = float(load_control(CONFIG_DIR).density_welfare_threshold_kg_m3)
+        except Exception:  # noqa: BLE001
+            pass
+        _tmp = Path(tempfile.gettempdir()) / "frontier_pr.xlsm"
+        _tmp.write_bytes(uploaded.getvalue())
+        with st.spinner(f"Running {len(reductions)} forecasts…"):
+            st.session_state["frontier_pts"] = stocking_frontier(
+                str(_tmp), str(CONFIG_DIR), str(SCENARIO_DIR),
+                reductions=reductions, welfare_density=_wl)
+
+    pts = st.session_state.get("frontier_pts")
+    if not pts:
+        return
+    for p in pts:
+        if p.error:
+            st.caption(f"⚠ {p.reduction * 100:.0f}% cut failed: {p.error}")
+    ok = [p for p in pts if not p.error and p.conserves]
+    if not ok:
+        st.warning("No valid frontier points (all failed or broke conservation).")
+        return
+    df = pd.DataFrame([{
+        "Stocking cut": f"{p.reduction * 100:.0f}%",
+        "Future batches cut": p.scaled_batches,
+        "Harvest (t)": round(p.harvest_t),
+        "Reared density (kg/m³)": round(p.mean_rearing_density, 1),
+        "% crowded": round(p.crowded_biomass_fraction * 100, 1),
+        "Worst density": round(p.worst_density),
+    } for p in ok])
+    st.dataframe(df, hide_index=True, use_container_width=True)
+    fig = pgo.Figure()
+    fig.add_trace(pgo.Scatter(
+        x=[p.harvest_t for p in ok], y=[p.mean_rearing_density for p in ok],
+        mode="lines+markers+text",
+        text=[f"{p.reduction * 100:.0f}%" for p in ok], textposition="top center",
+        line=dict(color="#2e7d32")))
+    fig.update_layout(
+        height=380, title="Quality vs volume — each point is a stocking cut",
+        xaxis_title="Harvest volume (t) — more is better →",
+        yaxis_title="Reared density (kg/m³) — lower is gentler ↓")
+    st.plotly_chart(fig, use_container_width=True)
+    base = next((p for p in ok if p.reduction == 0), ok[0])
+    for p in ok:
+        if p.reduction > 0:
+            dq = base.mean_rearing_density - p.mean_rearing_density
+            dv = base.harvest_t - p.harvest_t
+            st.caption(
+                f"**{p.reduction * 100:.0f}% fewer future fish** → reared "
+                f"**{dq:+.1f} kg/m³ gentler** "
+                f"({base.crowded_biomass_fraction * 100:.0f}% → "
+                f"{p.crowded_biomass_fraction * 100:.0f}% crowded), for "
+                f"**{dv:,.0f} t less harvest**.")
+
+
 def _tuner():
     st.header("🎛️ Tune — per-batch density knobs")
     st.caption(
@@ -2964,6 +3042,7 @@ def _tuner():
 
     results = st.session_state.get("_tune_results")
     if not results:
+        _stocking_frontier_section()   # available without running the knob sweep
         return
 
     rec = tuning.recommend(results)
@@ -3023,6 +3102,10 @@ def _tuner():
                      hide_index=True)
     else:
         st.info(f"No batch exceeds 1.2× cap in **{best.label}**.")
+
+    # The density KNOBS above can't lower density on a tank-full facility; the
+    # stocking-cut frontier is the lever that can. Always available (own button).
+    _stocking_frontier_section()
 
 
 # ============================================================
