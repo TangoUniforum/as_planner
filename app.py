@@ -1197,9 +1197,12 @@ def _mw_recommendations(state, rows, labels, ctx):
     Covers per-system FEED, per-system BIOMASS, per-tank DENSITY and FACILITY
     biomass, all against the SAME caps the System-rollup shows (tank-derived
     system caps + the Control facility cap). Reads the current `rows`, so as the
-    operator scripts harvests/moves the breaches shrink. Returns a list of
-    {frac, week, tank_id, msg, action} sorted by severity (value ÷ cap). `week` is
-    the ISO week-of-year label (the project's canonical id — forecast.time_grid)."""
+    operator scripts harvests/moves the breaches shrink. Returns
+    (collapsed_worst_first, weeks_with_breaches, {week: breaches_worst_first}); each
+    breach is {frac, week, tank_id, msg, action}, `week` the ISO week-of-year label
+    (the project's canonical id — forecast.time_grid). The by-week map + week list
+    drive the panel's week picker; `collapsed` is the 'all weeks' default (each
+    distinct breach shown once, at its worst week)."""
     from collections import defaultdict
     from forecast.biology import realized_feed_kg_day
     from forecast.sixn import SIXN_ALL_TANKS
@@ -1315,13 +1318,22 @@ def _mw_recommendations(state, rows, labels, ctx):
         out.append({"frac": frac, "week": wk, "tank_id": tid,
                     "msg": msg, "action": act,
                     "key": (kind, where if where is not None else "FAC")})
-    # Collapse a breach that recurs across weeks to its WORST week, so the top-N
-    # shows distinct problems instead of one tank repeated every week.
+    # Per-week view (everything out of bounds in a chosen week) + the ordered set
+    # of weeks that have ANY breach, for the panel's week picker.
+    by_week: dict = {}
+    for o in out:
+        by_week.setdefault(o["week"], []).append(o)
+    for _w in by_week:
+        by_week[_w].sort(key=lambda x: -x["frac"])
+    breach_weeks = sorted(by_week, key=lambda w: labels.index(w) if w in labels else 10**6)
+    # Collapse a breach that recurs across weeks to its WORST week, so the default
+    # 'all weeks' top-N shows distinct problems instead of one tank every week.
     worst = {}
     for o in out:
         if o["key"] not in worst or o["frac"] > worst[o["key"]]["frac"]:
             worst[o["key"]] = o
-    return sorted(worst.values(), key=lambda x: -x["frac"])
+    collapsed = sorted(worst.values(), key=lambda x: -x["frac"])
+    return collapsed, breach_weeks, by_week
 
 
 # ---- The contextual action panel (opens on a tank click) ----
@@ -1790,7 +1802,7 @@ def _mw_save_bar(events, bad):
         st.rerun()
 
 
-def _mw_copilot(uploaded, events):
+def _mw_copilot(uploaded, events, forecast_start=None):
     """Human-in-the-loop co-pilot (Sequential). Runs the planners forward ONCE
     from the scripted window (respect mode — your transfers are fixed) and lets
     you browse the recommended moves for the next several weeks. Only the NEXT
@@ -1819,10 +1831,11 @@ def _mw_copilot(uploaded, events):
         _fw = sum(1 for e in events if e.type == "fw_to_og")
         st.caption(
             f"✓ Building on your **{len(events)} scripted operation(s)** through "
-            f"week {_n}: {_tr} transfer · {_hv} harvest · {_s6} into 6N · {_fw} FW→OG. "
-            f"Both engines run your full manual window first, so every recommendation "
-            f"is computed on top of these.")
-    if st.button(f"🤖 Recommend from week {_n + 1}", key="mw_cp_run", type="primary"):
+            f"{_mw_iso_week(_n, forecast_start)}: {_tr} transfer · {_hv} harvest · "
+            f"{_s6} into 6N · {_fw} FW→OG. Both engines run your full manual window "
+            f"first, so every recommendation is computed on top of these.")
+    _next_iso = _mw_iso_week(_n + 1, forecast_start)
+    if st.button(f"🤖 Recommend from {_next_iso}", key="mw_cp_run", type="primary"):
         try:
             dump_manual_events(SCENARIO_DIR, events)
         except Exception as e:  # noqa: BLE001
@@ -1832,7 +1845,7 @@ def _mw_copilot(uploaded, events):
         tmp = Path(_wd) / "copilot_pr.xlsm"
         tmp.write_bytes(uploaded.getvalue())
         with st.spinner(f"Running the controller + global optimiser from "
-                        f"week {_n + 1}… (~1 min)"):
+                        f"{_next_iso}… (~1 min)"):
             try:
                 st.session_state["mw_cp_props"] = propose_upcoming(
                     str(tmp), str(CONFIG_DIR), str(SCENARIO_DIR), n_weeks=_LOOKAHEAD)
@@ -1868,13 +1881,13 @@ def _mw_copilot(uploaded, events):
         return
 
     if is_handoff:
-        st.markdown(f"**Recommended for {prop.week_label}** — ticked moves add as "
-                    f"week {prop.window_week}:")
+        st.markdown(f"**Recommended for {prop.week_label}** — ticked moves become "
+                    f"that week's operations:")
     else:
-        st.info(f"👁 **Look-ahead: {prop.week_label} (week {prop.window_week}).** "
+        st.info(f"👁 **Look-ahead: {prop.week_label}.** "
                 f"A projection from the current plan — approve advances one week at "
-                f"a time, so approve week {handoff.window_week} "
-                f"({handoff.week_label}) first. These numbers refresh once the "
+                f"a time, so approve {handoff.week_label} first. These numbers "
+                f"refresh once the "
                 f"nearer weeks are scripted.")
 
     _nonce = st.session_state.get("mw_cp_nonce", 0)
@@ -1916,10 +1929,10 @@ def _mw_copilot(uploaded, events):
 
     if not is_handoff:
         st.caption(f"Viewing a look-ahead week — switch the picker back to "
-                   f"**{handoff.week_label} (week {handoff.window_week})** to approve.")
+                   f"**{handoff.week_label}** to approve.")
         return
 
-    if st.button(f"✓ Approve ticked → add to week {prop.window_week}",
+    if st.button(f"✓ Approve ticked → add to {prop.week_label}",
                  key="mw_cp_approve", type="primary"):
         chosen = [m for m, key in picks if st.session_state.get(key)]
         if not chosen:
@@ -1932,9 +1945,9 @@ def _mw_copilot(uploaded, events):
             except Exception:  # noqa: BLE001
                 pass
             st.session_state.pop("mw_cp_props", None)
-            st.success(f"Added {len(chosen)} operation(s) to week "
-                       f"{prop.window_week}. Run me again for week "
-                       f"{prop.window_week + 1}.")
+            st.success(f"Added {len(chosen)} operation(s) to {prop.week_label}. "
+                       f"Run me again for the next week "
+                       f"({_mw_iso_week(prop.window_week + 1, forecast_start)}).")
             st.rerun()
 
 
@@ -2088,13 +2101,25 @@ def _manual_window_editor(uploaded):
                 # Recommendations — what's most out of bounds this window and the
                 # relief action, ranked worst-first. Reads the current projection,
                 # so it updates as you script events. ▶ jumps to that tank.
-                _recs = _mw_recommendations(state, rows, labels, ctx)
+                _collapsed, _breach_weeks, _by_week = _mw_recommendations(
+                    state, rows, labels, ctx)
                 with st.container(border=True):
                     st.markdown("**⚠ Most out of bounds — recommended actions**")
-                    if not _recs:
+                    if not _breach_weeks:
                         st.caption("✓ Every tank, system and the facility are "
                                    "within limits across this window.")
                     else:
+                        # Week picker: 'All weeks' collapses each distinct breach to
+                        # its worst week; a specific week shows everything wrong then.
+                        _opts = ["All weeks (worst first)", *_breach_weeks]
+                        if st.session_state.get("mw_rec_week") not in _opts:
+                            st.session_state["mw_rec_week"] = _opts[0]
+                        _sel = st.selectbox(
+                            "Show recommendations for week", _opts, key="mw_rec_week",
+                            help="'All weeks' lists each distinct breach at its worst "
+                                 "week; pick a week to see everything out of bounds then.")
+                        _recs = (_collapsed if _sel.startswith("All weeks")
+                                 else _by_week.get(_sel, []))
                         st.caption("Ranked by how far over cap. **▶** jumps to the "
                                    "tank so you can act on it.")
                         for _i, _rc in enumerate(_recs[:6]):
@@ -2136,7 +2161,7 @@ def _manual_window_editor(uploaded):
             if st.toggle("🤖 Co-pilot — let the forecast propose the next week",
                          key="mw_copilot_toggle"):
                 with st.container(border=True):
-                    _mw_copilot(uploaded, events)
+                    _mw_copilot(uploaded, events, ctx.get("forecast_start") if ctx else None)
 
             st.divider()
             _mw_timeline(state, events, bad, ctx.get("forecast_start") if ctx else None)
