@@ -1134,9 +1134,26 @@ def _mw_system_rollup(state, rows, labels, tables, batch_by_id, ctx=None,
             return "#e8615e"
         return "#7a0d0b"
 
-    def _table(agg, cap, scale, extra=None):
+    # Feed is coloured by ABSOLUTE kg/day/system load (operator setting), not by the
+    # per-system cap fraction: green below FEED_AMBER, amber between, red at/above
+    # FEED_RED. Change the two numbers to retune the thresholds.
+    FEED_AMBER, FEED_RED = 2600.0, 2800.0
+
+    def _fill_feed_abs(v):
+        if v <= 0:
+            return "#f0f0f0"
+        if v < FEED_AMBER:
+            return "#a8d5a8"
+        if v < FEED_RED:
+            return "#f5d49a"
+        return "#e8615e"
+
+    def _table(agg, cap, scale, extra=None, color_of=None):
         # extra = {wk: raw_value} for a neutral (uncapped) FW row folded into the
         # facility TOTAL — FW fish aren't in an OG system, so no cap fraction.
+        # color_of(value, system_cap) -> css colour; default = fraction-of-cap fill.
+        if color_of is None:
+            color_of = lambda v, caps: _fill((v / caps) if caps else 0.0)  # noqa: E731
         txt, css, idx = [], [], []
         for s in systems:
             idx.append(s)
@@ -1144,8 +1161,8 @@ def _mw_system_rollup(state, rows, labels, tables, batch_by_id, ctx=None,
             for wk in labels:
                 v = agg.get((s, wk), 0.0)
                 trow.append(f"{v * scale:,.0f}")
-                frac = (v / cap[s]) if cap.get(s) else 0.0
-                crow.append(f"background-color:{_fill(frac)};color:#1f1f1f")
+                crow.append(f"background-color:{color_of(v, cap.get(s, 0.0))};"
+                            f"color:#1f1f1f")
             txt.append(trow)
             css.append(crow)
         if extra:
@@ -1174,18 +1191,27 @@ def _mw_system_rollup(state, rows, labels, tables, batch_by_id, ctx=None,
     _w = "open" if view == "open" else "close"
     _nrows = len(systems) + 1 + (1 if fw else 0)
     _h = min(560, 44 + 33 * _nrows)
+    # Compact week columns (values are short numbers) so more weeks are visible and
+    # cells aren't padded with empty space — don't stretch to the full container.
+    # Mirrors the limits editor's per-week width="small".
+    _wk_cfg = {wk: st.column_config.Column(width="small") for wk in labels}
     _fwnote = (f" The **{FW_LABEL}** row is standing freshwater cohorts — fed in "
                "the FW area (no OG cap), shown neutral and folded only into the "
                "TOTAL." if fw else "")
-    st.caption(f"Colour = fraction of each OG system's tank capacity (green roomy, "
-               f"amber near cap, red over).{_fwnote} Same week-{_w} state as the grid.")
+    st.caption(f"Biomass colour = fraction of each OG system's tank capacity (green "
+               f"roomy, amber near cap, red over).{_fwnote} Same week-{_w} state as "
+               f"the grid.")
     st.markdown(f"**{_w.capitalize()} biomass — tonnes / system / week**")
     st.dataframe(_table(bio, sys_bio_cap, 0.001, fw_bio if fw else None),
-                 use_container_width=True, height=_h)
+                 column_config=_wk_cfg, use_container_width=False, height=_h)
     st.markdown(f"**{_w.capitalize()} feed — kg/day / system / week** "
                 f"(6N depuration eats 0)")
-    st.dataframe(_table(feed, sys_feed_cap, 1.0, fw_feed if fw else None),
-                 use_container_width=True, height=_h)
+    st.caption(f"Feed colour = absolute load: green < {FEED_AMBER:,.0f} · amber "
+               f"{FEED_AMBER:,.0f}–{FEED_RED:,.0f} · red ≥ {FEED_RED:,.0f} "
+               f"kg/day/system.")
+    st.dataframe(_table(feed, sys_feed_cap, 1.0, fw_feed if fw else None,
+                        color_of=lambda v, caps: _fill_feed_abs(v)),
+                 column_config=_wk_cfg, use_container_width=False, height=_h)
 
 
 def _mw_recommendations(state, rows, labels, ctx):
