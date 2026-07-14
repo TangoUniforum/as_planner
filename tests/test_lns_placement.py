@@ -57,6 +57,13 @@ def _synthetic():
     harv = [Harvest("B1", wd[3], 1, 10000.0, 1500.0)]   # full harvest empties T1 at W4
     placement = PlacementResult(batch_locations=bl, tranog_events=tranog,
                                 harvest_events=harv)
+    # Realized biology keyed by (tank_id, week_label, batch_id) — static (sgr=0,
+    # mortality=0) so it reconciles, but PRESENT so refine exercises the re-key +
+    # the realized-keyed final gate (guards finding #1's shipped-audit path).
+    placement.realized_biology = {}
+    for bid, idxs, tid in [("B1", (0, 1, 2), 1), ("B2", (0, 1, 2, 3, 4), 3)]:
+        for i in idxs:
+            placement.realized_biology[(tid, wl[i], bid)] = [0.0, 0.0]
 
     states = []
     for bid, idxs, cnt, wt, bio in [("B1", (0, 1, 2, 3), 10000.0, 1500.0, 15000.0),
@@ -96,8 +103,18 @@ def test_relocates_to_free_tank_zero_drift():
     new = lns_placement.system_peak(edited.batch_locations, {}, tables, sl)
     assert new < base - 1e-6, f"peak should drop ({base:.3f} -> {new:.3f})"
     assert lns_placement.drift_count(edited, states, initial) == 0, "no drift after move"
+    # realized_biology re-keyed WITH the move (finding #1): B1's entries now live
+    # under the destination tank (2), and the realized-keyed audit that actually
+    # SHIPS (run.py) is clean — not just the modelled one.
+    assert all(k[0] == 2 for k in edited.realized_biology if k[2] == "B1"), \
+        "B1 realized biology must follow it to tank 2"
+    assert lns_placement.drift_count(
+        edited, states, initial, realized_biology=edited.realized_biology) == 0, \
+        "shipped (realized-keyed) audit must be clean after the move"
     # greedy input is untouched (still 1.5x) — the engine works on a copy
     assert lns_placement.system_peak(placement.batch_locations, {}, tables, sl) == base
+    assert placement.realized_biology[(1, iso_week_label(date(2027, 1, 4)), "B1")] \
+        == [0.0, 0.0], "greedy's realized_biology must be untouched (kept at tank 1)"
 
 
 def test_no_move_when_no_target():
@@ -111,3 +128,53 @@ def test_no_move_when_no_target():
         facility=facility, system_limits=sl, facility_limits=None,
         batch_meta={}, tables=tables)
     assert edited is None
+
+
+class _Tk:
+    def __init__(self, tid, sysid):
+        self.tank_id = tid
+        self.location_id = f"L{tid}"
+        self.system_id = sysid
+        self.volume_m3 = 200.0
+        self.max_density_kg_m3 = 95.0
+
+
+def test_relabel_rekeys_realized_biology():
+    """_relabel must carry realized_biology (keyed by tank_id) with the occupancy,
+    or the SHIPPED TankContinuityAudit (run.py feeds realized_biology) reconciles a
+    moved tank-week against a MISSING key -> mort defaults to 0 -> phantom drift the
+    modelled accept gate never sees. Covers relocate, revert (audit-reject path), and
+    a two-way swap. Guards audit finding #1 (2026-07-13)."""
+    wl0, wl1 = "2027-W01", "2027-W02"
+    tank_by_id = {1: _Tk(1, "OG3N"), 2: _Tk(2, "OG4N")}
+
+    # --- RELOCATE B1: tank 1 -> tank 2 for both weeks ---
+    bl = [BatchLocationRow(wl0, date(2027, 1, 4), "B1", 1, "L1", "OG3N",
+                           10000.0, 1500.0, 15000.0, 75.0, "SW"),
+          BatchLocationRow(wl1, date(2027, 1, 11), "B1", 1, "L1", "OG3N",
+                           10000.0, 1500.0, 15000.0, 75.0, "SW")]
+    p = PlacementResult(batch_locations=bl)
+    p.realized_biology = {(1, wl0, "B1"): [12.0, 34.0], (1, wl1, "B1"): [56.0, 78.0]}
+    relmap = {("B1", 1, wl0): 2, ("B1", 1, wl1): 2}
+    lns_placement._relabel(p, relmap, tank_by_id)
+    assert (1, wl0, "B1") not in p.realized_biology, "old tank key must be gone"
+    assert p.realized_biology[(2, wl0, "B1")] == [12.0, 34.0]
+    assert p.realized_biology[(2, wl1, "B1")] == [56.0, 78.0]
+    assert all(r.tank_id == 2 and r.system_id == "OG4N" for r in p.batch_locations)
+
+    # --- REVERT via _invert restores the original keys + values exactly ---
+    lns_placement._relabel(p, lns_placement._invert(relmap), tank_by_id)
+    assert p.realized_biology == {(1, wl0, "B1"): [12.0, 34.0],
+                                  (1, wl1, "B1"): [56.0, 78.0]}
+    assert all(r.tank_id == 1 for r in p.batch_locations)
+
+    # --- SWAP B1@tank1 <-> B2@tank2 (same week): each batch's biology follows it ---
+    q = PlacementResult(batch_locations=[
+        BatchLocationRow(wl0, date(2027, 1, 4), "B1", 1, "L1", "OG3N",
+                         10000.0, 1500.0, 15000.0, 75.0, "SW"),
+        BatchLocationRow(wl0, date(2027, 1, 4), "B2", 2, "L2", "OG4N",
+                         5000.0, 1000.0, 5000.0, 25.0, "SW")])
+    q.realized_biology = {(1, wl0, "B1"): [1.0, 2.0], (2, wl0, "B2"): [3.0, 4.0]}
+    swap = {("B1", 1, wl0): 2, ("B2", 2, wl0): 1}
+    lns_placement._relabel(q, swap, tank_by_id)
+    assert q.realized_biology == {(2, wl0, "B1"): [1.0, 2.0], (1, wl0, "B2"): [3.0, 4.0]}

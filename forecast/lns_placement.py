@@ -157,9 +157,16 @@ def _better(new, base, *, peak_eps=1e-9, area_eps=1e-3, cv_eps=5e-3):
 # Conservation gate — reuse the REAL continuity audit so our reconciliation can
 # never diverge from the one the regression test locks.
 # --------------------------------------------------------------------------- #
-def drift_count(placement, batch_week_states, initial_state):
+def drift_count(placement, batch_week_states, initial_state, realized_biology=None):
     """Count TANK_DRIFT + BIO_DRIFT rows the real audit would flag for this
-    (batch_locations, events) — 0 means continuity is intact."""
+    (batch_locations, events) — 0 means continuity is intact.
+
+    `realized_biology=None` runs the modelled (SGR/m_pct) reconciliation — the
+    per-move accept gate, tank-agnostic so a relabel never perturbs it. Pass the
+    plan's re-keyed realized_biology to audit the EXACT ground-truth reconciliation
+    that ships (run.py), which catches any re-keying mistake before greedy is
+    replaced. (Callers pass `dict or None`: an EMPTY dict would set the audit's
+    _have_realized True with no data, zeroing every mortality — a false-drift trap.)"""
     import openpyxl
 
     from .excel_io import write_tank_continuity_audit
@@ -167,7 +174,8 @@ def drift_count(placement, batch_week_states, initial_state):
     write_tank_continuity_audit(
         wb, placement.batch_locations, batch_week_states,
         placement.harvest_events, placement.transfer_events,
-        placement.grade_events, placement.tranog_events, initial_state)
+        placement.grade_events, placement.tranog_events, initial_state,
+        realized_biology=realized_biology)
     ws = wb["TankContinuityAudit"]
     n = 0
     for i, row in enumerate(ws.iter_rows(values_only=True), 1):
@@ -288,6 +296,26 @@ def _relabel(placement, relmap, tank_by_id):
             relabel(ev.batch_id, t, ev.event_date) for t in ev.source_tank_ids]
         for d in ev.destinations:
             d.tank_id = relabel(ev.batch_id, d.tank_id, ev.event_date)
+
+    # Re-key the realized biology alongside the occupancy move. It is keyed by
+    # (tank_id, week_label, batch_id) -> [bio_delta_kg, mort_count] and feeds the
+    # SHIPPED TankContinuityAudit (run.py). If it kept the OLD tank keys after a
+    # relocate/swap, that audit would reconcile every moved tank-week against a
+    # missing key — mort defaults to 0 and biomass to the coarse SGR fallback —
+    # and flag phantom TANK_DRIFT/BIO_DRIFT the (modelled) accept gate never sees.
+    # Pop all sources first, then assign, so a two-way SWAP can't clobber: the
+    # batch_id in the key already disambiguates the two directions, but staging
+    # the writes keeps it order-independent. Symmetric under _invert (revert).
+    rb = getattr(placement, "realized_biology", None)
+    if rb:
+        moves = {}
+        for (bid, old_tank, wk), new_tank in relmap.items():
+            k_old = (old_tank, wk, bid)
+            if k_old in rb:
+                moves[k_old] = (new_tank, wk, bid)
+        vals = {k: rb.pop(k) for k in moves}
+        for k_old, k_new in moves.items():
+            rb[k_new] = vals[k_old]
 
 
 def _invert(relmap):
@@ -479,8 +507,16 @@ def refine_realized(placement, *, initial_state, batch_week_states, control,
         print("  LNS placement: no beneficial relocation (greedy already near the "
               "capacity floor); greedy stands", file=sys.stderr)
         return None
-    # belt-and-suspenders final gate
+    # belt-and-suspenders final gate — check BOTH reconciliations: the modelled
+    # one (the per-move gate) AND, when realized biology exists, the ground-truth
+    # one that actually SHIPS (so a realized_biology re-keying mistake falls back
+    # to greedy instead of shipping a falsified audit). `or None` avoids the
+    # empty-dict false-drift trap (see drift_count).
+    _rb = getattr(work, "realized_biology", None) or None
     if (drift_count(work, batch_week_states, initial_state) > 0
+            or (_rb is not None
+                and drift_count(work, batch_week_states, initial_state,
+                                realized_biology=_rb) > 0)
             or {r.batch_id for r in work.batch_locations} < g_batches):
         print("  LNS placement: final safety gate failed; greedy stands", file=sys.stderr)
         return None

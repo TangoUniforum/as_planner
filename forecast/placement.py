@@ -3618,11 +3618,11 @@ def run_placement(
     result.warnings.extend(f"[D] {w}" for w in d_warns)
 
     # NOTE: opt-in LNS placement refinement (placement_method=="lns") is applied
-    # ONE level up, in run.py, AFTER this greedy plan is realized — it refines the
-    # canvas migration_plan and RE-RUNS this same engine to realize the refined
-    # plan (continuity guaranteed by construction; greedy is the warm start +
-    # fallback). run_placement itself stays a pure realizer of whatever plan it is
-    # given, so the greedy warm-start run is never self-refined. See lns_placement.
+    # ONE level up, in run.py, AFTER this greedy plan is realized — it relocates
+    # realized grow-out occupancy IN PLACE (no second placement run), re-keying the
+    # batch_locations, every event stream AND realized_biology together, gated on the
+    # continuity audit (greedy is the warm start + fallback). run_placement itself
+    # stays a pure realizer of whatever plan it is given. See lns_placement.
     return result, final_state
 
 
