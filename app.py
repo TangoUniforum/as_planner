@@ -1776,59 +1776,100 @@ def _mw_save_bar(events, bad):
 
 
 def _mw_copilot(uploaded, events):
-    """Human-in-the-loop co-pilot (v1a). Runs the planners forward from the
-    scripted window (respect mode — your transfers are fixed) and recommends the
-    NEXT week: harvest + 6N staging from the validated controller (pre-ticked,
-    load-bearing) and an optimised OG<->OG transfer plan from the global optimiser
-    (ranked, opt-in). Ticked moves append as that week's operations, extending the
-    window by one week — then run it again for the week after. Engine is
-    forecast.copilot (UI-free); this is just the shell."""
+    """Human-in-the-loop co-pilot (Sequential). Runs the planners forward ONCE
+    from the scripted window (respect mode — your transfers are fixed) and lets
+    you browse the recommended moves for the next several weeks. Only the NEXT
+    week is approvable: ticked moves append as that week's operations, extending
+    the window by one week — then run again for the week after. The look-ahead
+    weeks are projections from the current plan and refresh once the nearer weeks
+    are scripted. Engine is forecast.copilot (UI-free); this is just the shell."""
+    import shutil
     import tempfile
-    from forecast.copilot import propose_next_week, to_manual_events
+    from forecast.copilot import propose_upcoming, to_manual_events
     from forecast.manual_events import dump_manual_events
     _n = max((e.week or 1) for e in events) if events else 0
+    _LOOKAHEAD = 6
     st.caption(
         "Runs the controller + global optimiser forward from your window — your "
-        "transfers stay fixed — and recommends the **next** week. Harvest + 6N "
-        "staging come from the validated controller (pre-ticked); the OG↔OG "
-        "transfer plan comes from the global optimiser (ranked, opt-in). Tick what "
-        "you want, approve, and it's added as that week's ops — then run again for "
-        "the week after. **~1 min per run.**")
-    if st.button(f"🤖 Recommend week {_n + 1}", key="mw_cp_run", type="primary"):
+        "transfers stay fixed — and recommends the **next** week plus a few weeks "
+        "of **look-ahead**. Harvest + 6N staging come from the validated "
+        "controller (pre-ticked); the OG↔OG transfer plan comes from the global "
+        "optimiser (ranked, opt-in). Tick what you want on the **next** week, "
+        "approve, and it's added as that week's ops — then run again for the week "
+        "after. Look-ahead weeks are view-only projections. **~1 min per run.**")
+    if events:
+        _tr = sum(1 for e in events if e.type == "og_transfer")
+        _hv = sum(1 for e in events if e.type == "harvest")
+        _s6 = sum(1 for e in events if e.type in ("og_to_6n", "graded_harvest"))
+        _fw = sum(1 for e in events if e.type == "fw_to_og")
+        st.caption(
+            f"✓ Building on your **{len(events)} scripted operation(s)** through "
+            f"week {_n}: {_tr} transfer · {_hv} harvest · {_s6} into 6N · {_fw} FW→OG. "
+            f"Both engines run your full manual window first, so every recommendation "
+            f"is computed on top of these.")
+    if st.button(f"🤖 Recommend from week {_n + 1}", key="mw_cp_run", type="primary"):
         try:
             dump_manual_events(SCENARIO_DIR, events)
         except Exception as e:  # noqa: BLE001
             st.error(f"Couldn't save your events first: {e}")
             return
-        tmp = Path(tempfile.gettempdir()) / "copilot_pr.xlsm"
+        _wd = tempfile.mkdtemp(prefix="as_copilot_")   # per-run dir: no cross-session clobber
+        tmp = Path(_wd) / "copilot_pr.xlsm"
         tmp.write_bytes(uploaded.getvalue())
-        with st.spinner(f"Running the controller + global optimiser for "
+        with st.spinner(f"Running the controller + global optimiser from "
                         f"week {_n + 1}… (~1 min)"):
             try:
-                st.session_state["mw_cp_prop"] = propose_next_week(
-                    str(tmp), str(CONFIG_DIR), str(SCENARIO_DIR))
+                st.session_state["mw_cp_props"] = propose_upcoming(
+                    str(tmp), str(CONFIG_DIR), str(SCENARIO_DIR), n_weeks=_LOOKAHEAD)
                 st.session_state["mw_cp_nonce"] = \
                     st.session_state.get("mw_cp_nonce", 0) + 1
             except Exception as e:  # noqa: BLE001
-                st.session_state.pop("mw_cp_prop", None)
+                st.session_state.pop("mw_cp_props", None)
                 st.error(f"Co-pilot failed: {type(e).__name__}: {e}")
                 return
+            finally:
+                shutil.rmtree(_wd, ignore_errors=True)
 
-    prop = st.session_state.get("mw_cp_prop")
-    if prop is None:
+    props = st.session_state.get("mw_cp_props")
+    if not props:
         return
+    handoff = props[0]
+
+    # Week picker — browse any upcoming week; approval stays on the handoff week
+    # (Sequential model: you approve one contiguous week at a time).
+    def _wk_label(i):
+        p = props[i]
+        return (f"{p.week_label}  ·  week {p.window_week}  ·  "
+                f"{'next — approvable' if i == 0 else 'look-ahead (view only)'}")
+    sel = st.selectbox("Show recommendations for week", range(len(props)),
+                       format_func=_wk_label, key="mw_cp_week_sel")
+    prop = props[sel]
+    is_handoff = (sel == 0)
+
     for _w in prop.warnings:
         st.caption(f"⚠ {_w}")
     if prop.is_empty():
         st.info(f"The planners recommend no moves for {prop.week_label}.")
         return
 
-    st.markdown(f"**Recommended for {prop.week_label}** — ticked moves add as "
-                f"week {prop.window_week}:")
+    if is_handoff:
+        st.markdown(f"**Recommended for {prop.week_label}** — ticked moves add as "
+                    f"week {prop.window_week}:")
+    else:
+        st.info(f"👁 **Look-ahead: {prop.week_label} (week {prop.window_week}).** "
+                f"A projection from the current plan — approve advances one week at "
+                f"a time, so approve week {handoff.window_week} "
+                f"({handoff.week_label}) first. These numbers refresh once the "
+                f"nearer weeks are scripted.")
+
     _nonce = st.session_state.get("mw_cp_nonce", 0)
     picks: list = []
 
-    def _ck(m, i, label, default):
+    def _row(m, i, label, default):
+        # Handoff: a tickable checkbox (approvable). Look-ahead: a read-only line.
+        if not is_handoff:
+            st.markdown(f"- {label}")
+            return
         key = f"mw_cp_pick_{_nonce}_{i}"
         c1, c2 = st.columns([1, 16])
         c1.checkbox("pick", value=default, key=key, label_visibility="collapsed")
@@ -1839,14 +1880,14 @@ def _mw_copilot(uploaded, events):
     if prop.harvest_recs:
         st.markdown("**① Harvest — controller (contract / caps)**")
         for m in prop.harvest_recs:
-            _ck(m, i, f"Harvest **{m.from_loc}** · {m.batch} · "
-                      f"{m.count:,.0f} fish @ {m.avg_wt_kg:.2f} kg", True)
+            _row(m, i, f"Harvest **{m.from_loc}** · {m.batch} · "
+                       f"{m.count:,.0f} fish @ {m.avg_wt_kg:.2f} kg", True)
             i += 1
     if prop.sixn_recs:
         st.markdown("**② Stage into 6N for harvest — controller**")
         for m in prop.sixn_recs:
-            _ck(m, i, f"**{m.from_loc} → {m.to_loc}** · {m.batch} · "
-                      f"{m.count:,.0f} fish", True)
+            _row(m, i, f"**{m.from_loc} → {m.to_loc}** · {m.batch} · "
+                       f"{m.count:,.0f} fish", True)
             i += 1
     for opt in prop.transfer_options:
         mv = sorted(opt.moves, key=lambda x: -x.count)
@@ -1854,9 +1895,14 @@ def _mw_copilot(uploaded, events):
                     f"— {len(mv)} moves (the optimiser's full transition; "
                     f"tick the ones you want)")
         for m in mv:
-            _ck(m, i, f"**{m.from_loc} → {m.to_loc}** · {m.batch} · "
-                      f"{m.count:,.0f} fish · _{m.note}_", False)
+            _row(m, i, f"**{m.from_loc} → {m.to_loc}** · {m.batch} · "
+                       f"{m.count:,.0f} fish · _{m.note}_", False)
             i += 1
+
+    if not is_handoff:
+        st.caption(f"Viewing a look-ahead week — switch the picker back to "
+                   f"**{handoff.week_label} (week {handoff.window_week})** to approve.")
+        return
 
     if st.button(f"✓ Approve ticked → add to week {prop.window_week}",
                  key="mw_cp_approve", type="primary"):
@@ -1870,7 +1916,7 @@ def _mw_copilot(uploaded, events):
                 dump_manual_events(SCENARIO_DIR, _mw_events())
             except Exception:  # noqa: BLE001
                 pass
-            st.session_state.pop("mw_cp_prop", None)
+            st.session_state.pop("mw_cp_props", None)
             st.success(f"Added {len(chosen)} operation(s) to week "
                        f"{prop.window_week}. Run me again for week "
                        f"{prop.window_week + 1}.")

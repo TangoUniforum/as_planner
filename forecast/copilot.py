@@ -63,10 +63,13 @@ class Proposal:
 
 
 def _handoff(input_path, config_dir, scenario_dir):
-    """(handoff ISO week label, forecast-relative week#, tank->system, tank->loc).
+    """(handoff ISO week label, forecast-relative week#, handoff week-start date,
+    tank->system, tank->loc).
 
     The manual window runs weeks 1..N from the PR-derived start; the next week to
-    recommend is N+1, whose ISO label filters the planners' output sheets."""
+    recommend is N+1, whose ISO label filters the planners' output sheets. The
+    returned date opens week N+1, so callers can step it +7 days to label the
+    look-ahead weeks N+2, N+3, ... off the SAME planner run."""
     from openpyxl import load_workbook
     from forecast.config_io import load_config
     from forecast.manual_events import load_manual_events
@@ -79,10 +82,11 @@ def _handoff(input_path, config_dir, scenario_dir):
     fs0 = date(pc.year, pc.month, pc.day) + timedelta(days=1)
     events = load_manual_events(str(scenario_dir))
     n = max((e.week or 1) for e in events) if events else 0
-    handoff = iso_week_label(fs0 + timedelta(days=7 * n))
+    handoff_date = fs0 + timedelta(days=7 * n)
+    handoff = iso_week_label(handoff_date)
     tank_sys = {t.tank_id: t.system_id for t in facility.tanks}
     tank_loc = {t.tank_id: t.location_id for t in facility.tanks}
-    return handoff, n + 1, tank_sys, tank_loc
+    return handoff, n + 1, handoff_date, tank_sys, tank_loc
 
 
 def _extract_harvests(wb, wk_label, tank_loc):
@@ -146,35 +150,49 @@ def _extract_transfers(wb, wk_label, tank_sys, tank_loc, is6n, *, only_to_6n, en
     return out
 
 
-def propose_next_week(input_path, config_dir, scenario_dir, *,
-                      include_global=True) -> Proposal:
-    """Run the planners forward from the current manual window and return the
-    handoff week's recommended moves (see module docstring). Reads the CURRENT
-    scenario/manual_events.yaml — the caller must save the operator's edits first.
-    Each planner runs to a throwaway temp workbook; no production file is touched."""
+def propose_upcoming(input_path, config_dir, scenario_dir, *,
+                     n_weeks=6, include_global=True) -> list:
+    """Run the planners forward ONCE from the current manual window and return a
+    `Proposal` for each of the next `n_weeks` weeks (handoff = index 0, then the
+    look-ahead weeks N+2, N+3, ...). Reads the CURRENT scenario/manual_events.yaml
+    — the caller must save the operator's edits first. Each planner runs to a
+    single throwaway temp workbook that every week is extracted from (cheap), so
+    the ~1 min cost is paid once, not per week; no production file is touched.
+
+    Only the handoff (index 0) is approvable in Sequential mode — the look-ahead
+    weeks are projections from the current plan and will refresh once the nearer
+    weeks are scripted (see the app shell)."""
     from openpyxl import load_workbook
     from forecast.run import main as run_pipeline
     from forecast.sixn import SIXN_ALL_TANKS
+    from forecast.time_grid import iso_week_label
 
-    handoff, window_week, tank_sys, tank_loc = _handoff(
+    handoff, window_week, handoff_date, tank_sys, tank_loc = _handoff(
         input_path, config_dir, scenario_dir)
     is6n = set(SIXN_ALL_TANKS)
+    n_weeks = max(1, int(n_weeks))
+    weeks = [(iso_week_label(handoff_date + timedelta(days=7 * j)), window_week + j)
+             for j in range(n_weeks)]
     warnings: list[str] = []
 
-    # 1) CONTROLLER — the validated harvest + 6N-staging recommendation.
-    harvest_recs, sixn_recs = [], []
+    # 1) CONTROLLER — the validated harvest + 6N-staging recommendation, extracted
+    #    for every upcoming week from a single forward run.
+    ctrl: dict = {}
     with tempfile.TemporaryDirectory() as td:
         out = Path(td) / "copilot_controller.xlsm"
         run_pipeline(input_path=str(input_path), output_path=str(out),
                      config_dir=str(config_dir), scenario_dir=str(scenario_dir))
         wb = load_workbook(str(out), read_only=True, data_only=True)
-        harvest_recs = _extract_harvests(wb, handoff, tank_loc)
-        sixn_recs = _extract_transfers(wb, handoff, tank_sys, tank_loc, is6n,
-                                       only_to_6n=True, engine="controller")
+        for wk, _ww in weeks:
+            ctrl[wk] = (
+                _extract_harvests(wb, wk, tank_loc),
+                _extract_transfers(wb, wk, tank_sys, tank_loc, is6n,
+                                   only_to_6n=True, engine="controller"),
+            )
         wb.close()
 
-    # 2) GLOBAL-LP — the optimized OG<->OG relocation plan (v1a: one option).
-    transfer_options: list[TransferOption] = []
+    # 2) GLOBAL-LP — the optimized OG<->OG relocation plan, same single run.
+    glob: dict = {}
     if include_global:
         try:
             from tools.run_global_forecast import run_global
@@ -183,26 +201,49 @@ def propose_next_week(input_path, config_dir, scenario_dir, *,
                 run_global(str(input_path), str(out), str(config_dir),
                            str(scenario_dir), optimal=False)
                 wb = load_workbook(str(out), read_only=True, data_only=True)
-                og = _extract_transfers(wb, handoff, tank_sys, tank_loc, is6n,
-                                        only_to_6n=False, engine="global-lp")
+                for wk, _ww in weeks:
+                    glob[wk] = _extract_transfers(wb, wk, tank_sys, tank_loc, is6n,
+                                                  only_to_6n=False, engine="global-lp")
                 wb.close()
-            if og:
-                transfer_options.append(TransferOption(
-                    label="Global LP",
-                    why="minimises cap breaches first, then number of transfers",
-                    moves=og))
         except Exception as e:  # noqa: BLE001 — optimizer is optional; degrade gracefully
             warnings.append(f"global optimizer unavailable "
                             f"({type(e).__name__}: {e}) — harvest/6N only")
 
-    return Proposal(week_label=handoff, window_week=window_week,
-                    harvest_recs=harvest_recs, sixn_recs=sixn_recs,
-                    transfer_options=transfer_options, warnings=warnings)
+    proposals: list[Proposal] = []
+    for wk, ww in weeks:
+        harvest_recs, sixn_recs = ctrl.get(wk, ([], []))
+        transfer_options: list[TransferOption] = []
+        og = glob.get(wk, [])
+        if og:
+            transfer_options.append(TransferOption(
+                label="Global LP",
+                why="minimises cap breaches first, then number of transfers",
+                moves=og))
+        proposals.append(Proposal(
+            week_label=wk, window_week=ww,
+            harvest_recs=harvest_recs, sixn_recs=sixn_recs,
+            transfer_options=transfer_options, warnings=list(warnings)))
+    return proposals
+
+
+def propose_next_week(input_path, config_dir, scenario_dir, *,
+                      include_global=True) -> Proposal:
+    """Handoff week only — thin wrapper over `propose_upcoming` (see its docstring).
+    Kept for callers that want just the next approvable week."""
+    return propose_upcoming(input_path, config_dir, scenario_dir,
+                            n_weeks=1, include_global=include_global)[0]
 
 
 def to_manual_events(moves, window_week):
     """Convert approved `Move`s into ManualEvents for `window_week` so they append
-    straight into the operator's scripted window (extending it by one week)."""
+    straight into the operator's scripted window (extending it by one week).
+
+    The move's fish count MUST ride on the destination (`ManualDest.count`) for
+    og_transfer / og_to_6n: their appliers (_apply_og_transfer / _apply_og_to_6n)
+    read only the per-destination count and treat a single count=None dest as
+    "all remaining", so an approved PARTIAL move would silently drain the WHOLE
+    source tank. `harvest` is the exception — _apply_harvest reads ManualEvent.count
+    (None = whole tank), so the count belongs on the event there."""
     from forecast.manual_events import ManualEvent, ManualDest
     evs = []
     for m in moves:
@@ -212,9 +253,11 @@ def to_manual_events(moves, window_week):
         elif m.kind == "to_6n":
             evs.append(ManualEvent(type="og_to_6n", week=window_week,
                                    from_tank=m.from_tank, count=m.count,
-                                   destinations=[ManualDest(tank=m.to_tank)]))
+                                   destinations=[ManualDest(tank=m.to_tank,
+                                                            count=m.count)]))
         elif m.kind == "og_transfer":
             evs.append(ManualEvent(type="og_transfer", week=window_week,
                                    from_tank=m.from_tank, count=m.count,
-                                   destinations=[ManualDest(tank=m.to_tank)]))
+                                   destinations=[ManualDest(tank=m.to_tank,
+                                                            count=m.count)]))
     return evs
