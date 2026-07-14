@@ -2978,12 +2978,17 @@ def _stocking_frontier_section():
             _wl = float(load_control(CONFIG_DIR).density_welfare_threshold_kg_m3)
         except Exception:  # noqa: BLE001
             pass
-        _tmp = Path(tempfile.gettempdir()) / "frontier_pr.xlsm"
+        import shutil
+        _wd = tempfile.mkdtemp(prefix="as_frontier_")   # per-run dir: no cross-session clobber
+        _tmp = Path(_wd) / "frontier_pr.xlsm"
         _tmp.write_bytes(uploaded.getvalue())
-        with st.spinner(f"Running {len(reductions)} forecasts…"):
-            st.session_state["frontier_pts"] = stocking_frontier(
-                str(_tmp), str(CONFIG_DIR), str(SCENARIO_DIR),
-                reductions=reductions, welfare_density=_wl)
+        try:
+            with st.spinner(f"Running {len(reductions)} forecasts…"):
+                st.session_state["frontier_pts"] = stocking_frontier(
+                    str(_tmp), str(CONFIG_DIR), str(SCENARIO_DIR),
+                    reductions=reductions, welfare_density=_wl)
+        finally:
+            shutil.rmtree(_wd, ignore_errors=True)
 
     pts = st.session_state.get("frontier_pts")
     if not pts:
