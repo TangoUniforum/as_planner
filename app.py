@@ -1198,7 +1198,8 @@ def _mw_recommendations(state, rows, labels, ctx):
     biomass, all against the SAME caps the System-rollup shows (tank-derived
     system caps + the Control facility cap). Reads the current `rows`, so as the
     operator scripts harvests/moves the breaches shrink. Returns a list of
-    {frac, week, wk_idx, tank_id, msg, action} sorted by severity (value ÷ cap)."""
+    {frac, week, tank_id, msg, action} sorted by severity (value ÷ cap). `week` is
+    the ISO week-of-year label (the project's canonical id — forecast.time_grid)."""
     from collections import defaultdict
     from forecast.biology import realized_feed_kg_day
     from forecast.sixn import SIXN_ALL_TANKS
@@ -1289,7 +1290,6 @@ def _mw_recommendations(state, rows, labels, ctx):
     out = []
     for kind, where, wk, used, cap in breaches:
         frac = used / cap if cap else 0.0
-        wk_idx = labels.index(wk) + 1 if wk in labels else 0
         if kind == "feed":
             act, tid = _shed_action(rows_by_sw.get((where, wk), []), where, wk)
             msg = (f"**{where}** feed {used:,.0f} / {cap:,.0f} kg/day "
@@ -1312,7 +1312,7 @@ def _mw_recommendations(state, rows, labels, ctx):
                    else "**Harvest facility-wide** — total over cap")
             msg = (f"**Facility** biomass {used / 1000:.1f} / {cap / 1000:.1f} t "
                    f"({frac * 100:.0f}%)")
-        out.append({"frac": frac, "week": wk, "wk_idx": wk_idx, "tank_id": tid,
+        out.append({"frac": frac, "week": wk, "tank_id": tid,
                     "msg": msg, "action": act,
                     "key": (kind, where if where is not None else "FAC")})
     # Collapse a breach that recurs across weeks to its WORST week, so the top-N
@@ -1381,7 +1381,7 @@ def _mw_action_panel(state, ctx, rows, labels, sel, date_for):
     dt = date_for.get(wlabel)
     ds = f" · {dt.strftime('%b %d')}" if dt else ""
     head = st.columns([8, 1])
-    head[0].markdown(f"#### ▶ {loc} — week {wk} ({wlabel}{ds})")
+    head[0].markdown(f"#### ▶ {loc} — {wlabel}{ds}")
     if head[1].button("✕", key="mw_close_sel", help="Close this panel"):
         st.session_state.pop("mw_sel", None)
         # bump the grid remount nonce so the selected row clears too
@@ -1417,7 +1417,7 @@ def _mw_action_panel(state, ctx, rows, labels, sel, date_for):
         if not whole:
             cnt = st.number_input("Fish to harvest", min_value=0.0,
                                   value=float(r.count), step=1000.0, key=f"mw_h_cnt_{sfx}")
-        if st.button(f"➕ Add harvest in week {wk}", key="mw_h_add", type="primary"):
+        if st.button(f"➕ Add harvest in {wlabel}", key="mw_h_add", type="primary"):
             _mw_add(ManualEvent(type="harvest", week=wk, from_tank=tid,
                                 count=(None if whole else cnt)))
             st.rerun()
@@ -1470,7 +1470,7 @@ def _mw_action_panel(state, ctx, rows, labels, sel, date_for):
             st.caption("⚠ No empty / same-batch OG tank for the smaller fish.")
         dests = ([ManualDest(tank=int(dest6n)), ManualDest(tank=int(ret_tank))]
                  if dest6n is not None and ret_tank is not None else [])
-        if st.button(f"➕ Add graded 6N move in week {wk}", key="mw_g6_add",
+        if st.button(f"➕ Add graded 6N move in {wlabel}", key="mw_g6_add",
                      type="primary",
                      disabled=(dest6n is None or ret_tank is None
                                or not n_big or n_big <= 0)):
@@ -1496,7 +1496,7 @@ def _mw_action_panel(state, ctx, rows, labels, sel, date_for):
             total = st.number_input("Total fish to move (split evenly across dests)",
                                     min_value=0.0, value=float(r.count), step=1000.0,
                                     key=f"mw_m_total_{sfx}")
-        if st.button(f"➕ Add move in week {wk}", key="mw_m_add", type="primary",
+        if st.button(f"➕ Add move in {wlabel}", key="mw_m_add", type="primary",
                      disabled=not picks):
             _mw_add(ManualEvent(type="og_transfer", week=wk, from_tank=tid,
                                 destinations=_mw_split_dests(picks, total, whole),
@@ -1514,7 +1514,7 @@ def _mw_action_panel(state, ctx, rows, labels, sel, date_for):
             total = st.number_input("Total fish to send (split evenly)",
                                     min_value=0.0, value=float(r.count), step=1000.0,
                                     key=f"mw_6_total_{sfx}")
-        if st.button(f"➕ Add 6N move in week {wk}", key="mw_6_add", type="primary",
+        if st.button(f"➕ Add 6N move in {wlabel}", key="mw_6_add", type="primary",
                      disabled=not picks):
             _mw_add(ManualEvent(type="og_to_6n", week=wk, from_tank=tid,
                                 destinations=_mw_split_dests(picks, total, whole),
@@ -1588,7 +1588,7 @@ def _mw_fw_intake(state, ctx, rows, labels, date_for):
         "| | Transfer week | Avg weight |\n"
         "|---|---|---|\n"
         f"| **Planned** (PR) | {p_week} | {p_wt_s} |\n"
-        f"| **This intake** | {wlabel} (wk {wk}) | {_wt / 1000:.2f} kg |")
+        f"| **This intake** | {wlabel} | {_wt / 1000:.2f} kg |")
     # One-line read-out of the deltas that matter operationally.
     notes = []
     cur_date = date_for.get(wlabel)
@@ -1642,7 +1642,7 @@ def _mw_fw_intake(state, ctx, rows, labels, date_for):
         st.caption("⚠ Still need " + " and ".join(gaps) + ".")
     dests = ([ManualDest(tank=int(t), size_class="big") for t in big_picks]
              + [ManualDest(tank=int(t), size_class="small") for t in small_picks])
-    if st.button(f"➕ Add FW→OG intake in week {wk}", key="mw_fw_add",
+    if st.button(f"➕ Add FW→OG intake in {wlabel}", key="mw_fw_add",
                  type="primary", disabled=bool(gaps) or not dests):
         _mw_add(ManualEvent(type="fw_to_og", week=wk, batch=bid, count=target,
                             destinations=dests))
@@ -1651,18 +1651,33 @@ def _mw_fw_intake(state, ctx, rows, labels, date_for):
 
 # ---- Readback timeline + save bar ----
 
-def _mw_event_summary(state, ev):
+def _mw_iso_week(week, forecast_start):
+    """ISO week-of-year label (e.g. '2026-W08') for a 1-based override-window week —
+    the project's canonical week identifier (forecast.time_grid), matching the grid
+    columns, the feed matrix and the co-pilot. Falls back to 'Wk N' when
+    forecast_start is unknown (non-hydrated PR)."""
+    from forecast.time_grid import week_label
+    if forecast_start is None or not week:
+        return f"Wk {week}"
+    try:
+        return week_label(int(week) - 1, forecast_start)
+    except Exception:  # noqa: BLE001
+        return f"Wk {week}"
+
+
+def _mw_event_summary(state, ev, forecast_start=None):
     loc = lambda t: _mw_loc(state, t)  # noqa: E731
     dests = ", ".join(loc(d.tank) for d in ev.destinations) or "—"
+    wk = _mw_iso_week(ev.week, forecast_start)   # week-of-year, like the matrix
     if ev.type == "harvest":
         amt = f"{ev.count:,.0f} fish" if ev.count is not None else "the whole tank"
-        return f"Wk {ev.week}: **Harvest** {amt} from {loc(ev.from_tank)}"
+        return f"{wk}: **Harvest** {amt} from {loc(ev.from_tank)}"
     if ev.type == "og_transfer":
         amt = f"{ev.count:,.0f}" if ev.count else "whole tank"
-        return f"Wk {ev.week}: **Move** {amt} from {loc(ev.from_tank)} → {dests}"
+        return f"{wk}: **Move** {amt} from {loc(ev.from_tank)} → {dests}"
     if ev.type == "og_to_6n":
         amt = f"{ev.count:,.0f}" if ev.count else "whole tank"
-        return f"Wk {ev.week}: **Send to 6N** {amt} from {loc(ev.from_tank)} → {dests}"
+        return f"{wk}: **Send to 6N** {amt} from {loc(ev.from_tank)} → {dests}"
     if ev.type == "fw_to_og":
         tgt = f"target {ev.count:,.0f}" if ev.count else "all available"
         big = ", ".join(loc(d.tank) for d in ev.destinations
@@ -1670,9 +1685,9 @@ def _mw_event_summary(state, ev):
         small = ", ".join(loc(d.tank) for d in ev.destinations
                           if (d.size_class or "").lower() == "small")
         if big or small:
-            return (f"Wk {ev.week}: **FW→OG** {ev.batch} → bigger {big or '—'} · "
+            return (f"{wk}: **FW→OG** {ev.batch} → bigger {big or '—'} · "
                     f"smaller {small or '—'} ({tgt})")
-        return f"Wk {ev.week}: **FW→OG** {ev.batch} → {dests} ({tgt})"
+        return f"{wk}: **FW→OG** {ev.batch} → {dests} ({tgt})"
     if ev.type == "graded_harvest":
         from forecast.sixn import SIXN_ALL_TANKS
         amt = f"{ev.count:,.0f}" if ev.count else "?"
@@ -1681,14 +1696,14 @@ def _mw_event_summary(state, ev):
         ret = (loc(ev.destinations[1].tank) if len(ev.destinations) >= 2
                else "source")
         if pk_id in SIXN_ALL_TANKS:
-            return (f"Wk {ev.week}: **Graded → 6N** biggest {amt} from "
+            return (f"{wk}: **Graded → 6N** biggest {amt} from "
                     f"{loc(ev.from_tank)} → 6N {pk}, retain smaller in {ret}")
-        return (f"Wk {ev.week}: **Graded harvest** biggest {amt} from "
+        return (f"{wk}: **Graded harvest** biggest {amt} from "
                 f"{loc(ev.from_tank)} (via {pk}), retain smaller in {ret}")
-    return f"Wk {ev.week}: {ev.type}"
+    return f"{wk}: {ev.type}"
 
 
-def _mw_timeline(state, events, bad):
+def _mw_timeline(state, events, bad, forecast_start=None):
     st.markdown("**Scripted operations — this window**")
     if not events:
         st.caption("None yet. Click a tank in the grid above (or use the FW→OG "
@@ -1699,10 +1714,10 @@ def _mw_timeline(state, events, bad):
         problems = bad.get(i)
         with c1:
             if problems:
-                st.markdown(f"❌ {_mw_event_summary(state, ev)}")
+                st.markdown(f"❌ {_mw_event_summary(state, ev, forecast_start)}")
                 st.caption("&nbsp;&nbsp;&nbsp;↳ " + "; ".join(problems))
             else:
-                st.markdown(f"✅ {_mw_event_summary(state, ev)}")
+                st.markdown(f"✅ {_mw_event_summary(state, ev, forecast_start)}")
             if ev.notes:
                 st.caption(f"&nbsp;&nbsp;&nbsp;_{ev.notes}_")
         if c2.button("🗑", key=f"mw_del_{i}", help="Delete this operation"):
@@ -2086,7 +2101,7 @@ def _manual_window_editor(uploaded):
                             _sev = "🔴" if _rc["frac"] >= 1.15 else "🟠"
                             _ca, _cb = st.columns([9, 1])
                             _ca.markdown(
-                                f"{_sev} **Wk {_rc['wk_idx']}** · {_rc['msg']}  \n"
+                                f"{_sev} **{_rc['week']}** · {_rc['msg']}  \n"
                                 f"↳ {_rc['action']}")
                             if (_rc["tank_id"] is not None
                                     and _rc["week"] in labels
@@ -2124,7 +2139,7 @@ def _manual_window_editor(uploaded):
                     _mw_copilot(uploaded, events)
 
             st.divider()
-            _mw_timeline(state, events, bad)
+            _mw_timeline(state, events, bad, ctx.get("forecast_start") if ctx else None)
 
             if st.toggle("⚙ Advanced — raw event grid (power users)",
                          key="mw_adv_toggle"):
