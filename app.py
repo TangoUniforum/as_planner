@@ -1191,27 +1191,28 @@ def _mw_system_rollup(state, rows, labels, tables, batch_by_id, ctx=None,
     _w = "open" if view == "open" else "close"
     _nrows = len(systems) + 1 + (1 if fw else 0)
     _h = min(560, 44 + 33 * _nrows)
-    # Compact week columns (values are short numbers) so more weeks are visible and
-    # cells aren't padded with empty space — don't stretch to the full container.
-    # Mirrors the limits editor's per-week width="small".
-    _wk_cfg = {wk: st.column_config.Column(width="small") for wk in labels}
     _fwnote = (f" The **{FW_LABEL}** row is standing freshwater cohorts — fed in "
                "the FW area (no OG cap), shown neutral and folded only into the "
                "TOTAL." if fw else "")
-    st.caption(f"Biomass colour = fraction of each OG system's tank capacity (green "
-               f"roomy, amber near cap, red over).{_fwnote} Same week-{_w} state as "
-               f"the grid.")
-    st.markdown(f"**{_w.capitalize()} biomass — tonnes / system / week**")
-    st.dataframe(_table(bio, sys_bio_cap, 0.001, fw_bio if fw else None),
-                 column_config=_wk_cfg, use_container_width=False, height=_h)
-    st.markdown(f"**{_w.capitalize()} feed — kg/day / system / week** "
-                f"(6N depuration eats 0)")
-    st.caption(f"Feed colour = absolute load: green < {FEED_AMBER:,.0f} · amber "
-               f"{FEED_AMBER:,.0f}–{FEED_RED:,.0f} · red ≥ {FEED_RED:,.0f} "
-               f"kg/day/system.")
-    st.dataframe(_table(feed, sys_feed_cap, 1.0, fw_feed if fw else None,
-                        color_of=lambda v, caps: _fill_feed_abs(v)),
-                 column_config=_wk_cfg, use_container_width=False, height=_h)
+    # Render the matrices in the SAME left 3/5 column the tank grid uses (the
+    # st.columns([3, 2]) split above the grid) and let them fill it, so the
+    # biomass/feed tables line up under the grid at the same width.
+    _mcol, _ = st.columns([3, 2], gap="medium")
+    with _mcol:
+        st.caption(f"Biomass colour = fraction of each OG system's tank capacity "
+                   f"(green roomy, amber near cap, red over).{_fwnote} Same "
+                   f"week-{_w} state as the grid.")
+        st.markdown(f"**{_w.capitalize()} biomass — tonnes / system / week**")
+        st.dataframe(_table(bio, sys_bio_cap, 0.001, fw_bio if fw else None),
+                     use_container_width=True, height=_h)
+        st.markdown(f"**{_w.capitalize()} feed — kg/day / system / week** "
+                    f"(6N depuration eats 0)")
+        st.caption(f"Feed colour = absolute load: green < {FEED_AMBER:,.0f} · amber "
+                   f"{FEED_AMBER:,.0f}–{FEED_RED:,.0f} · red ≥ {FEED_RED:,.0f} "
+                   f"kg/day/system.")
+        st.dataframe(_table(feed, sys_feed_cap, 1.0, fw_feed if fw else None,
+                            color_of=lambda v, caps: _fill_feed_abs(v)),
+                     use_container_width=True, height=_h)
 
 
 def _mw_recommendations(state, rows, labels, ctx):
