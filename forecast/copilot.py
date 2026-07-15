@@ -150,18 +150,73 @@ def _extract_transfers(wb, wk_label, tank_sys, tank_loc, is6n, *, only_to_6n, en
     return out
 
 
+def _short_horizon_config(config_dir, window_n, n_weeks, buffer):
+    """(config_dir_to_use, temp_dir_or_None). The co-pilot only surfaces the next
+    n_weeks, so running the planners over the FULL config horizon — especially the
+    global optimiser's full-horizon placement solve — is minutes of wasted work.
+
+    If (window_n + n_weeks + buffer) is STRICTLY shorter than the config's
+    horizon_weeks, copy config_dir to a temp dir with that shortened horizon and
+    return it (caller deletes the temp dir); else return config_dir unchanged. The
+    forward planner subtracts the manual window (window_n) itself, so the effective
+    look-ahead is n_weeks + buffer. The buffer preserves near-term fidelity — the
+    6N purge-rotation lead (~2-3 wks), harvest anticipation (~1 wk) and any TranOG
+    arrivals just past the window — so the handoff-week recommendations don't change
+    (verified in tests/test_copilot_short_horizon)."""
+    import os
+    import re
+    import shutil
+    import tempfile
+
+    import yaml
+    ctrl_src = os.path.join(str(config_dir), "control.yaml")
+    try:
+        with open(ctrl_src, encoding="utf-8") as f:
+            full = int((yaml.safe_load(f) or {}).get("horizon_weeks") or 0)
+    except (OSError, ValueError, TypeError):
+        return str(config_dir), None
+    want = int(window_n) + int(n_weeks) + int(buffer)
+    if full <= 0 or want >= full:
+        return str(config_dir), None          # already short enough — leave it alone
+    tmp = tempfile.mkdtemp(prefix="as_copilot_cfg_")
+    cdir = os.path.join(tmp, "config")
+    shutil.copytree(str(config_dir), cdir)
+    ctrl_dst = os.path.join(cdir, "control.yaml")
+    with open(ctrl_dst, encoding="utf-8") as f:
+        text = f.read()
+    new_text, n_sub = re.subn(r"(?m)^horizon_weeks:.*$",
+                              f"horizon_weeks: {want}", text)
+    if n_sub == 0:                            # unexpected layout — fall back to full
+        shutil.rmtree(tmp, ignore_errors=True)
+        return str(config_dir), None
+    with open(ctrl_dst, "w", encoding="utf-8") as f:
+        f.write(new_text)
+    return cdir, tmp
+
+
 def propose_upcoming(input_path, config_dir, scenario_dir, *,
-                     n_weeks=6, include_global=True) -> list:
+                     n_weeks=6, include_global=True, horizon_buffer=20) -> list:
     """Run the planners forward ONCE from the current manual window and return a
     `Proposal` for each of the next `n_weeks` weeks (handoff = index 0, then the
     look-ahead weeks N+2, N+3, ...). Reads the CURRENT scenario/manual_events.yaml
     — the caller must save the operator's edits first. Each planner runs to a
-    single throwaway temp workbook that every week is extracted from (cheap), so
-    the ~1 min cost is paid once, not per week; no production file is touched.
+    single throwaway temp workbook that every week is extracted from; no production
+    file is touched.
+
+    Because only the next `n_weeks` are surfaced, the planners run over a SHORT
+    horizon (manual window + n_weeks + `horizon_buffer`) instead of the full config
+    horizon — the global optimiser's full-horizon solve is otherwise minutes of
+    wasted work. With the default buffer (20) the HANDOFF (the only approvable week)
+    is byte-identical to the full-horizon run and the look-ahead previews stay within
+    ~20 fish with no structural change, at ~5x the speed (measured on the live config:
+    full ~90s -> ~18s). Smaller buffers are faster but drift the look-ahead more (a
+    10-week buffer split one week's 6N staging differently). See _short_horizon_config.
 
     Only the handoff (index 0) is approvable in Sequential mode — the look-ahead
     weeks are projections from the current plan and will refresh once the nearer
     weeks are scripted (see the app shell)."""
+    import shutil
+
     from openpyxl import load_workbook
     from forecast.run import main as run_pipeline
     from forecast.sixn import SIXN_ALL_TANKS
@@ -175,39 +230,47 @@ def propose_upcoming(input_path, config_dir, scenario_dir, *,
              for j in range(n_weeks)]
     warnings: list[str] = []
 
-    # 1) CONTROLLER — the validated harvest + 6N-staging recommendation, extracted
-    #    for every upcoming week from a single forward run.
-    ctrl: dict = {}
-    with tempfile.TemporaryDirectory() as td:
-        out = Path(td) / "copilot_controller.xlsm"
-        run_pipeline(input_path=str(input_path), output_path=str(out),
-                     config_dir=str(config_dir), scenario_dir=str(scenario_dir))
-        wb = load_workbook(str(out), read_only=True, data_only=True)
-        for wk, _ww in weeks:
-            ctrl[wk] = (
-                _extract_harvests(wb, wk, tank_loc),
-                _extract_transfers(wb, wk, tank_sys, tank_loc, is6n,
-                                   only_to_6n=True, engine="controller"),
-            )
-        wb.close()
+    # Run the planners over just (manual window + look-ahead + buffer) weeks, not the
+    # full config horizon — the co-pilot never reads past week n_weeks.
+    plan_cfg, _cfg_tmp = _short_horizon_config(
+        config_dir, window_week - 1, n_weeks, horizon_buffer)
+    try:
+        # 1) CONTROLLER — the validated harvest + 6N-staging recommendation, extracted
+        #    for every upcoming week from a single forward run.
+        ctrl: dict = {}
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "copilot_controller.xlsm"
+            run_pipeline(input_path=str(input_path), output_path=str(out),
+                         config_dir=str(plan_cfg), scenario_dir=str(scenario_dir))
+            wb = load_workbook(str(out), read_only=True, data_only=True)
+            for wk, _ww in weeks:
+                ctrl[wk] = (
+                    _extract_harvests(wb, wk, tank_loc),
+                    _extract_transfers(wb, wk, tank_sys, tank_loc, is6n,
+                                       only_to_6n=True, engine="controller"),
+                )
+            wb.close()
 
-    # 2) GLOBAL-LP — the optimized OG<->OG relocation plan, same single run.
-    glob: dict = {}
-    if include_global:
-        try:
-            from tools.run_global_forecast import run_global
-            with tempfile.TemporaryDirectory() as td:
-                out = Path(td) / "copilot_global.xlsm"
-                run_global(str(input_path), str(out), str(config_dir),
-                           str(scenario_dir), optimal=False)
-                wb = load_workbook(str(out), read_only=True, data_only=True)
-                for wk, _ww in weeks:
-                    glob[wk] = _extract_transfers(wb, wk, tank_sys, tank_loc, is6n,
-                                                  only_to_6n=False, engine="global-lp")
-                wb.close()
-        except Exception as e:  # noqa: BLE001 — optimizer is optional; degrade gracefully
-            warnings.append(f"global optimizer unavailable "
-                            f"({type(e).__name__}: {e}) — harvest/6N only")
+        # 2) GLOBAL-LP — the optimized OG<->OG relocation plan, same single run.
+        glob: dict = {}
+        if include_global:
+            try:
+                from tools.run_global_forecast import run_global
+                with tempfile.TemporaryDirectory() as td:
+                    out = Path(td) / "copilot_global.xlsm"
+                    run_global(str(input_path), str(out), str(plan_cfg),
+                               str(scenario_dir), optimal=False)
+                    wb = load_workbook(str(out), read_only=True, data_only=True)
+                    for wk, _ww in weeks:
+                        glob[wk] = _extract_transfers(wb, wk, tank_sys, tank_loc, is6n,
+                                                      only_to_6n=False, engine="global-lp")
+                    wb.close()
+            except Exception as e:  # noqa: BLE001 — optimizer is optional; degrade gracefully
+                warnings.append(f"global optimizer unavailable "
+                                f"({type(e).__name__}: {e}) — harvest/6N only")
+    finally:
+        if _cfg_tmp:
+            shutil.rmtree(_cfg_tmp, ignore_errors=True)
 
     proposals: list[Proposal] = []
     for wk, ww in weeks:

@@ -1849,7 +1849,7 @@ def _mw_copilot(uploaded, events, forecast_start=None):
         "controller (pre-ticked); the OG↔OG transfer plan comes from the global "
         "optimiser (ranked, opt-in). Tick what you want on the **next** week, "
         "approve, and it's added as that week's ops — then run again for the week "
-        "after. Look-ahead weeks are view-only projections. **~1 min per run.**")
+        "after. Look-ahead weeks are view-only projections. **~20-30 s per run.**")
     if events:
         _tr = sum(1 for e in events if e.type == "og_transfer")
         _hv = sum(1 for e in events if e.type == "harvest")
@@ -1871,7 +1871,7 @@ def _mw_copilot(uploaded, events, forecast_start=None):
         tmp = Path(_wd) / "copilot_pr.xlsm"
         tmp.write_bytes(uploaded.getvalue())
         with st.spinner(f"Running the controller + global optimiser from "
-                        f"{_next_iso}… (~1 min)"):
+                        f"{_next_iso}… (~20-30 s)"):
             try:
                 st.session_state["mw_cp_props"] = propose_upcoming(
                     str(tmp), str(CONFIG_DIR), str(SCENARIO_DIR), n_weeks=_LOOKAHEAD)
