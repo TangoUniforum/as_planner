@@ -143,7 +143,34 @@ batches then grow/feed differently, producing a different biomass trajectory,
 harvest timing, and peaks. Conservation holds regardless of the models chosen, so
 this is a safe way to stress-test or re-plan.
 
-### 3.4 Manual override window (optional starting-state editor)
+### 3.4 The biology tables (`config/biology.yaml`, **Configure → Biology models**)
+These are the curves every batch grows and eats along, edited as four grids:
+
+| Grid | Keyed on | Drives |
+|---|---|---|
+| **Growth** | fish size (g) | SGR %/day in freshwater and seawater, plus the FCR curve for each model |
+| **Mortality** | weeks since input | weekly mortality % |
+| **Feed types** | max size (g) | which feed a fish of that size is on |
+| **Culling** | days since input | scheduled cull % |
+
+Each grid is a **lookup curve read by size or age**, so the rows must run smallest
+to largest. You don't have to maintain that by hand — add a row wherever it's
+convenient and the app sorts it into place when you save, which is why a row can
+appear to jump after **💾 Save Biology**. That's the sort working, not an error.
+
+> **Why it matters.** Values between two rows are interpolated, and anything past
+> the last row holds that row's value. So an out-of-order row used to silently
+> flatten the whole curve beyond it — one stray 50 g row could make every
+> market-weight fish grow at the 50 g rate. The sort is now enforced wherever
+> tables enter (this editor, the Excel template import, hand-edited YAML), so this
+> class of silent error is gone. Values are never changed — only row order.
+
+Between edits, remember the app is the source of truth: a save writes
+`config/biology.yaml` and every later run reads it. Per-batch multipliers
+(`fcr_model`, `sgr_correction`, `fw_correction` in §3.3) scale these shared curves
+for one batch without touching them.
+
+### 3.5 Manual override window (optional starting-state editor)
 
 Sometimes the PR-hydrated starting state isn't quite the starting point you want
 to forecast from — you want to script a few operational moves first (relocate a
@@ -225,7 +252,17 @@ week is often a full layout transition, so you tick only the moves you want).
 Approve the ticked moves and they're appended as week N+1's operations, extending
 your window by a week; run it again for the week after, and so on. Each run takes
 **~1 minute** (it runs both planners). The engine (`forecast/copilot.py`) is
-UI-free by design, so this loop is portable to a future desktop build. *Planned
+UI-free by design, so this loop is portable to a future desktop build.
+
+Both co-pilot buttons write `scenario/manual_events.yaml` — the same file the
+forecast reads — so they follow the same **reject-at-entry** rule as *Save window*:
+while any operation in your window shows ❌, Recommend and Approve are disabled
+until you fix it. Recommendations are also tied to the window they were computed
+from; edit or delete an operation (or upload a different PR) and the proposals
+clear rather than letting you approve moves planned against a facility state that
+no longer exists. If a save ever fails — `scenario/` is OneDrive-synced, so a sync
+lock can win the race — you get an explicit error saying the operations are in your
+window but **not** on disk, and *💾 Save window* retries it. *Planned
 next (v1b): genuinely ranked transfer **options** side-by-side, each tagged by the
 priority it serves (contract → caps → utilisation → transfers).*
 
@@ -551,7 +588,25 @@ run will do*, a result shows *the config it used* (incl. optimizer overrides), a
 Optimize shows *the base the search tunes on top of* — so you can always see what's
 selected and what it does.
 
+**While a run is going**, the status box narrates the engine's own progress live —
+loading, hydration, caps, the harvest scheduler, FW calibration, the placement walk,
+the audits, save — with the newest line as the heading and the full sequence
+underneath. A controller run emits ~200 such lines. Two things it can't tell you:
+the placement walk itself is silent (it prints only when it finishes, so a long run
+rests on its last line for a while), and the CP-SAT solver reports only at the end
+of each solve. Neither is a hang — check CPU in Task Manager if in doubt.
+
 ### The app tabs
+Tab contents are computed **once per run** and reused, so clicking between tabs,
+dragging the Per-Batch period slider, or working in the manual-window editor above
+the results no longer rebuilds the pivots, tables and charts each time. A new run
+(or picking a different plan on the Compare board) rebuilds everything. Two
+consequences worth knowing: your Per-Batch batch/period selections now survive
+interactions elsewhere in the app but reset when you load a different run, and if
+the run's temporary output file has been cleaned up (after a reboot, say) the
+Overview's realized-feed chart is simply omitted rather than erroring the page —
+re-run to get it back.
+
 - **Overview** — advisory issues + tank-occupancy heatmap + per-system biomass + **realized** per-system feed (read from `SystemLimitsAudit`, with the per-system feed-cap line). This is the *fed plan after harvest/FIFO* — **not** the `BiologyProjection` per-batch feed, which is the unharvested projection (fish growing along the curve, ignoring harvest/caps) and runs far higher (10k+ vs a realized ~3–4k). If a feed line looks like it spikes to 5–10× the cap, you're looking at projection feed, not the plan.
 - **Per-Batch** — per-batch weight/biomass/density/losses over a period slider
 - **Period Summary** — facility biomass, weekly harvest, active batches, density
@@ -796,6 +851,13 @@ To keep the knobs permanently, paste the snippet into **Configure → Control** 
 `config/control.yaml`); every later run then uses them. The CLI prints the same
 snippet at the end of a sweep.
 
+The knobs shown, applied and saved are the winner's **actual** knob set. That matters
+for **Deep search**, which improves one knob at a time and names each candidate after
+the single knob it just changed — so the same name recurs across rounds carrying
+different accumulated settings. The recommendation carries its own knobs rather than
+being looked up by name, which is what makes a multi-knob winner save in full. (Before
+this, "save the winning knobs" could persist an early partial set.)
+
 **Two buttons — same search, different ending.** Both run the identical search
 (method + emphasis); they differ only in what happens *after* the recommendation:
 
@@ -878,8 +940,22 @@ report**. Each method's plan is internally consistent (0-drift, tank continuity)
 you choose a *whole* plan — never a splice.
 
 - **What runs.** Controller (~30s) and the Global heuristic LP (~4 min) always; the
-  optimal CP-SAT placement (~30 min) is a checkbox that is **on by default** — uncheck
-  it for a fast two-method compare.
+  optimal CP-SAT placement is a checkbox that is **on by default** — uncheck
+  it for a fast two-method compare. The CP-SAT leg is quoted at ~30 min but solves
+  each of the ~130 weeks under its own time budget, so on a long horizon it can run
+  considerably longer. Watch the clock in the progress text, not the bar.
+- **Interrupting is safe.** Each method is saved the instant it finishes. If you click
+  something mid-compare (which aborts the run — Streamlit restarts the script on any
+  widget interaction), the board still shows the legs that completed and names the ones
+  that didn't. Click **▶ Run all methods & compare** again and it reuses the finished
+  work, running only what's missing. Use **↻ Re-run all from scratch** to discard
+  everything and start over — you'll want that after changing config, though a config
+  or PR change already marks the stored results stale and re-runs them automatically.
+- **Reading the progress bar.** It advances when a method *finishes*, not while one is
+  running: the engine call blocks the app, so nothing can animate during it. The text
+  tells you which method is in flight, its typical duration, and the wall-clock time it
+  started. Each method also has its own status line that narrates the engine's stages
+  as they happen.
 - **Grading lenses** (each card shows the winning method + its value): fewest fish
   moves, steadiest harvest, most balanced *across* systems, most even *within* systems,
   tightest density, **best welfare / product quality**, smallest tank footprint, fastest
