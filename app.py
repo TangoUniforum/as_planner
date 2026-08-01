@@ -11,6 +11,7 @@ Run with:  streamlit run app.py
 from __future__ import annotations
 
 import io
+import os
 import sys
 import tempfile
 import time
@@ -45,6 +46,14 @@ def _config_ready() -> bool:
 
 def _scenario_ready() -> bool:
     return (SCENARIO_DIR / "batches.yaml").exists()
+
+
+def _cpu_workers() -> int:
+    """Parallel-work budget from the sidebar's "Computer power" percent: that
+    share of this machine's logical CPUs, at least 1. One number feeds both
+    kinds of heavy work — CP-SAT search threads and Optimize sweep processes."""
+    pct = int(st.session_state.get("cpu_pct", 40))
+    return max(1, round((os.cpu_count() or 2) * pct / 100.0))
 
 
 def _active_config_summary(cd: dict) -> list[tuple]:
@@ -2472,6 +2481,22 @@ st.caption(
 # ============================================================
 
 with st.sidebar:
+    # "Computer power" — how much of this machine the heavy runs may use. Stored
+    # as a PERCENT of logical CPUs (operator-friendly); _cpu_workers() translates
+    # it into CP-SAT search threads / sweep worker processes at the call sites.
+    st.slider(
+        "Computer power", min_value=10, max_value=100, value=40, step=10,
+        format="%d%%", key="cpu_pct",
+        help="How much of this computer the heavy runs may use — the Global "
+             "optimal (CP-SAT) solver (also inside Compare & Choose) and the "
+             "Optimize sweeps. Higher = faster runs, but other applications "
+             "may feel slower (and Optimize sweeps use more memory) while a "
+             "run is going. A plain controller Run forecast and Tune are "
+             "sequential and unaffected.",
+    )
+    st.caption(f"Heavy runs may use up to **{_cpu_workers()}** of "
+               f"{os.cpu_count() or 2} processor cores.")
+    st.divider()
     # If ▶ Run forecast was clicked from another mode, jump to Run forecast HERE —
     # before the radio is instantiated, so setting its session_state value is allowed
     # (Streamlit forbids mutating a widget's key after it renders). The pending run is
@@ -2667,8 +2692,13 @@ def _run_with_workbook_bytes(
     scenario_dir: str | None = None,
     method: str = "controller",
     cpsat_time: float = 300.0,
+    cpsat_workers: int | None = None,
 ) -> dict:
     """Run the pipeline against `input_bytes` in a temp directory.
+
+    `cpsat_workers` = CP-SAT search threads for the global-optimal method
+    (None -> the engine default of 8); callers pass _cpu_workers() so the
+    sidebar's "Computer power" percent governs it.
 
     When config_dir/scenario_dir are given (PR-only mode), the stable
     config + scenario load from YAML and the uploaded workbook supplies
@@ -2718,7 +2748,8 @@ def _run_with_workbook_bytes(
                 from tools.run_global_forecast import run_global
                 rc = run_global(in_path, out_path, config_dir, scenario_dir,
                                 optimal=(method == "global_optimal"),
-                                cpsat_time=cpsat_time)
+                                cpsat_time=cpsat_time,
+                                cpsat_workers=(cpsat_workers or 8))
             else:
                 rc = run_pipeline(input_path=in_path, output_path=out_path,
                                   config_dir=run_config_dir, scenario_dir=scenario_dir)
@@ -3548,15 +3579,17 @@ def _optimizer():
             if combined:
                 results = optimize.deep_search_combined(
                     str(in_path), str(CONFIG_DIR), str(SCENARIO_DIR),
-                    emphasis=emphasis, weights=_w, progress=_prog)
+                    emphasis=emphasis, weights=_w, progress=_prog,
+                    max_workers=_cpu_workers())
             elif deep:
                 results = optimize.coordinate_descent(
                     str(in_path), str(CONFIG_DIR), str(SCENARIO_DIR),
-                    emphasis=emphasis, weights=_w, progress=_prog)
+                    emphasis=emphasis, weights=_w, progress=_prog,
+                    max_workers=_cpu_workers())
             else:
                 results = optimize.sweep(
                     str(in_path), str(CONFIG_DIR), str(SCENARIO_DIR), grid=grid,
-                    progress=_prog)
+                    progress=_prog, max_workers=_cpu_workers())
         except Exception as e:  # noqa: BLE001
             bar.empty()
             st.error(f"Optimization failed: {e}")
@@ -3889,7 +3922,8 @@ def _compare_and_choose():
                 res = _run_with_workbook_bytes(
                     uploaded.getvalue(), uploaded.name,
                     config_dir=str(CONFIG_DIR), scenario_dir=str(SCENARIO_DIR),
-                    method=mkey, cpsat_time=300.0)
+                    method=mkey, cpsat_time=300.0,
+                    cpsat_workers=_cpu_workers())
             if res.get("ok") and res.get("output_path"):
                 try:
                     res["_score"] = _board_score(res["output_path"])
@@ -4040,6 +4074,7 @@ if (run_clicked or st.session_state.pop("_pending_run", False)) and uploaded is 
             uploaded.getvalue(), uploaded.name,
             config_dir=str(CONFIG_DIR), scenario_dir=str(SCENARIO_DIR),
             method=_method, cpsat_time=_cpsat_time,
+            cpsat_workers=_cpu_workers(),
         )
         if result["ok"]:
             st.write(

@@ -1012,7 +1012,8 @@ def _overrides_key(ov):
 
 def coordinate_descent(input_path, config_dir, scenario_dir, emphasis=DEFAULT_EMPHASIS,
                        weights=None, knob_space=None, max_rounds=3, seed=None,
-                       progress=None, parallel=True) -> list[OptVariant]:
+                       progress=None, parallel=True,
+                       max_workers=None) -> list[OptVariant]:
     """Greedy local search that finds COMBINATIONS the grid can't.
 
     From the `seed` config (default = current config / baseline), improve ONE knob
@@ -1035,11 +1036,12 @@ def coordinate_descent(input_path, config_dir, scenario_dir, emphasis=DEFAULT_EM
     def _key(ov):
         return tuple(sorted(ov.items()))
 
+    workers = max_workers if max_workers is not None else _default_workers(8)
     pool = None
-    if parallel and _default_workers(8) > 1:
+    if parallel and workers > 1:
         from concurrent.futures import ProcessPoolExecutor
         try:
-            pool = ProcessPoolExecutor(max_workers=_default_workers(8))
+            pool = ProcessPoolExecutor(max_workers=workers)
         except Exception:  # noqa: BLE001 — restricted env -> sequential
             pool = None
 
@@ -1108,7 +1110,7 @@ def coordinate_descent(input_path, config_dir, scenario_dir, emphasis=DEFAULT_EM
 
 def deep_search_combined(input_path, config_dir, scenario_dir, emphasis=DEFAULT_EMPHASIS,
                          weights=None, grid=None, max_rounds=3,
-                         progress=None) -> list[OptVariant]:
+                         progress=None, max_workers=None) -> list[OptVariant]:
     """Best-of-both for ANY emphasis: run the full GRID (broad, diverse coverage —
     incl. the off-by-default controls), then coordinate descent SEEDED FROM the
     grid's best (local refinement that finds combinations around the broadly-best
@@ -1118,12 +1120,14 @@ def deep_search_combined(input_path, config_dir, scenario_dir, emphasis=DEFAULT_
     the app/score-table/Pareto/apply-verify consume it unchanged."""
     w = weights or weights_for(emphasis)
     gvars = sweep(input_path, config_dir, scenario_dir,
-                  grid=grid or OPT_FULL_GRID, progress=progress)
+                  grid=grid or OPT_FULL_GRID, progress=progress,
+                  max_workers=max_workers)
     score_variants(gvars, w)
     ok = [v for v in gvars if v.conservation_ok]
     seed = dict((min(ok, key=lambda v: v.score) if ok else gvars[0]).overrides)
     dvars = coordinate_descent(input_path, config_dir, scenario_dir, emphasis=emphasis,
-                               weights=w, seed=seed, max_rounds=max_rounds, progress=progress)
+                               weights=w, seed=seed, max_rounds=max_rounds, progress=progress,
+                               max_workers=max_workers)
     pool = {}
     for v in gvars + dvars:        # dedup by overrides; identical configs collapse
         pool[tuple(sorted(v.overrides.items()))] = v

@@ -278,7 +278,8 @@ def run_global(input_path, output_path, config_dir, scenario_dir, *,
                max_iterations: int = 10, margin_frac: float = 0.5,
                slack_epsilon: float = 1000.0, mip_time_limit: float = 180.0,
                mip_rel_gap: float = 0.01,
-               optimal: bool = False, cpsat_time: float = 300.0) -> int:
+               optimal: bool = False, cpsat_time: float = 300.0,
+               cpsat_workers: int = 8) -> int:
     """Produce the standard GLOBAL-method workbook at `output_path` from the PR at
     `input_path` + the app's config/scenario. Callable mirror of `main()` for the
     UI (parallel to `forecast.run.main`). `overstock=True` bakes in the placement
@@ -326,7 +327,7 @@ def run_global(input_path, output_path, config_dir, scenario_dir, *,
         grow_q = None
         if optimal:
             grow_q = _solve_cpsat_q(result, facility, system_limits, control,
-                                    cpsat_time)
+                                    cpsat_time, workers=cpsat_workers)
         gft = gf.build_tables(result, batches, tables, control, facility,
                               fw_inflight=fw_inflight, grow_q_by_week=grow_q,
                               initial_tank_state=(_mw_stitch or {}).get(
@@ -368,7 +369,8 @@ def run_global(input_path, output_path, config_dir, scenario_dir, *,
     return 0
 
 
-def _solve_cpsat_q(result, facility, system_limits, control, time_limit):
+def _solve_cpsat_q(result, facility, system_limits, control, time_limit,
+                   workers: int = 8):
     """Run the CP-SAT full-horizon optimal placement on L1's standing and return
     {week: {(batch, tank): kg}} for the optimal grow-out layout (0-swap)."""
     from collections import defaultdict
@@ -411,7 +413,8 @@ def _solve_cpsat_q(result, facility, system_limits, control, time_limit):
     # which ignored the caller's cpsat_time AND left the ~2.6% gap open).
     q, info = solve_cpsat_perweek(by_week, og, tvol, vol, wl_of, system_limits,
                                   control, det_time=30.0,
-                                  time_limit=float(time_limit), verbose=True)
+                                  time_limit=float(time_limit),
+                                  workers=int(workers), verbose=True)
     print(f"  [CP-SAT per-week placement] worst_gap={info['worst_gap']*100:.2f}% "
           f"infeasible={info['n_infeasible']} slack={info.get('slack_kg'):,.0f} kg "
           f"solve={info.get('solve_s'):.0f}s")

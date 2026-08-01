@@ -45,6 +45,15 @@ feed / handling objective — §7.2), and **Compare & Choose (all methods)** (ru
 every planning engine on one PR, grade them on several lenses, and pick which plan
 becomes the report — §7.4).
 
+At the top of the sidebar, above the Mode selector, a **Computer power** slider
+(10–100%, default **40%**) sets how much of the machine the *heavy* runs may
+use — the Global optimal (CP-SAT) solver (also inside Compare & Choose) and the
+Optimize sweeps. The caption under it translates the percent into processor
+cores ("up to N of M"). Higher = faster heavy runs, but other applications feel
+slower and Optimize sweeps use more memory while a run is going (at 100% every
+core may be busy — an explicit opt-in). A plain controller **▶ Run forecast**
+and **Tune** are sequential and unaffected by this setting.
+
 In **Run forecast** mode the sidebar also has a **Planning method** selector:
 **Controller (validated)** — the default closed-loop planner (§4) — or **Global
 (precalculated)** — an experimental alternative engine (§12). Same PR in, same
