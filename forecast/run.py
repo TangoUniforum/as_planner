@@ -446,6 +446,49 @@ def main(
     states_by_batch: dict[str, list] = {}
     for s in states + in_flight_states:
         states_by_batch.setdefault(s.batch_id, []).append(s)
+    # ----- HYBRID: L1 harvest-envelope guide (opt-in via control.hybrid_follow)
+    # Runs standalone L1 ONCE, here — after the manual override window, so it
+    # sees the post-window facility state the controller will actually plan
+    # from. The guide is a per-week harvest QUANTITY the controller aims at;
+    # everything it can do is bounded by the existing clamps downstream.
+    harvest_guide = None
+    if str(getattr(control, "hybrid_follow", "off") or "off").lower() != "off":
+        import time as _time
+        from .hybrid_guide import build_harvest_guide
+        from .placement import fw_addends_by_week
+        from .sixn import SIXN_ALL_TANKS
+        _og: dict[str, list] = {}
+        _pg: dict[str, list] = {}
+        for _t in state.tanks_by_id.values():
+            if _t.is_empty or not _t.batch_id:
+                continue
+            _bucket = _pg if _t.tank_id in SIXN_ALL_TANKS else _og
+            _e = _bucket.setdefault(_t.batch_id, [0.0, 0.0])
+            _e[0] += _t.count
+            _e[1] += _t.biomass_kg
+        _cv = {b.batch_id: getattr(b, "tran_og_cv", 16.0) for b in batches}
+        _guide_inflight_og = {
+            b: (c, kg * 1000.0 / c, _cv.get(b, 16.0))
+            for b, (c, kg) in _og.items() if c > 0}
+        _guide_purge_inflight = {
+            b: (c, kg * 1000.0 / c) for b, (c, kg) in _pg.items() if c > 0}
+        _guide_fw_inflight = {
+            b: (agg["count"], agg["biomass_kg"] * 1000.0 / agg["count"], pr_closing)
+            for b, agg in fw_in_flight_aggregates.items()
+            if b in fw_in_flight_ids and agg["count"] > 0}
+        _t0g = _time.time()
+        harvest_guide = build_harvest_guide(
+            control=control, tables=tables, facility=facility, batches=batches,
+            inflight_og=_guide_inflight_og,
+            fw_inflight=_guide_fw_inflight,
+            purge_inflight=_guide_purge_inflight,
+            fw_by_label=fw_addends_by_week(states_by_batch),
+            facility_limits=facility_limits)
+        print(f"\n  HYBRID guide (hybrid_follow={control.hybrid_follow}): "
+              + (harvest_guide.source if harvest_guide
+                 else "UNAVAILABLE — running as the plain controller")
+              + f"  [{_time.time() - _t0g:.1f}s]")
+
     # Precalc the achievable biomass trajectory under min-only harvest.
     # The scheduler tracks this curve instead of chasing the unachievable
     # facility cap when carrying capacity is the binding constraint.
@@ -506,6 +549,7 @@ def main(
             system_limits, control, facility, tables,
             migration_plan=c.migration_plan,
             facility_limits=facility_limits,
+            harvest_guide=harvest_guide,
         )
         # Count violations: per-tank density > tank cap, OG6N excluded
         # in purge mode (depuration pool intentionally uncapped).

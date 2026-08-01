@@ -2350,6 +2350,7 @@ def phase_d_emit_events(
     system_limits: Optional[SystemLimits] = None,
     fw_biomass_by_week: Optional[dict] = None,
     fw_feed_by_week: Optional[dict] = None,
+    harvest_guide=None,
 ) -> tuple[FacilityState, list[TranOGEntry], list[Transfer], list[Harvest],
            list[BatchLocationRow], list[str]]:
     """Walk the plan week by week; emit events from assignment diff +
@@ -2727,6 +2728,10 @@ def phase_d_emit_events(
         else:
             setpoint = None
 
+        # Realized biomass above the HARD cap (not merely above the setpoint):
+        # the controller's own shed must never be clamped by a guide ceiling.
+        _over_cap = (bio_cap is not None and fac_bio > bio_cap)
+
         lead = max(1, len(sixn_pair_queue))
 
         # Feed-forward known TranOG arrivals, AMORTISED so each arrival is
@@ -2755,6 +2760,31 @@ def phase_d_emit_events(
             gain=_MOVE_IN_GAIN,
             arrivals_kg=arrivals_kg,
         )
+
+        # HYBRID lever 1 — PURGE weeks only. Fish moved in NOW drain at
+        # `drain_idx`, so this week's move-in must deliver the guide's quantity
+        # THERE (reusing the drain index the arrivals feed-forward computed —
+        # no new offset arithmetic). Phase-aware at RUNTIME: `sixn_phase` is
+        # only known during the walk, and the two engines' 6N clocks differ.
+        if harvest_guide is not None and harvest_guide.purge_lever:
+            if purge_this_week and sixn_refill:
+                _dl = (sorted_weeks[drain_idx]
+                       if drain_idx < len(sorted_weeks) else None)
+                move_in_target = harvest_guide.target(
+                    _dl, move_in_target, min_hv or 0.0, weekly_max,
+                    # Ceiling only when L1 also calls the DRAIN week a purge
+                    # week. If L1 has flipped to production by calendar while
+                    # we are still purging, its number describes a different
+                    # machine — take it as a floor, never as a clamp.
+                    allow_ceiling=(harvest_guide.mode_for(_dl) == "purge"))
+            elif purge_this_week:
+                # Winddown: refills are off, so there is no move-in to steer,
+                # and harvest_target is inert on this path. Say so rather than
+                # letting the guide believe it is in control.
+                harvest_guide.note(
+                    f"{week_label}: winddown — no lever (6N refill off, harvest "
+                    f"is whatever the draining pair holds)")
+
         # Immediate supplement (reactive deadbeat): harvest this week's growth
         # plus the CURRENT deviation from setpoint, realised now with no lag.
         # The predictive move-in pre-positions the steady harvest; this catches
@@ -2789,10 +2819,42 @@ def phase_d_emit_events(
                 _level_floor = max(_level_floor, float(_lt))
             harvest_target = max(harvest_target, _level_floor)
 
+        # HYBRID lever 2 — PRODUCTION weeks (incl. the 6N-empty window). Its OWN
+        # gate, deliberately not the level-load gate above: piggy-backing there
+        # would make the hybrid silently inert whenever harvest_level_load is
+        # off, weekly_max is infinite, or no mature fish exist.
+        if (harvest_guide is not None and harvest_guide.production_lever
+                and not purge_this_week):
+            harvest_target = harvest_guide.target(
+                week_label, harvest_target, min_hv or 0.0, weekly_max,
+                # Ceiling needs BOTH: L1 agrees this is a production week (its
+                # calendar clock runs ahead of our phase machine through
+                # winddown/empty), AND we are not over the hard cap, where the
+                # controller's own shed has to win.
+                allow_ceiling=((harvest_guide.mode_for(week_label) == "production")
+                               and not _over_cap))
+
         # In-place purge length + this week's harvest target (shared by the
         # winddown pre-stage and the production harvest below).
         purge_days = int(getattr(control, "starvation_period_days", 0) or 0)
         weekly_target = min(weekly_max, max(min_hv or 0.0, harvest_target or 0.0))
+
+        # STARVE ENTRY target — DECOUPLED from the harvest cap. A tank entered
+        # this week is harvestable `_starve_weeks` later, so it must be sized by
+        # what the guide asks for at the week it will SERVE, not by this week's
+        # harvest cap. Both halves matter: without the shift a raised cap cannot
+        # be met (the backlog was sized last week), and with a shared number we
+        # would freeze more fish off-feed than the pipeline needs.
+        _starve_weeks = max(1, math.ceil((purge_days or 7) / 7.0))
+        _entry_target = weekly_target
+        if harvest_guide is not None and harvest_guide.production_lever:
+            _si = cur_idx + _starve_weeks
+            if _si < len(sorted_weeks):
+                _sl = sorted_weeks[_si]
+                _entry_target = harvest_guide.target(
+                    _sl, weekly_target, min_hv or 0.0, weekly_max,
+                    allow_ceiling=((harvest_guide.mode_for(_sl) == "production")
+                                   and not _over_cap))
 
         # Shared per-week harvest budget. ON: a HARD ceiling at weekly_max less any
         # carried overdraw, threaded through every harvest pass below. OFF: inf, so
@@ -2834,17 +2896,21 @@ def phase_d_emit_events(
             # immediately — no break in harvest. We only ENTER + AGE them here
             # (don't harvest yet); the 6N drain covers winddown harvest. Bounded:
             # keep ~one weekly_target of fish in the pipeline, no more.
-            if not sixn_refill and purge_days > 0 and weekly_target > 0:
+            if not sixn_refill and purge_days > 0 and _entry_target > 0:
                 # Depuration takes ceil(purge_days/7) weekly steps to complete, so
                 # the pipeline must hold that many staggered cohorts of ~target to
                 # deliver target EVERY week from production's first week. Fill up to
                 # that depth, entering ~target/week (the steady production rate).
-                _stage_cap = math.ceil(purge_days / 7.0) * weekly_target
+                # Sized by _entry_target (== weekly_target unless the hybrid guide
+                # is steering) — this pre-stage IS the hybrid's only winddown
+                # channel, and sizing an entry by the week it will serve is
+                # exactly what it already does.
+                _stage_cap = math.ceil(purge_days / 7.0) * _entry_target
                 _in_pipe = sum(t.count for t in state.tanks_by_id.values()
                                if t.stage == STAGE_STARVE and not t.is_empty)
                 _entered = 0.0
                 for bid in _pick_fifo_move_in_batches(state, batch_meta, control):
-                    if _in_pipe >= _stage_cap or _entered >= weekly_target:
+                    if _in_pipe >= _stage_cap or _entered >= _entry_target:
                         break
                     src_tanks = sorted(
                         [t for t in state.tanks_by_id.values()
@@ -2852,7 +2918,7 @@ def phase_d_emit_events(
                          and t.avg_wt_g >= control.min_harvest_weight_g],
                         key=lambda t: (-t.avg_wt_g, t.tank_id))
                     for src in src_tanks:
-                        if _in_pipe >= _stage_cap or _entered >= weekly_target:
+                        if _in_pipe >= _stage_cap or _entered >= _entry_target:
                             break
                         src.stage = STAGE_STARVE
                         src.starvation_days_remaining = purge_days
@@ -2940,9 +3006,12 @@ def phase_d_emit_events(
                                if t.stage == STAGE_STARVE and not t.is_empty
                                and t.starvation_days_remaining <= 0)
                 _entered = 0.0
-                if target > 0 and _backlog < target:
+                # ENTRY is sized by _entry_target (the guide's demand at the week
+                # these fish will actually serve), not by `target` (THIS week's
+                # harvest cap). Identical to `target` unless the hybrid steers.
+                if _entry_target > 0 and _backlog < _entry_target:
                     for bid in _pick_fifo_move_in_batches(state, batch_meta, control):
-                        if _entered >= target:
+                        if _entered >= _entry_target:
                             break
                         src_tanks = [t for t in state.tanks_by_id.values()
                                      if t.batch_id == bid and not t.is_empty
@@ -2950,7 +3019,7 @@ def phase_d_emit_events(
                                      and t.avg_wt_g >= control.min_harvest_weight_g]
                         src_tanks.sort(key=lambda t: (-t.avg_wt_g, t.tank_id))
                         for src in src_tanks:
-                            if _entered >= target:
+                            if _entered >= _entry_target:
                                 break
                             src.stage = STAGE_STARVE
                             src.starvation_days_remaining = purge_days
@@ -3582,6 +3651,7 @@ def run_placement(
     tables: BiologyTables,
     migration_plan: Optional[dict] = None,
     facility_limits: Optional[FacilityLimits] = None,
+    harvest_guide=None,
 ) -> tuple[PlacementResult, FacilityState]:
     """End-to-end Phase A → B → C → D.
 
@@ -3621,6 +3691,7 @@ def run_placement(
         system_limits=system_limits,
         fw_biomass_by_week=fw_biomass_by_week,
         fw_feed_by_week=fw_feed_by_week,
+        harvest_guide=harvest_guide,
     )
     result.tranog_events = tranog
     result.transfer_events = transfers

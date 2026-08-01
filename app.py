@@ -32,6 +32,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from forecast.run import main as run_pipeline  # noqa: E402
 from forecast import tuning  # noqa: E402
 from forecast import optimize  # noqa: E402
+from forecast import methods as _methods  # noqa: E402
+
+# The ONE method list. Board roster, run-mode label and the engine dispatch all
+# read this, so adding a method is a single register() call in forecast/methods.
+_METHODS = _methods.REGISTRY
+# Operator-facing runtime hints + which methods the board runs unprompted.
+_TYPICAL = {"controller": "~30 s", "controller-hybrid": "~40 s",
+            "controller-lns": "~30 s", "global-lp": "~4 min",
+            "global-milp": "~30 min+"}
+_BOARD_OPTIONAL = {"global-milp"}          # behind its own checkbox (slow)
 
 # App-managed config (Phase 1) + scenario (Phase 2) live here. In PR-only
 # mode the app reads these instead of pulling everything from the upload;
@@ -2632,44 +2642,18 @@ with st.sidebar:
         st.info("No config yet — set it up in **Configure**.")
 
     st.header("Run")
-    forecast_method = st.radio(
-        "Planning method",
-        ["Controller (validated)", "Global (precalculated)"],
-        help="Controller: the validated closed-loop production planner (forecast/"
-             "run.py). Global: the precalculated L1→L3 method — whole-facility, "
-             "within-limits L1; swap-free, 0-drift specific-tank pick; optimizer-"
-             "tuned selective over-stock. Same PR in, same workbook shape out "
-             "(stamped with the method) so you can compare apples-to-apples. The "
-             "global method runs an LP per week, so it's slower.",
-        key="forecast_method",
-    )
-    _is_global = forecast_method.startswith("Global")
-    _global_optimal = False
-    _cpsat_time = 300.0
-    if _is_global:
-        st.caption("⚠ Global is the experimental precalculated engine — "
-                   "BatchLocations/Transfers are real (0-drift). The default "
-                   "heuristic placement concentrates per-tank density well over cap; "
-                   "the optimal mode below drives it back to the cap (~100 kg/m³) at "
-                   "the cost of more transfers and a ~30-min solve.")
-        _global_optimal = st.checkbox(
-            "Optimal placement (CP-SAT) — density at cap, low variance, fully placed",
-            value=False, key="global_optimal",
-            help="Places each week's grow-out layout with OR-Tools CP-SAT instead "
-                 "of the greedy heuristic. Drives per-tank density to the cap "
-                 "(~100 kg/m³, where the greedy heuristic leaves it 300+ over-cap), "
-                 "holds facility biomass at ~100%, places every batch to a real "
-                 "tank (full conservation PASS), and minimizes system-load "
-                 "variance. Trade-off: MORE transfers per fish (~1.9 vs ~0.8 "
-                 "heuristic / ~0.7 controller) — it moves fish to keep density even. "
-                 "A fixed per-week deterministic budget + fixed seed make the solve "
-                 "QUALITY reproducible (~0.8% optimality gap); equally-optimal "
-                 "layouts can differ tank-for-tank. 0 TANK_DRIFT, audited. SLOWER — "
-                 "~30 min for a 52-week horizon (heuristic LP ~4 min; controller, "
-                 "seconds).")
-        if _global_optimal:
-            st.caption("CP-SAT runs a fixed, tuned deterministic budget per week — "
-                       "no tuning needed. Expect ~30 min for a full 52-week horizon.")
+    # The planning method is chosen ONCE, on the Compare & Choose board, where
+    # you can see every method graded side by side. Run forecast just re-runs
+    # whichever plan you picked — no second, blind choice on the main screen.
+    _chosen = st.session_state.get("_chosen_method", "controller")
+    _chosen_m = _METHODS.get(_chosen) or _METHODS["controller"]
+    st.caption(f"Method: **{_chosen_m.label}**")
+    if _chosen == "controller":
+        st.caption("The validated default. Compare & Choose runs every method "
+                   "and lets you pick a different one.")
+    else:
+        st.caption("Picked on the Compare & Choose board. Pick another there, "
+                   "or re-select Controller to go back to the default.")
     if _cfg_ok:
         from forecast.config_io import load_control, control_to_dict
         _render_active_config(
@@ -2785,6 +2769,7 @@ def _run_with_workbook_bytes(
     method: str = "controller",
     cpsat_time: float = 300.0,
     cpsat_workers: int | None = None,
+    cpsat_det_time: float | None = None,
     on_line=None,
 ) -> dict:
     """Run the pipeline against `input_bytes` in a temp directory.
@@ -2803,11 +2788,14 @@ def _run_with_workbook_bytes(
     """
     work_dir = Path(tempfile.mkdtemp(prefix="as_forecast_"))
     in_path = work_dir / input_name
+    _m = _METHODS.get(method) or _METHODS["controller"]
+    _is_global_engine = (_m.engine == "global")
+    _is_optimal = bool(_m.engine_kwargs.get("optimal"))
     # The global method emits a fresh .xlsx (no VBA to carry); the controller
     # keeps the uploaded macro workbook's suffix.
-    if method == "global_optimal":
+    if _is_global_engine and _is_optimal:
         out_name = Path(input_name).stem + "_planned_OPTIMAL.xlsx"
-    elif method == "global":
+    elif _is_global_engine:
         out_name = Path(input_name).stem + "_planned_GLOBAL.xlsx"
     else:
         # Match the output extension to the workbook's MACRO STATE, not the input
@@ -2820,18 +2808,18 @@ def _run_with_workbook_bytes(
     out_path = work_dir / out_name
     in_path.write_bytes(input_bytes)
 
-    # controller_lns = the validated controller with the LNS placement pass.
-    # Apply placement_method=lns via a throwaway config COPY so the user's
-    # control.yaml is never touched (mirrors forecast.methods.run_method).
+    # A method's control-knob overrides (LNS placement, hybrid follow mode, ...)
+    # are applied via a throwaway config COPY so the user's control.yaml is
+    # never touched — same contract as forecast.methods.run_method.
     run_config_dir = config_dir
-    if method == "controller_lns" and config_dir:
+    if _m.overrides and config_dir:
         import shutil
         import yaml as _yaml
-        _tmpcfg = work_dir / "config_lns"
+        _tmpcfg = work_dir / f"config_{_m.key.replace('-', '_')}"
         shutil.copytree(config_dir, _tmpcfg)
         _cy = _tmpcfg / "control.yaml"
         _d = _yaml.safe_load(_cy.read_text()) or {}
-        _d["placement_method"] = "lns"
+        _d.update(_m.overrides)
         _cy.write_text(_yaml.safe_dump(_d, sort_keys=False))
         run_config_dir = str(_tmpcfg)
 
@@ -2840,12 +2828,13 @@ def _run_with_workbook_bytes(
     captured = _TeeIO(on_line)
     try:
         with redirect_stdout(captured):
-            if method in ("global", "global_optimal"):
+            if _is_global_engine:
                 from tools.run_global_forecast import run_global
-                rc = run_global(in_path, out_path, config_dir, scenario_dir,
-                                optimal=(method == "global_optimal"),
+                rc = run_global(in_path, out_path, run_config_dir, scenario_dir,
+                                optimal=_is_optimal,
                                 cpsat_time=cpsat_time,
-                                cpsat_workers=(cpsat_workers or 8))
+                                cpsat_workers=(cpsat_workers or 8),
+                                cpsat_det_time=(cpsat_det_time or 30.0))
             else:
                 rc = run_pipeline(input_path=in_path, output_path=out_path,
                                   config_dir=run_config_dir, scenario_dir=scenario_dir)
@@ -4057,22 +4046,28 @@ def _board_badges(gates):
     return "  ".join(f"{'✅' if ok else '⚠️'} {name}" for name, ok in gates.items())
 
 
-_BOARD_ORDER = ("controller", "controller_lns", "global", "global_optimal")
-_BOARD_TYPICAL = {"controller": "~30 s", "controller_lns": "~30 s",
-                  "global": "~4 min", "global_optimal": "~30 min+"}
+_BOARD_ORDER = tuple(_methods.DEFAULT_ROSTER)
 
 
 def _board_method_sig(mkey: str, pr_md5: str) -> str:
     """Identity of one board leg's inputs, so a finished method can be reused
-    instead of re-run. "board1" is a schema tag — bump it when the stored
-    result shape changes (mirrors the "proj3" tag in _mw_project). The CP-SAT
-    knobs enter only the method they affect, so moving the Computer power
-    slider doesn't needlessly invalidate the three fast methods."""
+    instead of re-run. "board2" is a schema tag — bump it when the stored
+    result shape or the method keys change (mirrors the "proj3" tag in
+    _mw_project). The CP-SAT knobs enter only the method they affect, so moving
+    the Computer power slider doesn't needlessly invalidate the fast methods."""
     import hashlib
-    parts = ["board1", pr_md5, _config_fingerprint(), mkey]
-    if mkey == "global_optimal":
-        parts += ["cpsat300", str(_cpu_workers())]
+    parts = ["board2", pr_md5, _config_fingerprint(), mkey]
+    if (_METHODS.get(mkey) or _METHODS["controller"]).engine_kwargs.get("optimal"):
+        parts += [f"cpsat{_cpsat_det_time()}", str(_cpu_workers())]
     return hashlib.md5("|".join(parts).encode()).hexdigest()
+
+
+def _cpsat_det_time() -> float:
+    """CP-SAT's per-week DETERMINISTIC work budget — the criterion that actually
+    stops each solve. (The wall-clock limit is only a safety cap for a
+    pathological week, so tuning it changes nothing.) Higher = tighter layout,
+    longer solve."""
+    return float(st.session_state.get("cpsat_depth", 30.0))
 
 
 def _ensure_board_score(res: dict, label: str) -> None:
@@ -4110,19 +4105,30 @@ def _compare_and_choose():
         return
 
     include_milp = st.checkbox(
-        "Include the optimal CP-SAT placement (~30 min — tightest density, most "
+        "Include the optimal CP-SAT placement (slow — tightest density, most "
         "balanced across systems)", value=True, key="board_milp")
-    st.caption("Controller, Controller + LNS, and Global heuristic always run "
-               "(~30s / ~30s / ~4 min). Uncheck the CP-SAT for a faster compare. "
-               "On a capacity-bound config (facility full at peak) **Controller + "
-               "LNS usually matches plain Controller** — LNS only diverges when "
-               "there's tank slack to relocate/swap into.")
-
-    roster = [("controller", "Controller (reactive)"),
-              ("controller_lns", "Controller + LNS"),
-              ("global", "Global (heuristic LP)")]
+    _always = [k for k in _BOARD_ORDER if k not in _BOARD_OPTIONAL]
+    st.caption(
+        ", ".join(f"{_METHODS[k].label} ({_TYPICAL.get(k, '?')})" for k in _always)
+        + " always run. The CP-SAT leg gives each of your ~130 weeks its own "
+        "solver budget, so it can run well past its estimate — uncheck it for a "
+        "fast compare and add it later, since finished methods are reused. On a "
+        "capacity-bound config (facility full at peak) **Controller + LNS "
+        "usually matches plain Controller** — LNS only diverges when there's "
+        "tank slack to relocate into.")
     if include_milp:
-        roster.append(("global_optimal", "Global (optimal CP-SAT)"))
+        st.select_slider(
+            "CP-SAT solve depth", options=[8.0, 30.0, 60.0], value=30.0,
+            format_func=lambda v: {8.0: "Quick", 30.0: "Balanced",
+                                   60.0: "Thorough"}[v],
+            key="cpsat_depth",
+            help="Deterministic work budget per week — the criterion that "
+                 "actually stops each solve (the wall-clock limit is only a "
+                 "safety cap). Quick trades layout tightness for a much shorter "
+                 "run; Balanced is the validated default.")
+
+    roster = [(k, _METHODS[k].label) for k in _BOARD_ORDER
+              if k not in _BOARD_OPTIONAL or include_milp]
 
     _b1, _b2 = st.columns([3, 2])
     run_all = _b1.button("▶ Run all methods & compare", type="primary",
@@ -4157,13 +4163,14 @@ def _compare_and_choose():
             # blocks the script — so say so, and give a clock to judge against.
             bar.progress(i / n, text=(
                 f"{i}/{n} finished · running {mlabel} (typically "
-                f"{_BOARD_TYPICAL.get(mkey, '?')}, started {_dtn.now():%H:%M}) — "
+                f"{_TYPICAL.get(mkey, '?')}, started {_dtn.now():%H:%M}) — "
                 f"this bar next moves when the method finishes"))
             with st.status(f"Running {mlabel}…", expanded=False) as _ms:
                 res = _run_with_workbook_bytes(
                     uploaded.getvalue(), uploaded.name,
                     config_dir=str(CONFIG_DIR), scenario_dir=str(SCENARIO_DIR),
                     method=mkey, cpsat_time=300.0,
+                    cpsat_det_time=_cpsat_det_time(),
                     cpsat_workers=_cpu_workers(),
                     on_line=lambda ln, _s=_ms, _l=mlabel: _s.update(
                         label=f"{_l} — {ln[:100]}"))
@@ -4300,6 +4307,9 @@ def _compare_and_choose():
                     # leak back into the store). The big payloads stay shared.
                     st.session_state.result = {
                         **v, "_run_label": f"Compare & Choose — {v['_label']}"}
+                    # This is where the planning method is chosen — ▶ Run
+                    # forecast re-runs THIS method from now on.
+                    st.session_state["_chosen_method"] = k
                     st.session_state["_goto_run_mode"] = True
                     st.rerun()
 
@@ -4331,13 +4341,9 @@ if uploaded is not None:
 # ============================================================
 
 if (run_clicked or st.session_state.pop("_pending_run", False)) and uploaded is not None:
-    _method = ("global_optimal" if (_is_global and _global_optimal)
-               else "global" if _is_global else "controller")
-    _spin = ("Running GLOBAL OPTIMAL (per-week CP-SAT placement) — ~30 min for a "
-             "full 52-week horizon, please wait..."
-             if _method == "global_optimal"
-             else "Running GLOBAL (precalculated L1→L3) planner — LP per week, slower..."
-             if _is_global else "Running forecast pipeline...")
+    _method = st.session_state.get("_chosen_method", "controller")
+    _mobj = _METHODS.get(_method) or _METHODS["controller"]
+    _spin = (f"Running {_mobj.label} — typically {_TYPICAL.get(_method, '?')}...")
     with st.status(_spin, expanded=True) as status:
         st.write("Config + scenario from the app; ProductionReport from upload...")
 
@@ -4350,7 +4356,8 @@ if (run_clicked or st.session_state.pop("_pending_run", False)) and uploaded is 
         result = _run_with_workbook_bytes(
             uploaded.getvalue(), uploaded.name,
             config_dir=str(CONFIG_DIR), scenario_dir=str(SCENARIO_DIR),
-            method=_method, cpsat_time=_cpsat_time,
+            method=_method, cpsat_time=300.0,
+            cpsat_det_time=_cpsat_det_time(),
             cpsat_workers=_cpu_workers(),
             on_line=_narrate,
         )
@@ -4361,9 +4368,9 @@ if (run_clicked or st.session_state.pop("_pending_run", False)) and uploaded is 
                 f"worst {result['worst_density']:.1f} kg/m³"
             )
             status.update(label="✓ Forecast complete", state="complete")
-            _mlabel = ("Global (precalculated L1→L3)" if _is_global
-                       else f"Controller — {_harvest_mode_label(CONFIG_DIR)}")
-            result["_run_label"] = _mlabel
+            result["_run_label"] = (
+                _mobj.label if _method != "controller"
+                else f"Controller — {_harvest_mode_label(CONFIG_DIR)}")
             st.session_state.result = result
         else:
             st.error(f"Pipeline failed: {result.get('error', 'unknown')}")

@@ -161,10 +161,23 @@ register(Method(
     blurb="Same L1 cascade + facility share, but the whole-horizon grow-out "
           "layout is placed by a CP-SAT optimal (0-swap) solver, not the LP.",
 ))
+register(Method(
+    key="controller-hybrid",
+    label="Controller — hybrid (L1-guided harvest)",
+    family="Controller",
+    engine="controller",
+    overrides={"hybrid_follow": "full"},
+    blurb="The validated controller, with the Global engine's L1 harvest "
+          "envelope fed in as a per-week harvest target band — L1's steady "
+          "weekly quantity, executed by the controller's realized machinery. "
+          "Aimed at the weeks the reactive controller paces below the "
+          "contract floor.",
+))
 
 
-# Default comparison roster (all four currently-wired methods).
-DEFAULT_ROSTER = ["controller", "controller-lns", "global-lp", "global-milp"]
+# Default comparison roster (every currently-wired method).
+DEFAULT_ROSTER = ["controller", "controller-hybrid", "controller-lns",
+                  "global-lp", "global-milp"]
 
 
 def get_roster(keys: "Optional[list[str]]" = None) -> "list[Method]":

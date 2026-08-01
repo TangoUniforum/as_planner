@@ -279,7 +279,7 @@ def run_global(input_path, output_path, config_dir, scenario_dir, *,
                slack_epsilon: float = 1000.0, mip_time_limit: float = 180.0,
                mip_rel_gap: float = 0.01,
                optimal: bool = False, cpsat_time: float = 300.0,
-               cpsat_workers: int = 8) -> int:
+               cpsat_workers: int = 8, cpsat_det_time: float = 30.0) -> int:
     """Produce the standard GLOBAL-method workbook at `output_path` from the PR at
     `input_path` + the app's config/scenario. Callable mirror of `main()` for the
     UI (parallel to `forecast.run.main`). `overstock=True` bakes in the placement
@@ -327,7 +327,8 @@ def run_global(input_path, output_path, config_dir, scenario_dir, *,
         grow_q = None
         if optimal:
             grow_q = _solve_cpsat_q(result, facility, system_limits, control,
-                                    cpsat_time, workers=cpsat_workers)
+                                    cpsat_time, workers=cpsat_workers,
+                                    det_time=cpsat_det_time)
         gft = gf.build_tables(result, batches, tables, control, facility,
                               fw_inflight=fw_inflight, grow_q_by_week=grow_q,
                               initial_tank_state=(_mw_stitch or {}).get(
@@ -370,7 +371,7 @@ def run_global(input_path, output_path, config_dir, scenario_dir, *,
 
 
 def _solve_cpsat_q(result, facility, system_limits, control, time_limit,
-                   workers: int = 8):
+                   workers: int = 8, det_time: float = 30.0):
     """Run the CP-SAT full-horizon optimal placement on L1's standing and return
     {week: {(batch, tank): kg}} for the optimal grow-out layout (0-swap)."""
     from collections import defaultdict
@@ -412,7 +413,7 @@ def _solve_cpsat_q(result, facility, system_limits, control, time_limit,
     # wall-clock time_limit is only a per-week safety cap (was hardcoded to 10.0,
     # which ignored the caller's cpsat_time AND left the ~2.6% gap open).
     q, info = solve_cpsat_perweek(by_week, og, tvol, vol, wl_of, system_limits,
-                                  control, det_time=30.0,
+                                  control, det_time=float(det_time),
                                   time_limit=float(time_limit),
                                   workers=int(workers), verbose=True)
     print(f"  [CP-SAT per-week placement] worst_gap={info['worst_gap']*100:.2f}% "
