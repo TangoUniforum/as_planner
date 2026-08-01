@@ -632,13 +632,18 @@ _MANUAL_COLS = ["week", "type", "batch", "from_tank", "to_tanks", "count", "note
 
 
 def _hydrate_state_from_upload(uploaded):
-    """Hydrate a FacilityState from the uploaded PR (cached by content hash), so
-    the editor can populate tank/batch context + dry-run validate events.
-    Returns (state, fw_records)."""
+    """Hydrate a FacilityState from the uploaded PR, so the editor can populate
+    tank/batch context + dry-run validate events. Returns (state, fw, ctx).
+
+    Cached by PR content hash AND config fingerprint: `ctx` embeds control /
+    tables / batches read from disk below, so keying on the PR alone left the
+    manual window validating against pre-edit config for the rest of the
+    session after any in-app config save."""
     import hashlib
     import io
     data = uploaded.getvalue()
-    ck = "_hydrated_" + hashlib.md5(data).hexdigest()
+    ck = ("_hydrated_" + hashlib.md5(data).hexdigest() + "_"
+          + _config_fingerprint())
     if ck in st.session_state:
         return st.session_state[ck]
     from openpyxl import load_workbook
@@ -669,6 +674,12 @@ def _hydrate_state_from_upload(uploaded):
         "pr_closing": pc,
         "fw_records": fw,
     }
+    # Keep only the current hydration: each entry is a deep FacilityState, and
+    # the key now varies with config too, so an un-evicted cache would grow one
+    # entry per (upload × config save) for the life of the session.
+    for k in [k for k in st.session_state
+              if isinstance(k, str) and k.startswith("_hydrated_") and k != ck]:
+        st.session_state.pop(k, None)
     st.session_state[ck] = (state, fw, ctx)
     return state, fw, ctx
 
@@ -784,12 +795,18 @@ def _mw_loc(state, tid):
 
 def _mw_sig(events, extra=""):
     """Cheap stable signature of the working set (+ context) for caching the
-    heavy biology projection / validation across idle reruns."""
+    heavy biology projection / validation across idle reruns.
+
+    Includes the config fingerprint: the projection and the reject-at-entry
+    validation both run against control/tables/batches, so an in-app config
+    save has to invalidate them — otherwise the editor keeps judging events
+    against pre-edit knobs while ▶ Run forecast reads the fresh YAML."""
     import hashlib
     import json
     from forecast.manual_events import manual_events_to_list
     payload = json.dumps({"e": manual_events_to_list(events), "x": extra,
-                          "pr": st.session_state.get("_mw_pr_key", "")},
+                          "pr": st.session_state.get("_mw_pr_key", ""),
+                          "cfg": _config_fingerprint()},
                          sort_keys=True, default=str)
     return hashlib.md5(payload.encode()).hexdigest()
 
