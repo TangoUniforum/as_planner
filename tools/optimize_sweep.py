@@ -64,7 +64,6 @@ def main(argv=None):
 
     results = optimize.sweep(args.input, cdir0, sdir0, grid=grid, progress=progress)
     rec = optimize.recommend(results, emphasis=args.emphasis, weights=weights)
-    best = next((v for v in results if v.label == rec.best_label), None)
 
     print(f"\n{'variant':<22} {'score':>7} {'bover':>6} {'bvar':>6} {'ugap':>6} "
           f"{'hvar':>6} {'hover':>6} {'feed':>8} {'tpf':>5} {'wk>cap':>6} | cons")
@@ -78,9 +77,11 @@ def main(argv=None):
               f"{m.harvest_overshoot:>6.3f} {m.feed_load:>8,.0f} {m.transfers_per_fish:>5.2f} "
               f"{m.weeks_over_harvest_cap:>6} | {cons}")
     print(f"\n{rec.text}")
-    if best is not None and best.overrides:
+    # The recommendation carries the winner's knobs; a by-label re-lookup could
+    # land on a different variant sharing that label (see OptRecommendation).
+    if rec.overrides:
         print("\nApply these knobs (control.yaml / Configure -> Control):")
-        for line in optimize.overrides_yaml(best.overrides).splitlines():
+        for line in optimize.overrides_yaml(rec.overrides).splitlines():
             print(f"  {line}")
 
 

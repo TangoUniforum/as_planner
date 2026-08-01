@@ -1855,20 +1855,38 @@ def _mw_save_bar(events, bad):
         st.rerun()
 
 
-def _mw_copilot(uploaded, events, forecast_start=None):
+def _mw_copilot(uploaded, events, forecast_start=None, bad=None):
     """Human-in-the-loop co-pilot (Sequential). Runs the planners forward ONCE
     from the scripted window (respect mode — your transfers are fixed) and lets
     you browse the recommended moves for the next several weeks. Only the NEXT
     week is approvable: ticked moves append as that week's operations, extending
     the window by one week — then run again for the week after. The look-ahead
     weeks are projections from the current plan and refresh once the nearer weeks
-    are scripted. Engine is forecast.copilot (UI-free); this is just the shell."""
+    are scripted. Engine is forecast.copilot (UI-free); this is just the shell.
+
+    `bad` is the save bar's infeasibility map. Both buttons here write
+    scenario/manual_events.yaml — the same file ▶ Run forecast reads — so they
+    honour the same reject-at-entry gate the Save button does."""
     import shutil
     import tempfile
     from forecast.copilot import propose_upcoming, to_manual_events
     from forecast.manual_events import dump_manual_events
     _n = max((e.week or 1) for e in events) if events else 0
     _LOOKAHEAD = 6
+    _blocked = bool(bad)
+    if _blocked:
+        st.warning(f"{len(bad)} operation(s) in the window are infeasible — fix the "
+                   "❌ rows above before running the co-pilot. It has to save your "
+                   "window to disk first, and that is the file the forecast reads.")
+    # A stale proposal is worse than none: it was computed against a different
+    # working set / PR, so its week number and tank picks may no longer line up.
+    _cp_sig = _mw_sig(events, extra="copilot1")
+    if st.session_state.get("mw_cp_sig") != _cp_sig:
+        st.session_state.pop("mw_cp_props", None)
+    # Approve reruns immediately, so its confirmation has to survive the rerun.
+    _flash = st.session_state.pop("mw_cp_flash", None)
+    if _flash:
+        st.success(_flash)
     st.caption(
         "Runs the controller + global optimiser forward from your window — your "
         "transfers stay fixed — and recommends the **next** week plus a few weeks "
@@ -1888,7 +1906,11 @@ def _mw_copilot(uploaded, events, forecast_start=None):
             f"{_s6} into 6N · {_fw} FW→OG. Both engines run your full manual window "
             f"first, so every recommendation is computed on top of these.")
     _next_iso = _mw_iso_week(_n + 1, forecast_start)
-    if st.button(f"🤖 Recommend from {_next_iso}", key="mw_cp_run", type="primary"):
+    if st.button(f"🤖 Recommend from {_next_iso}", key="mw_cp_run", type="primary",
+                 disabled=_blocked,
+                 help="Disabled while any operation is infeasible — the co-pilot "
+                      "saves your window to disk before it runs."
+                      if _blocked else None):
         try:
             dump_manual_events(SCENARIO_DIR, events)
         except Exception as e:  # noqa: BLE001
@@ -1902,6 +1924,9 @@ def _mw_copilot(uploaded, events, forecast_start=None):
             try:
                 st.session_state["mw_cp_props"] = propose_upcoming(
                     str(tmp), str(CONFIG_DIR), str(SCENARIO_DIR), n_weeks=_LOOKAHEAD)
+                # Stamp the working set these proposals were computed against —
+                # any later edit (or a new PR) invalidates them on the next render.
+                st.session_state["mw_cp_sig"] = _cp_sig
                 st.session_state["mw_cp_nonce"] = \
                     st.session_state.get("mw_cp_nonce", 0) + 1
             except Exception as e:  # noqa: BLE001
@@ -1986,7 +2011,9 @@ def _mw_copilot(uploaded, events, forecast_start=None):
         return
 
     if st.button(f"✓ Approve ticked → add to {prop.week_label}",
-                 key="mw_cp_approve", type="primary"):
+                 key="mw_cp_approve", type="primary", disabled=_blocked,
+                 help="Disabled while any operation is infeasible."
+                      if _blocked else None):
         chosen = [m for m, key in picks if st.session_state.get(key)]
         if not chosen:
             st.warning("Nothing ticked — tick at least one move to approve.")
@@ -1995,12 +2022,23 @@ def _mw_copilot(uploaded, events, forecast_start=None):
                 _mw_add(ev)
             try:
                 dump_manual_events(SCENARIO_DIR, _mw_events())
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as e:  # noqa: BLE001
+                # Never claim success on a failed write: scenario/ is OneDrive-
+                # synced and the dump can lose a lock race (see yaml_atomic).
+                # The ops are in the working set, so Save window can retry.
+                st.session_state.pop("mw_cp_props", None)
+                st.error(f"Added {len(chosen)} operation(s) to the window, but "
+                         f"couldn't write scenario/manual_events.yaml: {e}. "
+                         f"They are NOT on disk yet — use 💾 Save window to retry.")
+                return
             st.session_state.pop("mw_cp_props", None)
-            st.success(f"Added {len(chosen)} operation(s) to {prop.week_label}. "
-                       f"Run me again for the next week "
-                       f"({_mw_iso_week(prop.window_week + 1, forecast_start)}).")
+            # The window grew, so the copilot signature moved with it; re-stamp
+            # it or the next render would drop the (already consumed) proposal.
+            st.session_state["mw_cp_sig"] = _mw_sig(_mw_events(), extra="copilot1")
+            st.session_state["mw_cp_flash"] = (
+                f"Added {len(chosen)} operation(s) to {prop.week_label}. "
+                f"Run me again for the next week "
+                f"({_mw_iso_week(prop.window_week + 1, forecast_start)}).")
             st.rerun()
 
 
@@ -2214,7 +2252,8 @@ def _manual_window_editor(uploaded):
             if st.toggle("🤖 Co-pilot — let the forecast propose the next week",
                          key="mw_copilot_toggle"):
                 with st.container(border=True):
-                    _mw_copilot(uploaded, events, ctx.get("forecast_start") if ctx else None)
+                    _mw_copilot(uploaded, events,
+                                ctx.get("forecast_start") if ctx else None, bad)
 
             st.divider()
             _mw_timeline(state, events, bad, ctx.get("forecast_start") if ctx else None)
@@ -3278,6 +3317,26 @@ def _tuner():
 # Configure / Tune modes — render and stop
 # ============================================================
 
+def _opt_winner(results, rec):
+    """The variant the recommendation actually chose.
+
+    Resolve by OVERRIDES, not by label: coordinate_descent names each candidate
+    for the single knob it changed that step, so the same label recurs across
+    rounds carrying different accumulated overrides. A by-label lookup returns
+    the earliest match — a round-1 partial set — which then gets run and (with
+    auto-save on) written to control.yaml in place of the winning combination.
+    Falls back to the old behaviour for a recommendation without overrides.
+    """
+    ov = dict(getattr(rec, "overrides", None) or {})
+    for v in results:                      # exact winner: label AND knobs
+        if v.label == rec.best_label and dict(v.overrides) == ov:
+            return v
+    for v in results:                      # knobs alone still identify it
+        if dict(v.overrides) == ov:
+            return v
+    return next((v for v in results if v.label == rec.best_label), results[0])
+
+
 def _opt_table(results) -> pd.DataFrame:
     rows = []
     for v in results:
@@ -3618,7 +3677,7 @@ def _optimizer():
             # AUTO: pick the validated best, run the FULL forecast with it, load it
             # into the viz tabs, and (optionally) persist the winning knobs.
             _rec0 = optimize.recommend(results, emphasis=emphasis, weights=_w)
-            _best0 = next((v for v in results if v.label == _rec0.best_label), results[0])
+            _best0 = _opt_winner(results, _rec0)
             _knobs = optimize.overrides_yaml(_best0.overrides).replace("\n", " · ") or "baseline"
             with st.spinner(f"Auto-optimize — running the full forecast with {_knobs} …"):
                 try:
@@ -3688,7 +3747,7 @@ def _optimizer():
     # Save button is hidden (no overrides) and its Run button surfaces the same
     # capacity error, so it's survivable; the error above + the table make the
     # situation clear.
-    best = next((v for v in results if v.label == rec.best_label), results[0])
+    best = _opt_winner(results, rec)
     with st.container(border=True):
         st.markdown(f"**Apply & verify — `{best.label}`**")
         st.caption("These are control-knob overrides — the same knobs a normal run "
@@ -3798,7 +3857,7 @@ def _optimizer():
                       yaxis_title="Weeks over 55k harvest cap")
     st.plotly_chart(fig, use_container_width=True)
 
-    best = next((v for v in results if v.label == rec.best_label), results[0])
+    best = _opt_winner(results, rec)
     c1, c2 = st.columns(2)
     with c1:
         st.subheader("Component scores — recommended")

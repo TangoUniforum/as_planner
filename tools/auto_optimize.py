@@ -79,22 +79,25 @@ def main(argv=None):
     print("FINDING best knobs ...", flush=True)
     results = _run_search(args.method, args.input, cdir0, sdir0, emphasis, weights, progress)
     rec = optimize.recommend(results, emphasis=emphasis, weights=weights)
-    best = next((v for v in results if v.label == rec.best_label), None)
+    # Knobs come from the recommendation itself: labels are not unique across
+    # coordinate-descent rounds, so a by-label re-lookup could apply a partial
+    # override set (see OptRecommendation).
+    winning = rec.overrides
 
     print(f"\n{rec.text}")
     print("\nWinning knobs (validated together):")
-    for line in optimize.overrides_yaml(best.overrides if best else {}).splitlines():
+    for line in optimize.overrides_yaml(winning).splitlines():
         print(f"  {line}")
 
     # USE them: run the full forecast with the winning config.
     print("\nUSING them — running the full forecast ...", flush=True)
-    out = optimize.run_full_forecast(args.input, cdir0, sdir0, best.overrides if best else {})
+    out = optimize.run_full_forecast(args.input, cdir0, sdir0, winning)
     dest = args.output or (os.path.splitext(args.input)[0] + "_optimized.xlsm")
     shutil.copy(out, dest)
     print(f"optimized forecast written: {dest}")
 
     if args.save_config:
-        optimize.save_overrides_to_config("config", best.overrides if best else {})
+        optimize.save_overrides_to_config("config", winning)
         print("saved the winning knobs into config/control.yaml "
               "(future normal runs now use them)")
     else:

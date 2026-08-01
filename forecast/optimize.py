@@ -244,6 +244,12 @@ class OptRecommendation:
     score: float
     is_capacity_bound: bool
     text: str
+    # The winner's actual knobs. Labels are NOT unique — coordinate_descent
+    # names each candidate for the one knob it changed that step, so the same
+    # label recurs across rounds carrying different accumulated overrides.
+    # Callers must apply/save THIS, never a by-label re-lookup, or a round-1
+    # partial set can be persisted in place of the winning combination.
+    overrides: dict = field(default_factory=dict)
 
 
 # --------------------------------------------------------------------------- #
@@ -739,7 +745,8 @@ def recommend(variants, emphasis=DEFAULT_EMPHASIS, weights=None) -> OptRecommend
     ok = [v for v in variants if v.conservation_ok]
     if not ok:
         return OptRecommendation("(none)", emphasis, float("inf"), False,
-                                 "No variant held conservation — investigate before optimizing.")
+                                 "No variant held conservation — investigate before optimizing.",
+                                 {})
     best = min(ok, key=lambda v: (v.score, 0 if v.label == "baseline" else 1, v.label))
     baseline = next((v for v in variants if v.label == "baseline"), None)
     capacity_bound = (baseline is not None and baseline.conservation_ok
@@ -749,10 +756,14 @@ def recommend(variants, emphasis=DEFAULT_EMPHASIS, weights=None) -> OptRecommend
                 "remaining lumpiness/over-cap is a stocking/capacity limit, not a "
                 "knob (see USER_GUIDE). Baseline stands.")
     else:
-        text = (f"Best for '{emphasis}': {best.label} (score {best.score:.3f} vs "
-                f"baseline {baseline.score:.3f}). Use the Apply & verify panel below "
+        # `baseline` is absent when the caller seeded the search (coordinate_descent
+        # labels a non-empty seed "seed"), so quote it only when it exists.
+        _vs = f" vs baseline {baseline.score:.3f}" if baseline is not None else ""
+        text = (f"Best for '{emphasis}': {best.label} (score {best.score:.3f}{_vs}). "
+                f"Use the Apply & verify panel below "
                 f"to run it now (or paste the knobs into Configure → Control to keep them).")
-    return OptRecommendation(best.label, emphasis, best.score, capacity_bound, text)
+    return OptRecommendation(best.label, emphasis, best.score, capacity_bound, text,
+                             dict(best.overrides))
 
 
 # --------------------------------------------------------------------------- #
