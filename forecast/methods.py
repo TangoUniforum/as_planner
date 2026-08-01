@@ -167,17 +167,22 @@ register(Method(
     family="Controller",
     engine="controller",
     overrides={"hybrid_follow": "full"},
-    blurb="The validated controller, with the Global engine's L1 harvest "
-          "envelope fed in as a per-week harvest target band — L1's steady "
-          "weekly quantity, executed by the controller's realized machinery. "
-          "Aimed at the weeks the reactive controller paces below the "
-          "contract floor.",
+    blurb="EXPERIMENTAL — do not plan against this yet. The validated "
+          "controller with the Global engine's L1 harvest envelope fed in as a "
+          "per-week target band. Measured 2026-08-01 on a 130-week PR: cuts "
+          "weeks under the contract floor from 21 to 8, but puts a ~3.4k-fish "
+          "crater in a mid-horizon purge week (2027-W41) that the plain "
+          "controller does not have, preceded by a 64k spike over the harvest "
+          "cap — the documented pair over-fill / starve pattern. Fails the "
+          "steady-harvest contract rule, so it is excluded from the default "
+          "roster until the purge lever stops starving individual 6N pairs.",
 ))
 
 
-# Default comparison roster (every currently-wired method).
-DEFAULT_ROSTER = ["controller", "controller-hybrid", "controller-lns",
-                  "global-lp", "global-milp"]
+# Default comparison roster. controller-hybrid is registered and runnable
+# (tools/run_compare --methods ..., or the board once it is opted in) but is
+# NOT here: it currently breaches the never-a-near-empty-week rule.
+DEFAULT_ROSTER = ["controller", "controller-lns", "global-lp", "global-milp"]
 
 
 def get_roster(keys: "Optional[list[str]]" = None) -> "list[Method]":

@@ -2896,21 +2896,25 @@ def phase_d_emit_events(
             # immediately — no break in harvest. We only ENTER + AGE them here
             # (don't harvest yet); the 6N drain covers winddown harvest. Bounded:
             # keep ~one weekly_target of fish in the pipeline, no more.
-            if not sixn_refill and purge_days > 0 and _entry_target > 0:
+            # PRIMING IS FLOOR-ONLY. A guide ceiling must never shrink this: the
+            # pre-stage is what fills the in-place purge pipeline BEFORE
+            # production opens, and under-filling it empties the first
+            # production weeks with nothing left to harvest. Measured: clamping
+            # here put a 4,191-fish crater at 2028-W02, the week after the 6N
+            # switch, on a baseline that had no craters at all. The guide may
+            # raise priming, never lower it.
+            _prime_target = max(weekly_target, _entry_target)
+            if not sixn_refill and purge_days > 0 and _prime_target > 0:
                 # Depuration takes ceil(purge_days/7) weekly steps to complete, so
                 # the pipeline must hold that many staggered cohorts of ~target to
                 # deliver target EVERY week from production's first week. Fill up to
                 # that depth, entering ~target/week (the steady production rate).
-                # Sized by _entry_target (== weekly_target unless the hybrid guide
-                # is steering) — this pre-stage IS the hybrid's only winddown
-                # channel, and sizing an entry by the week it will serve is
-                # exactly what it already does.
-                _stage_cap = math.ceil(purge_days / 7.0) * _entry_target
+                _stage_cap = math.ceil(purge_days / 7.0) * _prime_target
                 _in_pipe = sum(t.count for t in state.tanks_by_id.values()
                                if t.stage == STAGE_STARVE and not t.is_empty)
                 _entered = 0.0
                 for bid in _pick_fifo_move_in_batches(state, batch_meta, control):
-                    if _in_pipe >= _stage_cap or _entered >= _entry_target:
+                    if _in_pipe >= _stage_cap or _entered >= _prime_target:
                         break
                     src_tanks = sorted(
                         [t for t in state.tanks_by_id.values()
@@ -2918,7 +2922,7 @@ def phase_d_emit_events(
                          and t.avg_wt_g >= control.min_harvest_weight_g],
                         key=lambda t: (-t.avg_wt_g, t.tank_id))
                     for src in src_tanks:
-                        if _in_pipe >= _stage_cap or _entered >= _entry_target:
+                        if _in_pipe >= _stage_cap or _entered >= _prime_target:
                             break
                         src.stage = STAGE_STARVE
                         src.starvation_days_remaining = purge_days
