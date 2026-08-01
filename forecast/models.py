@@ -193,11 +193,40 @@ class SizeClassSplit:
     small_class_avg_wt_g: float     # mean of lower half (below median)
 
 
+def _ascending_permutation(keys) -> Optional[list[int]]:
+    """Index order that sorts `keys` ascending, or None if already ascending.
+
+    Returning None for the already-sorted case keeps the common path
+    allocation-free, so a well-formed table is passed through untouched.
+    Python's sort is stable, so duplicate keys keep their relative order.
+    """
+    n = len(keys)
+    if n < 2 or all(keys[i] <= keys[i + 1] for i in range(n - 1)):
+        return None
+    return sorted(range(n), key=lambda i: keys[i])
+
+
+def _permute(seq, perm: list[int]):
+    """Reorder `seq` by `perm`, or return it untouched when the lengths don't
+    match — a ragged payload column (a short FCR model, an empty list) keeps
+    whatever behaviour it has today instead of raising here."""
+    if seq is None or len(seq) != len(perm):
+        return seq
+    return [seq[i] for i in perm]
+
+
 @dataclass
 class BiologyTables:
     """Lookup tables parsed from the Tables sheet.
 
-    Each list is sorted ascending by the key column.
+    `__post_init__` sorts each group ascending by its key column, stably, and
+    co-permutes the parallel payload lists. The lookups in `biology.py` clamp
+    and scan POSITIONALLY (`_interp` ends at `pairs[-1]`, `_mortality_weekly_pct`
+    breaks on the first larger key, `_feed_type_for_size` takes the first
+    bracket that fits), so an out-of-order row would silently flatten a curve
+    onto that row rather than raise. Enforcing order here fixes every entry
+    path at once: YAML load, Excel template import, the app's biology grid,
+    and the VBA migration.
     """
     sgr_size_g: list[float] = field(default_factory=list)
     sgr_fw_pct_day: list[Optional[float]] = field(default_factory=list)
@@ -212,6 +241,30 @@ class BiologyTables:
     feed_types: list[tuple[float, str]] = field(default_factory=list)
     # Culling schedule: (days_since_input, cull_pct), sorted ascending by day.
     culling: list[tuple[int, float]] = field(default_factory=list)
+
+    def __post_init__(self):
+        # Five independent key columns. sgr_size_g and fcr_size_g are SEPARATE
+        # keys (the YAML permits them to diverge), so they permute separately.
+        perm = _ascending_permutation(self.sgr_size_g)
+        if perm is not None:
+            self.sgr_size_g = _permute(self.sgr_size_g, perm)
+            self.sgr_fw_pct_day = _permute(self.sgr_fw_pct_day, perm)
+            self.sgr_sw_pct_day = _permute(self.sgr_sw_pct_day, perm)
+        perm = _ascending_permutation(self.fcr_size_g)
+        if perm is not None:
+            self.fcr_size_g = _permute(self.fcr_size_g, perm)
+            self.fcr_by_model = {k: _permute(v, perm)
+                                 for k, v in self.fcr_by_model.items()}
+        perm = _ascending_permutation(self.mortality_week_from_input)
+        if perm is not None:
+            self.mortality_week_from_input = _permute(
+                self.mortality_week_from_input, perm)
+            self.mortality_pct_weekly = _permute(self.mortality_pct_weekly, perm)
+        # Self-contained (key, value) tuples — sort in place by the key.
+        if _ascending_permutation([t[0] for t in self.feed_types]) is not None:
+            self.feed_types = sorted(self.feed_types, key=lambda t: t[0])
+        if _ascending_permutation([t[0] for t in self.culling]) is not None:
+            self.culling = sorted(self.culling, key=lambda t: t[0])
 
 
 @dataclass
