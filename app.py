@@ -4191,6 +4191,20 @@ def _compare_and_choose():
                    f"finished. Missing: {', '.join(_missing)}. Click **▶ Run all "
                    f"methods & compare** to run only those.")
 
+    # Results outlive the inputs that produced them: a config save or a new PR
+    # doesn't clear the board, so say which cards no longer match. (The run loop
+    # re-runs a stale method, but only once the operator presses ▶ — until then
+    # they could otherwise pick a plan built under different knobs.)
+    import hashlib as _hl
+    _now_pr = _hl.md5(uploaded.getvalue()).hexdigest()
+    _stale = {k for k in results
+              if store[k].get("sig") != _board_method_sig(k, _now_pr)}
+    if _stale:
+        st.warning(f"Inputs changed since {len(_stale)} of these result(s) were "
+                   f"computed ({', '.join(results[k].get('_label', k) for k in _stale)}"
+                   f") — they are shown as-is. **▶ Run all methods & compare** "
+                   f"refreshes just those.")
+
     scored = {k: v for k, v in results.items() if v.get("ok") and v.get("_score")}
     for k, v in results.items():
         if k not in scored:
@@ -4266,7 +4280,8 @@ def _compare_and_choose():
         with st.container(border=True):
             c1, c2 = st.columns([3, 1])
             with c1:
-                st.markdown(f"**{v['_label']}**  ·  {v.get('elapsed', 0):.0f}s")
+                st.markdown(f"**{v['_label']}**  ·  {v.get('elapsed', 0):.0f}s"
+                            + ("  ·  ⚠️ stale" if k in _stale else ""))
                 st.caption(_board_badges(v["_score"]["gates"]))
                 st.caption(
                     f"peak {m.overall_peak_biomass / (m.biomass_cap or 1) * 100:.0f}% cap"

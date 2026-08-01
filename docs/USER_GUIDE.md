@@ -49,12 +49,22 @@ At the top of the sidebar, above the Mode selector, a **Computer power** slider
 (10–100%, default **40%**) sets how much of the machine the *heavy* runs may
 use — the Global optimal (CP-SAT) solver (also inside Compare & Choose) and the
 Optimize sweeps. The caption under it translates the percent into processor
-cores ("up to N of M"). Higher = faster heavy runs, but other applications feel
-slower and Optimize sweeps use more memory while a run is going (at 100% every
-core may be busy — an explicit opt-in). A plain controller **▶ Run forecast**
-and **Tune** are sequential and unaffected by this setting.
+cores ("up to N of M"). Raising it lets those runs go wider, but other
+applications feel slower and Optimize sweeps use more memory while a run is
+going (at 100% every core may be busy — an explicit opt-in). A plain controller
+**▶ Run forecast** and **Tune** are sequential and unaffected by this setting.
 
-In **Run forecast** mode the sidebar also has a **Planning method** selector:
+**How much it actually buys depends on the shape of the work.** Optimize sweeps
+scale nearly linearly — each variant is a whole forecast in its own process, so
+twice the workers is roughly twice the throughput. CP-SAT scales only as far as
+the *individual solve* is big enough to keep the threads busy: a whole-horizon
+solve will use everything you give it, but the per-week solves used by
+**Compare & Choose** are small, and measured on a 20-core machine a 12-worker
+setting kept only about 3 cores busy. If a heavy run isn't using the share you
+set, that's usually the reason — not a broken setting.
+
+Lower in the sidebar (visible in every mode, but it governs **▶ Run forecast**) is a
+**Planning method** selector:
 **Controller (validated)** — the default closed-loop planner (§4) — or **Global
 (precalculated)** — an experimental alternative engine (§12). Same PR in, same
 workbook shape out, each stamped with the method that produced it, so you can run
@@ -122,7 +132,7 @@ Facility-wide knobs read into `ControlParams`:
 | `harvest_level_load` | **harvest smoother (ON by default)** — enforce `max_harvest_per_week` as a HARD ceiling + pre-harvest earlier so harvest is flat and biomass stays under cap. Paired with `rebalance_level`, which otherwise spikes harvest (see §4.3). Set `false` for old reactive behavior | **true** |
 | `harvest_smooth_lookahead_weeks` | level-load window K — weeks of coming-due biomass to spread the pre-harvest over | 6 |
 | `harvest_level_target` | flat fish/week floor when level-loading (unset/null = auto from realized growth) | null |
-| `placement_method` | placement engine: `greedy` (default heuristic + rebalancer) or `lns` (opt-in LP-guided optimal-layout refinement — *scaffold only today, identical to greedy until the solver phases land*; see `docs/LP_GUIDED_LNS_PLACEMENT.md`) | `greedy` |
+| `placement_method` | placement engine: `greedy` (default heuristic + rebalancer) or `lns` (opt-in LP-guided refinement of the realized layout — implemented and audit-gated, see §11; it correctly no-ops on a capacity-bound config, where there is no tank slack to relocate into) | `greedy` |
 
 ### 3.3 Scenario batches + per-batch models (`scenario/batches.yaml` / BatchRegistry)
 Each batch row carries its stocking AND its **growth models**:
@@ -163,7 +173,11 @@ appear to jump after **💾 Save Biology**. That's the sort working, not an erro
 > flatten the whole curve beyond it — one stray 50 g row could make every
 > market-weight fish grow at the 50 g rate. The sort is now enforced wherever
 > tables enter (this editor, the Excel template import, hand-edited YAML), so this
-> class of silent error is gone. Values are never changed — only row order.
+> class of silent error is gone. Values are never changed — only row order. One
+> limit worth knowing if you hand-edit the YAML: a value column shorter than its
+> key column is left alone rather than reordered, since there is no safe pairing —
+> so keep each curve's columns the same length. The app editor always writes them
+> that way.
 
 Between edits, remember the app is the source of truth: a save writes
 `config/biology.yaml` and every later run reads it. Per-batch multipliers
@@ -251,7 +265,7 @@ the global optimiser** (ranked biggest-first, *opt-in* — the optimiser's first
 week is often a full layout transition, so you tick only the moves you want).
 Approve the ticked moves and they're appended as week N+1's operations, extending
 your window by a week; run it again for the week after, and so on. Each run takes
-**~1 minute** (it runs both planners). The engine (`forecast/copilot.py`) is
+**~20–30 seconds** (it runs both planners). The engine (`forecast/copilot.py`) is
 UI-free by design, so this loop is portable to a future desktop build.
 
 Both co-pilot buttons write `scenario/manual_events.yaml` — the same file the
@@ -558,6 +572,7 @@ matters.
 | **InputConservationAudit** | per batch: placed/dropped, harvested, standing, **FW reconciliation** (planned vs realized seawater entry) + **closed FW mass-balance** (`first_FW_count` vs `realized_TranOG + FW_mort + FW_cull`; §6 #6) | conservation + FW calibration gaps |
 | **TankContinuityAudit** | per-(tank, week) balance + **facility conservation summary** | 0-drift proof |
 | **ReconciliationReport / SystemLimitsAudit** | per-batch open/close balance (count reconciles **exactly** via recorded realized biology; biomass within tolerance) / per-system cap usage | deeper audits — *TankContinuityAudit is the authoritative 0-drift biomass check* |
+| **Diagnostics** | FW-calibration: per batch, the target vs projected pre-cull avg weight at TranOG, the residual, and a back-solved `Suggested_FW_Correction` | tuning `fw_correction` (§7 step 2) |
 | **RunConfig** | the exact config + scenario embedded in the output | reproducibility |
 
 > The `ProductionReport` sheet stays the **historical** input month only — the
@@ -672,8 +687,8 @@ may need re-calibrating — but it can't tell you the model's *absolute* truth.
 1. **Run** with your PR + scenario.
 2. **Check `InputConservationAudit`**: 0 dropped, 0 over-produced, and review the
    **FW_Flag** column — any "FW UNDER/OVER plan" batch reached seawater off its
-   planned `tran_og_count`. Adjust that batch's `fw_correction` (the
-   **Diagnostics** tab's FW-Calibration table back-solves a suggested value — for
+   planned `tran_og_count`. Adjust that batch's `fw_correction` (the downloaded
+   workbook's **Diagnostics** sheet back-solves a suggested value — for
    **both** incoming batches *and* in-flight ones already in FW at the forecast
    start, where it solves the correction on the remaining growth to TranOG) if you
    want it to hit your plan.
@@ -681,7 +696,7 @@ may need re-calibrating — but it can't tell you the model's *absolute* truth.
      (Configure → *Auto-calibrate FW to transfer target*; default **off**), the run
      replaces every FW batch's `fw_correction` with that back-solved value **before
      projecting**, so each batch lands its pre-cull avg weight exactly on its
-     `tran_og_avg_wt_g` target on the transfer date and the Diagnostics residuals go
+     `tran_og_avg_wt_g` target on the transfer date and the Diagnostics sheet's residuals go
      to ~0. Applies to incoming **and** in-flight FW batches. The solved value is
      **clamped** to `[auto_calibrate_fw_min, auto_calibrate_fw_max]` (default
      0.5–1.5) so the model can't silently assume absurd growth; a batch that would
@@ -726,7 +741,9 @@ same engine (`forecast/tuning.py`):
   config set and a Production Report uploaded, pick **Quick** or **Full** sweep
   depth and click **▶ Run tuning sweep**. It shows the peak-density distribution
   per variant, a stacked-band chart, the **recommended** variant, and the
-  severe-batch list. The current config is never modified.
+  severe-batch list. The sweep itself never modifies your config — it runs each
+  variant in a temp copy — but the results panel has a **💾 Save these tuning knobs
+  to my config** button if you want to keep the winner.
 - **CLI:** `python -m tools.tune_sweep --config-template "C:\path\config_template (N).xlsx"`
   (or no `--config-template` to use the repo `config/` + `scenario/` yaml; add
   `--quick` for the cheap subset).
@@ -790,13 +807,15 @@ limit AND flat, not minimized:
 | `system_overshoot` | per-system feed+biomass over-cap fraction (compliance, §7.3) | no breach |
 | `density_overshoot` | per-tank density over-cap fraction, **OG6N purge excluded** (compliance, §7.3) | no breach |
 | `system_peak` | the single **hottest** (system, week) load — biomass *or* feed, as a fraction of cap | **no hot spots** |
+| `crowded_biomass_fraction` | share of grow-out biomass reared above the welfare line (§7.4) | gentler rearing / product quality |
 
 **Emphasis presets:** *Walk the line* (default — flatness + no-breach dominate),
 *Flatten biomass*, *Minimize feed*, *Minimize handling*, *Respect caps* (minimize all
 over-cap excursions — see §7.3), **_Minimize loads_** (keep every system's biomass+feed
 as LOW and EVEN as possible — minimizes `system_peak` + all CVs + feed + handling, and
-DROPS the press-to-cap reward; the "no hot spots" objective), *Balanced*; plus advanced
-custom weights. In the app, **changing the emphasis re-scores instantly** without
+DROPS the press-to-cap reward; the "no hot spots" objective), *Product quality* (trade
+packing for gentler rearing — weights `crowded_biomass_fraction`, see §7.4), *Balanced*;
+plus advanced custom weights. In the app, **changing the emphasis re-scores instantly** without
 re-running the sweep — explore the trade-offs live.
 
 **Search method (Quick/Full grid vs Deep search).** The grids *enumerate* hand-picked
@@ -805,11 +824,15 @@ configs and mostly vary one knob at a time, so they miss **combinations** (e.g. 
 is a greedy **coordinate descent**: from the current config it tunes one knob at a time
 toward the best score under the chosen emphasis, looping until nothing improves — so it
 **finds combinations the grid can't** (~15–30 runs, deterministic, conservation-gated).
-The emphasis *guides* the deep search, so pick it first. Both methods return the same
-ranked variants, Pareto map, and apply/verify panel.
+The emphasis *guides* the deep search, so pick it first. A fourth option, **Grid + Deep
+(best of both)**, runs the full grid and then a deep search seeded from the grid's
+winner, returning the best of either — it is what 🤖 Auto-optimize uses, and the
+slowest/most thorough choice. All of them return the same ranked variants, Pareto map,
+and apply/verify panel.
 
 **It runs in parallel.** Each grid variant is an independent full forecast, so the sweep
-runs them across a process pool (up to 8 at once) — typically **3–5× faster** than
+runs them across a process pool (as many at once as the sidebar's **Computer power**
+allows — the CLI defaults to 8) — typically **3–5× faster** than
 one-at-a-time, with **byte-identical** results (they're sorted back to grid order and
 re-scored). Deep search is inherently sequential (each knob depends on the previous
 best), so it parallelizes only the candidate values within a knob — a smaller win. If a
@@ -939,18 +962,30 @@ your PR, **grades them on several lenses, and lets *you* pick which plan becomes
 report**. Each method's plan is internally consistent (0-drift, tank continuity), so
 you choose a *whole* plan — never a splice.
 
-- **What runs.** Controller (~30s) and the Global heuristic LP (~4 min) always; the
+- **What runs.** Controller (~30s), **Controller + LNS** (~30s) and the Global
+  heuristic LP (~4 min) always; the
   optimal CP-SAT placement is a checkbox that is **on by default** — uncheck
-  it for a fast two-method compare. The CP-SAT leg is quoted at ~30 min but solves
-  each of the ~130 weeks under its own time budget, so on a long horizon it can run
-  considerably longer. Watch the clock in the progress text, not the bar.
+  it for a fast two-method compare. The CP-SAT leg is quoted at ~30 min but gives
+  **each week its own solver budget**, so the cost scales with your horizon: on a
+  130-week PR it has been measured well past **90 minutes**, and it reports nothing
+  until the whole solve is done. Watch the clock in the progress text, not the bar.
+  It also can't use the full **Computer power** share you set — the per-week models
+  are small (see §2) — so raising the slider won't rescue a long CP-SAT leg.
+- **Suggested way to work.** Uncheck CP-SAT first and get the three fast methods
+  graded in ~5 minutes; that's a complete, usable board. Then tick CP-SAT and run
+  again if you want it — the finished legs are reused instantly, so you only pay for
+  the new one, and if you interrupt that you lose only that leg. Compare this with
+  running everything up front, where the long leg is the one blocking your first look
+  at any result.
 - **Interrupting is safe.** Each method is saved the instant it finishes. If you click
   something mid-compare (which aborts the run — Streamlit restarts the script on any
   widget interaction), the board still shows the legs that completed and names the ones
   that didn't. Click **▶ Run all methods & compare** again and it reuses the finished
   work, running only what's missing. Use **↻ Re-run all from scratch** to discard
-  everything and start over — you'll want that after changing config, though a config
-  or PR change already marks the stored results stale and re-runs them automatically.
+  everything and start over. You rarely need it: if you change config or upload a
+  different PR, the affected cards are flagged **⚠️ stale** and the next ▶ re-runs
+  exactly those. Stale results stay on screen until then — they aren't wrong, they
+  were just computed under different inputs, so check the flag before picking a plan.
 - **Reading the progress bar.** It advances when a method *finishes*, not while one is
   running: the engine call blocks the app, so nothing can animate during it. The text
   tells you which method is in flight, its typical duration, and the wall-clock time it
