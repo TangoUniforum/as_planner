@@ -13,6 +13,7 @@ from __future__ import annotations
 import io
 import os
 import sys
+import uuid
 import tempfile
 import time
 import traceback
@@ -2741,6 +2742,41 @@ with st.sidebar:
 # Pipeline runner
 # ============================================================
 
+class _TeeIO(io.StringIO):
+    """Captures stdout AND forwards each completed line to `on_line`.
+
+    The pipeline narrates its stages to stdout; capturing it into a plain
+    StringIO meant the operator saw nothing until the run returned — a static
+    spinner for anything up to half an hour. This tees the stream so the UI can
+    show the current stage live, while `getvalue()` stays byte-identical to the
+    old capture (super().write runs first and unconditionally, whatever the
+    callback does). A callback that raises disables itself rather than
+    spamming; callbacks must only touch `st` APIs — printing from one would
+    re-enter this writer under redirect_stdout and pollute the transcript.
+    """
+
+    def __init__(self, on_line=None):
+        super().__init__()
+        self._on_line = on_line
+        self._buf = ""
+
+    def write(self, s: str) -> int:
+        n = super().write(s)            # transcript first: never lose output
+        if self._on_line and s:
+            self._buf += s
+            while "\n" in self._buf:
+                line, self._buf = self._buf.split("\n", 1)
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    self._on_line(line)
+                except Exception:  # noqa: BLE001 — narration is best-effort
+                    self._on_line = None
+                    break
+        return n
+
+
 def _run_with_workbook_bytes(
     input_bytes: bytes,
     input_name: str,
@@ -2749,12 +2785,16 @@ def _run_with_workbook_bytes(
     method: str = "controller",
     cpsat_time: float = 300.0,
     cpsat_workers: int | None = None,
+    on_line=None,
 ) -> dict:
     """Run the pipeline against `input_bytes` in a temp directory.
 
     `cpsat_workers` = CP-SAT search threads for the global-optimal method
     (None -> the engine default of 8); callers pass _cpu_workers() so the
     sidebar's "Computer power" percent governs it.
+
+    `on_line` receives each stage line the pipeline prints, as it prints it, so
+    the caller can narrate progress. The captured stdout is unaffected.
 
     When config_dir/scenario_dir are given (PR-only mode), the stable
     config + scenario load from YAML and the uploaded workbook supplies
@@ -2797,7 +2837,7 @@ def _run_with_workbook_bytes(
 
     # Run the pipeline, capturing console output for display.
     t0 = time.time()
-    captured = io.StringIO()
+    captured = _TeeIO(on_line)
     try:
         with redirect_stdout(captured):
             if method in ("global", "global_optimal"):
@@ -2856,6 +2896,9 @@ def _run_with_workbook_bytes(
         "output_name": out_path.name,
         "output_path": str(out_path),
         "config_used": config_used,
+        # Identity of this run, so the results view can memoize its derived
+        # frames and only rebuild them when a DIFFERENT run is displayed.
+        "_rid": uuid.uuid4().hex,
     })
     return parsed
 
@@ -3446,6 +3489,65 @@ def _harvest_mode_label(config_dir) -> str:
     return "level-load OFF (default controller)"
 
 
+def _rv_memo(name: str, rid: str, build):
+    """Per-run memo for the results view.
+
+    st.tabs renders ALL tab bodies on every rerun, so without this every widget
+    tick anywhere in the app (including the manual-window editor above the
+    results) rebuilt the pivots, groupbys and derived tables and re-opened the
+    output workbook from disk. Holds exactly one run's artifacts: a different
+    `rid` clears the lot, so stale data can't survive a new run.
+
+    Values are returned BY REFERENCE — callers must .copy() before mutating,
+    which the tab code already does throughout.
+    """
+    cache = st.session_state.setdefault("_rv_cache", {})
+    if cache.get("_rid") != rid:
+        cache.clear()
+        cache["_rid"] = rid
+    if name not in cache:
+        cache[name] = build()
+    return cache[name]
+
+
+def _system_feed_audit(out_path):
+    """REALIZED per-system feed rows + the cap, from the output workbook's
+    SystemLimitsAudit sheet. Returns ([], None) when the file is gone: the
+    output lives in a temp dir that the OS can sweep mid-session, and this
+    read previously took the whole results view down with it."""
+    from pathlib import Path as _P
+    if not out_path or not _P(out_path).exists():
+        return [], None
+    rows, cap = [], None
+    try:
+        _wb = load_workbook(out_path, data_only=True, read_only=True)
+        try:
+            if "SystemLimitsAudit" in _wb.sheetnames:
+                _hdr = None
+                for _row in _wb["SystemLimitsAudit"].iter_rows(values_only=True):
+                    if _hdr is None:
+                        if _row and _row[0] == "Week":
+                            _hdr = {h: j for j, h in enumerate(_row)}
+                        continue
+                    if not _row or _row[0] is None:
+                        continue
+                    _sys = _row[_hdr.get("System", 1)]
+                    _fd = _row[_hdr.get("Feed_kg_day", 5)]
+                    _fc = _row[_hdr.get("Feed_cap", 6)]
+                    if _sys is None or _fd is None:
+                        continue
+                    rows.append({"System": str(_sys),
+                                 "Week": str(_row[_hdr.get("Week", 0)]),
+                                 "Feed_kg_day": float(_fd)})
+                    if _fc:
+                        cap = float(_fc)
+        finally:
+            _wb.close()   # was outside any guard: an exception mid-scan leaked it
+    except Exception:  # noqa: BLE001 — an unreadable audit just hides the chart
+        return [], None
+    return rows, cap
+
+
 def _daily_harvest_table(he_df):
     """Per-day (Mon–Fri) breakout of the WEEK's total harvest for the Harvest tab.
 
@@ -3955,6 +4057,39 @@ def _board_badges(gates):
     return "  ".join(f"{'✅' if ok else '⚠️'} {name}" for name, ok in gates.items())
 
 
+_BOARD_ORDER = ("controller", "controller_lns", "global", "global_optimal")
+_BOARD_TYPICAL = {"controller": "~30 s", "controller_lns": "~30 s",
+                  "global": "~4 min", "global_optimal": "~30 min+"}
+
+
+def _board_method_sig(mkey: str, pr_md5: str) -> str:
+    """Identity of one board leg's inputs, so a finished method can be reused
+    instead of re-run. "board1" is a schema tag — bump it when the stored
+    result shape changes (mirrors the "proj3" tag in _mw_project). The CP-SAT
+    knobs enter only the method they affect, so moving the Computer power
+    slider doesn't needlessly invalidate the three fast methods."""
+    import hashlib
+    parts = ["board1", pr_md5, _config_fingerprint(), mkey]
+    if mkey == "global_optimal":
+        parts += ["cpsat300", str(_cpu_workers())]
+    return hashlib.md5("|".join(parts).encode()).hexdigest()
+
+
+def _ensure_board_score(res: dict, label: str) -> None:
+    """Grade a finished run, once. The grading is three full workbook reads, so
+    it lives inside the stored result — and a run whose grading failed
+    transiently can be re-graded on reuse without re-running the solve."""
+    if not (res.get("ok") and res.get("output_path")) or res.get("_score"):
+        return
+    with st.spinner(f"Grading {label}…"):
+        try:
+            res["_score"] = _board_score(res["output_path"])
+            res.pop("_score_err", None)
+        except Exception as e:  # noqa: BLE001
+            res["_score"] = None
+            res["_score_err"] = str(e)
+
+
 def _compare_and_choose():
     st.header("⚖️ Compare & Choose — run the methods, pick the plan")
     st.caption(
@@ -3983,37 +4118,78 @@ def _compare_and_choose():
                "LNS usually matches plain Controller** — LNS only diverges when "
                "there's tank slack to relocate/swap into.")
 
-    if st.button("▶ Run all methods & compare", type="primary",
-                 use_container_width=True):
-        roster = [("controller", "Controller (reactive)"),
-                  ("controller_lns", "Controller + LNS"),
-                  ("global", "Global (heuristic LP)")]
-        if include_milp:
-            roster.append(("global_optimal", "Global (optimal CP-SAT)"))
-        results = {}
+    roster = [("controller", "Controller (reactive)"),
+              ("controller_lns", "Controller + LNS"),
+              ("global", "Global (heuristic LP)")]
+    if include_milp:
+        roster.append(("global_optimal", "Global (optimal CP-SAT)"))
+
+    _b1, _b2 = st.columns([3, 2])
+    run_all = _b1.button("▶ Run all methods & compare", type="primary",
+                         use_container_width=True,
+                         help="Reuses any method already finished for these exact "
+                              "inputs — only missing or stale methods run.")
+    rerun_all = _b2.button("↻ Re-run all from scratch", use_container_width=True,
+                           help="Discards finished results and runs every method again.")
+    st.caption("Each method is saved the moment it finishes, so an interrupted "
+               "compare keeps the legs that completed — click ▶ again to finish "
+               "the rest.")
+
+    if run_all or rerun_all:
+        import hashlib
+        from datetime import datetime as _dtn
+        store = st.session_state.setdefault("_board_store", {})
+        if rerun_all:
+            store.clear()
+        st.session_state["_board_roster"] = roster
+        pr_md5 = hashlib.md5(uploaded.getvalue()).hexdigest()
+        n = len(roster)
         bar = st.progress(0.0, text="Starting…")
         for i, (mkey, mlabel) in enumerate(roster):
-            bar.progress(i / len(roster), text=f"Running {mlabel}…")
-            with st.spinner(f"Running {mlabel} — CP-SAT can take ~30 min…"):
+            msig = _board_method_sig(mkey, pr_md5)
+            done = store.get(mkey)
+            if (done and done.get("sig") == msig and done["res"].get("ok")
+                    and done["res"].get("output_path")):
+                _ensure_board_score(done["res"], mlabel)
+                bar.progress((i + 1) / n, text=f"{mlabel}: reusing finished result")
+                continue
+            # The bar can only move between methods — the engine call below
+            # blocks the script — so say so, and give a clock to judge against.
+            bar.progress(i / n, text=(
+                f"{i}/{n} finished · running {mlabel} (typically "
+                f"{_BOARD_TYPICAL.get(mkey, '?')}, started {_dtn.now():%H:%M}) — "
+                f"this bar next moves when the method finishes"))
+            with st.status(f"Running {mlabel}…", expanded=False) as _ms:
                 res = _run_with_workbook_bytes(
                     uploaded.getvalue(), uploaded.name,
                     config_dir=str(CONFIG_DIR), scenario_dir=str(SCENARIO_DIR),
                     method=mkey, cpsat_time=300.0,
-                    cpsat_workers=_cpu_workers())
-            if res.get("ok") and res.get("output_path"):
-                try:
-                    res["_score"] = _board_score(res["output_path"])
-                except Exception as e:  # noqa: BLE001
-                    res["_score"] = None
-                    res["_score_err"] = str(e)
+                    cpsat_workers=_cpu_workers(),
+                    on_line=lambda ln, _s=_ms, _l=mlabel: _s.update(
+                        label=f"{_l} — {ln[:100]}"))
+                _ms.update(
+                    label=(f"{mlabel} — done in {res.get('elapsed', 0):,.0f}s"
+                           if res.get("ok") else f"{mlabel} — failed"),
+                    state="complete" if res.get("ok") else "error")
             res["_label"] = mlabel
-            results[mkey] = res
-        bar.progress(1.0, text="Done")
-        st.session_state["_board_results"] = results
+            _ensure_board_score(res, mlabel)
+            store[mkey] = {"sig": msig, "res": res}   # persists NOW, per method
+            bar.progress((i + 1) / n,
+                         text=f"✓ {mlabel} done in {res.get('elapsed', 0):,.0f}s "
+                              f"({i + 1}/{n})")
+        bar.progress(1.0, text=f"All {n} method(s) complete")
 
-    results = st.session_state.get("_board_results")
+    store = st.session_state.get("_board_store") or {}
+    results = {k: store[k]["res"] for k in _BOARD_ORDER if k in store}
     if not results:
         return
+
+    _planned = st.session_state.get("_board_roster") or []
+    _missing = [lbl for k, lbl in _planned if k not in results]
+    if _missing:
+        st.warning(f"Partial compare — {len(results)} of {len(_planned)} methods "
+                   f"finished. Missing: {', '.join(_missing)}. Click **▶ Run all "
+                   f"methods & compare** to run only those.")
 
     scored = {k: v for k, v in results.items() if v.get("ok") and v.get("_score")}
     for k, v in results.items():
@@ -4103,9 +4279,12 @@ def _compare_and_choose():
             with c2:
                 if st.button("Use this plan", key=f"board_pick_{k}",
                              use_container_width=True):
-                    st.session_state.result = v
-                    st.session_state.result["_run_label"] = \
-                        f"Compare & Choose — {v['_label']}"
+                    # Shallow copy: `v` IS the board's stored entry, so writing
+                    # _run_label straight onto it would relabel the board card
+                    # too (and any later annotation of the active result would
+                    # leak back into the store). The big payloads stay shared.
+                    st.session_state.result = {
+                        **v, "_run_label": f"Compare & Choose — {v['_label']}"}
                     st.session_state["_goto_run_mode"] = True
                     st.rerun()
 
@@ -4146,11 +4325,19 @@ if (run_clicked or st.session_state.pop("_pending_run", False)) and uploaded is 
              if _is_global else "Running forecast pipeline...")
     with st.status(_spin, expanded=True) as status:
         st.write("Config + scenario from the app; ProductionReport from upload...")
+
+        def _narrate(line, _s=status):
+            """Show each pipeline stage as it happens: the newest line as the
+            status label, the whole sequence in the body below it."""
+            _s.update(label=line[:110])
+            st.write(line)
+
         result = _run_with_workbook_bytes(
             uploaded.getvalue(), uploaded.name,
             config_dir=str(CONFIG_DIR), scenario_dir=str(SCENARIO_DIR),
             method=_method, cpsat_time=_cpsat_time,
             cpsat_workers=_cpu_workers(),
+            on_line=_narrate,
         )
         if result["ok"]:
             st.write(
@@ -4181,6 +4368,9 @@ if (run_clicked or st.session_state.pop("_pending_run", False)) and uploaded is 
 
 if "result" in st.session_state and st.session_state.result.get("ok"):
     r = st.session_state.result
+    # Cache key for every derived frame below. Results stored before _rid
+    # existed (or by an older session) fall back to something run-unique.
+    _rid = r.get("_rid") or f"{r.get('output_path')}|{r.get('elapsed')}"
 
     # Provenance — always show WHICH run is on screen (keep the correct data).
     st.caption(f"📋 Showing: **{r.get('_run_label', 'forecast run')}**")
@@ -4226,10 +4416,12 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
             st.caption(f"Saved to:\n`{r['output_path']}`")
 
     # ---- Tabs ----
-    bl = r["batch_locations"]
-    bl_df = pd.DataFrame(bl) if bl else pd.DataFrame()
-    he_df = pd.DataFrame(r["harvest_events"]) if r["harvest_events"] else pd.DataFrame()
-    bio_df = pd.DataFrame(r.get("biology_projection", []))
+    bl_df = _rv_memo("bl_df", _rid, lambda: (
+        pd.DataFrame(r["batch_locations"]) if r["batch_locations"] else pd.DataFrame()))
+    he_df = _rv_memo("he_df", _rid, lambda: (
+        pd.DataFrame(r["harvest_events"]) if r["harvest_events"] else pd.DataFrame()))
+    bio_df = _rv_memo("bio_df", _rid,
+                      lambda: pd.DataFrame(r.get("biology_projection", [])))
 
     tab_over, tab_batch, tab_period, tab_harvest, tab_yearly, tab_plan = st.tabs([
         "Overview",
@@ -4270,26 +4462,45 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
 
         st.subheader("Tank occupancy over time")
         if not bl_df.empty:
-            df = bl_df.copy()
-            df["TankLabel"] = df.apply(lambda r: f"{r['System']}-{r['Tank']}", axis=1)
-            tank_order = sorted(
-                df["TankLabel"].unique(),
-                key=lambda t: (t.split("-")[0], int(t.split("-")[1]) if t.split("-")[1].isdigit() else 0),
-            )
-            weeks = sorted(df["Week"].dropna().unique())
-            density_pivot = df.pivot_table(
-                index="TankLabel", columns="Week",
-                values="Density_kg_m3", aggfunc="first",
-            ).reindex(index=tank_order, columns=weeks)
-            batch_pivot = df.pivot_table(
-                index="TankLabel", columns="Week",
-                values="Batch", aggfunc="first",
-            ).reindex(index=tank_order, columns=weeks)
+            def _build_heatmap():
+                """Pivots + hover matrix. Widget-independent, and the hover loop
+                is O(tanks x weeks) scalar lookups — the single most expensive
+                thing the results view used to redo on every click."""
+                df = bl_df.copy()
+                df["TankLabel"] = df.apply(
+                    lambda r: f"{r['System']}-{r['Tank']}", axis=1)
+                tank_order = sorted(
+                    df["TankLabel"].unique(),
+                    key=lambda t: (t.split("-")[0],
+                                   int(t.split("-")[1]) if t.split("-")[1].isdigit() else 0),
+                )
+                weeks = sorted(df["Week"].dropna().unique())
+                density_pivot = df.pivot_table(
+                    index="TankLabel", columns="Week",
+                    values="Density_kg_m3", aggfunc="first",
+                ).reindex(index=tank_order, columns=weeks)
+                batch_pivot = df.pivot_table(
+                    index="TankLabel", columns="Week",
+                    values="Batch", aggfunc="first",
+                ).reindex(index=tank_order, columns=weeks)
+                _dv = pd.to_numeric(df["Density_kg_m3"], errors="coerce")
+                vmax = max(130.0, float(_dv.max()) if _dv.notna().any() else 130.0)
+                customdata = []
+                for tl in tank_order:
+                    row_cd = []
+                    for wk in weeks:
+                        bid = batch_pivot.loc[tl, wk] if wk in batch_pivot.columns else None
+                        d = density_pivot.loc[tl, wk] if wk in density_pivot.columns else None
+                        row_cd.append([str(bid) if bid else "—",
+                                       f"{d:.1f}" if isinstance(d, (int, float)) else "—"])
+                    customdata.append(row_cd)
+                return density_pivot, batch_pivot, tank_order, weeks, vmax, customdata
+
+            (density_pivot, batch_pivot, tank_order, weeks, vmax,
+             customdata) = _rv_memo("ov_heatmap", _rid, _build_heatmap)
             # Severity-honest scale: span the TRUE worst density (clamping at 130
             # hid 3.8x spikes as ordinary red). Hard color break at the cap;
             # over-cap tanks deepen toward dark red as they get worse.
-            _dv = pd.to_numeric(df["Density_kg_m3"], errors="coerce")
-            vmax = max(130.0, float(_dv.max()) if _dv.notna().any() else 130.0)
             CAP = float(r.get("growout_density_cap") or 95.0)
             c_lo, c_cap = 80.0 / vmax, CAP / vmax
             colorscale = sorted({
@@ -4311,15 +4522,6 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
                 labels=dict(x="Week", y="Tank", color="Density (kg/m³)"),
                 aspect="auto",
             )
-            customdata = []
-            for tl in tank_order:
-                row_cd = []
-                for wk in weeks:
-                    bid = batch_pivot.loc[tl, wk] if wk in batch_pivot.columns else None
-                    d = density_pivot.loc[tl, wk] if wk in density_pivot.columns else None
-                    row_cd.append([str(bid) if bid else "—",
-                                   f"{d:.1f}" if isinstance(d, (int, float)) else "—"])
-                customdata.append(row_cd)
             fig.update_traces(
                 customdata=customdata,
                 hovertemplate=(
@@ -4402,31 +4604,8 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
             # the same projection-vs-realized gap fixed at the report layer in
             # 63dd6cc. This chart must mirror the realized plan, so it reads the
             # audit directly (also exact, not a biomass-share approximation).
-            sys_feed_rows = []
-            feed_cap_val = None
-            from openpyxl import load_workbook as _lwb
-            if r.get("output_path"):
-                _wb = _lwb(r["output_path"], data_only=True, read_only=True)
-                if "SystemLimitsAudit" in _wb.sheetnames:
-                    _hdr = None
-                    for _row in _wb["SystemLimitsAudit"].iter_rows(values_only=True):
-                        if _hdr is None:
-                            if _row and _row[0] == "Week":
-                                _hdr = {h: j for j, h in enumerate(_row)}
-                            continue
-                        if not _row or _row[0] is None:
-                            continue
-                        _sys = _row[_hdr.get("System", 1)]
-                        _fd = _row[_hdr.get("Feed_kg_day", 5)]
-                        _fc = _row[_hdr.get("Feed_cap", 6)]
-                        if _sys is None or _fd is None:
-                            continue
-                        sys_feed_rows.append({"System": str(_sys),
-                                              "Week": str(_row[_hdr.get("Week", 0)]),
-                                              "Feed_kg_day": float(_fd)})
-                        if _fc:
-                            feed_cap_val = float(_fc)
-                _wb.close()
+            sys_feed_rows, feed_cap_val = _rv_memo(
+                "sysfeed", _rid, lambda: _system_feed_audit(r.get("output_path")))
             if sys_feed_rows:
                 sys_feed = pd.DataFrame(sys_feed_rows).sort_values(["Week", "System"])
                 fig = px.line(
@@ -4459,37 +4638,55 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
             st.info("No batch data to display.")
         else:
             # Aggregate per (Batch, Week): sum count + biomass.
-            df = bl_df.copy()
-            df["Biomass_kg"] = df["Biomass_kg"].fillna(0)
-            df["Count"] = df["Count"].fillna(0)
-            agg = df.groupby(["Batch", "Week"]).agg(
-                Count=("Count", "sum"),
-                Biomass_kg=("Biomass_kg", "sum"),
-                MaxDensity=("Density_kg_m3", "max"),
-                MeanDensity=("Density_kg_m3", "mean"),
-                Tanks=("Tank", "nunique"),
-            ).reset_index()
-            agg["AvgWt_kg"] = (agg["Biomass_kg"] / agg["Count"]).where(agg["Count"] > 0, 0)
+            def _build_batch_agg():
+                df = bl_df.copy()
+                df["Biomass_kg"] = df["Biomass_kg"].fillna(0)
+                df["Count"] = df["Count"].fillna(0)
+                agg = df.groupby(["Batch", "Week"]).agg(
+                    Count=("Count", "sum"),
+                    Biomass_kg=("Biomass_kg", "sum"),
+                    MaxDensity=("Density_kg_m3", "max"),
+                    MeanDensity=("Density_kg_m3", "mean"),
+                    Tanks=("Tank", "nunique"),
+                ).reset_index()
+                agg["AvgWt_kg"] = (agg["Biomass_kg"] / agg["Count"]).where(
+                    agg["Count"] > 0, 0)
+                return agg
+
+            agg = _rv_memo("pb_agg", _rid, _build_batch_agg)
             batches = sorted(agg["Batch"].dropna().unique())
             default = ["B46", "B47"] if all(b in batches for b in ("B46", "B47")) else batches[:2]
+            all_weeks = sorted(agg["Week"].dropna().unique())
+            # Keyed so the selection survives reruns triggered elsewhere in the
+            # app; dropped when a new run's options no longer contain it (a
+            # select_slider raises on a value outside its options).
+            if ("pb_batches" in st.session_state
+                    and not set(st.session_state["pb_batches"]) <= set(batches)):
+                del st.session_state["pb_batches"]
+            if ("pb_period" in st.session_state
+                    and not all(w in all_weeks for w in st.session_state["pb_period"])):
+                del st.session_state["pb_period"]
 
             ctrl_l, ctrl_r = st.columns([2, 3])
             with ctrl_l:
                 picked = st.multiselect(
-                    "Batches", batches, default=default,
+                    "Batches", batches, default=default, key="pb_batches",
                     help="Pick one or more batches to compare trajectories.",
                 )
             with ctrl_r:
-                all_weeks = sorted(agg["Week"].dropna().unique())
                 if len(all_weeks) >= 2:
                     wk_lo, wk_hi = st.select_slider(
                         "Period",
                         options=all_weeks,
                         value=(all_weeks[0], all_weeks[-1]),
+                        key="pb_period",
                         help="Slide endpoints to zoom in on a specific window.",
                     )
                 else:
-                    wk_lo, wk_hi = all_weeks[0], all_weeks[-1] if all_weeks else (None, None)
+                    # NB: parenthesised so the empty case yields BOTH values —
+                    # unparenthesised, `all_weeks[0]` ran before the guard.
+                    wk_lo, wk_hi = ((all_weeks[0], all_weeks[-1]) if all_weeks
+                                    else (None, None))
 
             if not picked:
                 st.info("Select at least one batch.")
@@ -4574,25 +4771,28 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
         if bl_df.empty:
             st.info("No batch data to display.")
         else:
-            df = bl_df.copy()
-            df["Biomass_kg"] = df["Biomass_kg"].fillna(0)
-            wk_facility = df.groupby("Week").agg(
-                FacilityBiomass_kg=("Biomass_kg", "sum"),
-                ActiveTanks=("Tank", "nunique"),
-                ActiveBatches=("Batch", "nunique"),
-                MeanDensity=("Density_kg_m3", "mean"),
-            ).reset_index().sort_values("Week")
+            def _build_period():
+                df = bl_df.copy()
+                df["Biomass_kg"] = df["Biomass_kg"].fillna(0)
+                wk_facility = df.groupby("Week").agg(
+                    FacilityBiomass_kg=("Biomass_kg", "sum"),
+                    ActiveTanks=("Tank", "nunique"),
+                    ActiveBatches=("Batch", "nunique"),
+                    MeanDensity=("Density_kg_m3", "mean"),
+                ).reset_index().sort_values("Week")
+                # Merge harvest per week (kg + count)
+                if not he_df.empty:
+                    hw = he_df.groupby("Week").agg(
+                        HarvestKg=("Gross_kg", "sum"),
+                        HarvestCount=("Count", "sum"),
+                    ).reset_index()
+                    wk_facility = wk_facility.merge(hw, on="Week", how="left")
+                    wk_facility[["HarvestKg", "HarvestCount"]] = (
+                        wk_facility[["HarvestKg", "HarvestCount"]].fillna(0)
+                    )
+                return wk_facility
 
-            # Merge harvest per week (kg + count)
-            if not he_df.empty:
-                hw = he_df.groupby("Week").agg(
-                    HarvestKg=("Gross_kg", "sum"),
-                    HarvestCount=("Count", "sum"),
-                ).reset_index()
-                wk_facility = wk_facility.merge(hw, on="Week", how="left")
-                wk_facility[["HarvestKg", "HarvestCount"]] = (
-                    wk_facility[["HarvestKg", "HarvestCount"]].fillna(0)
-                )
+            wk_facility = _rv_memo("period", _rid, _build_period)
 
             c1, c2 = st.columns(2)
             with c1:
@@ -4736,7 +4936,8 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
                 "tank + batch that contributed; average weights are blended (total "
                 "biomass ÷ total fish). Same as the Excel 'Daily Harvest Schedule' "
                 "sheet.")
-            _dh, _totpos, _blankpos = _daily_harvest_table(he_df)
+            _dh, _totpos, _blankpos = _rv_memo(
+                "harvest_daily", _rid, lambda: _daily_harvest_table(he_df))
             if _dh.empty:
                 st.info("No datable harvest events for a daily breakout.")
             else:
@@ -4841,7 +5042,8 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
         # ---- Per-batch plan: where each batch is + how it got there ----
         st.divider()
         st.subheader("Per-batch plan — journey + milestones")
-        bplans = _derive_batch_plans(bl_df, he_df)
+        bplans = _rv_memo("bplans", _rid,
+                          lambda: _derive_batch_plans(bl_df, he_df))
         if not bplans:
             st.info("No batch-location data to build per-batch plans.")
         else:
@@ -4871,10 +5073,12 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
             st.dataframe(pd.DataFrame(bp["milestones"]), hide_index=True,
                          use_container_width=True)
             # Flat export (one row per batch-milestone) for sharing/review.
-            rows = [{"Batch": p["Batch"], **m} for p in bplans for m in p["milestones"]]
+            _csv = _rv_memo("bplans_csv", _rid, lambda: pd.DataFrame(
+                [{"Batch": p["Batch"], **m} for p in bplans for m in p["milestones"]]
+            ).to_csv(index=False).encode())
             st.download_button(
                 "⬇ Download all batch plans (CSV)",
-                data=pd.DataFrame(rows).to_csv(index=False).encode(),
+                data=_csv,
                 file_name="batch_plans.csv", mime="text/csv")
 
     # ---- Run log (collapsed) ----
