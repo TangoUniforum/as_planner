@@ -1154,6 +1154,15 @@ def _run_sixn_purge_week(
     #    when sufficient production inventory exists.
     min_h = control.min_harvest_per_week or 0
     max_h = control.max_harvest_per_week or min_h
+    # NOTE (measured 2026-08-01, DO NOT RETRY without re-measuring): the floor
+    # is judged at the DRAIN but sized HERE, and the fish carry ~lead weeks of
+    # mortality between the two — so 12 of 19 sub-floor weeks land at exactly
+    # 29,970 = 30,000 x 0.9995^2, thirty fish short by arithmetic. Grossing the
+    # fill up by that survival factor is arithmetically correct AND makes the
+    # plan worse: weeks below floor 21->17, but the worst week collapsed
+    # 19,070->1,607 and weeks over the processing cap went 4->9. Asking for
+    # thirty more fish per week cascades through tank selection and make-room
+    # into a materially worse plan. The shortfall is real; this is not its fix.
     if move_in_target is not None and move_in_target > 0:
         target = max(min_h, min(max_h, move_in_target))
     else:
@@ -1166,6 +1175,12 @@ def _run_sixn_purge_week(
     # so every week meets the harvest MIN.
     if getattr(control, "sixn_level_drains", False):
         _existing = pair_combined_count(state, fill_pair)
+        # NOTE (measured 2026-08-01): forcing the floor through this clamp —
+        # "the contract must win" — BACKFIRES. It re-creates the accumulation
+        # this clamp exists to prevent: weeks over the processing cap 4->6,
+        # worst week 19,070->9,782, peak density 102.8->154.7. The clamp is
+        # load-bearing; a sub-floor target here is a SYMPTOM of a full pair,
+        # not the cause of the shortfall. Fix the fill, not the clamp.
         target = min(target, max(0.0, max_h - _existing))
     if target <= 0:
         pair_queue.append(fill_pair)

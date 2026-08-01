@@ -627,20 +627,42 @@ def _build_weekly_system_facts(
 def _detect_bottlenecks(
     weekly_facility: dict[str, WeeklyFacilityFact],
     system_facts: dict[str, SystemFact],
+    control=None,
 ) -> list[Bottleneck]:
     """Spot supply-vs-demand gaps from the canvas alone (no placement run)."""
     out: list[Bottleneck] = []
-    total_og_tanks = sum(sf.tank_count for sf in system_facts.values() if sf.type == "OG")
+    # Count the tanks the coordinator can ACTUALLY place into. Counting every
+    # OG tank includes the 6N depuration pool, which placement never uses for
+    # grow-out in purge mode (and never uses the 3 sisters in any mode) — so
+    # demand was compared against ~6 tanks of phantom supply and whole stretches
+    # of the horizon reported no bottleneck while the plan was over-subscribed.
+    from .sixn import SIXN_SISTER_TANKS
+    _non_sixn = sum(sf.tank_count for sf in system_facts.values()
+                    if sf.type == "OG" and sf.system_id != "OG6N")
+    _sixn_all = sum(sf.tank_count for sf in system_facts.values()
+                    if sf.system_id == "OG6N")
+    # Mains (61/63/65) join grow-out only in PRODUCTION weeks; the sisters
+    # (67/69/71) are harvest-staging in both modes and are never placeable.
+    _sixn_prod_extra = max(0, _sixn_all - len(SIXN_SISTER_TANKS))
+
+    def _placeable_tanks(wff) -> tuple[int, bool]:
+        # The canvas already resolved this week's 6N mode — reuse it rather
+        # than re-deriving from the calendar (and diverging from it).
+        prod = (getattr(wff, "sixn_mode", "purge") == "production")
+        return (_non_sixn + (_sixn_prod_extra if prod else 0)), prod
     og12_tanks = sum(
         sf.tank_count for sf in system_facts.values() if sf.system_id in _OG12
     )
 
     for label, wff in sorted(weekly_facility.items()):
+        total_og_tanks, _prod = _placeable_tanks(wff)
         if wff.total_tank_demand > total_og_tanks:
             out.append(Bottleneck(
                 week_label=label, system_id=None, kind="tank_supply",
                 detail=(f"OG tank demand {wff.total_tank_demand} > "
-                        f"facility supply {total_og_tanks}"),
+                        f"placeable supply {total_og_tanks} "
+                        f"({'production' if _prod else 'purge'} mode; "
+                        f"6N depuration pool excluded)"),
                 deficit=wff.total_tank_demand - total_og_tanks,
             ))
         if wff.og12_arrival_demand > og12_tanks:
@@ -1453,7 +1475,7 @@ def build_precalc_canvas(
     weekly_system = _build_weekly_system_facts(
         horizon_labels, system_limits, system_facts,
     )
-    bottlenecks = _detect_bottlenecks(weekly_facility, system_facts)
+    bottlenecks = _detect_bottlenecks(weekly_facility, system_facts, control)
 
     total_og_supply = sum(
         sf.tank_count for sf in system_facts.values() if sf.type == "OG"
