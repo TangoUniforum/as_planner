@@ -144,6 +144,24 @@ class ControlParams:
     auto_calibrate_fw_min: float = 0.5
     auto_calibrate_fw_max: float = 1.5
 
+    # HYBRID L1-GUIDED HARVEST (opt-in, additive — see forecast/hybrid_guide.py).
+    # "off" = the validated controller, byte-identical. "floor"/"full" run a
+    # standalone L1 pre-pass and feed its per-week harvest quantity in as a
+    # target: "floor" never harvests LESS than L1 that week; "full" follows L1
+    # as a BAND, and its ceiling is released whenever realized biomass is over
+    # the facility cap or the two engines disagree about that week's 6N mode.
+    hybrid_follow: str = "off"              # "off" | "floor" | "full"
+    hybrid_follow_band: float = 0.10        # ± around the guide, "full" only
+    # Guide weeks below this fraction of min_harvest_per_week are DROPPED (not
+    # zeroed — a zero would become a ceiling of zero): they are L1 structural
+    # dropouts (transition-zeroed draws, startup priming, horizon tail).
+    hybrid_guide_min_frac: float = 0.25
+    hybrid_guide_smooth_weeks: int = 0      # 0/1 = raw L1 curve (recommended)
+    # Per-lever kill switches, so a backfire can be bisected to ONE mechanism
+    # without a code change — the purge and production paths are independent.
+    hybrid_purge_lever: bool = True         # 6N move-in sizing (purge weeks)
+    hybrid_production_lever: bool = True    # harvest cap + STARVE entry
+
 
 @dataclass
 class BatchInput:

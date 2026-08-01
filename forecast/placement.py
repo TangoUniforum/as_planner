@@ -3542,6 +3542,34 @@ def phase_d_emit_events(
 # Orchestrator
 # ============================================================
 
+def fw_addends_by_week(
+    biology_states_by_batch: dict[str, list[BatchWeekState]],
+) -> tuple[dict[str, float], dict[str, float]]:
+    """Per-week-label FW/EGG biomass (kg) + feed (kg/day).
+
+    FW-INCLUSIVE cap basis (audit H1/M5): pre-feed batches (EGG/FW stages) are
+    real facility biomass but are NEVER stocked into tanks, so the realized
+    harvest controller's tank-only biomass omits them. Summing them here lets
+    the setpoint + the feed-implied cap measure TOTAL facility biomass (OG+FW),
+    not OG-only — else true biomass rides over the 3.8M cap by the FW load
+    (~4-7%) at setpoint.
+
+    Extracted so the hybrid guide's L1 pre-pass can measure the SAME FW load
+    rather than recomputing it under a manual-window-shifted forecast start.
+    """
+    fw_biomass_by_week: dict[str, float] = {}
+    fw_feed_by_week: dict[str, float] = {}
+    for _sts in biology_states_by_batch.values():
+        for _s in _sts:
+            if getattr(_s, "stage", None) in ("FW", "EGG"):
+                fw_biomass_by_week[_s.week_label] = (
+                    fw_biomass_by_week.get(_s.week_label, 0.0) + _s.biomass_kg)
+                fw_feed_by_week[_s.week_label] = (
+                    fw_feed_by_week.get(_s.week_label, 0.0)
+                    + getattr(_s, "feed_kg_day", 0.0))
+    return fw_biomass_by_week, fw_feed_by_week
+
+
 def run_placement(
     initial_state: FacilityState,
     batch_meta: dict[str, BatchInput],
@@ -3582,22 +3610,8 @@ def run_placement(
     result.tank_assignments = tank_assigns
     result.warnings.extend(f"[C] {w}" for w in c_warns)
 
-    # FW-INCLUSIVE cap basis (audit H1/M5): pre-feed batches (EGG/FW stages) are
-    # real facility biomass but are NEVER stocked into tanks, so the realized
-    # harvest controller's tank-only biomass omits them. Pre-sum FW biomass + feed
-    # per week from the biology states and pass them in, so the setpoint + the
-    # feed-implied cap measure TOTAL facility biomass (OG+FW), not OG-only — else
-    # true biomass rides over the 3.8M cap by the FW load (~4-7%) at setpoint.
-    fw_biomass_by_week: dict = {}
-    fw_feed_by_week: dict = {}
-    for _sts in biology_states_by_batch.values():
-        for _s in _sts:
-            if getattr(_s, "stage", None) in ("FW", "EGG"):
-                fw_biomass_by_week[_s.week_label] = (
-                    fw_biomass_by_week.get(_s.week_label, 0.0) + _s.biomass_kg)
-                fw_feed_by_week[_s.week_label] = (
-                    fw_feed_by_week.get(_s.week_label, 0.0)
-                    + getattr(_s, "feed_kg_day", 0.0))
+    fw_biomass_by_week, fw_feed_by_week = fw_addends_by_week(
+        biology_states_by_batch)
 
     (final_state, tranog, transfers, harvests, grades, locs, d_warns,
      sixn_feed, realized_bio) = phase_d_emit_events(

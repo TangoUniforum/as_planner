@@ -626,6 +626,7 @@ def plan(
     model_full_facility: bool = False,
     fw_inflight: Optional[dict[str, tuple[float, float, "date"]]] = None,
     purge_inflight: Optional[dict[str, tuple[float, float]]] = None,
+    fw_by_label: Optional[tuple[dict[str, float], dict[str, float]]] = None,
 ) -> PlannerResult:
     """Run the tankless L1 planner. See module docstring for the algorithm.
 
@@ -714,8 +715,16 @@ def plan(
     fw_bio_by_label: dict[str, float] = {}
     fw_feed_by_label: dict[str, float] = {}
     if model_full_facility:
-        fw_bio_by_label, fw_feed_by_label = fw_phase_biomass_feed_by_week(
-            batches, tables, control, fw_inflight=fw_inflight)
+        if fw_by_label is not None:
+            # Caller supplied the curve (the hybrid guide passes the CONTROLLER's
+            # own FW addends). project_in_flight_fw_batch starts its projection at
+            # control.forecast_start with the raw PR state, so recomputing here
+            # under a start that a manual window has shifted forward would
+            # under-weight every FW batch — and bias the harvest envelope low.
+            fw_bio_by_label, fw_feed_by_label = fw_by_label
+        else:
+            fw_bio_by_label, fw_feed_by_label = fw_phase_biomass_feed_by_week(
+                batches, tables, control, fw_inflight=fw_inflight)
 
     def _bio_cap_for(label: str) -> float:
         """Per-week biomass ceiling: the override if present, else the flat cap."""
