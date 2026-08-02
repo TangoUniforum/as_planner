@@ -340,6 +340,23 @@ def _biomass_and_feed(wb):
 
 
 def _harvest_weekly_fish(wb):
+    """Fish harvested per week, over the FULL horizon — zero weeks included.
+
+    A week in which nothing is harvested writes NO rows to HarvestPlan, so
+    keying the series off that sheet alone silently DROPPED blackout weeks
+    instead of recording them as 0. Every harvest metric inherited the blind
+    spot: `zero_weeks` could never exceed 0, `min_week` could never be 0,
+    `weeks_below_min` undercounted, and the crater regression test plus the
+    Compare board's "No empty week" gate — the guards for the operator's
+    hardest rule, never an empty week — could not see the emptiest possible
+    week. Measured on a real PR: two consecutive blackout weeks (2026-W47/W48,
+    biomass climbing through the cap meanwhile) reported as zero_weeks=0,
+    weeks_below_min 21 instead of 23, min_week 19,070 instead of 0.
+
+    The horizon comes from Advisory (one row per week, written every run). If
+    that sheet is missing we fall back to the harvested weeks alone — the old,
+    optimistic behaviour — rather than inventing a horizon.
+    """
     ws = wb["HarvestPlan"]
     cols = _col_map(ws, lambda r: r and str(r[0]).strip() == "Week"
                     and any(str(c).strip() == "Batch" for c in r if c))
@@ -348,7 +365,14 @@ def _harvest_weekly_fish(wb):
     for row in ws.iter_rows(values_only=True):
         if _is_week(row[0]) and len(row) > ci and isinstance(row[ci], (int, float)):
             weekly[row[0]] = weekly.get(row[0], 0.0) + row[ci]
-    return [weekly[w] for w in sorted(weekly)]
+
+    horizon = set()
+    if "Advisory" in wb.sheetnames:
+        for row in wb["Advisory"].iter_rows(values_only=True):
+            if row and _is_week(row[0]):
+                horizon.add(row[0])
+    weeks = sorted(horizon | set(weekly)) if horizon else sorted(weekly)
+    return [weekly.get(w, 0.0) for w in weeks]
 
 
 def _transfers_per_fish(wb):
