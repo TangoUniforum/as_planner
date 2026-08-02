@@ -3015,6 +3015,39 @@ def _parse_output_workbook(path: Path) -> dict:
                     "HOG_avg_kg": hog_avg_kg,
                 })
 
+    # FACILITY-WIDE weekly biomass + feed, straight from the Advisory sheet.
+    # This is the FW-INCLUSIVE basis the engine's cap actually governs (audit
+    # H2/M3): FW/EGG fish are real facility biomass but live in FW tanks, so
+    # they never appear in BatchLocations. Charts that summed tank rows and
+    # drew the facility cap line beside them understated the load by the FW
+    # share — which peaks near 7% of cap, so a chart reading 98% was really
+    # ~105%. Read the number the cap is enforced against instead.
+    facility_weekly = []
+    if "Advisory" in wb.sheetnames:
+        ws = wb["Advisory"]
+        hdr = None
+        for r in ws.iter_rows(values_only=True):
+            if hdr is None:
+                if r and r[0] == "Week" and any(
+                        str(c).startswith("Total_Biomass") for c in r if c):
+                    hdr = {str(c): i for i, c in enumerate(r) if c}
+                continue
+            if not r or not r[0] or not str(r[0]).startswith("20"):
+                continue
+
+            def _num(key, _row=r, _h=hdr):
+                k = next((c for c in _h if c.startswith(key)), None)
+                v = _row[_h[k]] if k is not None else None
+                return float(v) if isinstance(v, (int, float)) else None
+
+            facility_weekly.append({
+                "Week": str(r[0]),
+                "Total_Biomass_kg": _num("Total_Biomass"),
+                "Biomass_Limit_kg": _num("Biomass_Limit"),
+                "Total_Feed_kg_day": _num("Total_Feed"),
+                "Feed_Limit_kg_day": _num("Feed_Limit"),
+            })
+
     # Validation warnings now live in ValidationLog ("# | Category | Detail",
     # data rows have a numeric '#'); the Advisory sheet is the per-week capacity
     # table. Build the issues-by-category summary + detail list from ValidationLog.
@@ -3106,6 +3139,7 @@ def _parse_output_workbook(path: Path) -> dict:
         "biology_projection": bio_rows,
         "advisory_summary": advisory_summary,
         "advisory_entries": advisory_entries,
+        "facility_weekly": facility_weekly,
         "control_status": status,
         "yearly": yearly,
         "plan_summary": plan_summary,
@@ -3612,14 +3646,21 @@ def _quick_viz(r):
                       annotation_text=f"{_hv_cap / 1000:,.0f}k cap")
         fig.update_layout(height=340, xaxis_title="", yaxis_title="fish")
         st.plotly_chart(fig, use_container_width=True)
-    if not bl.empty and "Week" in bl and "Biomass_kg" in bl:
-        bw = (bl.groupby("Week", as_index=False)["Biomass_kg"].sum()
-                .sort_values("Week"))
-        bw["Biomass_t"] = bw["Biomass_kg"] / 1000.0
-        fig2 = px.line(bw, x="Week", y="Biomass_t",
-                       title="Facility biomass per week (t)")
-        _cap_t = float((r.get("config_used") or {}).get("max_biomass_kg")
-                       or 3_800_000) / 1000.0
+    # WHOLE-FACILITY biomass (OG + 6N + freshwater) — the basis the cap is
+    # enforced on. Summing tank rows omits the FW phase entirely (~7% of cap at
+    # peak), which drew a line the plan appeared to sit comfortably under while
+    # the engine was at or over it.
+    _fw = pd.DataFrame(r.get("facility_weekly") or [])
+    if not _fw.empty and _fw["Total_Biomass_kg"].notna().any():
+        _fw = _fw.dropna(subset=["Total_Biomass_kg"]).sort_values("Week")
+        _fw["Biomass_t"] = _fw["Total_Biomass_kg"] / 1000.0
+        fig2 = px.line(_fw, x="Week", y="Biomass_t",
+                       title="Facility biomass per week (t) — whole facility, "
+                             "incl. freshwater")
+        _lim = _fw["Biomass_Limit_kg"].dropna()
+        _cap_t = (float(_lim.iloc[0]) if not _lim.empty else
+                  float((r.get("config_used") or {}).get("max_biomass_kg")
+                        or 3_800_000)) / 1000.0
         fig2.add_hline(y=_cap_t, line_dash="dot",
                        annotation_text=f"{_cap_t / 1000:.2f}M cap")
         fig2.update_layout(height=340, xaxis_title="", yaxis_title="tonnes")
@@ -4818,16 +4859,38 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
 
             c1, c2 = st.columns(2)
             with c1:
-                fig = px.line(
-                    wk_facility, x="Week", y="FacilityBiomass_kg",
-                    markers=True, title="Facility biomass (kg)",
-                )
-                _cap_kg = float((r.get("config_used") or {}).get("max_biomass_kg")
-                                or 3_800_000)
+                # WHOLE-FACILITY basis (OG + 6N + freshwater) — what the cap
+                # actually governs. The tank-row sum below omits the FW phase
+                # (~7% of cap at peak), so plotting it against this cap line
+                # showed headroom that did not exist.
+                _fwk = pd.DataFrame(r.get("facility_weekly") or [])
+                _has_fac = (not _fwk.empty
+                            and _fwk["Total_Biomass_kg"].notna().any())
+                if _has_fac:
+                    _fwk = _fwk.dropna(subset=["Total_Biomass_kg"]).sort_values("Week")
+                    fig = px.line(_fwk, x="Week", y="Total_Biomass_kg",
+                                  markers=True,
+                                  title="Facility biomass (kg) — whole facility, "
+                                        "incl. freshwater")
+                    _lim = _fwk["Biomass_Limit_kg"].dropna()
+                    _cap_kg = (float(_lim.iloc[0]) if not _lim.empty else
+                               float((r.get("config_used") or {})
+                                     .get("max_biomass_kg") or 3_800_000))
+                else:
+                    fig = px.line(wk_facility, x="Week", y="FacilityBiomass_kg",
+                                  markers=True,
+                                  title="Facility biomass (kg) — TANKS ONLY "
+                                        "(freshwater not included)")
+                    _cap_kg = float((r.get("config_used") or {})
+                                    .get("max_biomass_kg") or 3_800_000)
                 fig.add_hline(y=_cap_kg, line_dash="dash", line_color="red",
                               annotation_text=f"Max Biomass cap ({_cap_kg / 1000:,.0f} t)")
                 fig.update_layout(height=350, yaxis_title="kg")
                 st.plotly_chart(fig, use_container_width=True)
+                if not _has_fac:
+                    st.caption("⚠ Advisory sheet not found in this workbook — "
+                               "showing tank biomass only, which sits below the "
+                               "cap line by the freshwater share (~7% at peak).")
             with c2:
                 if "HarvestKg" in wk_facility.columns:
                     fig = px.bar(
