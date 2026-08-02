@@ -267,6 +267,23 @@ def pick_tanks(
     _purge_h_demand = 0.0
     _purge_h_from6n = 0.0
     _purge_h_shortfall = 0.0
+    # DEPURATION RESIDENCY. The 6N pool is a BATCH process, not a pass-through
+    # buffer: fish must sit off-feed for _PURGE_HOLD_WEEKS before harvest, which
+    # is a product requirement, not a scheduling preference. L1's envelope
+    # honours it (it releases fish `hold` weeks after the draw), but this pick
+    # never did — it drew from whichever 6N tank had fish, including ones filled
+    # the same week. Measured on a real PR: 96% of harvested fish (3.43M of
+    # 3.56M) left 6N before completing the hold, 284 draws with ZERO residency.
+    # That is what made the global plan look smoother than the controller's —
+    # it was skipping the two-week pipeline lag the controller must live with.
+    # `sixn_arrival[tank] = week index the current occupancy arrived`.
+    sixn_arrival: dict[int, int] = {}
+    # Same constant L1 plans against — imported, not restated, so the pick and
+    # the envelope can never disagree about the hold length.
+    from .global_planner_poc import _PURGE_HOLD_WEEKS as _HOLD
+    _hold_weeks = int(_HOLD or 2)
+    _hold_short_fish = _hold_total_fish = 0.0
+    _hold_short_draws = _hold_total_draws = 0
 
     # ---- L3 grow-out demand: per (week, system, batch) -> tank count + standing.
     # Index placements; also gather the per-(batch, week) L1 standing so per-tank
@@ -773,6 +790,13 @@ def pick_tanks(
                     drawn_c += take_c
                     if t in sixn_set:
                         _from6n += take_c
+                        # AUDIT (not a gate): did these fish serve the purge?
+                        _res = w - sixn_arrival.get(t, -10 ** 6)
+                        if _res < _hold_weeks:
+                            _hold_short_fish += take_c
+                            _hold_short_draws += 1
+                        _hold_total_fish += take_c
+                        _hold_total_draws += 1
                 if _purge_wk:
                     _purge_h_demand += drawn_c
                     _purge_h_from6n += _from6n
@@ -860,10 +884,33 @@ def pick_tanks(
             realized_biology[(tid, wl, pocc.batch_id)] = (
                 (prev[0] if prev else 0.0), (prev[1] if prev else 0.0) + mct)
 
+        # Depuration clock: a 6N tank starts its hold when fish ARRIVE — i.e.
+        # when it goes from empty/other-batch to holding this batch, or when its
+        # count grows (a top-up restarts the hold for that tank, the
+        # conservative reading). Emptying clears it.
+        for tid in sixn_set:
+            now = new_state.get(tid)
+            before = prev_state.get(tid)
+            if now is None:
+                sixn_arrival.pop(tid, None)
+            elif (before is None or before.batch_id != now.batch_id
+                    or now.count > before.count + 1.0):
+                sixn_arrival[tid] = w
+
         if week_oversub:
             oversub_weeks.append(wl)
         state = new_state
 
+    if _hold_total_draws:
+        _pct = 100.0 * _hold_short_fish / max(1.0, _hold_total_fish)
+        print(f"  [DEPURATION AUDIT] {_hold_short_draws} of {_hold_total_draws} "
+              f"6N draws harvested BEFORE the {_hold_weeks}-week purge hold "
+              f"({_hold_short_fish:,.0f} of {_hold_total_fish:,.0f} fish, "
+              f"{_pct:.0f}%). The 6N pool is a BATCH process — fish must sit "
+              f"off-feed for the hold before harvest. L1's envelope honours it; "
+              f"this tank pick does NOT stage fish into 6N ahead of the draw, so "
+              f"it harvests from tanks it filled the same week. Any harvest-"
+              f"smoothness advantage over the controller is inflated by that.")
     if _purge_h_demand > 0:
         print(f"  [6N-RULE PROBE] purge-mode harvest: {_purge_h_demand:,.0f} fish "
               f"demanded; {_purge_h_from6n:,.0f} from 6N ({100*_purge_h_from6n/_purge_h_demand:.0f}%); "
