@@ -131,15 +131,25 @@ register(Method(
     label="Controller — reactive greedy",
     family="Controller",
     engine="controller",
+    # MUST pin hybrid_follow off EXPLICITLY. control.yaml now ships the hybrid on
+    # (see there), and run_method layers a method's overrides on top of that base
+    # — so without this line the "controller" arm would silently BE the hybrid and
+    # every controller-vs-hybrid comparison would run the same plan twice. That is
+    # not hypothetical: an A/B whose override equalled the live config value is
+    # exactly how grade-to-min was wrongly recorded as inert (2026-08-03).
+    overrides={"hybrid_follow": "off"},
     blurb="Reactive week-by-week planner: greedy placement + multi-objective "
-          "rebalancer. The validated production engine, and the greedy baseline.",
+          "rebalancer. The long-standing production engine and the greedy "
+          "baseline — but it leaves a totally empty harvest week on 5 of 6 real "
+          "PRs, so it no longer meets the steady-harvest contract rule.",
 ))
 register(Method(
     key="controller-lns",
     label="Controller — greedy + LNS",
     family="Controller",
     engine="controller",
-    overrides={"placement_method": "lns"},
+    # Same reason as `controller` above: isolate the LNS variable from the hybrid.
+    overrides={"placement_method": "lns", "hybrid_follow": "off"},
     blurb="Controller with a large-neighborhood-search pass that relocates / "
           "swaps grow-out occupancy off the hottest systems (audit-gated).",
 ))
@@ -166,23 +176,32 @@ register(Method(
     label="Controller — hybrid (L1-guided harvest)",
     family="Controller",
     engine="controller",
-    overrides={"hybrid_follow": "full"},
-    blurb="EXPERIMENTAL — do not plan against this yet. The validated "
-          "controller with the Global engine's L1 harvest envelope fed in as a "
-          "per-week target band. Measured 2026-08-01 on a 130-week PR: cuts "
-          "weeks under the contract floor from 21 to 8, but puts a ~3.4k-fish "
-          "crater in a mid-horizon purge week (2027-W41) that the plain "
-          "controller does not have, preceded by a 64k spike over the harvest "
-          "cap — the documented pair over-fill / starve pattern. Fails the "
-          "steady-harvest contract rule, so it is excluded from the default "
-          "roster until the purge lever stops starving individual 6N pairs.",
+    # band 0.05, not the 0.10 knob default: measured tighter on every axis that
+    # matters (see blurb). The band is the CEILING half — a narrower band clamps
+    # harvest less in the fat weeks, so fewer fish are held back for later.
+    overrides={"hybrid_follow": "full", "hybrid_follow_band": 0.05},
+    blurb="The validated controller with the Global engine's L1 harvest "
+          "envelope fed in as a per-week target band. Meets the never-an-empty-"
+          "week contract rule; the plain controller does NOT. Measured across "
+          "6 real July-2026 PRs (2026-08-03, fixed harvest metric): 0 zero-"
+          "harvest weeks vs the controller's 6, weeks under the contract floor "
+          "22.5 -> 9.0, worst week 0 -> 16,148 fish. Costs peak biomass 102.6 "
+          "-> 107.1% of cap and peak density 102 -> 124: holding fish back for "
+          "a lean week means they are still in the water. Every knob that "
+          "shrinks that peak (wider deviation band, guide smoothing) puts empty "
+          "weeks back — the spike IS the reserve. Chosen over band 0.10 and "
+          "over deviation 0.025 by a 90-cell paired sweep: it is also the most "
+          "STABLE arm, holding 0-1 blackout weeks under neutral perturbation "
+          "where the alternatives drift to 3-4.",
 ))
 
 
-# Default comparison roster. controller-hybrid is registered and runnable
-# (tools/run_compare --methods ..., or the board once it is opted in) but is
-# NOT here: it currently breaches the never-a-near-empty-week rule.
-DEFAULT_ROSTER = ["controller", "controller-lns", "global-lp", "global-milp"]
+# Default comparison roster. controller-hybrid is IN it as of 2026-08-03: with
+# the zero-harvest-week blind spot fixed (34ecbaf) the plain controller was shown
+# to breach the never-an-empty-week rule on 5 of 6 real PRs, while the hybrid
+# breaches it on none. The old exclusion note here predated that measurement.
+DEFAULT_ROSTER = ["controller", "controller-hybrid", "controller-lns",
+                  "global-lp", "global-milp"]
 
 
 def get_roster(keys: "Optional[list[str]]" = None) -> "list[Method]":

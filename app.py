@@ -37,6 +37,11 @@ from forecast import methods as _methods  # noqa: E402
 # The ONE method list. Board roster, run-mode label and the engine dispatch all
 # read this, so adding a method is a single register() call in forecast/methods.
 _METHODS = _methods.REGISTRY
+# The method ▶ Run forecast uses until the board picks another. The hybrid, not
+# the plain controller: once zero-harvest weeks were actually counted (34ecbaf)
+# the controller turned out to leave an empty week on 5 of 6 real PRs, which
+# breaks the hard steady-harvest contract rule. See forecast/methods.py.
+_DEFAULT_METHOD = "controller-hybrid"
 # Operator-facing runtime hints + which methods the board runs unprompted.
 _TYPICAL = {"controller": "~30 s", "controller-hybrid": "~40 s",
             "controller-lns": "~30 s", "global-lp": "~4 min",
@@ -2645,15 +2650,17 @@ with st.sidebar:
     # The planning method is chosen ONCE, on the Compare & Choose board, where
     # you can see every method graded side by side. Run forecast just re-runs
     # whichever plan you picked — no second, blind choice on the main screen.
-    _chosen = st.session_state.get("_chosen_method", "controller")
-    _chosen_m = _METHODS.get(_chosen) or _METHODS["controller"]
+    _chosen = st.session_state.get("_chosen_method", _DEFAULT_METHOD)
+    _chosen_m = _METHODS.get(_chosen) or _METHODS[_DEFAULT_METHOD]
     st.caption(f"Method: **{_chosen_m.label}**")
-    if _chosen == "controller":
-        st.caption("The validated default. Compare & Choose runs every method "
-                   "and lets you pick a different one.")
+    if _chosen == _DEFAULT_METHOD:
+        st.caption("The default. It is the only method measured to harvest "
+                   "something every single week — the plain Controller has an "
+                   "empty week on 5 of 6 real PRs. Compare & Choose runs every "
+                   "method and lets you pick a different one.")
     else:
         st.caption("Picked on the Compare & Choose board. Pick another there, "
-                   "or re-select Controller to go back to the default.")
+                   "or re-select the hybrid to go back to the default.")
     if _cfg_ok:
         from forecast.config_io import load_control, control_to_dict
         _render_active_config(
@@ -4382,8 +4389,8 @@ if uploaded is not None:
 # ============================================================
 
 if (run_clicked or st.session_state.pop("_pending_run", False)) and uploaded is not None:
-    _method = st.session_state.get("_chosen_method", "controller")
-    _mobj = _METHODS.get(_method) or _METHODS["controller"]
+    _method = st.session_state.get("_chosen_method", _DEFAULT_METHOD)
+    _mobj = _METHODS.get(_method) or _METHODS[_DEFAULT_METHOD]
     _spin = (f"Running {_mobj.label} — typically {_TYPICAL.get(_method, '?')}...")
     with st.status(_spin, expanded=True) as status:
         st.write("Config + scenario from the app; ProductionReport from upload...")

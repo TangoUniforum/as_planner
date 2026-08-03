@@ -22,6 +22,23 @@ starvation_period_days: 7
 min_transfer_count: 7000.0
 harvest_grade_to_min: true
 sixn_level_drains: true
+# L1-GUIDED HARVEST (the hybrid). Feeds the Global engine's whole-horizon L1
+# harvest envelope into the validated controller as a per-week target band, so
+# the controller is told to harvest LESS in the fat weeks and those fish stay
+# available for the lean ones — the one thing a purely reactive controller can
+# never do for itself (every one of its own levers is a max()).
+# ON because the plain controller leaves a TOTALLY EMPTY harvest week on 5 of 6
+# real July-2026 PRs, breaking the hard steady-harvest contract rule. That was
+# invisible until zero-harvest weeks were actually counted (34ecbaf).
+# Cost, and it is real: peak biomass 102.6 -> 107.1% of cap, peak density
+# 102 -> 124. Holding fish back means they are still in the water. Every knob
+# that shrinks that peak puts empty weeks back — measured, not assumed.
+# band 0.05 (not the 0.10 knob default): chosen by a 90-cell paired sweep as the
+# most STABLE arm, holding 0-1 empty weeks under neutral perturbation where the
+# alternatives drift to 3-4. Set hybrid_follow: off for the old reactive-only
+# behaviour (and see forecast/methods.py for the full measurement record).
+hybrid_follow: full
+hybrid_follow_band: 0.05
 density_target_pct: 0.85
 rebalance_varqty_budget: 20
 rebalance_split_budget: 8
