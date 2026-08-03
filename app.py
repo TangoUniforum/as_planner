@@ -221,6 +221,25 @@ def _records(df):
     return json.loads(df.to_json(orient="records"))
 
 
+def _preserved_facility_limits(fl_cur, shown_weeks):
+    """Facility limit records for weeks the grid is NOT showing.
+
+    The limits editor renders only the current forecast horizon but Save
+    REPLACES limits.yaml, so anything without a column here would be deleted.
+    See _edit_limits. Extracted so this is testable without Streamlit.
+    """
+    shown = set(shown_weeks)
+    return [{"week": wk, "metric": m, "value": v}
+            for (wk, m), v in fl_cur.items() if wk not in shown]
+
+
+def _preserved_system_limits(sl_cur, shown_weeks):
+    """System limit records for weeks the grid is NOT showing (see above)."""
+    shown = set(shown_weeks)
+    return [{"week": wk, "system": s, "metric": m, "value": v}
+            for (wk, s, m), v in sl_cur.items() if wk not in shown]
+
+
 def _result_rid(r):
     """Stable identity of a result dict, for binding derived data to the run it
     came from. Results stored before `_rid` existed fall back to something
@@ -2502,11 +2521,8 @@ def _edit_limits():
             # from the grid would silently DELETE it — e.g. every earlier week
             # after uploading a PR that starts later. Carry those through
             # untouched; the operator never saw them and cannot have edited them.
-            _shown = set(weeks)
-            fl_recs = [{"week": wk, "metric": m, "value": v}
-                       for (wk, m), v in fl_cur.items() if wk not in _shown]
-            sl_recs = [{"week": wk, "system": s, "metric": m, "value": v}
-                       for (wk, s, m), v in sl_cur.items() if wk not in _shown]
+            fl_recs = _preserved_facility_limits(fl_cur, weeks)
+            sl_recs = _preserved_system_limits(sl_cur, weeks)
             fl_recs += [{"week": wk, "metric": r["metric"], "value": float(r[wk])}
                         for r in _records(fdf) for wk in weeks
                         if r.get(wk) not in (None, "")]
