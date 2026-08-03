@@ -64,6 +64,45 @@ def control_to_dict(c: ControlParams) -> dict:
     return d
 
 
+def _coerce_control_value(key: str, raw, type_str: str):
+    """Coerce a control value to its DECLARED dataclass type.
+
+    Dataclasses do not validate types, so a numeric knob arriving as a string
+    (`"5"`) is stored as a string and written straight back to YAML quoted —
+    then blows up much later in arithmetic, far from the cause. Two real ways in:
+    the app's Control editor picks its widget from the CURRENT value, so a knob
+    that is presently null (harvest_level_target, sixn_transition_weeks) renders
+    as a text box; and a hand-edited YAML can quote a number.
+
+    Blank means "unset": allowed only where the declared type is Optional.
+    Anywhere else it is a real error, and a loud one here beats a TypeError deep
+    in the engine.
+    """
+    t = (type_str or "").replace(" ", "")
+    optional = "Optional" in t or "None" in t
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        if optional or not t:
+            return None
+        raise ValueError(
+            f"control knob {key!r} is required and cannot be blank "
+            f"(declared {type_str})"
+        )
+    try:
+        if "bool" in t:
+            if isinstance(raw, str):
+                return raw.strip().lower() in ("true", "1", "yes", "on")
+            return bool(raw)
+        if "float" in t:
+            return float(raw)
+        if "int" in t:
+            return int(float(raw))          # tolerate "5" and "5.0" alike
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"control knob {key!r} expects {type_str}, got {raw!r}"
+        ) from None
+    return raw
+
+
 def control_from_dict(d: dict) -> ControlParams:
     d = dict(d)
     d["forecast_start"] = _from_iso(d.get("forecast_start"))
@@ -71,6 +110,13 @@ def control_from_dict(d: dict) -> ControlParams:
     # Only pass keys ControlParams accepts (tolerate extra/missing YAML keys).
     fields = ControlParams.__dataclass_fields__
     kwargs = {k: v for k, v in d.items() if k in fields}
+    # Coerce to declared types. models.py uses `from __future__ import
+    # annotations`, so field.type is the annotation SOURCE TEXT, not a type
+    # object — matched as a string. datetime/str fields fall through untouched.
+    for k, v in list(kwargs.items()):
+        if k in ("forecast_start", "sixn_production_start"):
+            continue                        # already datetime via _from_iso
+        kwargs[k] = _coerce_control_value(k, v, str(fields[k].type))
     return ControlParams(**kwargs)
 
 

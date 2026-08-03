@@ -143,7 +143,14 @@ def _ingest_pr(uploaded):
     (+1 day). Returns dict(ok, forecast_start, closing, n_og, n_fw, errors,
     warnings). `ok` is False (locks downstream actions) on any hard error.
     """
-    key = (uploaded.name, uploaded.size)
+    # Key on CONTENT, not (name, size): re-uploading an edited PR under the same
+    # name at the same size served the previous parse — stale forecast_start,
+    # stale counts and stale validation warnings, silently, for the whole
+    # session. Everything downstream anchors on forecast_start, so this is not a
+    # cosmetic staleness. The hydration cache below already hashes content; this
+    # was the one PR cache that did not. md5 of a few MB is ~milliseconds.
+    import hashlib
+    key = hashlib.md5(uploaded.getvalue()).hexdigest()
     if st.session_state.get("_pr_key") == key:
         return st.session_state["_pr"]
     from datetime import datetime as _dt, timedelta as _td
@@ -212,6 +219,43 @@ def _records(df):
     coerces numpy->native and NaN->None."""
     import json
     return json.loads(df.to_json(orient="records"))
+
+
+def _result_rid(r):
+    """Stable identity of a result dict, for binding derived data to the run it
+    came from. Results stored before `_rid` existed fall back to something
+    run-unique."""
+    r = r or {}
+    return r.get("_rid") or f"{r.get('output_path')}|{r.get('elapsed')}"
+
+
+def _blank(v):
+    return v is None or (isinstance(v, str) and not v.strip())
+
+
+def _clean_rows(records, key_field, what):
+    """Drop never-filled rows from a `num_rows="dynamic"` grid, and refuse
+    half-filled ones.
+
+    Streamlit's dynamic editor appends an empty row as soon as you click +, and
+    it is returned whether or not you type in it. Saved verbatim those become
+    junk config: a batch literally named "None", or a facility tank with a null
+    tank_id that bricks the NEXT run deep inside precalc. An all-blank row is
+    unambiguously an accident, so drop it silently. A row with data but no
+    identifier is NOT — the operator typed something and would lose it, so say
+    so instead of guessing.
+    """
+    out = []
+    for i, r in enumerate(records, start=1):
+        if all(_blank(v) for v in r.values()):
+            continue
+        if _blank(r.get(key_field)):
+            raise ValueError(
+                f"row {i} has no {key_field} — every {what} needs one. "
+                f"Fill it in, or clear the row to discard it."
+            )
+        out.append(r)
+    return out
 
 
 def _persist(key, loader):
@@ -530,10 +574,19 @@ def _edit_control():
                 new[k] = st.text_input(_ctl_label(k), value="" if v is None else str(v),
                                        help=_CONTROL_HELP.get(k)) or None
         if st.form_submit_button("💾 Save Control"):
-            dump_config(CONFIG_DIR, control=control_from_dict(new),
-                        tables=load_biology_tables(CONFIG_DIR),
-                        facility=load_facility_config(CONFIG_DIR))
-            st.success("Saved config/control.yaml")
+            # control_from_dict coerces to the declared types and raises on a
+            # value that cannot be one (e.g. text typed into a knob that is
+            # currently null, so it rendered as a text box). Catch it here: the
+            # alternative is a saved string that fails much later in arithmetic.
+            try:
+                _ctl = control_from_dict(new)
+            except ValueError as e:
+                st.error(f"Not saved — {e}")
+            else:
+                dump_config(CONFIG_DIR, control=_ctl,
+                            tables=load_biology_tables(CONFIG_DIR),
+                            facility=load_facility_config(CONFIG_DIR))
+                st.success("Saved config/control.yaml")
 
 
 def _edit_biology():
@@ -596,7 +649,8 @@ def _edit_facility():
     b1, b2, _ = st.columns([1, 1, 3])
     if b1.button("💾 Save Facility", key="save_fac"):
         try:
-            fac2 = facility_from_dict({"tanks": _records(edited)})
+            fac2 = facility_from_dict(
+                {"tanks": _clean_rows(_records(edited), "tank_id", "tank")})
             dump_config(CONFIG_DIR, control=load_control(CONFIG_DIR),
                         tables=load_biology_tables(CONFIG_DIR), facility=fac2)
             _reset_keys("fac_df")
@@ -625,7 +679,8 @@ def _edit_batches():
     b1, b2, _ = st.columns([1, 1, 3])
     if b1.button("💾 Save Batches", key="save_batch"):
         try:
-            batches2 = batches_from_list(_records(edited))
+            batches2 = batches_from_list(
+                _clean_rows(_records(edited), "batch_id", "batch"))
             fl, sl = load_limits(SCENARIO_DIR)
             dump_scenario(SCENARIO_DIR, batches=batches2,
                           facility_limits=fl, system_limits=sl)
@@ -700,15 +755,34 @@ def _hydrate_state_from_upload(uploaded):
     return state, fw, ctx
 
 
+def _dest_token(d):
+    """One `to_tanks` token: `tank`, `tank:count`, `tank@size`, `tank:count@size`."""
+    tok = str(d.tank) if d.count is None else f"{d.tank}:{int(d.count)}"
+    return f"{tok}@{d.size_class}" if d.size_class else tok
+
+
+def _parse_dest_token(tok):
+    """Inverse of _dest_token -> (tank, count|None, size_class|None)."""
+    size = None
+    if "@" in tok:
+        tok, size = tok.split("@", 1)
+        size = size.strip().lower() or None
+    if ":" in tok:
+        _t, _c = tok.split(":", 1)
+        return int(float(_t)), float(_c), size
+    return int(float(tok)), None, size
+
+
 def _manual_events_to_df_rows(events):
     rows = []
     for e in events:
         # Encode per-dest counts as "tank:count" so explicit / UNEQUAL counts
         # round-trip losslessly; a bare "tank" means None (split the `count`
-        # column evenly across the bare tanks at run time).
-        to_tanks = ",".join(
-            (f"{d.tank}:{int(d.count)}" if d.count is not None else str(d.tank))
-            for d in e.destinations)
+        # column evenly across the bare tanks at run time). "@big"/"@small"
+        # carries fw_to_og size routing — WITHOUT it a round-trip through this
+        # grid silently collapsed the big/small split, so "Apply to window"
+        # quietly planned a different transfer than the one that was saved.
+        to_tanks = ",".join(_dest_token(d) for d in e.destinations)
         count = e.count if e.type not in ("og_transfer", "og_to_6n") else None
         rows.append({"week": e.week, "type": e.type, "batch": e.batch or "",
                      "from_tank": e.from_tank, "to_tanks": to_tanks,
@@ -732,36 +806,36 @@ def _rows_to_manual_events(rows):
         from_tank = int(ft) if ft not in (None, "") else None
         cnt = r.get("count")
         count = float(cnt) if cnt not in (None, "") else None
-        # parse to_tanks: each token is "tank" (bare) or "tank:count" (explicit
-        # per-dest). Bare tanks share the `count` column evenly.
+        # parse to_tanks: "tank" (bare), "tank:count" (explicit per-dest), either
+        # optionally suffixed "@big"/"@small" for fw_to_og size routing. Bare
+        # tanks share the `count` column evenly.
         specs = []
         for tok in str(r.get("to_tanks") or "").replace(" ", "").split(","):
             if not tok:
                 continue
-            if ":" in tok:
-                _t, _c = tok.split(":", 1)
-                specs.append((int(float(_t)), float(_c)))
-            else:
-                specs.append((int(float(tok)), None))
+            specs.append(_parse_dest_token(tok))
         notes = str(r.get("notes") or "")
         if typ in ("og_transfer", "og_to_6n"):
-            bare = [t for t, c in specs if c is None]
+            bare = [t for t, c, _s in specs if c is None]
             per_bare = (count / len(bare)) if (bare and count is not None) else None
-            dests = [ManualDest(tank=t, count=(c if c is not None else per_bare))
-                     for t, c in specs]
+            dests = [ManualDest(tank=t, count=(c if c is not None else per_bare),
+                                size_class=s)
+                     for t, c, s in specs]
             out.append(ManualEvent(type=typ, week=week, from_tank=from_tank,
                                    destinations=dests, batch=batch, notes=notes))
         elif typ == "harvest":
             out.append(ManualEvent(type=typ, week=week, from_tank=from_tank,
                                    count=count, batch=batch, notes=notes))
         elif typ == "fw_to_og":
-            dests = [ManualDest(tank=t) for t, c in specs]
+            # size_class is the whole point here: it routes the big half of the
+            # FW cohort to one tank and the small half to another.
+            dests = [ManualDest(tank=t, size_class=s) for t, c, s in specs]
             out.append(ManualEvent(type=typ, week=week, batch=batch, count=count,
                                    destinations=dests, notes=notes))
         elif typ == "graded_harvest":
             # from_tank = source, count = biggest-N to harvest, to_tanks =
             # pickup[,retention] (retention defaults to the source).
-            dests = [ManualDest(tank=t) for t, c in specs]
+            dests = [ManualDest(tank=t, size_class=s) for t, c, s in specs]
             out.append(ManualEvent(type=typ, week=week, from_tank=from_tank,
                                    count=count, destinations=dests,
                                    batch=batch, notes=notes))
@@ -860,6 +934,7 @@ def _mw_project(state, ctx, events, n_weeks, view="open"):
     if not (cache and cache.get("sig") == sig):
         labels = forecast_week_labels(ctx["forecast_start"], n_weeks)
         moves: list[dict] = []
+        err = None
         try:
             sc = copy.deepcopy(state)
             win = advance_facility_window(
@@ -882,13 +957,27 @@ def _mw_project(state, ctx, events, n_weeks, view="open"):
                 moves.append({"week": lbl, "src": tr.source_tank_id,
                               "dests": dests, "batch": tr.batch_id,
                               "count": getattr(tr, "count_transferred", 0.0)})
-        except Exception:  # noqa: BLE001 — a bad event must not blank the view
+        except Exception as e:  # noqa: BLE001 — a bad event must not blank the view
+            # Record WHY. Empty rows are indistinguishable from "facility is
+            # fine" downstream, so a silent failure here reports an all-clear.
             open_rows, close_rows = [], []
+            err = f"{type(e).__name__}: {e}"
         cache = {"sig": sig, "open": open_rows, "close": close_rows,
-                 "labels": labels, "moves": moves}
+                 "labels": labels, "moves": moves, "error": err}
         st.session_state["_mw_proj_cache"] = cache
     rows = cache["close"] if view == "close" else cache["open"]
     return rows, cache["labels"], cache.get("moves", [])
+
+
+def _mw_proj_error():
+    """Why the last _mw_project failed, or None.
+
+    A failed projection caches EMPTY rows, and empty rows read downstream as
+    "nothing in the facility" — which renders as a clean bill of health rather
+    than a failure. Callers must check this before showing any all-within-limits
+    verdict, or a crashed projection silently reports the safest possible answer.
+    """
+    return (st.session_state.get("_mw_proj_cache") or {}).get("error")
 
 
 def _mw_validate(state, ctx, events):
@@ -1355,7 +1444,15 @@ def _mw_recommendations(state, rows, labels, ctx):
         cap = tank_cap.get(r.tank_id, 0.0)
         if cap > 0 and r.density_kg_m3 > cap:
             breaches.append(("dens", r.tank_id, r.week_label, r.density_kg_m3, cap))
+    # FACILITY biomass must be FW-INCLUSIVE to match the cap it is judged against.
+    # `rows` are TANK rows, so they cover OG + 6N only; the freshwater cohorts are
+    # tracked separately and were simply missing here. The engine's setpoint counts
+    # FW (see the dual-limit setpoint), so leaving it out understated facility
+    # biomass and showed headroom that does not exist — the same OG-only-vs-
+    # FW-inclusive mismatch already fixed in the results biomass charts.
+    _fw_load = _mw_fw_load(ctx, labels) if ctx else {}
     for wk, used in fac_bio.items():
+        used += float((_fw_load.get(wk) or {}).get("close_bio", 0.0) or 0.0)
         if fac_bio_cap > 0 and used > fac_bio_cap:
             breaches.append(("facbio", None, wk, used, fac_bio_cap))
 
@@ -1746,6 +1843,24 @@ def _mw_iso_week(week, forecast_start):
         return f"Wk {week}"
 
 
+def _mw_move_amount(ev):
+    """How much a transfer/6N event actually moves, for the timeline label.
+
+    These event types carry their counts PER DESTINATION, not on ev.count — so
+    reading ev.count alone always found None and every partial move was
+    described as "whole tank". That misreads what the plan will do, and it is
+    exactly what a grid round-trip produces (each dest gets an explicit count).
+    Only claim a number when EVERY destination has one; a mix of explicit and
+    bare destinations is genuinely ambiguous (the bare ones split the remainder).
+    """
+    ds = ev.destinations or []
+    if ev.count is not None:
+        return f"{ev.count:,.0f}"
+    if ds and all(d.count is not None for d in ds):
+        return f"{sum(d.count for d in ds):,.0f}"
+    return "whole tank"
+
+
 def _mw_event_summary(state, ev, forecast_start=None):
     loc = lambda t: _mw_loc(state, t)  # noqa: E731
     dests = ", ".join(loc(d.tank) for d in ev.destinations) or "—"
@@ -1754,11 +1869,11 @@ def _mw_event_summary(state, ev, forecast_start=None):
         amt = f"{ev.count:,.0f} fish" if ev.count is not None else "the whole tank"
         return f"{wk}: **Harvest** {amt} from {loc(ev.from_tank)}"
     if ev.type == "og_transfer":
-        amt = f"{ev.count:,.0f}" if ev.count else "whole tank"
-        return f"{wk}: **Move** {amt} from {loc(ev.from_tank)} → {dests}"
+        return (f"{wk}: **Move** {_mw_move_amount(ev)} from "
+                f"{loc(ev.from_tank)} → {dests}")
     if ev.type == "og_to_6n":
-        amt = f"{ev.count:,.0f}" if ev.count else "whole tank"
-        return f"{wk}: **Send to 6N** {amt} from {loc(ev.from_tank)} → {dests}"
+        return (f"{wk}: **Send to 6N** {_mw_move_amount(ev)} from "
+                f"{loc(ev.from_tank)} → {dests}")
     if ev.type == "fw_to_og":
         tgt = f"target {ev.count:,.0f}" if ev.count else "all available"
         big = ", ".join(loc(d.tank) for d in ev.destinations
@@ -1820,7 +1935,9 @@ def _mw_raw_grid(state):
         "count=biggest-N, to_tanks=pickup[,retention] · "
         "**og_to_6n**: from_tank → 6N to_tanks · "
         "**fw_to_og**: batch + count=target → to_tanks. "
-        "to_tanks: comma-separated; `tank:count` for an explicit per-tank amount.")
+        "to_tanks: comma-separated; `tank:count` for an explicit per-tank "
+        "amount; `tank@big` / `tank@small` to route an fw_to_og size split "
+        "(combinable: `45:1000@small`).")
     nonce = st.session_state.get("mw_grid_nonce", 0)
     base = pd.DataFrame(_manual_events_to_df_rows(_mw_events()), columns=_MANUAL_COLS)
     edited = st.data_editor(
@@ -2212,7 +2329,16 @@ def _manual_window_editor(uploaded):
                     state, rows, labels, ctx)
                 with st.container(border=True):
                     st.markdown("**⚠ Most out of bounds — recommended actions**")
-                    if not _breach_weeks:
+                    _proj_err = _mw_proj_error()
+                    if _proj_err:
+                        # The projection failed, so `rows` is empty and NOTHING can
+                        # look out of bounds. Never let that read as an all-clear.
+                        st.error(
+                            f"Projection failed — **limits could not be checked**. "
+                            f"Treat this as unknown, not as within-limits.\n\n"
+                            f"`{_proj_err}`"
+                        )
+                    elif not _breach_weeks:
                         st.caption("✓ Every tank, system and the facility are "
                                    "within limits across this window.")
                     else:
@@ -2359,16 +2485,37 @@ def _edit_limits():
     st.markdown("**System limits**")
     sdf = st.data_editor(st.session_state["slim_wide"], hide_index=True,
                          column_config=sys_cfg, key="slim_wide_w", height=400)
+    _hidden = ({k[0] for k in fl_cur} | {k[0] for k in sl_cur}) - set(weeks)
+    if _hidden:
+        st.caption(
+            f"ℹ️ {len(_hidden)} week(s) in `limits.yaml` fall outside the current "
+            f"forecast horizon and are not shown here "
+            f"({min(_hidden)} … {max(_hidden)}). They are **kept** on save, not "
+            f"deleted — edit them by loading a PR whose horizon covers them."
+        )
     b1, b2, _ = st.columns([1, 1, 3])
     if b1.button("💾 Save Limits", key="save_lim"):
         try:
-            fl_recs = [{"week": wk, "metric": r["metric"], "value": float(r[wk])}
-                       for r in _records(fdf) for wk in weeks
-                       if r.get(wk) not in (None, "")]
-            sl_recs = [{"week": wk, "system": r["system"], "metric": r["metric"],
-                        "value": float(r[wk])}
-                       for r in _records(sdf) for wk in weeks
-                       if r.get(wk) not in (None, "")]
+            # Save REPLACES limits.yaml wholesale, but this grid only shows the
+            # current forecast horizon (_limit_week_cols). Any week stored in the
+            # file OUTSIDE that horizon has no column here, so rebuilding purely
+            # from the grid would silently DELETE it — e.g. every earlier week
+            # after uploading a PR that starts later. Carry those through
+            # untouched; the operator never saw them and cannot have edited them.
+            _shown = set(weeks)
+            fl_recs = [{"week": wk, "metric": m, "value": v}
+                       for (wk, m), v in fl_cur.items() if wk not in _shown]
+            sl_recs = [{"week": wk, "system": s, "metric": m, "value": v}
+                       for (wk, s, m), v in sl_cur.items() if wk not in _shown]
+            fl_recs += [{"week": wk, "metric": r["metric"], "value": float(r[wk])}
+                        for r in _records(fdf) for wk in weeks
+                        if r.get(wk) not in (None, "")]
+            sl_recs += [{"week": wk, "system": r["system"], "metric": r["metric"],
+                         "value": float(r[wk])}
+                        for r in _records(sdf) for wk in weeks
+                        if r.get(wk) not in (None, "")]
+            fl_recs.sort(key=lambda r: (r["week"], r["metric"]))
+            sl_recs.sort(key=lambda r: (r["week"], r["system"], r["metric"]))
             dump_scenario(SCENARIO_DIR, batches=load_batches(SCENARIO_DIR),
                           facility_limits=facility_limits_from_list(fl_recs),
                           system_limits=system_limits_from_list(sl_recs))
@@ -2875,13 +3022,19 @@ def _run_with_workbook_bytes(
     # Read parsed outputs for visualization.
     output_bytes = out_path.read_bytes()
     parsed = _parse_output_workbook(out_path)
-    # Capture the EFFECTIVE config this run used (config_dir includes any optimizer
-    # overrides for applied runs), so the result can always show what produced it.
+    # Capture the EFFECTIVE config this run used, so the result can always show
+    # what produced it. MUST read run_config_dir, not config_dir: with method
+    # overrides it is the throwaway copy they were applied to, while config_dir
+    # still holds the user's un-overridden values. Reading config_dir made an LNS
+    # run report placement_method=greedy, and would now report the pinned
+    # controller arms as hybrid_follow=full (the base config's value) — i.e. the
+    # panel would describe a different plan than the one on screen. It falls back
+    # to config_dir automatically: run_config_dir IS config_dir when no overrides.
     config_used = {}
-    if config_dir:
+    if run_config_dir:
         try:
             from forecast.config_io import load_control, control_to_dict
-            config_used = control_to_dict(load_control(config_dir))
+            config_used = control_to_dict(load_control(run_config_dir))
         except Exception:  # noqa: BLE001
             config_used = {}
     parsed.update({
@@ -3541,14 +3694,22 @@ def _rv_memo(name: str, rid: str, build):
 
 
 def _system_feed_audit(out_path):
-    """REALIZED per-system feed rows + the cap, from the output workbook's
-    SystemLimitsAudit sheet. Returns ([], None) when the file is gone: the
-    output lives in a temp dir that the OS can sweep mid-session, and this
-    read previously took the whole results view down with it."""
+    """REALIZED per-system feed rows + PER-SYSTEM caps, from the output
+    workbook's SystemLimitsAudit sheet.
+
+    Returns (rows, {system: cap_kg_day}). The cap used to be a single scalar
+    overwritten on every row, so it ended up holding whatever the LAST audit row
+    happened to say — one cap line drawn for every system, wrong for all but one
+    of them whenever the per-system caps differ (which is the normal case: OG1/2
+    and OG3-6 have very different feed capacity).
+
+    Returns ([], {}) when the file is gone: the output lives in a temp dir that
+    the OS can sweep mid-session, and this read previously took the whole
+    results view down with it."""
     from pathlib import Path as _P
     if not out_path or not _P(out_path).exists():
-        return [], None
-    rows, cap = [], None
+        return [], {}
+    rows, caps = [], {}
     try:
         _wb = load_workbook(out_path, data_only=True, read_only=True)
         try:
@@ -3570,12 +3731,12 @@ def _system_feed_audit(out_path):
                                  "Week": str(_row[_hdr.get("Week", 0)]),
                                  "Feed_kg_day": float(_fd)})
                     if _fc:
-                        cap = float(_fc)
+                        caps[str(_sys)] = float(_fc)
         finally:
             _wb.close()   # was outside any guard: an exception mid-scan leaked it
     except Exception:  # noqa: BLE001 — an unreadable audit just hides the chart
-        return [], None
-    return rows, cap
+        return [], {}
+    return rows, caps
 
 
 def _daily_harvest_table(he_df):
@@ -3923,6 +4084,11 @@ def _optimizer():
                         st.session_state["_opt_run"] = {
                             "dropped": dropped, "overprod": overprod,
                             "cv": m.harvest_var, "over": m.weeks_over_harvest_cap,
+                            # Bind these metrics to the run they describe. Without
+                            # it the panel survives a later ordinary Run-forecast,
+                            # pairing THESE numbers with THAT workbook and still
+                            # offering it as "Forecast_optimized.xlsm".
+                            "rid": _result_rid(result),
                         }
                     else:
                         st.error(f"Run failed: {result.get('error', 'unknown')}")
@@ -3930,7 +4096,11 @@ def _optimizer():
                     st.error(f"Run failed: {e}")
                     st.code(traceback.format_exc())
         run_out = st.session_state.get("_opt_run")
-        if run_out and "result" in st.session_state and st.session_state.result.get("ok"):
+        _cur = st.session_state.get("result") or {}
+        # Only render while the loaded result IS the run these metrics came from.
+        # A later plain Run-forecast replaces `result` but leaves `_opt_run`
+        # behind, and the panel would then describe a workbook it never measured.
+        if run_out and _cur.get("ok") and run_out.get("rid") == _result_rid(_cur):
             r = st.session_state.result
             ok = run_out["dropped"] == 0 and run_out["overprod"] == 0
             cc1, cc2, cc3 = st.columns(3)
@@ -4438,9 +4608,8 @@ if (run_clicked or st.session_state.pop("_pending_run", False)) and uploaded is 
 
 if "result" in st.session_state and st.session_state.result.get("ok"):
     r = st.session_state.result
-    # Cache key for every derived frame below. Results stored before _rid
-    # existed (or by an older session) fall back to something run-unique.
-    _rid = r.get("_rid") or f"{r.get('output_path')}|{r.get('elapsed')}"
+    # Cache key for every derived frame below.
+    _rid = _result_rid(r)
 
     # Provenance — always show WHICH run is on screen (keep the correct data).
     st.caption(f"📋 Showing: **{r.get('_run_label', 'forecast run')}**")
@@ -4674,7 +4843,7 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
             # the same projection-vs-realized gap fixed at the report layer in
             # 63dd6cc. This chart must mirror the realized plan, so it reads the
             # audit directly (also exact, not a biomass-share approximation).
-            sys_feed_rows, feed_cap_val = _rv_memo(
+            sys_feed_rows, feed_caps = _rv_memo(
                 "sysfeed", _rid, lambda: _system_feed_audit(r.get("output_path")))
             if sys_feed_rows:
                 sys_feed = pd.DataFrame(sys_feed_rows).sort_values(["Week", "System"])
@@ -4683,10 +4852,19 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
                     markers=True,
                     title="Per-system feed (kg/day) over time — REALIZED",
                 )
-                if feed_cap_val:
-                    fig.add_hline(y=feed_cap_val, line_dash="dash",
-                                  line_color="red",
-                                  annotation_text=f"{feed_cap_val:.0f} kg/day cap")
+                # One dashed line per DISTINCT cap, labelled with the systems it
+                # applies to. Systems sharing a cap collapse to a single line so
+                # the chart is not striped with duplicates.
+                _by_cap = {}
+                for _s, _c in (feed_caps or {}).items():
+                    _by_cap.setdefault(round(float(_c), 6), []).append(_s)
+                for _c, _syss in sorted(_by_cap.items()):
+                    _lbl = (", ".join(sorted(_syss)) if len(_syss) <= 3
+                            else f"{len(_syss)} systems")
+                    fig.add_hline(y=_c, line_dash="dash", line_color="red",
+                                  opacity=0.55,
+                                  annotation_text=f"{_lbl}: {_c:,.0f} kg/day cap",
+                                  annotation_font_size=10)
                 fig.update_layout(height=380, yaxis_title="kg/day",
                                   legend=dict(title="System"))
                 st.plotly_chart(fig, use_container_width=True)
@@ -4695,8 +4873,10 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
                     "fed plan (after harvest + FIFO), the exact series the feed "
                     "caps are checked against. NOT the unharvested biology "
                     "projection (which ignores harvest and spikes well past the "
-                    "cap). Lines riding just under the dashed cap = leveled "
-                    "correctly; brief crossings are the residual over-cap weeks."
+                    "cap). Each dashed line is the cap for the system(s) named on "
+                    "it — OG1/2 and OG3-6 do not share a feed cap. Lines riding "
+                    "just under their own cap = leveled correctly; brief "
+                    "crossings are the residual over-cap weeks."
                 )
 
     # ============================================================
