@@ -1786,16 +1786,28 @@ def _mw_fw_intake(state, ctx, rows, labels, date_for):
         st.caption("No in-flight freshwater cohorts are still in freshwater "
                    "during this window.")
         return
-    bid = st.selectbox("Freshwater cohort", options=sorted(avail), key="mw_fw_batch")
+    # Seed both pickers from durable copies: adding/deleting a grid event calls
+    # st.rerun() BEFORE this section renders, so Streamlit drops the widget-
+    # backed keys on that interrupted pass and the selection silently snapped
+    # back to the first cohort (same cleanup mechanism as the cpsat_depth fix).
+    _opts = sorted(avail)
+    _saved_bid = st.session_state.get("_mw_fw_batch_saved")
+    bid = st.selectbox("Freshwater cohort", options=_opts, key="mw_fw_batch",
+                       index=(_opts.index(_saved_bid)
+                              if _saved_bid in _opts else 0))
+    st.session_state["_mw_fw_batch_saved"] = bid
     wk_labels = [w for w in labels if w in avail.get(bid, {})]
     if not wk_labels:
         st.caption("This cohort has already crossed to seawater in this window.")
         return
+    _saved_wk = st.session_state.get("_mw_fw_week_saved")
     wlabel = st.selectbox(
         "Week to bring it in", options=wk_labels,
         format_func=lambda w: f"{w}"
         + (f" · {date_for[w].strftime('%b %d')}" if date_for.get(w) else ""),
-        key="mw_fw_week")
+        key="mw_fw_week",
+        index=(wk_labels.index(_saved_wk) if _saved_wk in wk_labels else 0))
+    st.session_state["_mw_fw_week_saved"] = wlabel
     cnt, _wt, _cv = avail[bid][wlabel]
     wk = labels.index(wlabel) + 1
     # Scope input keys to THIS cohort+week — a fixed key would keep the previous

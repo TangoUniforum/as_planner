@@ -20,7 +20,12 @@ tran_og_default_tanks: 2
 global_buffer_pct: 0.05
 starvation_period_days: 7
 min_transfer_count: 7000.0
-harvest_grade_to_min: true
+# OFF as of 2026-08-05: the corrected 4-way sweep (6 real July PRs, both knobs
+# pinned per arm) measured grading NEVER better paired with the hybrid (0 wins,
+# 3 losses, 3 ties on weeks-below-floor; weeks-over-cap 3 -> 5) and WORSE alone
+# (median 21.5 -> 22.5, worst_week 0). The earlier "inert" A/B was broken
+# because this knob was already true here — pin it explicitly in any future arm.
+harvest_grade_to_min: false
 sixn_level_drains: true
 # L1-GUIDED HARVEST (the hybrid). Feeds the Global engine's whole-horizon L1
 # harvest envelope into the validated controller as a per-week target band, so
