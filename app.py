@@ -393,8 +393,9 @@ _CONTROL_HELP = {
         "overrides in FacilityLimits.",
     "facility_biomass_deviation_pct": "± tolerance band around the biomass cap "
         "(R24). 0.01 = 1%.",
-    "handling_mortality_pct": "Mortality fraction applied to fish on each transfer. "
-        "0.01 = 1%.",
+    "handling_mortality_pct": "Mortality PERCENT applied to fish on each transfer "
+        "(divided by 100 before use, unlike the deviation band above): 0.01 = "
+        "0.01%, 1 = 1%.",
     "sixn_growth": "Run the OG6N system as a normal grow-out system for the whole "
         "horizon, instead of depuration/purge rotation.",
     "sixn_production_start": "Date OG6N flips from purge to production mode "
@@ -948,7 +949,7 @@ def _mw_project(state, ctx, events, n_weeks, view="open"):
     from forecast.time_grid import forecast_week_labels
     # "proj3" (bump on every cached-schema change) so a stale cache from an
     # older schema can never satisfy this {sig,open,close,labels,moves} read.
-    sig = _mw_sig(events, extra=f"proj3:{n_weeks}")  # view is NOT in the sig:
+    sig = _mw_sig(events, extra=f"proj4:{n_weeks}")  # view is NOT in the sig:
     cache = st.session_state.get("_mw_proj_cache")    # one projection feeds both
     if not (cache and cache.get("sig") == sig):
         labels = forecast_week_labels(ctx["forecast_start"], n_weeks)
@@ -970,8 +971,23 @@ def _mw_project(state, ctx, events, n_weeks, view="open"):
                              for i, lbl in enumerate(labels)}
             for tr in (win.get("transfer_events") or []):
                 lbl = label_by_date.get(getattr(tr, "event_date", None))
+                if lbl is None:
+                    continue
+                if hasattr(tr, "pickup_tank_id"):
+                    # GradedHarvest carries pickup/retention tanks, not
+                    # .destinations — without this branch a scripted grading
+                    # draws NO arrows and the fish just "appear" in the grid.
+                    dests = [tr.pickup_tank_id]
+                    cnt = float(tr.pickup_count)
+                    if tr.retention_tank_id != tr.source_tank_id:
+                        dests.append(tr.retention_tank_id)
+                        cnt += float(tr.retention_count)
+                    moves.append({"week": lbl, "src": tr.source_tank_id,
+                                  "dests": dests, "batch": tr.batch_id,
+                                  "count": cnt})
+                    continue
                 dests = [a.tank_id for a in getattr(tr, "destinations", []) or []]
-                if lbl is None or not dests:
+                if not dests:
                     continue
                 moves.append({"week": lbl, "src": tr.source_tank_id,
                               "dests": dests, "batch": tr.batch_id,
@@ -1365,7 +1381,7 @@ def _mw_system_rollup(state, rows, labels, tables, batch_by_id, ctx=None,
                      use_container_width=True, height=_h)
 
 
-def _mw_recommendations(state, rows, labels, ctx):
+def _mw_recommendations(state, rows, labels, ctx, view="open"):
     """Rank the projected window's cap breaches (most out of bounds FIRST) and
     suggest a relief action for each — harvest the heaviest tank in the offending
     system when it's at harvest weight, else move it to the system with the most
@@ -1470,8 +1486,11 @@ def _mw_recommendations(state, rows, labels, ctx):
     # biomass and showed headroom that does not exist — the same OG-only-vs-
     # FW-inclusive mismatch already fixed in the results biomass charts.
     _fw_load = _mw_fw_load(ctx, labels) if ctx else {}
+    # Match the FW snapshot to the view `rows` came from — mixing open OG rows
+    # with close FW biomass would disagree with the rollup TOTAL beside it.
+    _fw_key = "open_bio" if view == "open" else "close_bio"
     for wk, used in fac_bio.items():
-        used += float((_fw_load.get(wk) or {}).get("close_bio", 0.0) or 0.0)
+        used += float((_fw_load.get(wk) or {}).get(_fw_key, 0.0) or 0.0)
         if fac_bio_cap > 0 and used > fac_bio_cap:
             breaches.append(("facbio", None, wk, used, fac_bio_cap))
 
@@ -1638,10 +1657,21 @@ def _mw_action_panel(state, ctx, rows, labels, sel, date_for):
             key=f"mw_g6_cnt_{sfx}",
             help="The N largest fish are graded out at their (higher) mean weight; "
                  "the rest stay at their (lower) mean.")
-        # Live cut-weight readout — the SAME split the run applies.
+        # Live cut-weight readout — the SAME split the run applies. CV travels
+        # with the BATCH through every event, so read the hydrated tank's cv
+        # only while it still holds this batch; if the window moved fish here,
+        # fall back to any hydrated tank of the batch, then the batch's PR cv —
+        # the hydration-time cv of the clicked tank would be a stale 0.
         _cvt = state.tanks_by_id.get(tid)
-        _big, _small = _mw_cut_weights(
-            r.avg_wt_g, (_cvt.cv_pct if _cvt else 0.0), r.count, n_big)
+        if _cvt is not None and _cvt.batch_id == r.batch_id and _cvt.cv_pct:
+            _cv = _cvt.cv_pct
+        else:
+            _cv = next((t.cv_pct for t in state.tanks_by_id.values()
+                        if t.batch_id == r.batch_id and t.cv_pct), 0.0)
+            if not _cv:
+                _bm = (ctx.get("batch_by_id") or {}).get(r.batch_id)
+                _cv = float(getattr(_bm, "tran_og_cv", 0.0) or 0.0)
+        _big, _small = _mw_cut_weights(r.avg_wt_g, _cv, r.count, n_big)
         if _big is not None:
             st.caption(f"↳ biggest **{n_big:,.0f} ≈ {_big / 1000:.2f} kg** → 6N · "
                        f"smaller {r.count - n_big:,.0f} ≈ "
@@ -1768,6 +1798,10 @@ def _mw_fw_intake(state, ctx, rows, labels, date_for):
         key="mw_fw_week")
     cnt, _wt, _cv = avail[bid][wlabel]
     wk = labels.index(wlabel) + 1
+    # Scope input keys to THIS cohort+week — a fixed key would keep the previous
+    # cohort's target count / tank picks alive (Streamlit ignores value= once a
+    # key has state), silently scripting e.g. a huge bottom-cull on the new one.
+    sfx = f"{bid}_{wlabel}"
 
     # Planned vs. current: the batch's originally-scheduled TranOG (from the PR /
     # scenario) next to what you're actually picking, so you can see how far off
@@ -1800,11 +1834,19 @@ def _mw_fw_intake(state, ctx, rows, labels, date_for):
                      f"than planned")
     if notes:
         st.caption("↳ " + " · ".join(notes))
-    st.caption(f"Projected freshwater state: ~{cnt:,.0f} fish available at "
-               f"{wlabel}. Target is the count entering seawater (the engine "
-               f"applies handling mortality + culls down to it).")
+    # The target is judged AFTER handling mortality (validate_manual_events:
+    # avail = fw_count * (1 - handling/100)) — defaulting to the raw FW count
+    # would pre-fill a target the validator itself rejects as infeasible.
+    _hf = float(getattr(ctx.get("control"), "handling_mortality_pct", 0.0)
+                or 0.0) / 100.0
+    avail_sw = cnt * (1.0 - _hf)
+    st.caption(f"Projected freshwater state: ~{cnt:,.0f} fish at {wlabel}; "
+               f"after handling mortality **~{avail_sw:,.0f} can enter "
+               f"seawater**. Target is the count entering seawater (the "
+               f"engine culls down to it).")
     target = st.number_input("Target fish entering seawater", min_value=0.0,
-                             value=float(cnt), step=1000.0, key="mw_fw_target")
+                             value=float(avail_sw), step=1000.0,
+                             key=f"mw_fw_target_{sfx}")
 
     # Live entry-grade preview — the two classes after handling + cull, so the
     # operator sees the counts/weights they're placing before picking tanks.
@@ -1821,12 +1863,12 @@ def _mw_fw_intake(state, ctx, rows, labels, date_for):
     dfmt = _mw_dest_fmt(state, _mw_occ_at(rows, wlabel))
     big_picks = st.multiselect(
         "Tank(s) for the BIGGER grade", options=empty_og,
-        format_func=dfmt, key="mw_fw_big")
+        format_func=dfmt, key=f"mw_fw_big_{sfx}")
     # A tank can't hold both grades — drop the big picks from the small options.
     small_opts = [t for t in empty_og if t not in big_picks]
     small_picks = st.multiselect(
         "Tank(s) for the SMALLER grade", options=small_opts,
-        format_func=dfmt, key="mw_fw_small")
+        format_func=dfmt, key=f"mw_fw_small_{sfx}")
 
     need_big = bool(prev and prev[0] > 0)
     need_small = bool(prev and prev[2] > 0)
@@ -1986,8 +2028,20 @@ def _mw_raw_grid(state):
 def _mw_save_bar(events, bad):
     from forecast.manual_events import dump_manual_events, load_manual_events
     n = len(events)
+    # -1 is _mw_validate's "validation itself crashed" sentinel — it has no
+    # timeline row, so without this branch the bar says "fix the ❌ rows above"
+    # while every row shows ✅ and the actual exception is displayed nowhere.
+    _sentinel = (bad or {}).get(-1)
+    _n_bad = len([k for k in (bad or {}) if k != -1])
     if n and not bad:
         st.success(f"All {n} operation(s) feasible against the uploaded PR.")
+    elif _sentinel:
+        st.error("Couldn't validate the window — " + "; ".join(_sentinel)
+                 + ". Saving is disabled until validation runs; check the "
+                   "operations in the raw table below, or ↻ Reload from file.")
+        if _n_bad:
+            st.warning(f"{_n_bad} operation(s) infeasible — fix the ❌ rows "
+                       f"above before saving.")
     elif bad:
         st.warning(f"{len(bad)} operation(s) infeasible — fix the ❌ rows above "
                    f"before saving.")
@@ -2345,7 +2399,7 @@ def _manual_window_editor(uploaded):
                 # relief action, ranked worst-first. Reads the current projection,
                 # so it updates as you script events. ▶ jumps to that tank.
                 _collapsed, _breach_weeks, _by_week = _mw_recommendations(
-                    state, rows, labels, ctx)
+                    state, rows, labels, ctx, view=_view)
                 with st.container(border=True):
                     st.markdown("**⚠ Most out of bounds — recommended actions**")
                     _proj_err = _mw_proj_error()
@@ -2588,6 +2642,27 @@ def _config_fingerprint() -> str:
                     h.update(p.name.encode())
                     h.update(str(p.stat().st_mtime_ns).encode())
     return h.hexdigest()
+
+
+def _sweep_inputs_sig() -> str:
+    """Identity of the inputs a sweep ran against (PR content + config/scenario
+    state) — stored beside Tune/Optimize/Frontier results so a recommendation
+    computed on different inputs is flagged instead of presented as current."""
+    import hashlib
+    return hashlib.md5(
+        f"{st.session_state.get('_pr_key', '')}|{_config_fingerprint()}"
+        .encode()).hexdigest()
+
+
+def _warn_if_sweep_stale(sig_key: str, what: str) -> None:
+    """Compare a stored sweep's input signature to the live inputs and warn —
+    the Compare board has this staleness check; the sweeps were missing it, so
+    a knob set validated on another PR/config could be saved as if current."""
+    stored = st.session_state.get(sig_key)
+    if stored is not None and stored != _sweep_inputs_sig():
+        st.warning(f"⚠ These {what} were computed on a **different PR or "
+                   f"config** than what's loaded now — re-run before trusting "
+                   f"or saving anything from them.")
 
 
 def _config_io_section():
@@ -3383,12 +3458,14 @@ def _stocking_frontier_section():
                 st.session_state["frontier_pts"] = stocking_frontier(
                     str(_tmp), str(CONFIG_DIR), str(SCENARIO_DIR),
                     reductions=reductions, welfare_density=_wl)
+                st.session_state["_frontier_sig"] = _sweep_inputs_sig()
         finally:
             shutil.rmtree(_wd, ignore_errors=True)
 
     pts = st.session_state.get("frontier_pts")
     if not pts:
         return
+    _warn_if_sweep_stale("_frontier_sig", "frontier points")
     for p in pts:
         if p.error:
             st.caption(f"⚠ {p.reduction * 100:.0f}% cut failed: {p.error}")
@@ -3486,11 +3563,13 @@ def _tuner():
             return
         bar.progress(1.0, text="Sweep complete")
         st.session_state["_tune_results"] = results
+        st.session_state["_tune_sig"] = _sweep_inputs_sig()
 
     results = st.session_state.get("_tune_results")
     if not results:
         _stocking_frontier_section()   # available without running the knob sweep
         return
+    _warn_if_sweep_stale("_tune_sig", "tuning results")
 
     rec = tuning.recommend(results)
     if rec.is_capacity_bound:
@@ -3511,6 +3590,9 @@ def _tuner():
                          type="primary"):
                 _opt.save_overrides_to_config(str(CONFIG_DIR), best.overrides)
                 _clear_all_editor_state()
+                # The save itself moved the config fingerprint — refresh the
+                # sweep's input sig so only EXTERNAL changes flag it stale.
+                st.session_state["_tune_sig"] = _sweep_inputs_sig()
                 st.success("Saved to config/control.yaml — switch to **Run forecast** "
                            "to use them (or open **Configure → Control** to review).")
     else:
@@ -3841,12 +3923,19 @@ def _quick_viz(r):
         fig2 = px.line(_fw, x="Week", y="Biomass_t",
                        title="Facility biomass per week (t) — whole facility, "
                              "incl. freshwater")
-        _lim = _fw["Biomass_Limit_kg"].dropna()
-        _cap_t = (float(_lim.iloc[0]) if not _lim.empty else
-                  float((r.get("config_used") or {}).get("max_biomass_kg")
-                        or 3_800_000)) / 1000.0
-        fig2.add_hline(y=_cap_t, line_dash="dot",
-                       annotation_text=f"{_cap_t / 1000:.2f}M cap")
+        _lim = _fw["Biomass_Limit_kg"]
+        if _lim.dropna().nunique() > 1:
+            # The cap is a per-week limit (FacilityLimits overrides) — a single
+            # hline at week 1's value misreads any ramp across the horizon.
+            fig2.add_scatter(x=_fw["Week"], y=_lim / 1000.0, mode="lines",
+                             line={"dash": "dot", "color": "red"},
+                             name="cap (per-week)")
+        else:
+            _cap_t = (float(_lim.dropna().iloc[0]) if _lim.notna().any() else
+                      float((r.get("config_used") or {}).get("max_biomass_kg")
+                            or 3_800_000)) / 1000.0
+            fig2.add_hline(y=_cap_t, line_dash="dot",
+                           annotation_text=f"{_cap_t / 1000:.2f}M cap")
         fig2.update_layout(height=340, xaxis_title="", yaxis_title="tonnes")
         st.plotly_chart(fig2, use_container_width=True)
 
@@ -3989,6 +4078,7 @@ def _optimizer():
             return
         bar.progress(1.0, text="Done")
         st.session_state["_opt_results"] = results
+        st.session_state["_opt_sig"] = _sweep_inputs_sig()
         if _auto_opt:
             # AUTO: pick the validated best, run the FULL forecast with it, load it
             # into the viz tabs, and (optionally) persist the winning knobs.
@@ -4011,6 +4101,9 @@ def _optimizer():
                 if _saved:
                     optimize.save_overrides_to_config(str(CONFIG_DIR), _best0.overrides)
                     _clear_all_editor_state()
+                    # The save moved the config fingerprint — refresh the sig
+                    # so only EXTERNAL changes flag the results stale.
+                    st.session_state["_opt_sig"] = _sweep_inputs_sig()
                 # Log this run (settings + results) to optimize_history.jsonl so
                 # there's a durable record of what was run and what it produced.
                 from datetime import datetime as _dt
@@ -4026,6 +4119,7 @@ def _optimizer():
     results = st.session_state.get("_opt_results")
     if not results:
         return
+    _warn_if_sweep_stale("_opt_sig", "optimization results")
 
     # Some variants may be INFEASIBLE on this PR (the engine refused to plan them —
     # e.g. a TranOG arrival with no free tanks). They're excluded from selection but
@@ -4076,6 +4170,9 @@ def _optimizer():
                                             key="opt_save", use_container_width=True):
                 optimize.save_overrides_to_config(str(CONFIG_DIR), best.overrides)
                 _clear_all_editor_state()
+                # The save moved the config fingerprint — refresh the sig so
+                # only EXTERNAL changes flag the results stale.
+                st.session_state["_opt_sig"] = _sweep_inputs_sig()
                 st.success("Saved to config — **Run forecast** and future runs now "
                            "use these knobs (no longer baseline).")
         _run_clicked_opt = _bcol1.button("▶ Run full forecast with these knobs",
@@ -4300,8 +4397,14 @@ def _cpsat_det_time() -> float:
     """CP-SAT's per-week DETERMINISTIC work budget — the criterion that actually
     stops each solve. (The wall-clock limit is only a safety cap for a
     pathological week, so tuning it changes nothing.) Higher = tighter layout,
-    longer solve."""
-    return float(st.session_state.get("cpsat_depth", 30.0))
+    longer solve.
+
+    Reads the durable copy when the Compare-board slider isn't rendered —
+    Streamlit deletes widget-backed keys on any rerun that doesn't draw the
+    widget, so without the fallback every other mode (including ▶ Run forecast
+    re-running a picked CP-SAT plan) silently reverted to 30.0."""
+    return float(st.session_state.get(
+        "cpsat_depth", st.session_state.get("_cpsat_depth_saved", 30.0)))
 
 
 def _ensure_board_score(res: dict, label: str) -> None:
@@ -4351,8 +4454,13 @@ def _compare_and_choose():
         "usually matches plain Controller** — LNS only diverges when there's "
         "tank slack to relocate into.")
     if include_milp:
+        # value= seeds from the durable copy so leaving Compare mode (which
+        # drops the widget key) doesn't snap the depth back to Balanced — that
+        # both re-ran picked plans at the wrong budget and falsely marked
+        # finished CP-SAT legs stale (the board sig embeds _cpsat_det_time()).
         st.select_slider(
-            "CP-SAT solve depth", options=[8.0, 30.0, 60.0], value=30.0,
+            "CP-SAT solve depth", options=[8.0, 30.0, 60.0],
+            value=st.session_state.get("_cpsat_depth_saved", 30.0),
             format_func=lambda v: {8.0: "Quick", 30.0: "Balanced",
                                    60.0: "Thorough"}[v],
             key="cpsat_depth",
@@ -4360,6 +4468,8 @@ def _compare_and_choose():
                  "actually stops each solve (the wall-clock limit is only a "
                  "safety cap). Quick trades layout tightness for a much shorter "
                  "run; Balanced is the validated default.")
+        st.session_state["_cpsat_depth_saved"] = float(
+            st.session_state["cpsat_depth"])
 
     roster = [(k, _METHODS[k].label) for k in _BOARD_ORDER
               if k not in _BOARD_OPTIONAL or include_milp]
@@ -5075,10 +5185,19 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
                                   markers=True,
                                   title="Facility biomass (kg) — whole facility, "
                                         "incl. freshwater")
-                    _lim = _fwk["Biomass_Limit_kg"].dropna()
-                    _cap_kg = (float(_lim.iloc[0]) if not _lim.empty else
-                               float((r.get("config_used") or {})
-                                     .get("max_biomass_kg") or 3_800_000))
+                    _lim = _fwk["Biomass_Limit_kg"]
+                    if _lim.dropna().nunique() > 1:
+                        # Per-week cap (FacilityLimits ramp) — one hline at
+                        # week 1's value would misread the whole horizon.
+                        fig.add_scatter(x=_fwk["Week"], y=_lim, mode="lines",
+                                        line={"dash": "dash", "color": "red"},
+                                        name="Max Biomass cap (per-week)")
+                        _cap_kg = None
+                    else:
+                        _cap_kg = (float(_lim.dropna().iloc[0])
+                                   if _lim.notna().any() else
+                                   float((r.get("config_used") or {})
+                                         .get("max_biomass_kg") or 3_800_000))
                 else:
                     fig = px.line(wk_facility, x="Week", y="FacilityBiomass_kg",
                                   markers=True,
@@ -5086,8 +5205,10 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
                                         "(freshwater not included)")
                     _cap_kg = float((r.get("config_used") or {})
                                     .get("max_biomass_kg") or 3_800_000)
-                fig.add_hline(y=_cap_kg, line_dash="dash", line_color="red",
-                              annotation_text=f"Max Biomass cap ({_cap_kg / 1000:,.0f} t)")
+                if _cap_kg is not None:
+                    fig.add_hline(
+                        y=_cap_kg, line_dash="dash", line_color="red",
+                        annotation_text=f"Max Biomass cap ({_cap_kg / 1000:,.0f} t)")
                 fig.update_layout(height=350, yaxis_title="kg")
                 st.plotly_chart(fig, use_container_width=True)
                 if not _has_fac:
@@ -5343,8 +5464,14 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
                                     ("Batch", "SW_entry", "Peak_tanks", "Harvest_window", "HOG_t")}
                                    for p in bplans])
             st.dataframe(hdr_df, hide_index=True, use_container_width=True)
-            pick = st.selectbox("Batch", [p["Batch"] for p in bplans], key="batchplan_pick")
-            bp = next(p for p in bplans if p["Batch"] == pick)
+            # A previous run's pick may not exist in this run's plans (different
+            # PR, or a Global-LP plan without per-tank rows) — Streamlit passes
+            # the stale value through verbatim, so guard it or next() raises.
+            _bp_opts = [p["Batch"] for p in bplans]
+            if st.session_state.get("batchplan_pick") not in _bp_opts:
+                st.session_state.pop("batchplan_pick", None)
+            pick = st.selectbox("Batch", _bp_opts, key="batchplan_pick")
+            bp = next((p for p in bplans if p["Batch"] == pick), bplans[0])
             m1, m2, m3, m4 = st.columns(4)
             m1.metric("SW entry", bp["SW_entry"],
                       help="The week this batch enters seawater (its FW→OG / "
