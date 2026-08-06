@@ -1,0 +1,396 @@
+"""Analysis layer — the composition that turns many runs into ONE decision.
+
+The app's modes (Compare & Choose, Optimize, Tune) each answer a PIECE of the
+operator's real question: "which engine, with which knobs, gives the best plan
+that passes the hard rules?" This module holds the pieces the composition
+needs that don't exist anywhere else:
+
+  * hard/soft GATES as a registry (conservation, never-an-empty-week, caps,
+    harvest targets) — the checklist that makes "did I miss something?"
+    structurally impossible to answer wrong;
+  * harvest TARGETS (monthly/yearly kg) — config-owned, penalized not
+    hard-gated (operator decision 2026-08-05);
+  * ECONOMICS (price per fish size) — turns harvest kg into revenue;
+  * the PROMOTED DEFAULT — the operator-blessed best candidate, stored in
+    config/ (versioned, exported with config snapshots, never in an output
+    workbook) so it survives sessions and cannot be lost by a run.
+
+Extensibility rule: the analysis flow iterates registries — it does not know
+what the gates/objectives are. A future lever (facility expansion, stocking
+frequency/size) or objective (growth, revenue emphasis) is a register() call
+plus its implementation, not a rewrite of the flow. Same pattern as
+forecast.methods.REGISTRY.
+
+Everything here is pure logic + file IO; Streamlit stays in app.py.
+"""
+from __future__ import annotations
+
+import datetime as _dt
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Callable, Optional
+
+import yaml
+
+from .yaml_atomic import read_text_resilient, write_text_atomic
+
+TARGETS_FILE = "targets.yaml"
+ECONOMICS_FILE = "economics.yaml"
+DEFAULTS_FILE = "analysis_defaults.yaml"
+
+
+# --------------------------------------------------------------------------- #
+# Config files: targets, economics, promoted default
+# --------------------------------------------------------------------------- #
+def _load_yaml_or_none(path: Path) -> Optional[dict]:
+    if not path.exists():
+        return None
+    data = yaml.safe_load(read_text_resilient(path))
+    return data if isinstance(data, dict) else None
+
+
+def _dump_yaml(path: Path, data: dict) -> None:
+    write_text_atomic(path, yaml.safe_dump(data, sort_keys=False,
+                                           allow_unicode=True))
+
+
+def load_targets(config_dir) -> Optional[dict]:
+    """{basis: 'hog'|'gross', tolerance_pct: float,
+        monthly: {'YYYY-MM': kg}, yearly: {'YYYY': kg}} or None if unset.
+
+    Missing/empty file -> None (the targets gate reports N/A, never FAIL:
+    absent targets must not block analysis)."""
+    d = _load_yaml_or_none(Path(config_dir) / TARGETS_FILE)
+    if not d:
+        return None
+    out = {
+        "basis": str(d.get("basis", "hog")).lower(),
+        "tolerance_pct": float(d.get("tolerance_pct", 5.0)),
+        "monthly": {str(k): float(v) for k, v in (d.get("monthly") or {}).items()
+                    if v is not None},
+        "yearly": {str(k): float(v) for k, v in (d.get("yearly") or {}).items()
+                   if v is not None},
+    }
+    return out if (out["monthly"] or out["yearly"]) else None
+
+
+def save_targets(config_dir, targets: dict) -> None:
+    _dump_yaml(Path(config_dir) / TARGETS_FILE, targets)
+
+
+def load_economics(config_dir) -> Optional[dict]:
+    """{currency: str, basis: 'hog'|'gross',
+        price_bands: [{min_kg, max_kg, price_per_kg}, ...]} or None.
+
+    Bands are matched on the harvest event's AVERAGE fish weight on `basis`;
+    an event whose weight falls in no band earns 0 and is reported unpriced —
+    a loud gap beats silently inventing a price."""
+    d = _load_yaml_or_none(Path(config_dir) / ECONOMICS_FILE)
+    if not d:
+        return None
+    bands = []
+    for b in d.get("price_bands") or []:
+        try:
+            bands.append({"min_kg": float(b["min_kg"]),
+                          "max_kg": float(b["max_kg"]),
+                          "price_per_kg": float(b["price_per_kg"])})
+        except (KeyError, TypeError, ValueError):
+            continue
+    if not bands:
+        return None
+    return {"currency": str(d.get("currency", "USD")),
+            "basis": str(d.get("basis", "hog")).lower(),
+            "price_bands": sorted(bands, key=lambda b: b["min_kg"])}
+
+
+def save_economics(config_dir, economics: dict) -> None:
+    _dump_yaml(Path(config_dir) / ECONOMICS_FILE, economics)
+
+
+def load_promoted_default(config_dir) -> Optional[dict]:
+    """The operator-blessed analysis candidate:
+    {method, overrides, promoted_ts, note, evidence} or None."""
+    d = _load_yaml_or_none(Path(config_dir) / DEFAULTS_FILE)
+    return d if d and d.get("method") else None
+
+
+def save_promoted_default(config_dir, method: str, overrides: dict,
+                          promoted_ts: str, note: str = "",
+                          evidence: Optional[dict] = None) -> None:
+    _dump_yaml(Path(config_dir) / DEFAULTS_FILE, {
+        "method": method,
+        "overrides": overrides or {},
+        "promoted_ts": promoted_ts,
+        "note": note,
+        "evidence": evidence or {},
+    })
+
+
+# --------------------------------------------------------------------------- #
+# Harvest readers — HarvestPlan rows -> period totals + revenue
+# --------------------------------------------------------------------------- #
+def week_to_month(week_label: str) -> Optional[str]:
+    """'2026-W31' -> '2026-07' (month of the ISO week's Monday — the SAME
+    convention as the app's monthly harvest table, so targets and the Harvest
+    tab can never disagree about which month a week belongs to)."""
+    try:
+        y, w = int(str(week_label)[:4]), int(str(week_label)[6:8])
+        return _dt.date.fromisocalendar(y, w, 1).strftime("%Y-%m")
+    except (ValueError, TypeError):
+        return None
+
+
+def harvest_rows(out_path) -> list[dict]:
+    """Per-event harvest rows from the output workbook's HarvestPlan sheet:
+    [{week, count, gross_avg_kg, gross_kg, hog_kg, hog_avg_kg}, ...]."""
+    import openpyxl
+    wb = openpyxl.load_workbook(out_path, read_only=True, data_only=True)
+    try:
+        if "HarvestPlan" not in wb.sheetnames:
+            return []
+        ws = wb["HarvestPlan"]
+        header = None
+        rows: list[dict] = []
+        for r in ws.iter_rows(values_only=True):
+            if header is None:
+                if r and str(r[0]).strip() == "Week" and any(
+                        str(c).strip() == "Batch" for c in r if c):
+                    header = {str(c).strip(): i for i, c in enumerate(r) if c}
+                continue
+            if not r or not str(r[0]).startswith("20"):
+                continue
+
+            def _num(prefix, _r=r, _h=header):
+                k = next((c for c in _h if c.startswith(prefix)), None)
+                v = _r[_h[k]] if k is not None and _h[k] < len(_r) else None
+                return float(v) if isinstance(v, (int, float)) else 0.0
+
+            count = _num("Count")
+            hog_kg = _num("HOG_Biomass")
+            rows.append({
+                "week": str(r[0]).strip(),
+                "count": count,
+                "gross_avg_kg": _num("Gross_AvgWt"),
+                "gross_kg": _num("Gross_Biomass"),
+                "hog_kg": hog_kg,
+                "hog_avg_kg": (hog_kg / count) if count > 0 else 0.0,
+            })
+        return rows
+    finally:
+        wb.close()
+
+
+def harvest_by_period(rows: list[dict], basis: str = "hog"
+                      ) -> tuple[dict, dict]:
+    """({'YYYY-MM': kg}, {'YYYY': kg}) on the given basis ('hog'|'gross')."""
+    key = "hog_kg" if basis == "hog" else "gross_kg"
+    monthly: dict[str, float] = {}
+    yearly: dict[str, float] = {}
+    for r in rows:
+        m = week_to_month(r["week"])
+        if m is None:
+            continue
+        monthly[m] = monthly.get(m, 0.0) + r[key]
+        y = m[:4]
+        yearly[y] = yearly.get(y, 0.0) + r[key]
+    return monthly, yearly
+
+
+def review_targets(monthly: dict, yearly: dict, targets: dict) -> dict:
+    """Score actuals against targets — PENALIZED, not hard-gated (operator
+    decision): a miss beyond tolerance is flagged, never disqualifying.
+
+    Only periods the plan's horizon actually reaches are judged: a target for
+    a month with zero recorded harvest AND no neighboring in-horizon month is
+    still judged (0 vs target) IF any harvest month >= it exists — i.e. we
+    judge every target period up to the last month with any harvest, so a
+    blackout month inside the horizon shows as MISSED, while targets beyond
+    the horizon end are N/A rather than false misses.
+
+    Returns {rows: [{period, target_kg, actual_kg, pct, status}],
+             judged, met, close, missed, worst_pct, total_shortfall_kg}."""
+    tol = float(targets.get("tolerance_pct", 5.0))
+    horizon_end_m = max(monthly) if monthly else ""
+    horizon_end_y = max(yearly) if yearly else ""
+    rows = []
+
+    def _judge(period, target_kg, actual_kg, in_horizon):
+        if not in_horizon:
+            return {"period": period, "target_kg": target_kg,
+                    "actual_kg": actual_kg, "pct": None, "status": "N/A"}
+        pct = (actual_kg / target_kg * 100.0) if target_kg > 0 else 100.0
+        status = ("MET" if pct >= 100.0 - 1e-9
+                  else "CLOSE" if pct >= 100.0 - tol else "MISSED")
+        return {"period": period, "target_kg": target_kg,
+                "actual_kg": actual_kg, "pct": pct, "status": status}
+
+    for period in sorted(targets.get("monthly") or {}):
+        rows.append(_judge(period, targets["monthly"][period],
+                           monthly.get(period, 0.0),
+                           bool(horizon_end_m) and period <= horizon_end_m))
+    for period in sorted(targets.get("yearly") or {}):
+        rows.append(_judge(period, targets["yearly"][period],
+                           yearly.get(period, 0.0),
+                           bool(horizon_end_y) and period <= horizon_end_y))
+
+    judged = [r for r in rows if r["status"] != "N/A"]
+    shortfall = sum(max(0.0, r["target_kg"] - r["actual_kg"]) for r in judged)
+    worst = min((r["pct"] for r in judged), default=None)
+    return {
+        "rows": rows,
+        "judged": len(judged),
+        "met": sum(1 for r in judged if r["status"] == "MET"),
+        "close": sum(1 for r in judged if r["status"] == "CLOSE"),
+        "missed": sum(1 for r in judged if r["status"] == "MISSED"),
+        "worst_pct": worst,
+        "total_shortfall_kg": shortfall,
+    }
+
+
+def revenue_for(rows: list[dict], economics: dict) -> dict:
+    """Price each harvest event by its average fish weight on the economics
+    basis. Returns {total, priced_kg, unpriced_kg, currency, by_band}."""
+    basis = economics.get("basis", "hog")
+    wt_key = "hog_avg_kg" if basis == "hog" else "gross_avg_kg"
+    kg_key = "hog_kg" if basis == "hog" else "gross_kg"
+    bands = economics["price_bands"]
+    by_band = [{"band": f"{b['min_kg']:g}–{b['max_kg']:g} kg",
+                "price_per_kg": b["price_per_kg"], "kg": 0.0, "revenue": 0.0}
+               for b in bands]
+    total = priced = unpriced = 0.0
+    for r in rows:
+        w, kg = r[wt_key], r[kg_key]
+        if kg <= 0:
+            continue
+        hit = next((i for i, b in enumerate(bands)
+                    if b["min_kg"] <= w < b["max_kg"]), None)
+        if hit is None:
+            unpriced += kg
+            continue
+        rev = kg * bands[hit]["price_per_kg"]
+        by_band[hit]["kg"] += kg
+        by_band[hit]["revenue"] += rev
+        priced += kg
+        total += rev
+    return {"total": total, "priced_kg": priced, "unpriced_kg": unpriced,
+            "currency": economics.get("currency", "USD"), "by_band": by_band}
+
+
+# --------------------------------------------------------------------------- #
+# Gate registry — the checklist
+# --------------------------------------------------------------------------- #
+@dataclass
+class Gate:
+    key: str
+    label: str
+    hard: bool                     # hard = a FAIL disqualifies the candidate
+    fn: Callable[[dict], tuple]    # ctx -> (status, detail); status in
+    #                                PASS / WARN / FAIL / N/A
+
+
+GATES: list[Gate] = []
+
+
+def register_gate(key: str, label: str, hard: bool,
+                  fn: Callable[[dict], tuple]) -> None:
+    """Add a gate to the checklist. The analysis flow evaluates EVERY
+    registered gate on every candidate — new rules become part of the
+    checklist by registering, not by editing the flow."""
+    GATES.append(Gate(key=key, label=label, hard=hard, fn=fn))
+
+
+def evaluate_gates(ctx: dict) -> list[dict]:
+    """Run every registered gate against one candidate's context dict.
+    ctx keys used by the built-ins: dropped, overprod, zero_weeks,
+    weeks_over_cap, weeks_over_harvest_cap, peak_pct_of_cap, worst_density,
+    targets_review (from review_targets, or None)."""
+    out = []
+    for g in GATES:
+        try:
+            status, detail = g.fn(ctx)
+        except Exception as e:  # noqa: BLE001 — a broken gate must be VISIBLE
+            status, detail = "FAIL", f"gate error: {type(e).__name__}: {e}"
+        out.append({"key": g.key, "label": g.label, "hard": g.hard,
+                    "status": status, "detail": detail})
+    return out
+
+
+def _gate_conservation(ctx):
+    d, o = int(ctx.get("dropped") or 0), int(ctx.get("overprod") or 0)
+    if d == 0 and o == 0:
+        return "PASS", "0 dropped / 0 over-produced"
+    return "FAIL", f"{d} dropped / {o} over-produced fish"
+
+
+def _gate_no_empty_week(ctx):
+    z = ctx.get("zero_weeks")
+    if z is None:
+        return "N/A", "zero-week count unavailable"
+    return (("PASS", "harvests something every week") if int(z) == 0
+            else ("FAIL", f"{int(z)} totally empty harvest week(s)"))
+
+
+def _gate_biomass_cap(ctx):
+    p = ctx.get("peak_pct_of_cap")
+    if p is None:
+        return "N/A", "peak biomass unavailable"
+    p = float(p)
+    if p <= 100.0:
+        return "PASS", f"peak {p:.1f}% of cap"
+    return ("WARN" if p <= 110.0 else "FAIL"), f"peak {p:.1f}% of cap"
+
+
+def _gate_harvest_cap(ctx):
+    w = ctx.get("weeks_over_harvest_cap")
+    if w is None:
+        return "N/A", "weekly harvest series unavailable"
+    w = int(w)
+    return (("PASS", "no week over the 55k processing cap") if w == 0
+            else ("WARN", f"{w} week(s) over the 55k processing cap"))
+
+
+def _gate_targets(ctx):
+    tr = ctx.get("targets_review")
+    if not tr or not tr.get("judged"):
+        return "N/A", "no harvest targets configured (Configure → Targets)"
+    if tr["missed"] == 0 and tr["close"] == 0:
+        return "PASS", f"all {tr['judged']} target period(s) met"
+    if tr["missed"] == 0:
+        return "WARN", (f"{tr['close']} period(s) within tolerance, "
+                        f"worst {tr['worst_pct']:.0f}% of target")
+    return "WARN", (f"{tr['missed']} period(s) missed "
+                    f"(worst {tr['worst_pct']:.0f}% of target, "
+                    f"short {tr['total_shortfall_kg'] / 1000.0:,.0f} t) — "
+                    f"penalized, not disqualifying")
+
+
+register_gate("conservation", "Conservation (no fish created or lost)",
+              hard=True, fn=_gate_conservation)
+register_gate("no_empty_week", "Never an empty harvest week", hard=True,
+              fn=_gate_no_empty_week)
+register_gate("biomass_cap", "Facility biomass cap", hard=False,
+              fn=_gate_biomass_cap)
+register_gate("harvest_cap", "Weekly processing cap (55k)", hard=False,
+              fn=_gate_harvest_cap)
+register_gate("targets", "Harvest targets (monthly/yearly)", hard=False,
+              fn=_gate_targets)
+
+
+# --------------------------------------------------------------------------- #
+# Ranking — the operator-approved pick order
+# --------------------------------------------------------------------------- #
+def rank_key(candidate: dict) -> tuple:
+    """Sort key for candidates (ascending; first = best). Encodes the
+    operator-approved ordering (2026-08-05): hard gates absolutely first,
+    then soft-gate failures, then target shortfall, then the emphasis score.
+    Revenue enters through the card display (and later as a scored component
+    once real price data is in economics.yaml), not the pick order."""
+    gates = candidate.get("gates") or []
+    hard_fails = sum(1 for g in gates if g["hard"] and g["status"] == "FAIL")
+    soft_fails = sum(1 for g in gates if not g["hard"] and g["status"] == "FAIL")
+    warns = sum(1 for g in gates if g["status"] == "WARN")
+    tr = candidate.get("targets_review") or {}
+    shortfall_kg = float(tr.get("total_shortfall_kg") or 0.0)
+    score = float(candidate.get("score") if candidate.get("score") is not None
+                  else 1e9)
+    return (hard_fails, soft_fails, warns, round(shortfall_kg), score)
