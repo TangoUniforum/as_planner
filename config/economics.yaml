@@ -8,6 +8,16 @@
 # !! with the real price list per band.
 currency: USD
 basis: hog
+# Sales-model harvest weight-distribution CV (%): each harvest event's kg is
+# spread across the bands with a size-biased lognormal around the event's
+# average weight (the operator's Excel LOGNORM method). Re-tune against
+# historical harvest results as needed. 18 = 0.18 CV.
+model_cv_pct: 18
+# Per-band `monthly:` overrides the default price_per_kg for specific
+# forecast months, e.g.
+#     monthly:
+#       2026-09: 9.10
+#       2026-10: 9.35
 price_bands:
   - min_kg: 0.0      # 0-2 lbs HOG
     max_kg: 0.907

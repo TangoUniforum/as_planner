@@ -2820,12 +2820,21 @@ def _edit_targets_prices():
                 "fish weight; harvest falling in **no band is reported as "
                 "unpriced** (a loud gap, never an invented price).")
     e = _ana.load_economics(CONFIG_DIR) or {"currency": "USD", "basis": "hog",
+                                            "model_cv_pct": 18.0,
                                             "price_bands": []}
-    c3, c4 = st.columns(2)
+    c3, c4, c5 = st.columns(3)
     cur = c3.text_input("Currency", value=e["currency"], key="eco_cur")
     ebasis = c4.radio("Price basis", ["hog", "gross"], horizontal=True,
                       index=0 if e["basis"] == "hog" else 1, key="eco_basis",
                       help="Which weight the bands + revenue are on.")
+    mcv = c5.number_input(
+        "Sales model CV (%)", min_value=0.0, max_value=60.0,
+        value=float(e.get("model_cv_pct", 18.0)), step=1.0, key="eco_cv",
+        help="Harvest weight-distribution CV: each event's kg is spread "
+             "across the bands with a size-biased lognormal around its "
+             "average weight (your Excel LOGNORM method). Re-tune against "
+             "historical harvest results. Per-month price overrides live "
+             "in config/economics.yaml under each band's `monthly:` key.")
     bdf = st.data_editor(
         pd.DataFrame(e["price_bands"]
                      or [{"min_kg": None, "max_kg": None, "price_per_kg": None}]),
@@ -2864,6 +2873,11 @@ def _edit_targets_prices():
             else:
                 yearly[yr] = float(kg)
         bands = []
+        # The grid edits only default prices — carry each band's per-month
+        # overrides through the save (matched by weight range), or a UI save
+        # would silently strip the monthly price ladder from the YAML.
+        _old_monthly = {(b["min_kg"], b["max_kg"]): b.get("monthly") or {}
+                        for b in (e.get("price_bands") or [])}
         for rec in _records(bdf):
             lo, hi, p = (rec.get("min_kg"), rec.get("max_kg"),
                          rec.get("price_per_kg"))
@@ -2875,7 +2889,9 @@ def _edit_targets_prices():
                 errs.append(f"band {lo}–{hi}: max must exceed min")
             else:
                 bands.append({"min_kg": float(lo), "max_kg": float(hi),
-                              "price_per_kg": float(p)})
+                              "price_per_kg": float(p),
+                              "monthly": _old_monthly.get(
+                                  (float(lo), float(hi)), {})})
         if errs:
             for x in errs:
                 st.error(x)
@@ -2885,7 +2901,7 @@ def _edit_targets_prices():
                 "monthly": monthly, "yearly": yearly})
             _ana.save_economics(str(CONFIG_DIR), {
                 "currency": cur or "USD", "basis": ebasis,
-                "price_bands": bands})
+                "model_cv_pct": float(mcv), "price_bands": bands})
             st.success(f"Saved — {len(monthly)} monthly + {len(yearly)} yearly "
                        f"target(s), {len(bands)} price band(s). Analyze "
                        f"re-judges instantly; no runs are invalidated.")

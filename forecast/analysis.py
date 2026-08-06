@@ -79,27 +79,40 @@ def save_targets(config_dir, targets: dict) -> None:
 
 
 def load_economics(config_dir) -> Optional[dict]:
-    """{currency: str, basis: 'hog'|'gross',
-        price_bands: [{min_kg, max_kg, price_per_kg}, ...]} or None.
+    """{currency, basis: 'hog'|'gross', model_cv_pct,
+        price_bands: [{min_kg, max_kg, price_per_kg, monthly: {YYYY-MM: p}}]}
+    or None.
 
-    Bands are matched on the harvest event's AVERAGE fish weight on `basis`;
-    an event whose weight falls in no band earns 0 and is reported unpriced —
-    a loud gap beats silently inventing a price."""
+    model_cv_pct — the SALES-side harvest weight-distribution CV (%), the
+    operator's Model_CV: each harvest event's kg is spread across the bands
+    with a size-biased lognormal around the event's average weight (the
+    operator's own Excel method). Re-tuned against historical harvest results,
+    hence a config variable, not a constant. Distinct from the biological
+    grading CV (tran_og_cv).
+
+    price_per_kg is the default price; `monthly` optionally overrides it per
+    forecast month. kg falling outside every band is reported unpriced — a
+    loud gap beats silently inventing a price."""
     d = _load_yaml_or_none(Path(config_dir) / ECONOMICS_FILE)
     if not d:
         return None
     bands = []
     for b in d.get("price_bands") or []:
         try:
+            monthly = {str(k): float(v)
+                       for k, v in (b.get("monthly") or {}).items()
+                       if v is not None}
             bands.append({"min_kg": float(b["min_kg"]),
                           "max_kg": float(b["max_kg"]),
-                          "price_per_kg": float(b["price_per_kg"])})
+                          "price_per_kg": float(b["price_per_kg"]),
+                          "monthly": monthly})
         except (KeyError, TypeError, ValueError):
             continue
     if not bands:
         return None
     return {"currency": str(d.get("currency", "USD")),
             "basis": str(d.get("basis", "hog")).lower(),
+            "model_cv_pct": float(d.get("model_cv_pct", 18.0) or 18.0),
             "price_bands": sorted(bands, key=lambda b: b["min_kg"])}
 
 
@@ -247,12 +260,47 @@ def review_targets(monthly: dict, yearly: dict, targets: dict) -> dict:
     }
 
 
+def biomass_band_fraction(mean_kg: float, cv: float,
+                          lo_kg: float, hi_kg: float) -> float:
+    """Fraction of a harvest event's BIOMASS falling in [lo, hi) — the
+    operator's Excel method, verbatim: fish weights ~ lognormal around the
+    event mean with the sales-model CV; the biomass (not count) share uses
+    the size-biased distribution, i.e. LogN(mu + s^2, s):
+
+        s  = sqrt(ln(1 + cv^2))
+        mu = ln(mean) - s^2/2
+        share = F(hi; mu+s^2, s) - F(lo; mu+s^2, s)
+
+    cv is a FRACTION here (0.18, not 18). Scale-invariant: mean and band
+    edges just need the same unit."""
+    import math
+    from statistics import NormalDist
+    if mean_kg <= 0 or cv < 0:
+        return 0.0
+    if cv == 0:
+        return 1.0 if lo_kg <= mean_kg < hi_kg else 0.0
+    s = math.sqrt(math.log(1.0 + cv * cv))
+    mu_b = math.log(mean_kg) - 0.5 * s * s + s * s   # mu + s^2 (size-biased)
+    nd = NormalDist()
+
+    def _F(x):
+        return nd.cdf((math.log(x) - mu_b) / s) if x > 0 else 0.0
+
+    return max(0.0, _F(hi_kg) - _F(lo_kg))
+
+
 def revenue_for(rows: list[dict], economics: dict) -> dict:
-    """Price each harvest event by its average fish weight on the economics
-    basis. Returns {total, priced_kg, unpriced_kg, currency, by_band}."""
+    """Revenue for a plan: each harvest event's kg is SPREAD across the price
+    bands with the size-biased lognormal (model_cv_pct), then priced per band
+    — with the band's monthly price override when one exists for the event's
+    month, else its default price. kg in no band (distribution tails outside
+    the ladder) is unpriced, reported loudly.
+
+    Returns {total, priced_kg, unpriced_kg, currency, by_band}."""
     basis = economics.get("basis", "hog")
     wt_key = "hog_avg_kg" if basis == "hog" else "gross_avg_kg"
     kg_key = "hog_kg" if basis == "hog" else "gross_kg"
+    cv = float(economics.get("model_cv_pct", 18.0)) / 100.0
     bands = economics["price_bands"]
     by_band = [{"band": f"{b['min_kg']:g}–{b['max_kg']:g} kg",
                 "price_per_kg": b["price_per_kg"], "kg": 0.0, "revenue": 0.0}
@@ -260,18 +308,22 @@ def revenue_for(rows: list[dict], economics: dict) -> dict:
     total = priced = unpriced = 0.0
     for r in rows:
         w, kg = r[wt_key], r[kg_key]
-        if kg <= 0:
+        if kg <= 0 or w <= 0:
             continue
-        hit = next((i for i, b in enumerate(bands)
-                    if b["min_kg"] <= w < b["max_kg"]), None)
-        if hit is None:
-            unpriced += kg
-            continue
-        rev = kg * bands[hit]["price_per_kg"]
-        by_band[hit]["kg"] += kg
-        by_band[hit]["revenue"] += rev
-        priced += kg
-        total += rev
+        month = week_to_month(r["week"])
+        event_priced = 0.0
+        for i, b in enumerate(bands):
+            frac = biomass_band_fraction(w, cv, b["min_kg"], b["max_kg"])
+            if frac <= 0:
+                continue
+            price = (b.get("monthly") or {}).get(month, b["price_per_kg"])
+            part = kg * frac
+            by_band[i]["kg"] += part
+            by_band[i]["revenue"] += part * price
+            total += part * price
+            event_priced += part
+        priced += event_priced
+        unpriced += max(0.0, kg - event_priced)
     return {"total": total, "priced_kg": priced, "unpriced_kg": unpriced,
             "currency": economics.get("currency", "USD"), "by_band": by_band}
 

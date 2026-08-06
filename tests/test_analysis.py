@@ -83,33 +83,90 @@ def test_review_targets_yearly():
 
 
 # --------------------------------------------------------------------------- #
-# Revenue banding
+# Revenue banding — size-biased lognormal spread (the operator's Excel method)
 # --------------------------------------------------------------------------- #
-def _econ():
-    return {"currency": "USD", "basis": "hog",
+def _econ(cv_pct=18.0):
+    return {"currency": "USD", "basis": "hog", "model_cv_pct": cv_pct,
             "price_bands": [
-                {"min_kg": 2.0, "max_kg": 3.0, "price_per_kg": 8.0},
-                {"min_kg": 3.0, "max_kg": 5.0, "price_per_kg": 10.0},
+                {"min_kg": 2.0, "max_kg": 3.0, "price_per_kg": 8.0,
+                 "monthly": {}},
+                {"min_kg": 3.0, "max_kg": 5.0, "price_per_kg": 10.0,
+                 "monthly": {}},
             ]}
 
 
-def test_revenue_bands_and_unpriced_gap():
-    rows = [
-        # hog_avg 2.5 -> band 1: 1000 kg * 8
-        {"week": "2026-W31", "count": 400, "gross_avg_kg": 3.0,
-         "gross_kg": 1200.0, "hog_kg": 1000.0, "hog_avg_kg": 2.5},
-        # hog_avg 4.0 -> band 2: 2000 kg * 10
-        {"week": "2026-W32", "count": 500, "gross_avg_kg": 4.7,
-         "gross_kg": 2350.0, "hog_kg": 2000.0, "hog_avg_kg": 4.0},
-        # hog_avg 6.0 -> NO band: unpriced, loud not silent
-        {"week": "2026-W33", "count": 100, "gross_avg_kg": 7.0,
-         "gross_kg": 700.0, "hog_kg": 600.0, "hog_avg_kg": 6.0},
-    ]
+def test_band_fraction_matches_monte_carlo():
+    # Independent check: the analytic size-biased share must match a
+    # biomass-weighted Monte Carlo of the SAME lognormal population.
+    import math
+    import random
+    mean, cv, lo, hi = 4.0, 0.18, 3.629, 4.536
+    s = math.sqrt(math.log(1 + cv * cv))
+    mu = math.log(mean) - 0.5 * s * s
+    rng = random.Random(42)
+    draws = [rng.lognormvariate(mu, s) for _ in range(200_000)]
+    mc = (sum(w for w in draws if lo <= w < hi) / sum(draws))
+    assert A.biomass_band_fraction(mean, cv, lo, hi) == pytest.approx(mc, abs=0.01)
+
+
+def test_band_fraction_degenerate_and_total():
+    # cv=0 collapses to the old step function; wide band captures ~all kg.
+    assert A.biomass_band_fraction(4.0, 0.0, 3.629, 4.536) == 1.0
+    assert A.biomass_band_fraction(4.0, 0.0, 5.0, 6.0) == 0.0
+    assert A.biomass_band_fraction(4.0, 0.18, 0.001, 1000.0) == pytest.approx(1.0, abs=1e-6)
+
+
+def test_revenue_spreads_kg_across_bands():
+    rows = [{"week": "2026-W32", "count": 500, "gross_avg_kg": 3.5,
+             "gross_kg": 1750.0, "hog_kg": 1500.0, "hog_avg_kg": 3.0}]
     rev = A.revenue_for(rows, _econ())
-    assert rev["total"] == pytest.approx(1000 * 8 + 2000 * 10)
-    assert rev["priced_kg"] == pytest.approx(3000.0)
-    assert rev["unpriced_kg"] == pytest.approx(600.0)
-    assert rev["by_band"][1]["revenue"] == pytest.approx(20000.0)
+    # Mean sits ON the 2-3/3-5 band edge: kg splits across BOTH bands
+    # (roughly half each, size-bias tilting to the upper), none silently lost.
+    assert rev["by_band"][0]["kg"] > 0 and rev["by_band"][1]["kg"] > 0
+    assert rev["priced_kg"] + rev["unpriced_kg"] == pytest.approx(1500.0)
+    assert rev["unpriced_kg"] < 150.0        # only the far tails are unpriced
+    assert rev["total"] == pytest.approx(
+        rev["by_band"][0]["kg"] * 8.0 + rev["by_band"][1]["kg"] * 10.0)
+
+
+def test_revenue_tails_outside_ladder_are_unpriced():
+    rows = [{"week": "2026-W33", "count": 100, "gross_avg_kg": 7.0,
+             "gross_kg": 700.0, "hog_kg": 600.0, "hog_avg_kg": 6.0}]
+    rev = A.revenue_for(rows, _econ())
+    # Mean 6.0 kg is above every band: most kg unpriced, a little lower-tail
+    # kg lands in the 3-5 band — loud gap, not an invented price.
+    assert rev["unpriced_kg"] > 400.0
+    assert rev["priced_kg"] == pytest.approx(600.0 - rev["unpriced_kg"])
+
+
+def test_revenue_monthly_price_override():
+    econ = _econ()
+    econ["price_bands"][1]["monthly"] = {"2026-08": 12.0}   # W32 -> 2026-08
+    rows = [{"week": "2026-W32", "count": 500, "gross_avg_kg": 4.7,
+             "gross_kg": 2350.0, "hog_kg": 2000.0, "hog_avg_kg": 4.0}]
+    base = A.revenue_for(rows, _econ())
+    bumped = A.revenue_for(rows, econ)
+    # Same kg distribution; the 3-5 band earns 12 instead of 10 in August.
+    assert bumped["by_band"][1]["kg"] == pytest.approx(base["by_band"][1]["kg"])
+    assert bumped["by_band"][1]["revenue"] == pytest.approx(
+        base["by_band"][1]["kg"] * 12.0)
+
+
+def test_load_economics_model_cv_and_monthly(tmp_path):
+    (tmp_path / A.ECONOMICS_FILE).write_text(
+        "currency: USD\nbasis: hog\nmodel_cv_pct: 22\n"
+        "price_bands:\n"
+        "  - min_kg: 2.0\n    max_kg: 3.0\n    price_per_kg: 8.0\n"
+        "    monthly:\n      2026-09: 9.1\n")
+    e = A.load_economics(tmp_path)
+    assert e["model_cv_pct"] == 22.0
+    assert e["price_bands"][0]["monthly"] == {"2026-09": 9.1}
+    # Legacy schema (no model_cv_pct / monthly) still loads with defaults.
+    (tmp_path / A.ECONOMICS_FILE).write_text(
+        "currency: USD\nprice_bands:\n"
+        "  - min_kg: 2.0\n    max_kg: 3.0\n    price_per_kg: 8.0\n")
+    e2 = A.load_economics(tmp_path)
+    assert e2["model_cv_pct"] == 18.0 and e2["price_bands"][0]["monthly"] == {}
 
 
 def test_load_economics_rejects_empty_bands(tmp_path):
