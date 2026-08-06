@@ -1337,3 +1337,39 @@ basis is now FW-inclusive, the controller anticipates the known FW curve, and th
 operator cap reports + the feed dual-limit were aligned to match (§4.1, §6). The two
 engines now agree on tonnage (~8.2M kg), both 0 weeks over the true cap. Use Global as a
 **cross-check and diagnostic**, not a replacement for the validated controller.
+
+## 13. Analyze mode — find my best plan (one flow)
+
+The modes above each answer a PIECE of the real question — *which engine, with
+which knobs, gives the best plan that passes the hard rules?* **Analyze** runs
+that whole composition in one flow and ends in a single recommendation card:
+
+1. **Engine round** — every planning method once on your current config (the
+   same runs as Compare & Choose; finished legs are shared both ways, nothing
+   runs twice). Global CP-SAT is an opt-in checkbox (slow).
+2. **Knob round** — the Grid + Deep search (what Auto-optimize uses) on the
+   live-config engine, then a verification run of the winner on that SAME
+   engine.
+3. **The checklist** — every candidate is judged on the hard-rule checklist:
+   conservation and never-an-empty-week are **hard** (a fail disqualifies);
+   the biomass cap, the 55k processing cap, and your **harvest targets** are
+   soft (flagged and penalized, never hidden).
+4. **The card** — one recommended plan (pick order: hard rules → soft rules →
+   target shortfall → emphasis score), with **✅ Adopt this plan** (saves the
+   knobs, sets the ▶ Run forecast method, loads the run) and **⭐ Promote as
+   Quick-run default**.
+
+**Targets & prices** (Configure → Targets & prices): monthly/yearly harvest
+targets in kg (HOG or gross) judged with a tolerance — *penalized, never
+disqualifying* — and price-per-kg bands by fish size that turn each plan into
+a revenue figure. Harvest outside every band is reported **unpriced** rather
+than silently priced. These are analysis overlays: editing them re-judges
+existing results instantly and never invalidates cached runs.
+
+**The promoted default** lives in `config/analysis_defaults.yaml` — versioned
+with your config, included in config exports, never written to an output
+workbook, so it cannot be lost to a run. Promotion is **manual by design**:
+the tool never changes its own defaults. Once promoted, the **⚡ Quick run**
+card at the top of Analyze re-validates that exact plan (one run + the
+checklist, minutes not hours) — use it as the everyday sanity check and the
+full analysis when the PR or the facility changes materially.

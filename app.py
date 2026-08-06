@@ -2650,15 +2650,24 @@ def _current_horizon_start():
     return h, s
 
 
+# Analysis-layer files are SCORING overlays, not engine inputs — editing a
+# harvest target or a price band changes no run's output, so they must not
+# invalidate cached board legs / sweep results (which would force hours of
+# re-runs to change a number the checklist re-judges instantly).
+_NON_ENGINE_CONFIG = {"targets.yaml", "economics.yaml", "analysis_defaults.yaml"}
+
+
 def _config_fingerprint() -> str:
-    """Hash of config/ + scenario/ file names + mtimes — changes whenever any
-    config is saved, so a cached template can be invalidated."""
+    """Hash of config/ + scenario/ ENGINE-INPUT file names + mtimes — changes
+    whenever any config that affects a run is saved, so cached templates,
+    board legs and sweep results invalidate. Analysis-overlay files are
+    excluded (see _NON_ENGINE_CONFIG)."""
     import hashlib
     h = hashlib.md5()
     for d in (CONFIG_DIR, SCENARIO_DIR):
         if d.exists():
             for p in sorted(d.iterdir()):
-                if p.is_file():
+                if p.is_file() and p.name not in _NON_ENGINE_CONFIG:
                     h.update(p.name.encode())
                     h.update(str(p.stat().st_mtime_ns).encode())
     return h.hexdigest()
@@ -2760,6 +2769,128 @@ def _config_io_section():
                 st.error(f"Import failed: {e}")
 
 
+def _edit_targets_prices():
+    """Harvest targets + price bands — the ANALYSIS overlay. These score and
+    judge plans (Analyze mode's checklist + revenue) but change no engine
+    output, so saving here never invalidates cached runs."""
+    from forecast import analysis as _ana
+
+    st.markdown("**Harvest targets** — monthly / yearly harvest the plan "
+                "should deliver. Judged with a tolerance and **penalized, "
+                "never disqualifying**: Analyze flags shortfalls and prefers "
+                "plans that meet them, but a miss doesn't hide a plan.")
+    t = _ana.load_targets(CONFIG_DIR) or {"basis": "hog", "tolerance_pct": 5.0,
+                                          "monthly": {}, "yearly": {}}
+    c1, c2 = st.columns(2)
+    basis = c1.radio("Target basis", ["hog", "gross"], horizontal=True,
+                     index=0 if t["basis"] == "hog" else 1, key="tgt_basis",
+                     help="HOG = head-off gutted (sold) kg; gross = live kg.")
+    tol = c2.number_input("Tolerance (%)", min_value=0.0, max_value=50.0,
+                          value=float(t["tolerance_pct"]), step=1.0,
+                          key="tgt_tol",
+                          help="Within this % under target counts as CLOSE "
+                               "(soft warn) instead of MISSED.")
+    mdf = st.data_editor(
+        pd.DataFrame([{"Month": k, "Target_kg": v}
+                      for k, v in sorted(t["monthly"].items())]
+                     or [{"Month": "", "Target_kg": None}]),
+        num_rows="dynamic", hide_index=True, use_container_width=True,
+        key="tgt_monthly",
+        column_config={
+            "Month": st.column_config.TextColumn(
+                "Month (YYYY-MM)", help="e.g. 2026-11"),
+            "Target_kg": st.column_config.NumberColumn(
+                "Target (kg)", min_value=0.0, step=1000.0),
+        })
+    ydf = st.data_editor(
+        pd.DataFrame([{"Year": k, "Target_kg": v}
+                      for k, v in sorted(t["yearly"].items())]
+                     or [{"Year": "", "Target_kg": None}]),
+        num_rows="dynamic", hide_index=True, use_container_width=True,
+        key="tgt_yearly",
+        column_config={
+            "Year": st.column_config.TextColumn("Year (YYYY)"),
+            "Target_kg": st.column_config.NumberColumn(
+                "Target (kg)", min_value=0.0, step=10000.0),
+        })
+
+    st.divider()
+    st.markdown("**Price per fish size** — turns harvest into revenue on the "
+                "Analyze board. Each harvest event is priced by its average "
+                "fish weight; harvest falling in **no band is reported as "
+                "unpriced** (a loud gap, never an invented price).")
+    e = _ana.load_economics(CONFIG_DIR) or {"currency": "USD", "basis": "hog",
+                                            "price_bands": []}
+    c3, c4 = st.columns(2)
+    cur = c3.text_input("Currency", value=e["currency"], key="eco_cur")
+    ebasis = c4.radio("Price basis", ["hog", "gross"], horizontal=True,
+                      index=0 if e["basis"] == "hog" else 1, key="eco_basis",
+                      help="Which weight the bands + revenue are on.")
+    bdf = st.data_editor(
+        pd.DataFrame(e["price_bands"]
+                     or [{"min_kg": None, "max_kg": None, "price_per_kg": None}]),
+        num_rows="dynamic", hide_index=True, use_container_width=True,
+        key="eco_bands",
+        column_config={
+            "min_kg": st.column_config.NumberColumn(
+                "Min fish wt (kg, incl.)", min_value=0.0, step=0.25),
+            "max_kg": st.column_config.NumberColumn(
+                "Max fish wt (kg, excl.)", min_value=0.0, step=0.25),
+            "price_per_kg": st.column_config.NumberColumn(
+                "Price / kg", min_value=0.0, step=0.1),
+        })
+
+    if st.button("💾 Save targets & prices", key="tgt_save", type="primary"):
+        import re as _re
+        monthly, yearly, errs = {}, {}, []
+        for rec in _records(mdf):
+            mth, kg = str(rec.get("Month") or "").strip(), rec.get("Target_kg")
+            if not mth and kg in (None, ""):
+                continue
+            if not _re.fullmatch(r"20\d{2}-(0[1-9]|1[0-2])", mth):
+                errs.append(f"bad month '{mth}' (want YYYY-MM)")
+            elif kg in (None, ""):
+                errs.append(f"month {mth} has no target")
+            else:
+                monthly[mth] = float(kg)
+        for rec in _records(ydf):
+            yr, kg = str(rec.get("Year") or "").strip(), rec.get("Target_kg")
+            if not yr and kg in (None, ""):
+                continue
+            if not _re.fullmatch(r"20\d{2}", yr):
+                errs.append(f"bad year '{yr}' (want YYYY)")
+            elif kg in (None, ""):
+                errs.append(f"year {yr} has no target")
+            else:
+                yearly[yr] = float(kg)
+        bands = []
+        for rec in _records(bdf):
+            lo, hi, p = (rec.get("min_kg"), rec.get("max_kg"),
+                         rec.get("price_per_kg"))
+            if lo in (None, "") and hi in (None, "") and p in (None, ""):
+                continue
+            if None in (lo, hi, p) or "" in (lo, hi, p):
+                errs.append("a price band is half-filled")
+            elif float(hi) <= float(lo):
+                errs.append(f"band {lo}–{hi}: max must exceed min")
+            else:
+                bands.append({"min_kg": float(lo), "max_kg": float(hi),
+                              "price_per_kg": float(p)})
+        if errs:
+            for x in errs:
+                st.error(x)
+        else:
+            _ana.save_targets(str(CONFIG_DIR), {
+                "basis": basis, "tolerance_pct": float(tol),
+                "monthly": monthly, "yearly": yearly})
+            _ana.save_economics(str(CONFIG_DIR), {
+                "currency": cur or "USD", "basis": ebasis,
+                "price_bands": bands})
+            st.success(f"Saved — {len(monthly)} monthly + {len(yearly)} yearly "
+                       f"target(s), {len(bands)} price band(s). Analyze "
+                       f"re-judges instantly; no runs are invalidated.")
+
+
 def _config_editor():
     st.header("⚙️ Configure — models & control")
     st.caption("Build the forecast config here — saved to `config/` + `scenario/` "
@@ -2774,7 +2905,7 @@ def _config_editor():
         return
 
     tabs = st.tabs(["Control", "Biology models", "Facility (tanks)",
-                    "Batches", "Limits"])
+                    "Batches", "Limits", "Targets & prices"])
     with tabs[0]:
         _edit_control()
     with tabs[1]:
@@ -2785,6 +2916,8 @@ def _config_editor():
         _edit_batches()
     with tabs[4]:
         _edit_limits()
+    with tabs[5]:
+        _edit_targets_prices()
 
 
 # ============================================================
@@ -2835,10 +2968,14 @@ with st.sidebar:
         st.session_state["app_mode"] = "Run forecast"
     app_mode = st.radio(
         "Mode",
-        ["Run forecast", "Configure (models & control)", "Tune (density knobs)",
+        ["Run forecast", "Analyze (find my best plan)",
+         "Configure (models & control)", "Tune (density knobs)",
          "Optimize (multi-objective)", "Compare & Choose (all methods)"],
-        help="Run forecast: upload a PR and run. Configure: edit the app's "
-             "biology models, facility, control, batches, and limits. "
+        help="Run forecast: upload a PR and run. Analyze: ONE flow that runs "
+             "the engines, tunes the knobs, grades everything on the hard-rule "
+             "checklist (incl. your harvest targets), and recommends a single "
+             "plan to adopt. Configure: edit the app's "
+             "biology models, facility, control, batches, limits, and targets. "
              "Tune: sweep the controller knobs and read the per-batch "
              "density distribution. Optimize: sweep knobs and rank variants on a "
              "selectable objective (walk the line + minimize feed/handling). "
@@ -4701,6 +4838,390 @@ def _compare_and_choose():
                     st.session_state["_goto_run_mode"] = True
                     st.rerun()
 
+
+# ============================================================
+# Analyze — ONE flow: engines → knobs → checklist → a single card
+# ============================================================
+
+def _ana_grade(res, targets, econ):
+    """Analysis-layer grading for one finished run: gate checklist + target
+    review + revenue. Harvest rows are cached on the result dict (keyed by
+    rid) so target/price edits re-judge instantly without re-reading the
+    workbook — the overlay files are deliberately outside the config
+    fingerprint for the same reason."""
+    from forecast import analysis as _ana
+    rid = _result_rid(res)
+    cached = res.get("_ana_rows")
+    if not cached or cached.get("rid") != rid:
+        try:
+            rows = (_ana.harvest_rows(res["output_path"])
+                    if res.get("output_path") else [])
+        except Exception:  # noqa: BLE001 — grading must not kill the board
+            rows = []
+        cached = {"rid": rid, "rows": rows}
+        res["_ana_rows"] = cached
+    rows = cached["rows"]
+    tr = None
+    if targets:
+        monthly, yearly = _ana.harvest_by_period(
+            rows, basis=targets.get("basis", "hog"))
+        tr = _ana.review_targets(monthly, yearly, targets)
+    rev = _ana.revenue_for(rows, econ) if (econ and rows) else None
+    sc = res.get("_score") or {}
+    m = sc.get("metrics")
+    v = sc.get("verdict") or {}
+    h = sc.get("harvest") or {}
+    peak_pct = None
+    if m is not None and getattr(m, "biomass_cap", 0):
+        peak_pct = m.overall_peak_biomass / m.biomass_cap * 100.0
+    ctx = {
+        "dropped": v.get("dropped", 0), "overprod": v.get("overprod", 0),
+        "zero_weeks": h.get("zero_weeks"),
+        "weeks_over_harvest_cap": (m.weeks_over_harvest_cap
+                                   if m is not None else None),
+        "peak_pct_of_cap": peak_pct,
+        "targets_review": tr,
+    }
+    return {"gates": _ana.evaluate_gates(ctx), "targets_review": tr,
+            "revenue": rev, "metrics": m}
+
+
+_ANA_ICON = {"PASS": "✅", "WARN": "⚠️", "FAIL": "❌", "N/A": "◽"}
+
+
+def _ana_checklist(gates):
+    for g in gates:
+        hard = " **(hard rule)**" if g["hard"] else ""
+        st.markdown(f"{_ANA_ICON.get(g['status'], '◽')} **{g['label']}**{hard}"
+                    f" — {g['detail']}")
+
+
+def _analyze():
+    import hashlib
+    from datetime import datetime as _dtn
+    from forecast import analysis as _ana
+    st.header("🧭 Analyze — find my best plan")
+    st.caption(
+        "The whole decision in one flow: run every planning engine, tune the "
+        "knobs on top, judge every candidate on the **hard-rule checklist** "
+        "(conservation, never-an-empty-week, caps, your harvest targets), and "
+        "recommend ONE plan. The modes it composes (Compare & Choose, "
+        "Optimize) stay available for steering any phase by hand — finished "
+        "runs are shared, nothing runs twice.")
+
+    _cfg_ok = _config_ready() and _scenario_ready()
+    _pr_ok = pr is not None and pr["ok"]
+    if not _cfg_ok:
+        st.info("No config yet — set it up in **Configure** first.")
+        return
+    if not _pr_ok:
+        st.info("Upload a valid **ProductionReport** in the sidebar first.")
+        return
+
+    targets = _ana.load_targets(CONFIG_DIR)
+    econ = _ana.load_economics(CONFIG_DIR)
+    _t_bits = []
+    _t_bits.append(f"🎯 {len((targets or {}).get('monthly', {}))} monthly + "
+                   f"{len((targets or {}).get('yearly', {}))} yearly target(s)"
+                   if targets else "🎯 no harvest targets set")
+    _t_bits.append(f"💰 {len(econ['price_bands'])} price band(s) ({econ['currency']})"
+                   if econ else "💰 no prices set")
+    st.caption(" · ".join(_t_bits) + " — edit in **Configure → Targets & prices**; "
+               "edits re-judge existing results instantly (no re-runs).")
+
+    # ---- ⚡ Quick run — the operator-promoted default ----
+    promoted = _ana.load_promoted_default(CONFIG_DIR)
+    if promoted:
+        with st.container(border=True):
+            _pk = ", ".join(f"{k}={v}" for k, v in
+                            (promoted.get("overrides") or {}).items()) or "no knob overrides"
+            st.markdown(f"**⚡ Promoted default** — `{promoted['method']}` · {_pk} · "
+                        f"promoted {promoted.get('promoted_ts', '?')}"
+                        + (f" · _{promoted['note']}_" if promoted.get("note") else ""))
+            qc1, qc2 = st.columns([1, 3])
+            if qc1.button("⚡ Quick run this default", key="ana_quick",
+                          help="One run + the checklist — minutes, not the full "
+                               "analysis. Uses the promoted method + knobs; "
+                               "changes nothing."):
+                with st.status("Quick run — promoted default…", expanded=False) as _qs:
+                    _qcfg = optimize.config_dir_with_overrides(
+                        str(CONFIG_DIR), promoted.get("overrides") or {})
+                    _qm = (promoted["method"] if promoted["method"] in _METHODS
+                           else "as-configured")
+                    qres = _run_with_workbook_bytes(
+                        uploaded.getvalue(), uploaded.name, config_dir=_qcfg,
+                        scenario_dir=str(SCENARIO_DIR), method=_qm,
+                        cpsat_time=300.0, cpsat_det_time=_cpsat_det_time(),
+                        cpsat_workers=_cpu_workers(),
+                        on_line=lambda ln, _s=_qs: _s.update(label=ln[:100]))
+                    _qs.update(state="complete" if qres.get("ok") else "error")
+                if qres.get("ok"):
+                    qres["_label"] = "Quick run — promoted default"
+                    _ensure_board_score(qres, qres["_label"])
+                    st.session_state["_ana_quick"] = {
+                        "res": qres, "sig": _sweep_inputs_sig()}
+                else:
+                    st.error(f"Quick run failed: {qres.get('error', 'unknown')}")
+            qr = st.session_state.get("_ana_quick")
+            if qr and qr["res"].get("ok"):
+                if qr.get("sig") != _sweep_inputs_sig():
+                    st.warning("This quick run predates a PR/config change — "
+                               "re-run it.")
+                _qg = _ana_grade(qr["res"], targets, econ)
+                _ana_checklist(_qg["gates"])
+                if _qg["revenue"]:
+                    _rv = _qg["revenue"]
+                    st.caption(f"Revenue ≈ **{_rv['total']:,.0f} {_rv['currency']}**"
+                               + (f" · ⚠ {_rv['unpriced_kg']:,.0f} kg unpriced "
+                                  f"(outside every band)" if _rv["unpriced_kg"] else ""))
+                if qc2.button("Load this run into the Run-forecast tabs",
+                              key="ana_quick_load"):
+                    st.session_state.result = {
+                        **qr["res"], "_run_label": qr["res"]["_label"]}
+                    st.session_state["_goto_run_mode"] = True
+                    st.rerun()
+
+    # ---- Full analysis ----
+    st.subheader("Full analysis")
+    emphasis = st.selectbox(
+        "What should 'best' mean? (the emphasis for the knob search + final score)",
+        list(optimize.EMPHASIS_PRESETS.keys()), key="ana_emph",
+        help="Hard rules always come first regardless of emphasis; this weights "
+             "the soft objectives (flat biomass, feed, handling, density).")
+    include_milp = st.checkbox(
+        "Include Global — CP-SAT optimal (adds ~30 min; finished legs are reused)",
+        value=False, key="ana_milp")
+    _n_eng = len([k for k in _BOARD_ORDER if k not in _BOARD_OPTIONAL or include_milp])
+    go = st.button(f"▶ Run full analysis ({_n_eng} engines + knob search "
+                   f"+ checklist)", type="primary", key="ana_go")
+
+    if go:
+        pr_md5 = hashlib.md5(uploaded.getvalue()).hexdigest()
+        roster = [(k, _METHODS[k].label) for k in _BOARD_ORDER
+                  if k not in _BOARD_OPTIONAL or include_milp]
+        store = st.session_state.setdefault("_board_store", {})
+        n_phases = len(roster) + 2
+        bar = st.progress(0.0, text="Phase 1/3 — engine round…")
+        # Phase 1: every engine once on the CURRENT config (board legs reused
+        # both ways — a leg run here shows up finished on Compare & Choose).
+        for i, (mkey, mlabel) in enumerate(roster):
+            msig = _board_method_sig(mkey, pr_md5)
+            done = store.get(mkey)
+            if (done and done.get("sig") == msig and done["res"].get("ok")
+                    and done["res"].get("output_path")):
+                _ensure_board_score(done["res"], mlabel)
+                bar.progress((i + 1) / n_phases, text=f"{mlabel} — reused ✓")
+                continue
+            bar.progress(i / n_phases, text=f"Phase 1/3 — running {mlabel} "
+                         f"(typically {_TYPICAL.get(mkey, '?')})…")
+            with st.status(f"Running {mlabel}…", expanded=False) as _ms:
+                res = _run_with_workbook_bytes(
+                    uploaded.getvalue(), uploaded.name,
+                    config_dir=str(CONFIG_DIR), scenario_dir=str(SCENARIO_DIR),
+                    method=mkey, cpsat_time=300.0,
+                    cpsat_det_time=_cpsat_det_time(),
+                    cpsat_workers=_cpu_workers(),
+                    on_line=lambda ln, _s=_ms, _l=mlabel: _s.update(
+                        label=f"{_l} — {ln[:100]}"))
+                _ms.update(state="complete" if res.get("ok") else "error")
+            res["_label"] = mlabel
+            _ensure_board_score(res, mlabel)
+            store[mkey] = {"sig": msig, "res": res}
+        # Phase 2: knob search on the live-config engine (Grid + Deep — what
+        # Auto-optimize uses), then verify the winner on the SAME engine.
+        bar.progress(len(roster) / n_phases,
+                     text="Phase 2/3 — knob search (Grid + Deep)…")
+        work = Path(tempfile.mkdtemp(prefix="as_ana_"))
+        in_path = work / (uploaded.name or "input.xlsm")
+        in_path.write_bytes(uploaded.getvalue())
+        _w = optimize.weights_for(emphasis)
+        try:
+            opt_results = optimize.deep_search_combined(
+                str(in_path), str(CONFIG_DIR), str(SCENARIO_DIR),
+                emphasis=emphasis, weights=_w,
+                progress=lambda i, m, label: bar.progress(
+                    min((len(roster) + 0.9) / n_phases,
+                        (len(roster) + (i / m if m else 0.9)) / n_phases),
+                    text=f"Phase 2/3 — knob search [{i}"
+                         f"{'/' + str(m) if m else ''}] {label}…"),
+                max_workers=_cpu_workers())
+            _rec = optimize.recommend(opt_results, emphasis=emphasis, weights=_w)
+            _best = _opt_winner(opt_results, _rec)
+        except Exception as e:  # noqa: BLE001
+            st.error(f"Knob search failed: {e}")
+            st.code(traceback.format_exc())
+            return
+        bar.progress((n_phases - 1) / n_phases,
+                     text="Phase 3/3 — verifying the tuned winner…")
+        tuned_res = None
+        _knob_str = ", ".join(f"{k}={v}" for k, v in
+                              (_best.overrides or {}).items())
+        if _best.overrides:
+            _tcfg = optimize.config_dir_with_overrides(str(CONFIG_DIR),
+                                                       _best.overrides)
+            tuned_res = _run_with_workbook_bytes(
+                uploaded.getvalue(), uploaded.name, config_dir=_tcfg,
+                scenario_dir=str(SCENARIO_DIR), method="as-configured")
+            if tuned_res.get("ok"):
+                tuned_res["_label"] = f"Tuned config — {_knob_str}"
+                _ensure_board_score(tuned_res, tuned_res["_label"])
+            else:
+                st.warning("The tuned winner's verification run failed — "
+                           "recommending among the engine round only. "
+                           f"({tuned_res.get('error', 'unknown')})")
+                tuned_res = None
+        bar.progress(1.0, text="Analysis complete")
+        st.session_state["_ana"] = {
+            "sig": _sweep_inputs_sig(), "emphasis": emphasis,
+            "made": _dtn.now().isoformat(timespec="seconds"),
+            "engine_keys": [k for k, _ in roster],
+            "tuned": ({"overrides": dict(_best.overrides), "res": tuned_res}
+                      if tuned_res else None),
+        }
+
+    ana = st.session_state.get("_ana")
+    if not ana:
+        st.caption("No analysis yet — click ▶ above. Roughly "
+                   f"{'1½–2 h' if include_milp else '45–75 min'} hands-off; "
+                   "finished engine legs are reused across re-runs and shared "
+                   "with Compare & Choose.")
+        return
+    if ana["sig"] != _sweep_inputs_sig():
+        st.warning("⚠ This analysis was computed on a **different PR or "
+                   "config** than what's loaded now — re-run it before "
+                   "adopting anything.")
+
+    # ---- Build + grade candidates (targets/prices re-judged live) ----
+    store = st.session_state.get("_board_store", {})
+    cands = []
+    for k in ana["engine_keys"]:
+        done = store.get(k)
+        if done and done["res"].get("ok") and done["res"].get("_score"):
+            cands.append({"key": k, "label": done["res"].get("_label", k),
+                          "overrides": {}, "res": done["res"]})
+    if ana.get("tuned") and ana["tuned"]["res"].get("ok"):
+        cands.append({"key": "_tuned",
+                      "label": ana["tuned"]["res"].get("_label", "Tuned config"),
+                      "overrides": ana["tuned"]["overrides"],
+                      "res": ana["tuned"]["res"]})
+    if not cands:
+        st.error("No graded candidates survived — check the engine round above.")
+        return
+    for c in cands:
+        g = _ana_grade(c["res"], targets, econ)
+        c.update(gates=g["gates"], targets_review=g["targets_review"],
+                 revenue=g["revenue"], metrics=g["metrics"], score=None)
+    # Comparable emphasis score across candidates (same scorer as Optimize).
+    _w = optimize.weights_for(ana.get("emphasis", "balanced"))
+    _variants = [optimize.OptVariant(label=c["label"], overrides=c["overrides"],
+                                     metrics=c["metrics"], dropped=0, overprod=0)
+                 for c in cands if c["metrics"] is not None]
+    if _variants:
+        optimize.score_variants(_variants, _w)
+        _by_label = {v.label: v.score for v in _variants}
+        for c in cands:
+            c["score"] = _by_label.get(c["label"])
+
+    from forecast.analysis import rank_key as _rank_key
+    ranked = sorted(cands, key=_rank_key)
+    winner, runner = ranked[0], (ranked[1] if len(ranked) > 1 else None)
+
+    # ---- The card ----
+    st.divider()
+    st.subheader("🏆 Recommended plan")
+    st.caption(f"Analysis of {ana['made']} · emphasis **{ana.get('emphasis')}** · "
+               "pick order: hard rules → soft rules → target shortfall → score.")
+    with st.container(border=True):
+        st.markdown(f"### {winner['label']}")
+        if winner["overrides"]:
+            st.code(optimize.overrides_yaml(winner["overrides"]), language="yaml")
+        _ana_checklist(winner["gates"])
+        if winner["revenue"]:
+            _rv = winner["revenue"]
+            st.markdown(f"**Revenue ≈ {_rv['total']:,.0f} {_rv['currency']}**"
+                        + (f" · ⚠ {_rv['unpriced_kg']:,.0f} kg unpriced"
+                           if _rv["unpriced_kg"] else ""))
+        if runner is not None:
+            st.caption(f"Runner-up: **{runner['label']}** — kept below for "
+                       "drill-in; the full table shows every candidate.")
+        a1, a2 = st.columns(2)
+        if a1.button("✅ Adopt this plan", type="primary", key="ana_adopt",
+                     help="Saves the winning knobs (if any) to config, makes "
+                          "this the method ▶ Run forecast uses, and loads the "
+                          "run into the tabs."):
+            if winner["overrides"]:
+                optimize.save_overrides_to_config(str(CONFIG_DIR),
+                                                  winner["overrides"])
+                _clear_all_editor_state()
+            st.session_state["_chosen_method"] = (
+                winner["key"] if winner["key"] in _METHODS else _DEFAULT_METHOD)
+            st.session_state.result = {
+                **winner["res"], "_run_label": f"Analyze — {winner['label']}"}
+            st.session_state["_goto_run_mode"] = True
+            st.rerun()
+        if a2.button("⭐ Promote as Quick-run default", key="ana_promote",
+                     help="Stores method + knobs in config/analysis_defaults.yaml "
+                          "(versioned with your config, exported with snapshots — "
+                          "cannot be lost to an output file). Manual by design: "
+                          "the tool never changes its own defaults."):
+            from datetime import datetime as _dtn2
+            _gsum = {g["key"]: g["status"] for g in winner["gates"]}
+            _ana.save_promoted_default(
+                str(CONFIG_DIR),
+                method=(winner["key"] if winner["key"] in _METHODS
+                        else _DEFAULT_METHOD),
+                overrides=winner["overrides"],
+                promoted_ts=_dtn2.now().isoformat(timespec="seconds"),
+                note=f"won analysis on {uploaded.name}",
+                evidence={"gates": _gsum, "score": winner.get("score"),
+                          "emphasis": ana.get("emphasis")})
+            st.success("Promoted — the ⚡ Quick run card at the top now uses "
+                       "this plan.")
+
+    # ---- Full candidate table ----
+    st.subheader("All candidates")
+    _rows = []
+    for c in ranked:
+        tr = c.get("targets_review") or {}
+        _rows.append({
+            "Candidate": c["label"],
+            "Gates": " ".join(_ANA_ICON.get(g["status"], "◽")
+                              for g in c["gates"]),
+            "Hard fails": sum(1 for g in c["gates"]
+                              if g["hard"] and g["status"] == "FAIL"),
+            "Targets met": (f"{tr.get('met', 0)}/{tr.get('judged', 0)}"
+                            if tr.get("judged") else "—"),
+            "Shortfall (t)": (round(tr.get("total_shortfall_kg", 0) / 1000.0, 1)
+                              if tr.get("judged") else None),
+            "Revenue": (f"{c['revenue']['total']:,.0f}" if c.get("revenue")
+                        else "—"),
+            "Score": (round(c["score"], 3) if c.get("score") is not None
+                      else None),
+        })
+    st.dataframe(pd.DataFrame(_rows), hide_index=True, use_container_width=True)
+    st.caption("Gate icons in checklist order: " +
+               " · ".join(g["label"] for g in ranked[0]["gates"]) +
+               ". Scores are the emphasis-weighted objective (lower is "
+               "better), comparable across candidates.")
+    with st.expander("🎯 Target detail — every period, every candidate"):
+        for c in ranked:
+            tr = c.get("targets_review")
+            if not tr or not tr.get("rows"):
+                continue
+            st.markdown(f"**{c['label']}**")
+            st.dataframe(pd.DataFrame([
+                {"Period": r["period"], "Target (t)": r["target_kg"] / 1000.0,
+                 "Planned (t)": round(r["actual_kg"] / 1000.0, 1),
+                 "% of target": (round(r["pct"], 1) if r["pct"] is not None
+                                 else None),
+                 "Status": r["status"]}
+                for r in tr["rows"]]), hide_index=True,
+                use_container_width=True)
+
+
+if app_mode.startswith("Analyze"):
+    _analyze()
+    st.stop()
 
 if app_mode.startswith("Compare"):
     _compare_and_choose()
