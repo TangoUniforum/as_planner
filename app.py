@@ -47,6 +47,14 @@ _TYPICAL = {"controller": "~30 s", "controller-hybrid": "~40 s",
             "controller-lns": "~30 s", "global-lp": "~4 min",
             "global-milp": "~30 min+"}
 _BOARD_OPTIONAL = {"global-milp"}          # behind its own checkbox (slow)
+# Pseudo-method: run the controller pipeline on the given config EXACTLY as-is,
+# with NO registry pins layered on top. Optimize's sweep measures variants that
+# way (variant knobs onto the live config, nothing else), so its verification
+# runs must too — passing "controller" here would pin hybrid_follow off and
+# verify a DIFFERENT engine than every variant the sweep just scored.
+_AS_CONFIGURED = _methods.Method(
+    key="as-configured", label="As configured", family="Controller",
+    blurb="", engine="controller")
 
 # App-managed config (Phase 1) + scenario (Phase 2) live here. In PR-only
 # mode the app reads these instead of pulling everything from the upload;
@@ -3045,7 +3053,8 @@ def _run_with_workbook_bytes(
     """
     work_dir = Path(tempfile.mkdtemp(prefix="as_forecast_"))
     in_path = work_dir / input_name
-    _m = _METHODS.get(method) or _METHODS["controller"]
+    _m = (_AS_CONFIGURED if method == "as-configured"
+          else _METHODS.get(method) or _METHODS["controller"])
     _is_global_engine = (_m.engine == "global")
     _is_optimal = bool(_m.engine_kwargs.get("optimal"))
     # The global method emits a fresh .xlsx (no VBA to carry); the controller
@@ -3977,6 +3986,19 @@ def _optimizer():
         control_to_dict(load_control(CONFIG_DIR)),
         "ℹ️ Base configuration — the search tunes knobs ON TOP of this")
 
+    # Optimize tunes the controller-family pipeline (the live config's engine).
+    # If the plan picked on the Compare board is a GLOBAL engine, knobs found
+    # here were never measured on it — say so instead of letting a save look
+    # like it was validated for the chosen plan.
+    _ch = st.session_state.get("_chosen_method", _DEFAULT_METHOD)
+    _chm = _METHODS.get(_ch)
+    if _chm is not None and _chm.engine == "global":
+        st.warning(
+            f"Your picked plan is **{_chm.label}** (a Global engine). Optimize "
+            f"sweeps and validates the **controller-family** engine, so a "
+            f"recommendation saved here was not measured on your picked plan — "
+            f"re-run **Compare & Choose** after saving to see its effect there.")
+
     _hist = optimize.read_run_log(n=15)
     if _hist:
         with st.expander(f"📜 Recent auto-optimize runs ({len(_hist)}) — settings used + results",
@@ -3987,7 +4009,9 @@ def _optimizer():
                 kb = h.get("winning_knobs") or {}
                 _rows.append({
                     "When": h.get("ts", ""),
-                    "Method": h.get("method", ""),
+                    # This is the SEARCH method (grid/deep), not a planning
+                    # engine — label it so it can't be misread as one.
+                    "Search": h.get("method", ""),
                     "Emphasis": h.get("emphasis", ""),
                     "Winning knobs": ", ".join(f"{k}={v}" for k, v in kb.items()) or "(baseline)",
                     "Hot spot": mt.get("system_peak"),
@@ -4100,9 +4124,14 @@ def _optimizer():
             with st.spinner(f"Auto-optimize — running the full forecast with {_knobs} …"):
                 try:
                     _tmpcfg = optimize.config_dir_with_overrides(str(CONFIG_DIR), _best0.overrides)
+                    # "as-configured": the SAME engine the sweep measured (the
+                    # live config + winning knobs, no method pins) — the default
+                    # "controller" method pins hybrid_follow off and would load
+                    # a different engine's plan into the tabs than was scored.
                     _res = _run_with_workbook_bytes(
                         uploaded.getvalue(), uploaded.name,
-                        config_dir=_tmpcfg, scenario_dir=str(SCENARIO_DIR))
+                        config_dir=_tmpcfg, scenario_dir=str(SCENARIO_DIR),
+                        method="as-configured")
                 except Exception as e:  # noqa: BLE001
                     st.error(f"Auto-optimize run failed: {e}")
                     _res = {"ok": False}
@@ -4196,9 +4225,12 @@ def _optimizer():
                     # config with the knobs applied — so the result populates the
                     # full visualization tabs AND the download, not just metrics.
                     tmpcfg = optimize.config_dir_with_overrides(str(CONFIG_DIR), best.overrides)
+                    # "as-configured" — match the sweep's engine exactly (see
+                    # the auto-optimize call above for why).
                     result = _run_with_workbook_bytes(
                         uploaded.getvalue(), uploaded.name,
-                        config_dir=tmpcfg, scenario_dir=str(SCENARIO_DIR))
+                        config_dir=tmpcfg, scenario_dir=str(SCENARIO_DIR),
+                        method="as-configured")
                     if result.get("ok"):
                         result["_run_label"] = ("Optimized — "
                             + optimize.overrides_yaml(best.overrides).replace("\n", " · "))
