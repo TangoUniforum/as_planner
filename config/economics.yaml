@@ -1,21 +1,35 @@
 # Price per fish size — turns harvest into revenue on the Analyze board.
 # Edit in the app: Configure -> Targets & prices.
-# !! PLACEHOLDER VALUES (typical Atlantic salmon HOG price ladder, seeded
-# !! 2026-08-06 for the first end-to-end Analyze run) — replace with your
-# !! real price list. Bands match on the harvest event's average fish weight
-# !! (basis below); harvest outside every band is reported UNPRICED.
+#
+# BANDS = the REAL sales weight ranges (operator, 2026-08-06), HOG basis:
+#   0-2 lbs / 2-4 / 4-5.8 / 5.8-8 / 8-10 / 10-12 / 12-14 / 14-16 lbs HOG
+# converted to kg (1 lb = 0.45359 kg).
+# !! PRICES ARE STILL PLACEHOLDERS (ascending ladder) — replace price_per_kg
+# !! with the real price list per band.
 currency: USD
 basis: hog
 price_bands:
-  - min_kg: 2.0
-    max_kg: 3.0
-    price_per_kg: 8.5
-  - min_kg: 3.0
-    max_kg: 4.0
+  - min_kg: 0.0      # 0-2 lbs HOG
+    max_kg: 0.907
+    price_per_kg: 4.0
+  - min_kg: 0.907    # 2-4 lbs HOG
+    max_kg: 1.814
+    price_per_kg: 6.0
+  - min_kg: 1.814    # 4-5.8 lbs HOG
+    max_kg: 2.631
+    price_per_kg: 8.0
+  - min_kg: 2.631    # 5.8-8 lbs HOG
+    max_kg: 3.629
     price_per_kg: 9.5
-  - min_kg: 4.0
-    max_kg: 5.0
+  - min_kg: 3.629    # 8-10 lbs HOG
+    max_kg: 4.536
     price_per_kg: 10.5
-  - min_kg: 5.0
-    max_kg: 7.0
+  - min_kg: 4.536    # 10-12 lbs HOG
+    max_kg: 5.443
     price_per_kg: 11.0
+  - min_kg: 5.443    # 12-14 lbs HOG
+    max_kg: 6.35
+    price_per_kg: 11.5
+  - min_kg: 6.35     # 14-16 lbs HOG
+    max_kg: 7.257
+    price_per_kg: 12.0
