@@ -4604,6 +4604,53 @@ def _cpsat_det_time() -> float:
         "cpsat_depth", st.session_state.get("_cpsat_depth_saved", 30.0)))
 
 
+def _restore_output_path(res: dict, tag: str) -> None:
+    """A cached result's output_path points into a temp dir the OS may have
+    cleaned — regenerate the workbook from the cached bytes so drill-ins and
+    re-grading keep working after any amount of downtime."""
+    p = res.get("output_path")
+    if not p or Path(p).exists() or not res.get("output_bytes"):
+        return
+    from forecast import analysis as _ana
+    d = _ana._default_cache_dir() / "workbooks"
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+        newp = d / f"{tag}__{Path(p).name}"
+        newp.write_bytes(res["output_bytes"])
+        res["output_path"] = str(newp)
+    except OSError:
+        pass  # grading degrades gracefully (gates from the stored _score)
+
+
+def _board_store() -> dict:
+    """The per-method finished-run store, hydrated from the DISK cache once
+    per session — so a page reload, a frozen tab, or a browser restart never
+    loses a finished leg (a CP-SAT leg is 30 minutes of compute). Staleness
+    is unchanged: every entry carries its sig and is checked at use."""
+    store = st.session_state.setdefault("_board_store", {})
+    if not st.session_state.get("_board_cache_hydrated"):
+        from forecast import analysis as _ana
+        for name, obj in _ana.cache_load_all(prefix="board_").items():
+            mkey = name[len("board_"):]
+            if store.setdefault(mkey, obj) is obj and obj.get("res"):
+                _restore_output_path(obj["res"], mkey)
+        st.session_state["_board_cache_hydrated"] = True
+    return store
+
+
+def _board_persist(mkey: str) -> None:
+    """Write one method's finished entry through to the disk cache. Failures
+    are non-fatal (the session copy still works) but surfaced."""
+    from forecast import analysis as _ana
+    entry = st.session_state.get("_board_store", {}).get(mkey)
+    if not entry:
+        return
+    try:
+        _ana.cache_save(f"board_{mkey}", entry)
+    except Exception as e:  # noqa: BLE001
+        st.caption(f"⚠ couldn't disk-cache {mkey}: {e} (session copy kept)")
+
+
 def _ensure_board_score(res: dict, label: str) -> None:
     """Grade a finished run, once. The grading is three full workbook reads, so
     it lives inside the stored result — and a run whose grading failed
@@ -4685,7 +4732,7 @@ def _compare_and_choose():
     if run_all or rerun_all:
         import hashlib
         from datetime import datetime as _dtn
-        store = st.session_state.setdefault("_board_store", {})
+        store = _board_store()
         if rerun_all:
             store.clear()
         st.session_state["_board_roster"] = roster
@@ -4698,6 +4745,7 @@ def _compare_and_choose():
             if (done and done.get("sig") == msig and done["res"].get("ok")
                     and done["res"].get("output_path")):
                 _ensure_board_score(done["res"], mlabel)
+                _board_persist(mkey)   # capture a freshly-added _score too
                 bar.progress((i + 1) / n, text=f"{mlabel}: reusing finished result")
                 continue
             # The bar can only move between methods — the engine call below
@@ -4722,12 +4770,13 @@ def _compare_and_choose():
             res["_label"] = mlabel
             _ensure_board_score(res, mlabel)
             store[mkey] = {"sig": msig, "res": res}   # persists NOW, per method
+            _board_persist(mkey)                       # ...and to DISK
             bar.progress((i + 1) / n,
                          text=f"✓ {mlabel} done in {res.get('elapsed', 0):,.0f}s "
                               f"({i + 1}/{n})")
         bar.progress(1.0, text=f"All {n} method(s) complete")
 
-    store = st.session_state.get("_board_store") or {}
+    store = _board_store()
     results = {k: store[k]["res"] for k in _BOARD_ORDER if k in store}
     if not results:
         return
@@ -5015,7 +5064,7 @@ def _analyze():
         pr_md5 = hashlib.md5(uploaded.getvalue()).hexdigest()
         roster = [(k, _METHODS[k].label) for k in _BOARD_ORDER
                   if k not in _BOARD_OPTIONAL or include_milp]
-        store = st.session_state.setdefault("_board_store", {})
+        store = _board_store()
         n_phases = len(roster) + 2
         bar = st.progress(0.0, text="Phase 1/3 — engine round…")
         # Phase 1: every engine once on the CURRENT config (board legs reused
@@ -5026,6 +5075,7 @@ def _analyze():
             if (done and done.get("sig") == msig and done["res"].get("ok")
                     and done["res"].get("output_path")):
                 _ensure_board_score(done["res"], mlabel)
+                _board_persist(mkey)   # capture a freshly-added _score too
                 bar.progress((i + 1) / n_phases, text=f"{mlabel} — reused ✓")
                 continue
             bar.progress(i / n_phases, text=f"Phase 1/3 — running {mlabel} "
@@ -5043,6 +5093,7 @@ def _analyze():
             res["_label"] = mlabel
             _ensure_board_score(res, mlabel)
             store[mkey] = {"sig": msig, "res": res}
+            _board_persist(mkey)
         # Phase 2: knob search on the live-config engine (Grid + Deep — what
         # Auto-optimize uses), then verify the winner on the SAME engine.
         bar.progress(len(roster) / n_phases,
@@ -5094,8 +5145,22 @@ def _analyze():
             "tuned": ({"overrides": dict(_best.overrides), "res": tuned_res}
                       if tuned_res else None),
         }
+        # The card survives reloads/frozen tabs too — same disk cache as the
+        # engine legs (the 2026-08-06 tab freeze made this non-optional).
+        try:
+            _ana.cache_save("ana_summary", st.session_state["_ana"])
+        except Exception as e:  # noqa: BLE001
+            st.caption(f"⚠ couldn't disk-cache the analysis: {e}")
 
     ana = st.session_state.get("_ana")
+    if ana is None:
+        # New session (reload, new tab, browser restart): restore the last
+        # finished analysis from disk — sig-checked below like any other.
+        ana = _ana.cache_load_all(prefix="ana_summary").get("ana_summary")
+        if ana is not None:
+            if ana.get("tuned") and ana["tuned"].get("res"):
+                _restore_output_path(ana["tuned"]["res"], "tuned")
+            st.session_state["_ana"] = ana
     if not ana:
         st.caption("No analysis yet — click ▶ above. Roughly "
                    f"{'1½–2 h' if include_milp else '45–75 min'} hands-off; "
@@ -5108,7 +5173,7 @@ def _analyze():
                    "adopting anything.")
 
     # ---- Build + grade candidates (targets/prices re-judged live) ----
-    store = st.session_state.get("_board_store", {})
+    store = _board_store()
     cands = []
     for k in ana["engine_keys"]:
         done = store.get(k)
@@ -5175,24 +5240,27 @@ def _analyze():
                 **winner["res"], "_run_label": f"Analyze — {winner['label']}"}
             st.session_state["_goto_run_mode"] = True
             st.rerun()
+        def _promote(cand, note_prefix):
+            from datetime import datetime as _dtn2
+            _gsum = {g["key"]: g["status"] for g in cand["gates"]}
+            _ana.save_promoted_default(
+                str(CONFIG_DIR),
+                method=(cand["key"] if cand["key"] in _METHODS
+                        else _DEFAULT_METHOD),
+                overrides=cand["overrides"],
+                promoted_ts=_dtn2.now().isoformat(timespec="seconds"),
+                note=f"{note_prefix} on {uploaded.name}",
+                evidence={"gates": _gsum, "score": cand.get("score"),
+                          "emphasis": ana.get("emphasis")})
+            st.success(f"Promoted **{cand['label']}** — the ⚡ Quick run card "
+                       "at the top now uses this plan.")
+
         if a2.button("⭐ Promote as Quick-run default", key="ana_promote",
                      help="Stores method + knobs in config/analysis_defaults.yaml "
                           "(versioned with your config, exported with snapshots — "
                           "cannot be lost to an output file). Manual by design: "
                           "the tool never changes its own defaults."):
-            from datetime import datetime as _dtn2
-            _gsum = {g["key"]: g["status"] for g in winner["gates"]}
-            _ana.save_promoted_default(
-                str(CONFIG_DIR),
-                method=(winner["key"] if winner["key"] in _METHODS
-                        else _DEFAULT_METHOD),
-                overrides=winner["overrides"],
-                promoted_ts=_dtn2.now().isoformat(timespec="seconds"),
-                note=f"won analysis on {uploaded.name}",
-                evidence={"gates": _gsum, "score": winner.get("score"),
-                          "emphasis": ana.get("emphasis")})
-            st.success("Promoted — the ⚡ Quick run card at the top now uses "
-                       "this plan.")
+            _promote(winner, "won analysis")
 
     # ---- Full candidate table ----
     st.subheader("All candidates")
@@ -5219,6 +5287,19 @@ def _analyze():
                " · ".join(g["label"] for g in ranked[0]["gates"]) +
                ". Scores are the emphasis-weighted objective (lower is "
                "better), comparable across candidates.")
+    # Promote ANY candidate, not only the card's winner — the first real
+    # analysis promoted the runner-up (the tuned winner was refuted cross-PR),
+    # which needed a by-hand YAML write. Now it's a picker.
+    _pc1, _pc2 = st.columns([3, 1])
+    _pick_lbl = _pc1.selectbox(
+        "Promote a different candidate as the Quick-run default",
+        [c["label"] for c in ranked], key="ana_promote_pick",
+        help="The card's ⭐ promotes the winner; this promotes whichever "
+             "candidate YOUR judgment picks (e.g. after cross-PR evidence).")
+    if _pc2.button("⭐ Promote selected", key="ana_promote_any",
+                   use_container_width=True):
+        _cand = next(c for c in ranked if c["label"] == _pick_lbl)
+        _promote(_cand, "operator pick from the candidates table")
     with st.expander("🎯 Target detail — every period, every candidate"):
         for c in ranked:
             tr = c.get("targets_review")

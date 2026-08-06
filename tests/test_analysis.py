@@ -271,6 +271,47 @@ def test_promoted_default_roundtrip(tmp_path):
     assert A.load_promoted_default(tmp_path)["method"] == "controller"
 
 
+# --------------------------------------------------------------------------- #
+# Result cache — reload/frozen-tab resilience
+# --------------------------------------------------------------------------- #
+def test_cache_roundtrip_and_prefix(tmp_path):
+    A.cache_save("board_controller", {"sig": "abc", "res": {"ok": True,
+                 "output_bytes": b"\x00\x01" * 100}}, cache_dir=tmp_path)
+    A.cache_save("ana_summary", {"sig": "abc", "emphasis": "Walk the line"},
+                 cache_dir=tmp_path)
+    board = A.cache_load_all(cache_dir=tmp_path, prefix="board_")
+    assert list(board) == ["board_controller"]
+    assert board["board_controller"]["res"]["output_bytes"][:2] == b"\x00\x01"
+    everything = A.cache_load_all(cache_dir=tmp_path)
+    assert set(everything) == {"board_controller", "ana_summary"}
+
+
+def test_cache_overwrite_newest_wins(tmp_path):
+    A.cache_save("board_x", {"sig": "old"}, cache_dir=tmp_path)
+    A.cache_save("board_x", {"sig": "new"}, cache_dir=tmp_path)
+    assert A.cache_load_all(cache_dir=tmp_path)["board_x"]["sig"] == "new"
+
+
+def test_cache_eviction_keeps_newest(tmp_path):
+    import os
+    import time
+    for i in range(6):
+        A.cache_save(f"e{i}", {"i": i}, cache_dir=tmp_path, keep=6)
+        # deterministic ordering: backdate earlier entries into the past
+        t = time.time() - 100 + i
+        os.utime(tmp_path / f"e{i}.pkl", (t, t))
+    A.cache_save("e_final", {"i": 99}, cache_dir=tmp_path, keep=3)
+    kept = A.cache_load_all(cache_dir=tmp_path)
+    assert len(kept) == 3 and "e_final" in kept
+
+
+def test_cache_corrupt_entry_is_skipped_not_fatal(tmp_path):
+    A.cache_save("good", {"ok": 1}, cache_dir=tmp_path)
+    (tmp_path / "bad.pkl").write_bytes(b"this is not a pickle")
+    out = A.cache_load_all(cache_dir=tmp_path)
+    assert "good" in out and "bad" not in out
+
+
 def test_targets_roundtrip_and_empty_is_none(tmp_path):
     assert A.load_targets(tmp_path) is None
     A.save_targets(tmp_path, {"basis": "hog", "tolerance_pct": 5.0,

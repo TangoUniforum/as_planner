@@ -76,6 +76,7 @@ def _measure(out_path, control: dict) -> dict:
     return {
         "conserves": v.get("gate") != "FAIL" and dropped == 0 and overprod == 0,
         "weeks_below_floor": float(h.get("weeks_below_min") or 0),
+        "zero_weeks": float(h.get("zero_weeks") or 0),
         "worst_week": float(h.get("min_week") or 0),
         "weeks_over_cap": float(m.weeks_over_harvest_cap),
         "peak_pct_of_cap": m.overall_peak_biomass / (m.biomass_cap or 1) * 100.0,

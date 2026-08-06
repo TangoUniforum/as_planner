@@ -329,6 +329,58 @@ def revenue_for(rows: list[dict], economics: dict) -> dict:
 
 
 # --------------------------------------------------------------------------- #
+# Result cache — finished runs survive reloads, frozen tabs, and new sessions
+# --------------------------------------------------------------------------- #
+# Streamlit session_state dies with the browser session; a finished CP-SAT leg
+# is 30 minutes of compute. Entries are pickled OUTSIDE OneDrive (multi-MB
+# binaries would churn sync) and keyed by name; staleness is the CALLER's
+# problem — every stored entry carries its input signature and is checked at
+# use, so an old entry is simply re-run, never wrongly trusted.
+def _default_cache_dir() -> Path:
+    import os
+    import tempfile
+    base = os.environ.get("LOCALAPPDATA") or tempfile.gettempdir()
+    return Path(base) / "as_planner" / "result_cache"
+
+
+def cache_save(name: str, obj, cache_dir=None, keep: int = 40) -> None:
+    """Pickle `obj` under `name` atomically; evict oldest beyond `keep`."""
+    import os
+    import pickle
+    d = Path(cache_dir) if cache_dir else _default_cache_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    tmp = d / f"{name}.pkl.tmp-{os.getpid()}"
+    with tmp.open("wb") as fh:
+        pickle.dump(obj, fh, protocol=pickle.HIGHEST_PROTOCOL)
+    os.replace(tmp, d / f"{name}.pkl")
+    files = sorted(d.glob("*.pkl"), key=lambda p: p.stat().st_mtime,
+                   reverse=True)
+    for p in files[keep:]:
+        try:
+            p.unlink()
+        except OSError:
+            pass
+
+
+def cache_load_all(cache_dir=None, prefix: str = "") -> dict:
+    """{name: obj} for every readable cached entry (optionally filtered by
+    name prefix). A corrupt/unreadable file is SKIPPED, never fatal — the
+    worst outcome of a bad cache must be a re-run, not a crash."""
+    import pickle
+    d = Path(cache_dir) if cache_dir else _default_cache_dir()
+    out: dict = {}
+    if not d.exists():
+        return out
+    for p in sorted(d.glob(f"{prefix}*.pkl")):
+        try:
+            with p.open("rb") as fh:
+                out[p.stem] = pickle.load(fh)
+        except Exception:  # noqa: BLE001 — see docstring
+            continue
+    return out
+
+
+# --------------------------------------------------------------------------- #
 # Gate registry — the checklist
 # --------------------------------------------------------------------------- #
 @dataclass
