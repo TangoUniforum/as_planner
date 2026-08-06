@@ -1,0 +1,14 @@
+# Harvest targets — judged by Analyze mode's checklist (PENALIZED, never
+# disqualifying). Edit in the app: Configure -> Targets & prices.
+# !! PLACEHOLDER VALUES (seeded 2026-08-06 for the first end-to-end Analyze
+# !! run) — replace with the real contract numbers.
+# basis: hog = head-off gutted (sold) kg; gross = live kg.
+basis: hog
+tolerance_pct: 5.0
+monthly:
+  2026-09: 250000
+  2026-10: 250000
+  2026-11: 250000
+  2026-12: 250000
+yearly:
+  '2027': 3300000
