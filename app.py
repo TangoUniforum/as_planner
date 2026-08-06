@@ -2683,6 +2683,35 @@ def _sweep_inputs_sig() -> str:
         .encode()).hexdigest()
 
 
+class _WriteThroughCache(dict):
+    """dict that persists itself to the analysis result cache on every write —
+    so each finished knob-search variant survives a mid-search crash (the
+    2026-08-06 pickling incident cost a whole 15-min phase; with this, a
+    re-search reuses every variant that had already finished)."""
+
+    def __init__(self, name: str, data: dict):
+        super().__init__(data)
+        self._name = name
+
+    def __setitem__(self, key, value):
+        super().__setitem__(key, value)
+        try:
+            from forecast import analysis as _ana
+            _ana.cache_save(self._name, dict(self))
+        except Exception:  # noqa: BLE001 — durability is best-effort
+            pass
+
+
+def _variant_cache() -> "_WriteThroughCache":
+    """The knob-search variant cache for the CURRENT inputs (PR + config) —
+    keyed by the sweep input signature, so a config/PR change simply starts
+    an empty cache while the old one ages out of the store."""
+    from forecast import analysis as _ana
+    name = f"optvar_{_sweep_inputs_sig()[:20]}"
+    data = _ana.cache_load_all(prefix=name).get(name) or {}
+    return _WriteThroughCache(name, data)
+
+
 def _warn_if_sweep_stale(sig_key: str, what: str) -> None:
     """Compare a stored sweep's input signature to the live inputs and warn —
     the Compare board has this staleness check; the sweeps were missing it, so
@@ -4245,21 +4274,22 @@ def _optimizer():
             min(0.98, i / m) if m else min(0.95, i / 40.0),
             text=f"[{i}{'/' + str(m) if m else ''}] {label} …")
         _w = optimize.weights_for(emphasis, custom)
+        _vc = _variant_cache()
         try:
             if combined:
                 results = optimize.deep_search_combined(
                     str(in_path), str(CONFIG_DIR), str(SCENARIO_DIR),
                     emphasis=emphasis, weights=_w, progress=_prog,
-                    max_workers=_cpu_workers())
+                    max_workers=_cpu_workers(), variant_cache=_vc)
             elif deep:
                 results = optimize.coordinate_descent(
                     str(in_path), str(CONFIG_DIR), str(SCENARIO_DIR),
                     emphasis=emphasis, weights=_w, progress=_prog,
-                    max_workers=_cpu_workers())
+                    max_workers=_cpu_workers(), variant_cache=_vc)
             else:
                 results = optimize.sweep(
                     str(in_path), str(CONFIG_DIR), str(SCENARIO_DIR), grid=grid,
-                    progress=_prog, max_workers=_cpu_workers())
+                    progress=_prog, max_workers=_cpu_workers(), variant_cache=_vc)
         except Exception as e:  # noqa: BLE001
             bar.empty()
             st.error(f"Optimization failed: {e}")
@@ -5111,7 +5141,7 @@ def _analyze():
                         (len(roster) + (i / m if m else 0.9)) / n_phases),
                     text=f"Phase 2/3 — knob search [{i}"
                          f"{'/' + str(m) if m else ''}] {label}…"),
-                max_workers=_cpu_workers())
+                max_workers=_cpu_workers(), variant_cache=_variant_cache())
             _rec = optimize.recommend(opt_results, emphasis=emphasis, weights=_w)
             _best = _opt_winner(opt_results, _rec)
         except Exception as e:  # noqa: BLE001

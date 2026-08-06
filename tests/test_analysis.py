@@ -312,6 +312,53 @@ def test_cache_corrupt_entry_is_skipped_not_fatal(tmp_path):
     assert "good" in out and "bad" not in out
 
 
+# --------------------------------------------------------------------------- #
+# Knob-search variant cache — crash/resume resilience
+# --------------------------------------------------------------------------- #
+def test_sweep_variant_cache_reuses_and_relabels(monkeypatch):
+    from forecast import optimize as O
+    calls = []
+
+    def fake_run(label, ov, cdir, sdir, inp):
+        calls.append(label)
+        return O.OptVariant(label=label, overrides=dict(ov), metrics=None,
+                            dropped=0, overprod=0)
+
+    monkeypatch.setattr(O, "run_variant", fake_run)
+    grid = [("baseline", {}), ("a", {"x": 1})]
+    vc = {}
+    r1 = O.sweep("in", "cfg", "scn", grid=grid, parallel=False,
+                 variant_cache=vc)
+    assert len(calls) == 2 and len(vc) == 2 and len(r1) == 2
+    # Second search: everything reused, nothing re-run — this is the
+    # crash-resume property (a mid-search crash keeps completed variants).
+    r2 = O.sweep("in", "cfg", "scn", grid=grid, parallel=False,
+                 variant_cache=vc)
+    assert len(calls) == 2
+    # Same overrides under a NEW label (descent reaching a grid point):
+    # reused, and relabeled for the requester.
+    r3 = O.sweep("in", "cfg", "scn", grid=[("renamed", {"x": 1})],
+                 parallel=False, variant_cache=vc)
+    assert len(calls) == 2 and r3[0].label == "renamed"
+    assert r3[0].overrides == {"x": 1}
+
+
+def test_sweep_without_cache_unchanged(monkeypatch):
+    from forecast import optimize as O
+    calls = []
+
+    def fake_run(label, ov, cdir, sdir, inp):
+        calls.append(label)
+        return O.OptVariant(label=label, overrides=dict(ov), metrics=None,
+                            dropped=0, overprod=0)
+
+    monkeypatch.setattr(O, "run_variant", fake_run)
+    grid = [("baseline", {}), ("a", {"x": 1})]
+    O.sweep("in", "cfg", "scn", grid=grid, parallel=False)
+    O.sweep("in", "cfg", "scn", grid=grid, parallel=False)
+    assert len(calls) == 4    # no cache -> every variant runs every time
+
+
 def test_targets_roundtrip_and_empty_is_none(tmp_path):
     assert A.load_targets(tmp_path) is None
     A.save_targets(tmp_path, {"basis": "hog", "tolerance_pct": 5.0,

@@ -975,8 +975,26 @@ def _default_workers(n_tasks: int) -> int:
     return max(1, min(n_tasks, cpu - 1, 8))
 
 
+def _vc_get(vc, overrides, label):
+    """Fetch a finished measurement from the cross-run variant cache (keyed by
+    the deterministic overrides key) and relabel it for THIS requester — the
+    same knob set can be reached under different labels by grid vs descent."""
+    if vc is None:
+        return None
+    v = vc.get(_overrides_key(overrides))
+    if v is None:
+        return None
+    return OptVariant(label=label, overrides=dict(v.overrides), metrics=v.metrics,
+                      dropped=v.dropped, overprod=v.overprod, failed=v.failed)
+
+
+def _vc_put(vc, variant) -> None:
+    if vc is not None:
+        vc[_overrides_key(variant.overrides)] = variant
+
+
 def sweep(input_path, config_dir, scenario_dir, grid=None, progress=None,
-          parallel=True, max_workers=None) -> list[OptVariant]:
+          parallel=True, max_workers=None, variant_cache=None) -> list[OptVariant]:
     """Run every grid row and return per-variant results (unscored — call
     recommend()/score_variants() with an emphasis). Nothing mutates the caller's
     config; each variant runs in its own temp copy.
@@ -985,7 +1003,13 @@ def sweep(input_path, config_dir, scenario_dir, grid=None, progress=None,
     PROCESS POOL — the pipeline is CPU-bound + deterministic, so parallel execution
     yields IDENTICAL results (sorted back to grid order), just N× faster. Falls back
     to sequential automatically if a pool can't start (restricted env). Pass
-    parallel=False to force the old one-at-a-time path."""
+    parallel=False to force the old one-at-a-time path.
+
+    `variant_cache` (optional MutableMapping) persists finished measurements
+    across searches and crashes: a variant whose overrides-key is already in
+    the cache is reused, every fresh run is recorded. The CALLER owns validity
+    (key the cache store by the input signature) and durability (pass a
+    write-through mapping to survive a mid-search crash)."""
     grid = grid or OPT_FULL_GRID
     n = len(grid)
     if max_workers is None:
@@ -996,30 +1020,50 @@ def sweep(input_path, config_dir, scenario_dir, grid=None, progress=None,
         for i, (label, overrides) in enumerate(grid):
             if progress is not None:
                 progress(i, n, label)
-            results.append(run_variant(label, overrides, config_dir, scenario_dir,
-                                       input_path))
+            v = _vc_get(variant_cache, overrides, label)
+            if v is None:
+                v = run_variant(label, overrides, config_dir, scenario_dir,
+                                input_path)
+                _vc_put(variant_cache, v)
+            results.append(v)
         return results
 
     from concurrent.futures import ProcessPoolExecutor, as_completed
     order = {label: i for i, (label, _) in enumerate(grid)}
     results: list = []
+    todo = []
     done = 0
+    for label, ov in grid:
+        v = _vc_get(variant_cache, ov, label)
+        if v is not None:
+            done += 1
+            if progress is not None:
+                progress(done, n, f"{label} (cached)")
+            results.append(v)
+        else:
+            todo.append((label, ov))
+    if not todo:
+        results.sort(key=lambda v: order.get(v.label, 1 << 30))
+        return results
     try:
         with ProcessPoolExecutor(max_workers=max_workers) as ex:
             futs = {ex.submit(run_variant, label, ov, config_dir, scenario_dir,
-                              input_path): label for label, ov in grid}
+                              input_path): label for label, ov in todo}
             for fut in as_completed(futs):
                 done += 1
                 if progress is not None:
                     progress(done, n, futs[fut])
-                results.append(fut.result())
+                v = fut.result()
+                _vc_put(variant_cache, v)
+                results.append(v)
     except Exception:  # noqa: BLE001
         # A pool that can't even start (sandboxed env) -> sequential. But if some
         # variants already ran, a failure is a real variant error -> surface it.
-        if results:
+        if len(results) > n - len(todo):
             raise
         return sweep(input_path, config_dir, scenario_dir, grid=grid,
-                     progress=progress, parallel=False)
+                     progress=progress, parallel=False,
+                     variant_cache=variant_cache)
     results.sort(key=lambda v: order.get(v.label, 1 << 30))   # deterministic order
     return results
 
@@ -1048,7 +1092,7 @@ def _overrides_key(ov):
 def coordinate_descent(input_path, config_dir, scenario_dir, emphasis=DEFAULT_EMPHASIS,
                        weights=None, knob_space=None, max_rounds=3, seed=None,
                        progress=None, parallel=True,
-                       max_workers=None) -> list[OptVariant]:
+                       max_workers=None, variant_cache=None) -> list[OptVariant]:
     """Greedy local search that finds COMBINATIONS the grid can't.
 
     From the `seed` config (default = current config / baseline), improve ONE knob
@@ -1090,22 +1134,40 @@ def coordinate_descent(input_path, config_dir, scenario_dir, emphasis=DEFAULT_EM
         k = _key(ov)
         if k in cache:
             return cache[k]
-        _record(k, run_variant(label, dict(ov), config_dir, scenario_dir, input_path))
+        cv = _vc_get(variant_cache, ov, label)
+        if cv is not None:
+            _record(k, cv)
+            return cache[k]
+        v = run_variant(label, dict(ov), config_dir, scenario_dir, input_path)
+        _vc_put(variant_cache, v)
+        _record(k, v)
         return cache[k]
 
     def _eval_many(items):
-        """Evaluate a list of (key, overrides, label) — all uncached — in parallel."""
+        """Evaluate a list of (key, overrides, label) — all uncached in THIS
+        descent — reusing the cross-run variant cache, the rest in parallel."""
         if not items:
             return
-        if pool is None or len(items) == 1:
-            for k, ov, label in items:
+        run_items = []
+        for k, ov, label in items:
+            cv = _vc_get(variant_cache, ov, label)
+            if cv is not None:
+                _record(k, cv)
+            else:
+                run_items.append((k, ov, label))
+        if not run_items:
+            return
+        if pool is None or len(run_items) == 1:
+            for k, ov, label in run_items:
                 _eval(ov, label)
             return
         from concurrent.futures import as_completed
         futs = {pool.submit(run_variant, label, dict(ov), config_dir, scenario_dir,
-                            input_path): k for k, ov, label in items}
+                            input_path): k for k, ov, label in run_items}
         for fut in as_completed(futs):
-            _record(futs[fut], fut.result())
+            v = fut.result()
+            _vc_put(variant_cache, v)
+            _record(futs[fut], v)
 
     def _best_overrides():
         # Re-score the whole evaluated set (consistent normalization over all OK
@@ -1145,7 +1207,8 @@ def coordinate_descent(input_path, config_dir, scenario_dir, emphasis=DEFAULT_EM
 
 def deep_search_combined(input_path, config_dir, scenario_dir, emphasis=DEFAULT_EMPHASIS,
                          weights=None, grid=None, max_rounds=3,
-                         progress=None, max_workers=None) -> list[OptVariant]:
+                         progress=None, max_workers=None,
+                         variant_cache=None) -> list[OptVariant]:
     """Best-of-both for ANY emphasis: run the full GRID (broad, diverse coverage —
     incl. the off-by-default controls), then coordinate descent SEEDED FROM the
     grid's best (local refinement that finds combinations around the broadly-best
@@ -1156,13 +1219,13 @@ def deep_search_combined(input_path, config_dir, scenario_dir, emphasis=DEFAULT_
     w = weights or weights_for(emphasis)
     gvars = sweep(input_path, config_dir, scenario_dir,
                   grid=grid or OPT_FULL_GRID, progress=progress,
-                  max_workers=max_workers)
+                  max_workers=max_workers, variant_cache=variant_cache)
     score_variants(gvars, w)
     ok = [v for v in gvars if v.conservation_ok]
     seed = dict((min(ok, key=lambda v: v.score) if ok else gvars[0]).overrides)
     dvars = coordinate_descent(input_path, config_dir, scenario_dir, emphasis=emphasis,
                                weights=w, seed=seed, max_rounds=max_rounds, progress=progress,
-                               max_workers=max_workers)
+                               max_workers=max_workers, variant_cache=variant_cache)
     pool = {}
     for v in gvars + dvars:        # dedup by overrides; identical configs collapse
         pool[tuple(sorted(v.overrides.items()))] = v
