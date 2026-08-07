@@ -34,6 +34,7 @@ from typing import Optional
 import yaml
 
 from .events import GradedHarvest, Harvest, TankAllocation, TranOGEntry, Transfer
+from .tiers import is_entry, move_allowed
 from .yaml_atomic import read_text_resilient, write_text_atomic
 
 MANUAL_EVENTS_FILE = "manual_events.yaml"
@@ -316,6 +317,13 @@ def _apply_og_to_6n(state, ev: ManualEvent, idx: int,
         return [f"{tag}: unknown source tank #{ev.from_tank}"]
     if src.is_empty:
         return [f"{tag}: source tank {src.location_id} is empty (nothing to move)"]
+    # R5: no 6N staging FROM an entry-tier (OG1/2) tank — fish route forward
+    # first. Transfer.apply can't catch this (the dest is 6N, not entry), so
+    # the rule is enforced here for both the run and the validation dry-run.
+    if is_entry(src.system_id):
+        return [f"{tag}: refused — fish can't be staged to 6N from the entry "
+                f"tier ({src.location_id}, {src.system_id}); move them forward "
+                f"first (rule R5)"]
     if not ev.destinations:
         return [f"{tag}: no 6N destination specified"]
     for d in ev.destinations:
@@ -671,8 +679,9 @@ def apply_events_for_week(state, events, week, week_start, week_label=None,
 
 
 def _validate_fw_to_og_structural(scratch, ev) -> list[str]:
-    """Cheap structural checks for an fw_to_og (dest tanks empty OG + batch set)
-    that don't need the FW projection. Shared by both validation paths."""
+    """Cheap structural checks for an fw_to_og (dest tanks empty entry-tier OG
+    + batch set) that don't need the FW projection. Shared by both validation
+    paths."""
     w: list[str] = []
     for d in ev.destinations:
         t = scratch.tanks_by_id.get(d.tank)
@@ -680,10 +689,38 @@ def _validate_fw_to_og_structural(scratch, ev) -> list[str]:
             w.append(f"unknown dest tank #{d.tank}")
         elif t.type != "OG":
             w.append(f"dest #{d.tank} is not an OG tank")
+        elif not is_entry(t.system_id):
+            w.append(f"❌ dest {t.location_id} ({t.system_id}) is not in the "
+                     f"entry tier — FW arrivals may enter ONLY OG1/2 (rule R1)")
         elif not t.is_empty:
             w.append(f"dest {t.location_id} not empty (holds {t.batch_id})")
     if not ev.batch:
         w.append("fw_to_og requires a FW batch")
+    return w
+
+
+def _structural_rule_errors(scratch, ev) -> list[str]:
+    """Hard tier-rule violations (R3/R4/R5) for one manual event against the
+    CURRENT scratch state — reject-at-entry with an explicit ❌ message. The
+    events.py apply layer refuses these at run time too; this makes the editor
+    say WHY before the operator saves."""
+    w: list[str] = []
+    src = scratch.tanks_by_id.get(ev.from_tank) if ev.from_tank else None
+    if ev.type == TYPE_OG_TRANSFER and src is not None and not src.is_empty:
+        for d in ev.destinations:
+            t = scratch.tanks_by_id.get(d.tank)
+            if t is None:
+                continue  # unknown-tank message comes from the apply layer
+            ok, why = move_allowed(src.system_id, t.system_id, src.avg_wt_g)
+            if not ok:
+                w.append(f"❌ move {src.location_id} -> {t.location_id} "
+                         f"refused — {why}")
+    elif (ev.type in (TYPE_HARVEST, TYPE_GRADED_HARVEST, TYPE_OG_TO_6N)
+          and src is not None and not src.is_empty
+          and is_entry(src.system_id)):
+        w.append(f"❌ {ev.type} from {src.location_id} ({src.system_id}) "
+                 f"refused — fish can't be harvested or staged to 6N from the "
+                 f"entry tier (OG1/2); move them forward first (rule R5)")
     return w
 
 
@@ -730,6 +767,11 @@ def validate_manual_events(state, events: list[ManualEvent], *,
         labels = forecast_week_labels(forecast_start, max(_max_week, 1))
 
     def _apply_one(ev, i, week_label, week_start) -> list[str]:
+        # Hard tier-rule violations (R1/R3/R4/R5) reject at entry with an
+        # explicit ❌ before the dry-run apply (which would also refuse them).
+        rule_errs = _structural_rule_errors(scratch, ev)
+        if rule_errs:
+            return rule_errs
         if ev.type == TYPE_OG_TRANSFER:
             return _apply_og_transfer(scratch, ev, i, event_date=week_start)
         if ev.type == TYPE_HARVEST:

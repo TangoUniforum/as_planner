@@ -1612,6 +1612,7 @@ def _mw_dest_fmt(state, occ):
 def _mw_action_panel(state, ctx, rows, labels, sel, date_for):
     from forecast.sixn import SIXN_ALL_TANKS
     from forecast.manual_events import ManualDest, ManualEvent
+    from forecast.tiers import is_entry, move_allowed
     tid, wlabel, wk = sel
     r = next((x for x in rows if x.tank_id == tid and x.week_label == wlabel), None)
     occupied = r is not None and r.count > 0
@@ -1644,12 +1645,21 @@ def _mw_action_panel(state, ctx, rows, labels, sel, date_for):
     # Scope input keys to THIS tank+week so a previous selection's destinations /
     # counts don't linger when you click a different cell.
     sfx = f"{tid}_{wk}"
+    # Tier rules (R5): the clicked tank's SYSTEM decides whether harvest / 6N
+    # staging is possible at all; its projected avg weight gates entry moves.
+    _src_sys = state.tanks_by_id[tid].system_id
+    _entry_src = is_entry(_src_sys)
     act = st.radio("What do you want to do here?",
                    ["Harvest", "Graded → 6N", "Move (OG→OG)",
                     "Send to 6N depuration"],
                    horizontal=True, key="mw_act")
 
     if act == "Harvest":
+        if _entry_src:
+            st.warning(f"Fish can't be harvested from {loc} ({_src_sys}) — "
+                       f"OG1/2 is the entry tier (rule R5): move them forward "
+                       f"to OG3-6 first, then harvest from there.")
+            return
         whole = st.checkbox("Harvest the whole tank", value=True, key=f"mw_h_whole_{sfx}")
         cnt = None
         if not whole:
@@ -1661,6 +1671,12 @@ def _mw_action_panel(state, ctx, rows, labels, sel, date_for):
             st.rerun()
 
     elif act == "Graded → 6N":
+        if _entry_src:
+            st.warning(f"Fish can't be graded to 6N from {loc} ({_src_sys}) — "
+                       f"OG1/2 is the entry tier (rule R5): no harvest and no "
+                       f"6N staging from entry-tier tanks; move them forward "
+                       f"first.")
+            return
         st.caption("Grade the tank by size — it **empties**: the **biggest N fish** "
                    "go to a 6N depuration tank (frozen, off-feed to purge, harvested "
                    "later from 6N) and the **smaller remainder moves to an OG tank** "
@@ -1731,10 +1747,19 @@ def _mw_action_panel(state, ctx, rows, labels, sel, date_for):
         # Regular OG grow-out tanks only (the 6N depuration system is reached via
         # Send-to-6N / Graded->6N, not a plain grow-out move). Offer EMPTY tanks or
         # ones already holding this batch, each showing current density, roomiest-first.
+        # Tier rules R2-R4 (tiers.move_allowed, judged on the tank's projected avg
+        # weight): non-entry sources may never move back into OG1/2; entry sources
+        # >= 1 kg may only move forward (OG3-6); entry sources < 1 kg may do both.
         move_dests = sorted(
             (t.tank_id for t in other_og
-             if t.tank_id not in occ_map or occ_map[t.tank_id][0] == r.batch_id),
+             if (t.tank_id not in occ_map or occ_map[t.tank_id][0] == r.batch_id)
+             and move_allowed(_src_sys, t.system_id, r.avg_wt_g)[0]),
             key=lambda t: occ_map.get(t, (None, 0.0))[1])
+        if _entry_src and r.avg_wt_g >= 1000.0:
+            st.caption("↳ ≥ 1 kg in the entry tier: forward moves (OG3-6) only "
+                       "(rule R3 — the intra-OG1/2 equipment limit).")
+        elif not _entry_src:
+            st.caption("↳ Grow-out fish never move back into OG1/2 (rule R4).")
         picks = st.multiselect(
             "Destination grow-out tank(s) — empty or same batch (· batch · density)",
             options=move_dests, format_func=dfmt, key=f"mw_m_dest_{sfx}")
@@ -1753,6 +1778,11 @@ def _mw_action_panel(state, ctx, rows, labels, sel, date_for):
             st.rerun()
 
     else:  # Send to 6N depuration
+        if _entry_src:
+            st.warning(f"Fish can't be staged to 6N from {loc} ({_src_sys}) — "
+                       f"OG1/2 is the entry tier (rule R5): move them forward "
+                       f"to OG3-6 first.")
+            return
         picks = st.multiselect(
             "6N depuration tank(s) — mains + sisters (· batch · density)",
             options=sorted(SIXN_ALL_TANKS), format_func=dfmt, key=f"mw_6_dest_{sfx}")
@@ -1891,9 +1921,17 @@ def _mw_fw_intake(state, ctx, rows, labels, date_for):
                    f"**smaller {small_n:,.0f} ≈ {small_avg / 1000:.2f} kg**")
 
     occ = {x.tank_id for x in rows if x.week_label == wlabel and x.count > 0}
+    # R1: FW arrivals enter ONLY the entry tier (OG1/2) — the pool offers
+    # empty entry-tier tanks, never OG3+.
+    from forecast.tiers import is_entry as _is_entry
     empty_og = [t.tank_id for t in _mw_tanks(state)
                 if t.type == "OG" and t.tank_id not in SIXN_ALL_TANKS
+                and _is_entry(t.system_id)
                 and t.tank_id not in occ]
+    if not empty_og:
+        st.caption("⚠ No empty entry-tier (OG1/2) tank at this week — FW "
+                   "arrivals may only enter OG1/2 (rule R1); free entry tanks "
+                   "first (move their fish forward).")
     dfmt = _mw_dest_fmt(state, _mw_occ_at(rows, wlabel))
     big_picks = st.multiselect(
         "Tank(s) for the BIGGER grade", options=empty_og,
