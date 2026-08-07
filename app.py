@@ -3011,28 +3011,43 @@ with st.sidebar:
     # then honored by the run handler below.
     if st.session_state.pop("_goto_run_mode", False):
         st.session_state["app_mode"] = "Run forecast"
+    # Order = order of OPERATIONS: run daily; set up config; find the best
+    # plan; then the specialist diagnostics/searches Analyze composes.
     app_mode = st.radio(
         "Mode",
-        ["Run forecast", "Analyze (find my best plan)",
-         "Configure (models & control)", "Tune (density knobs)",
+        ["Run forecast", "Configure (models & control)",
+         "Analyze (find my best plan)", "Tune (density knobs)",
          "Optimize (multi-objective)", "Compare & Choose (all methods)"],
-        help="Run forecast: upload a PR and run. Analyze: ONE flow that runs "
+        help="Run forecast: upload a PR and run. Configure: edit the app's "
+             "biology models, facility, control, batches, limits, targets and "
+             "prices. Analyze: ONE flow that runs "
              "the engines, tunes the knobs, grades everything on the hard-rule "
              "checklist (incl. your harvest targets), and recommends a single "
-             "plan to adopt. Configure: edit the app's "
-             "biology models, facility, control, batches, limits, and targets. "
-             "Tune: sweep the controller knobs and read the per-batch "
-             "density distribution. Optimize: sweep knobs and rank variants on a "
+             "plan to adopt. "
+             "Tune: density DIAGNOSTIC — read the per-batch peak-density "
+             "distribution (tuning problem vs capacity problem) + the "
+             "stocking frontier. Optimize: sweep knobs and rank variants on a "
              "selectable objective (walk the line + minimize feed/handling). "
              "Compare & Choose: run all planning methods, grade them on several "
              "lenses, and pick which plan becomes the report.",
         key="app_mode",
     )
-    with st.expander("ℹ️ Which mode? — Run vs Tune vs Optimize"):
+    with st.expander("ℹ️ Which mode? — the order of operations"):
         st.markdown(
+            "**The workflow:** set up **Configure** once (models, facility, "
+            "targets, prices) → run **Analyze** to pick + tune the best plan "
+            "(promote it as your Quick-run default) → then **Run forecast** "
+            "(or Analyze's ⚡ Quick run) is the everyday step. Tune / Optimize "
+            "/ Compare & Choose are the specialist tools Analyze composes — "
+            "use them directly to steer one phase by hand.\n\n"
+            "- **Analyze** — the one-flow version of the whole decision: every "
+            "engine + knob search + the hard-rule checklist (conservation, "
+            "never-an-empty-week, caps, your harvest targets, revenue) → one "
+            "recommendation card with Adopt / Promote. Finished runs are "
+            "cached to disk and shared with Compare & Choose.\n"
             "- **Run forecast** — runs the pipeline with your **current** Control knobs "
             "and produces the plan + reports. This is the everyday mode. *\"Run with "
-            "tuned knobs\"* just means a normal Run **after** Tune or Optimize has saved "
+            "tuned knobs\"* just means a normal Run **after** Analyze/Tune/Optimize has saved "
             "better knobs into your config.\n"
             "- **Tune (density knobs)** — sweeps **only the density knobs**, shows the "
             "per-batch peak-density distribution, and recommends + saves the best set. "
