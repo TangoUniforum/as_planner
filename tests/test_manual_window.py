@@ -66,8 +66,10 @@ def hydrated():
 
 
 def _empty_og_tanks(state, n):
+    # Entry-tier only: FW->OG destinations must be OG1/2 (rule R1).
+    from forecast.tiers import is_entry
     return [t for t, tk in sorted(state.tanks_by_id.items())
-            if tk.type == "OG" and tk.is_empty][:n]
+            if tk.type == "OG" and tk.is_empty and is_entry(tk.system_id)][:n]
 
 
 def _assert_count_conserved(tc):
@@ -155,13 +157,18 @@ class TestGradedHarvest:
 
     @staticmethod
     def _source_pickup(state):
+        # Non-entry source/pickup: harvest & 6N staging FROM the entry tier
+        # (OG1/2) is forbidden (rule R5), so the fixture grades a grow-out tank.
         from forecast.sixn import SIXN_ALL_TANKS
+        from forecast.tiers import is_entry
         src = max((t for t in state.tanks_by_id.values()
                    if t.type == "OG" and t.tank_id not in SIXN_ALL_TANKS
+                   and not is_entry(t.system_id)
                    and not t.is_empty), key=lambda t: t.count)
         pickup = next(t for t in sorted(state.tanks_by_id.values(),
                                         key=lambda t: t.tank_id)
                       if t.type == "OG" and t.tank_id not in SIXN_ALL_TANKS
+                      and not is_entry(t.system_id)
                       and t.is_empty and t.tank_id != src.tank_id)
         return src, pickup
 
