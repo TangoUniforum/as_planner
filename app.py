@@ -3924,6 +3924,35 @@ def _system_feed_audit(out_path):
     return rows, caps
 
 
+def _transfer_plan_rows(out_path) -> list[dict]:
+    """TransferPlan sheet -> list of dicts, generically by its header row —
+    every engine writes the same single-table layout (Week | Batch | Type |
+    From_Tank | To_Tank | Count | Avg_Weight). Missing sheet/file -> []."""
+    from openpyxl import load_workbook as _lw
+    try:
+        wb = _lw(out_path, read_only=True, data_only=True)
+    except Exception:  # noqa: BLE001 — file gone -> empty, caller says so
+        return []
+    try:
+        if "TransferPlan" not in wb.sheetnames:
+            return []
+        hdr = None
+        out = []
+        for row in wb["TransferPlan"].iter_rows(values_only=True):
+            if hdr is None:
+                if (row and str(row[0]).strip() == "Week"
+                        and any(str(c).strip() == "Batch" for c in row if c)):
+                    hdr = [str(c).strip() if c else "" for c in row]
+                continue
+            if not row or not str(row[0]).startswith("20"):
+                continue
+            out.append({hdr[i]: row[i]
+                        for i in range(min(len(hdr), len(row))) if hdr[i]})
+        return out
+    finally:
+        wb.close()
+
+
 def _daily_harvest_table(he_df):
     """Per-day (Mon–Fri) breakout of the WEEK's total harvest for the Harvest tab.
 
@@ -6151,6 +6180,58 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
                 "⬇ Download all batch plans (CSV)",
                 data=_csv,
                 file_name="batch_plans.csv", mime="text/csv")
+
+    # ---- Transfer plan — the week-by-week move list. Parsed LAZILY from
+    # the output workbook (every engine writes a TransferPlan sheet), so it
+    # also works for results picked/restored before this view existed, and
+    # shows even when per-batch plans are unavailable (Global LP).
+    with tab_plan:
+        st.divider()
+        st.subheader("🚚 Transfer plan — every move, week by week")
+        tp_df = _rv_memo("tp_df", _rid, lambda: pd.DataFrame(
+            _transfer_plan_rows(r["output_path"])
+            if r.get("output_path") else []))
+        if tp_df.empty:
+            st.info("No transfers in this plan (or the output workbook is no "
+                    "longer on disk — re-run to regenerate it).")
+        else:
+            _wk_col = tp_df.columns[0]
+            f1, f2, f3 = st.columns(3)
+            _wks = f1.multiselect(
+                "Week(s)", sorted(tp_df[_wk_col].astype(str).unique()),
+                default=[], key="tp_weeks",
+                help="Empty = all weeks.")
+            _typ_col = next((c for c in tp_df.columns
+                             if str(c).startswith("Type")), None)
+            _typs = (f2.multiselect("Type(s)",
+                                    sorted(tp_df[_typ_col].astype(str).unique()),
+                                    default=[], key="tp_types")
+                     if _typ_col else [])
+            _bat_col = next((c for c in tp_df.columns
+                             if str(c).startswith("Batch")), None)
+            _bats = (f3.multiselect("Batch(es)",
+                                    sorted(tp_df[_bat_col].astype(str).unique()),
+                                    default=[], key="tp_batches")
+                     if _bat_col else [])
+            view = tp_df
+            if _wks:
+                view = view[view[_wk_col].astype(str).isin(_wks)]
+            if _typs and _typ_col:
+                view = view[view[_typ_col].astype(str).isin(_typs)]
+            if _bats and _bat_col:
+                view = view[view[_bat_col].astype(str).isin(_bats)]
+            c1, c2 = st.columns(2)
+            c1.metric("Moves shown", len(view),
+                      help=f"{len(tp_df)} total in the plan")
+            c2.metric("Weeks with moves",
+                      view[_wk_col].astype(str).nunique())
+            st.dataframe(view, hide_index=True, use_container_width=True,
+                         height=min(520, 46 + 35 * min(len(view), 13)))
+            st.download_button(
+                "⬇ Download transfer plan (CSV)",
+                data=_rv_memo("tp_csv", _rid,
+                              lambda: tp_df.to_csv(index=False).encode()),
+                file_name="transfer_plan.csv", mime="text/csv")
 
     # ---- Run log (collapsed) ----
     with st.expander("Run log (console output)"):
