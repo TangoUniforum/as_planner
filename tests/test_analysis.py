@@ -369,3 +369,23 @@ def test_targets_roundtrip_and_empty_is_none(tmp_path):
     A.save_targets(tmp_path, {"basis": "hog", "tolerance_pct": 5.0,
                               "monthly": {}, "yearly": {}})
     assert A.load_targets(tmp_path) is None   # all-empty = unset, gate N/A
+
+
+# --------------------------------------------------------------------------- #
+# Density-quality gate (the old Tune readout as a checklist lens)
+# --------------------------------------------------------------------------- #
+def test_density_gate_pass_warn_na():
+    dr_ok = {"n": 60, "over": 40, "severe": 0, "worst": 1.12, "median": 1.01,
+             "buckets": {}, "severe_rows": []}
+    st1 = {g["key"]: g for g in A.evaluate_gates(
+        {"dropped": 0, "overprod": 0, "density_review": dr_ok})}
+    assert st1["density_quality"]["status"] == "PASS"
+    assert st1["density_quality"]["hard"] is False   # diagnostic, never blocks
+
+    dr_bad = dict(dr_ok, severe=3, worst=1.42)
+    st2 = {g["key"]: g["status"] for g in A.evaluate_gates(
+        {"dropped": 0, "overprod": 0, "density_review": dr_bad})}
+    assert st2["density_quality"] == "WARN"          # penalized, not FAIL
+
+    st3 = {g["key"]: g["status"] for g in A.evaluate_gates({"dropped": 0})}
+    assert st3["density_quality"] == "N/A"           # absent data never fails

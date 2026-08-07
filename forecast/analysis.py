@@ -289,6 +289,29 @@ def biomass_band_fraction(mean_kg: float, cv: float,
     return max(0.0, _F(hi_kg) - _F(lo_kg))
 
 
+def density_review(out_path) -> Optional[dict]:
+    """Per-batch peak-density distribution for one plan — the diagnostic that
+    was Tune mode's reason to exist, now a per-candidate lens. Reuses Tune's
+    exact math (TransferTemplate Section B peaks; severe = >=1.3x cap).
+
+    KEY READING RULE (hard-won): severe batches clustering in time and peaking
+    mid-grow-out = a STOCKING/CAPACITY problem — no knob fixes it; the stocking
+    lever does. Scattered mild overshoot near 1.0-1.1x = normal near-cap
+    operation. Returns None when the sheet is absent (e.g. Global outputs
+    without Section B) — the gate reports N/A, never a false verdict."""
+    from . import tuning
+    try:
+        peaks, detail = tuning._peaks_and_detail(out_path)
+    except Exception:  # noqa: BLE001 — sheet absent/foreign shape -> no lens
+        return None
+    if not peaks:
+        return None
+    d = tuning.analyze(peaks)
+    return {"n": d.n, "over": d.over, "severe": d.severe,
+            "worst": float(d.worst), "median": float(d.median),
+            "buckets": dict(d.buckets), "severe_rows": list(detail)}
+
+
 def revenue_for(rows: list[dict], economics: dict) -> dict:
     """Revenue for a plan: each harvest event's kg is SPREAD across the price
     bands with the size-biased lognormal (model_cv_pct), then priced per band
@@ -478,6 +501,24 @@ register_gate("harvest_cap", "Weekly processing cap (55k)", hard=False,
               fn=_gate_harvest_cap)
 register_gate("targets", "Harvest targets (monthly/yearly)", hard=False,
               fn=_gate_targets)
+
+
+def _gate_density_quality(ctx):
+    dr = ctx.get("density_review")
+    if not dr:
+        return "N/A", "per-batch peak-density data unavailable for this plan"
+    if dr["severe"] == 0:
+        return "PASS", (f"no batch over 1.3× cap (worst {dr['worst']:.2f}×, "
+                        f"{dr['over']}/{dr['n']} touch the cap — normal near "
+                        f"full utilisation)")
+    return "WARN", (f"{dr['severe']} batch(es) peak ≥1.3× cap (worst "
+                    f"{dr['worst']:.2f}×) — if these cluster in time and peak "
+                    f"mid-grow-out it's a STOCKING/capacity problem, not a "
+                    f"knob: see the stocking lever, don't re-tune")
+
+
+register_gate("density_quality", "Per-batch density quality", hard=False,
+              fn=_gate_density_quality)
 
 
 # --------------------------------------------------------------------------- #

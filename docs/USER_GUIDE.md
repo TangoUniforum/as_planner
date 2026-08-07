@@ -1373,3 +1373,18 @@ the tool never changes its own defaults. Once promoted, the **⚡ Quick run**
 card at the top of Analyze re-validates that exact plan (one run + the
 checklist, minutes not hours) — use it as the everyday sanity check and the
 full analysis when the PR or the facility changes materially.
+
+### 13.1 Tune mode retired (2026-08-06)
+
+The old **Tune (density knobs)** mode is retired — nothing it did is gone:
+
+- Its **per-batch peak-density distribution** and **severe-batch table** are now
+  a checklist gate ("Per-batch density quality", soft — PASS/WARN, never
+  disqualifying) plus a per-candidate drill-in expander on the **Analyze**
+  board. The reading rule is printed right there: severe (>=1.3x) batches that
+  cluster in time and peak mid-grow-out are a **stocking/capacity** problem —
+  no knob fixes them.
+- The **stocking-for-quality frontier** (the remedy for exactly that
+  diagnosis) moved to the bottom of the Analyze board.
+- Its knob *search* was already covered by Optimize's grid and Analyze's knob
+  round. The headless density sweep remains available: `python tools/tune_sweep.py`.

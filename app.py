@@ -30,7 +30,6 @@ from openpyxl import load_workbook
 # launched from the project root or elsewhere.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from forecast.run import main as run_pipeline  # noqa: E402
-from forecast import tuning  # noqa: E402
 from forecast import optimize  # noqa: E402
 from forecast import methods as _methods  # noqa: E402
 
@@ -2999,7 +2998,7 @@ with st.sidebar:
              "optimal (CP-SAT) solver (also inside Compare & Choose) and the "
              "Optimize sweeps. Higher = faster runs, but other applications "
              "may feel slower (and Optimize sweeps use more memory) while a "
-             "run is going. A plain controller Run forecast and Tune are "
+             "run is going. A plain controller Run forecast is "
              "sequential and unaffected.",
     )
     st.caption(f"Heavy runs may use up to **{_cpu_workers()}** of "
@@ -3013,20 +3012,23 @@ with st.sidebar:
         st.session_state["app_mode"] = "Run forecast"
     # Order = order of OPERATIONS: run daily; set up config; find the best
     # plan; then the specialist diagnostics/searches Analyze composes.
+    # If a stored selection references the retired Tune mode, reset it BEFORE
+    # the radio instantiates (a stored value outside the options raises).
+    if str(st.session_state.get("app_mode", "")).startswith("Tune"):
+        st.session_state["app_mode"] = "Run forecast"
     app_mode = st.radio(
         "Mode",
         ["Run forecast", "Configure (models & control)",
-         "Analyze (find my best plan)", "Tune (density knobs)",
+         "Analyze (find my best plan)",
          "Optimize (multi-objective)", "Compare & Choose (all methods)"],
         help="Run forecast: upload a PR and run. Configure: edit the app's "
              "biology models, facility, control, batches, limits, targets and "
              "prices. Analyze: ONE flow that runs "
              "the engines, tunes the knobs, grades everything on the hard-rule "
-             "checklist (incl. your harvest targets), and recommends a single "
-             "plan to adopt. "
-             "Tune: density DIAGNOSTIC — read the per-batch peak-density "
-             "distribution (tuning problem vs capacity problem) + the "
-             "stocking frontier. Optimize: sweep knobs and rank variants on a "
+             "checklist (incl. your harvest targets, revenue, and the "
+             "per-batch density lens), and recommends a single "
+             "plan to adopt — the stocking frontier lives there too. "
+             "Optimize: sweep knobs and rank variants on a "
              "selectable objective (walk the line + minimize feed/handling). "
              "Compare & Choose: run all planning methods, grade them on several "
              "lenses, and pick which plan becomes the report.",
@@ -3037,22 +3039,19 @@ with st.sidebar:
             "**The workflow:** set up **Configure** once (models, facility, "
             "targets, prices) → run **Analyze** to pick + tune the best plan "
             "(promote it as your Quick-run default) → then **Run forecast** "
-            "(or Analyze's ⚡ Quick run) is the everyday step. Tune / Optimize "
-            "/ Compare & Choose are the specialist tools Analyze composes — "
+            "(or Analyze's ⚡ Quick run) is the everyday step. Optimize and "
+            "Compare & Choose are the specialist tools Analyze composes — "
             "use them directly to steer one phase by hand.\n\n"
             "- **Analyze** — the one-flow version of the whole decision: every "
             "engine + knob search + the hard-rule checklist (conservation, "
-            "never-an-empty-week, caps, your harvest targets, revenue) → one "
-            "recommendation card with Adopt / Promote. Finished runs are "
-            "cached to disk and shared with Compare & Choose.\n"
+            "never-an-empty-week, caps, your harvest targets, revenue, and the "
+            "per-batch density lens) → one recommendation card with Adopt / "
+            "Promote. The stocking-for-quality frontier lives here too. "
+            "Finished runs are cached to disk and shared with Compare & Choose.\n"
             "- **Run forecast** — runs the pipeline with your **current** Control knobs "
             "and produces the plan + reports. This is the everyday mode. *\"Run with "
-            "tuned knobs\"* just means a normal Run **after** Analyze/Tune/Optimize has saved "
+            "tuned knobs\"* just means a normal Run **after** Analyze/Optimize has saved "
             "better knobs into your config.\n"
-            "- **Tune (density knobs)** — sweeps **only the density knobs**, shows the "
-            "per-batch peak-density distribution, and recommends + saves the best set. "
-            "**One axis (density).** Use when the Plan tab's per-batch density is the "
-            "concern.\n"
             "- **Optimize (multi-objective)** — sweeps knobs against **several goals at "
             "once** (flat biomass, feed, handling, cap compliance) on a *selectable* "
             "weighted objective, ranks variants, and applies the best. **Many axes**, and "
@@ -3061,14 +3060,14 @@ with st.sidebar:
             "(Controller, Global heuristic, Global optimal CP-SAT) on one PR, grades "
             "them on several lenses (fewest moves, steadiest harvest, between/within-"
             "system balance, density, footprint) with hard-rule badges, and lets you "
-            "pick which whole plan becomes the report. Unlike Tune/Optimize (same "
+            "pick which whole plan becomes the report. Unlike Optimize (same "
             "engine, different knobs), this compares *engines*.\n"
-            "- **Configure** — hand-edit the models, control knobs, facility, batches, and "
-            "limits (every knob has a tooltip).\n\n"
-            "**Tune and Optimize don't use a different engine** — they run *the same "
-            "forecast* many times with different Control knobs, then save the winning set "
-            "to `config/control.yaml`. So after either, a plain **Run forecast** uses "
-            "those tuned knobs — and you can review/adjust them in **Configure → Control**."
+            "- **Configure** — hand-edit the models, control knobs, facility, batches, "
+            "limits, targets and prices (every knob has a tooltip).\n\n"
+            "*(The old Tune mode retired — its density distribution + severe-batch "
+            "readout is now a checklist gate + drill-in on the Analyze board, and "
+            "the stocking frontier moved there with it. The headless density sweep "
+            "is still available via `tools/tune_sweep.py`.)*"
         )
     st.divider()
 
@@ -3131,7 +3130,7 @@ with st.sidebar:
     )
 
     # The ▶ Run forecast button lives in the sidebar in EVERY mode, but the run
-    # results render only in Run forecast mode — so clicking it from Configure/Tune/
+    # results render only in Run forecast mode — so clicking it from Configure/
     # Optimize used to silently do nothing (the main panel st.stop()s before the run
     # handler). Jump to Run forecast and run there instead.
     if run_clicked and app_mode != "Run forecast":
@@ -3617,27 +3616,8 @@ def _parse_output_workbook(path: Path) -> dict:
 
 
 # ============================================================
-# Tune mode — sweep the controller knobs, read the distribution
+# Stocking-for-quality frontier — called from the Analyze board
 # ============================================================
-
-def _results_to_frame(results) -> pd.DataFrame:
-    rows = []
-    for r in results:
-        d = r.dist
-        rows.append({
-            "Variant": r.label,
-            "OVER": f"{d.over}/{d.n}",
-            "Severe (>1.3x)": d.severe,
-            "Worst": round(d.worst, 2),
-            "Median": round(d.median, 2),
-            "<=1.0": d.buckets["<=1.0"],
-            "1.0-1.1": d.buckets["1.0-1.1"],
-            "1.1-1.3": d.buckets["1.1-1.3"],
-            ">1.3": d.buckets[">1.3"],
-            "Conservation": "OK" if r.conservation_ok else f"FAIL ({r.dropped} drop/{r.overprod} over)",
-        })
-    return pd.DataFrame(rows)
-
 
 def _stocking_frontier_section():
     """Stocking-for-quality frontier: sweep a stocking CUT across FUTURE batches
@@ -3724,139 +3704,8 @@ def _stocking_frontier_section():
                 f"**{dv:,.0f} t less harvest**.")
 
 
-def _tuner():
-    st.header("🎛️ Tune — per-batch density knobs")
-    st.caption(
-        "Sweeps the controller knobs and reports the per-batch **peak-density "
-        "distribution** for each, using the current config + the uploaded "
-        "ProductionReport. Read the distribution, not the raw OVER count: 1.0–1.1 "
-        "is *at cap* (normal near full utilisation); only **severe (>1.3×)** rows "
-        "matter. Pick the variant with the fewest severe while conservation holds. "
-        "If none beats baseline, it's a capacity problem, not a tuning one "
-        "(see USER_GUIDE §7.1)."
-    )
-
-    _cfg_ok = _config_ready() and _scenario_ready()
-    _pr_ok = pr is not None and pr["ok"]
-    if not _cfg_ok:
-        st.info("No config yet — set it up in **Configure** first.")
-        return
-    if not _pr_ok:
-        st.info("Upload a valid **ProductionReport** in the sidebar first.")
-        return
-
-    depth = st.radio(
-        "Sweep depth",
-        ["Quick", "Full"],
-        horizontal=True,
-        help="Quick: baseline + the dominant lever on each axis (fast read). "
-             "Full: both directions of every relevant knob.",
-    )
-    quick = depth == "Quick"
-    grid = tuning.grid_for(quick)
-    n_variants = len(grid)
-    st.write(
-        f"**{depth}** sweep — runs the forecast **{n_variants} times** "
-        f"(~{n_variants * 90 // 60}–{max(1, n_variants * 100 // 60)} min). "
-        "The current config is never modified — each variant runs on a temp copy."
-    )
-    go = st.button("▶ Run tuning sweep", type="primary")
-
-    if go:
-        work = Path(tempfile.mkdtemp(prefix="as_tune_in_"))
-        in_path = work / (uploaded.name or "input.xlsm")
-        in_path.write_bytes(uploaded.getvalue())
-        bar = st.progress(0.0, text="Starting sweep…")
-
-        def _progress(i, n, label):
-            bar.progress(i / n, text=f"[{i+1}/{n}] running {label} …")
-
-        try:
-            results = tuning.sweep(str(in_path), str(CONFIG_DIR),
-                                   str(SCENARIO_DIR), grid=grid, progress=_progress)
-        except Exception as e:  # noqa: BLE001
-            bar.empty()
-            st.error(f"Sweep failed: {e}")
-            st.code(traceback.format_exc())
-            return
-        bar.progress(1.0, text="Sweep complete")
-        st.session_state["_tune_results"] = results
-        st.session_state["_tune_sig"] = _sweep_inputs_sig()
-
-    results = st.session_state.get("_tune_results")
-    if not results:
-        _stocking_frontier_section()   # available without running the knob sweep
-        return
-    _warn_if_sweep_stale("_tune_sig", "tuning results")
-
-    rec = tuning.recommend(results)
-    if rec.is_capacity_bound:
-        st.warning(f"**Capacity-bound:** {rec.text}")
-    else:
-        st.success(f"**Recommendation:** {rec.text}")
-
-    # Apply & save the recommended knobs — same mechanism as Optimize mode, so a
-    # tuning sweep flows straight into config/control.yaml without retyping anything.
-    best = next((r for r in results if r.label == rec.best_label), results[0])
-    from forecast import optimize as _opt
-    if best.overrides:
-        with st.container(border=True):
-            st.markdown(f"**Apply — `{best.label}`** · these are Control-knob overrides "
-                        "(the same knobs the **Configure → Control** tab edits).")
-            st.code(_opt.overrides_yaml(best.overrides) or "# baseline", language="yaml")
-            if st.button("💾 Save these tuning knobs to my config", key="tune_save",
-                         type="primary"):
-                _opt.save_overrides_to_config(str(CONFIG_DIR), best.overrides)
-                _clear_all_editor_state()
-                # The save itself moved the config fingerprint — refresh the
-                # sweep's input sig so only EXTERNAL changes flag it stale.
-                st.session_state["_tune_sig"] = _sweep_inputs_sig()
-                st.success("Saved to config/control.yaml — switch to **Run forecast** "
-                           "to use them (or open **Configure → Control** to review).")
-    else:
-        st.caption("Recommended variant is the baseline — no knob change to save.")
-
-    df = _results_to_frame(results)
-
-    def _hl(row):
-        if row["Variant"] == rec.best_label:
-            return ["background-color: #d7f0d7"] * len(row)
-        if row["Variant"] == "baseline":
-            return ["background-color: #eef3fb"] * len(row)
-        return [""] * len(row)
-
-    st.dataframe(df.style.apply(_hl, axis=1), use_container_width=True,
-                 hide_index=True)
-
-    # Peak-density distribution chart (stacked bands per variant).
-    band_cols = ["<=1.0", "1.0-1.1", "1.1-1.3", ">1.3"]
-    long = df.melt(id_vars="Variant", value_vars=band_cols,
-                   var_name="Band", value_name="Batches")
-    fig = px.bar(long, x="Variant", y="Batches", color="Band",
-                 title="Peak-density distribution by variant",
-                 color_discrete_map={"<=1.0": "#2e7d32", "1.0-1.1": "#9ccc65",
-                                     "1.1-1.3": "#ffb300", ">1.3": "#c62828"})
-    st.plotly_chart(fig, use_container_width=True)
-
-    # Severe-batch detail for the recommended (or baseline) variant.
-    if best.severe_rows:
-        st.subheader(f"Batches over 1.2× cap — {best.label}")
-        st.caption(
-            "Where the density pressure actually is. If these cluster in time "
-            "(close Entry weeks) and peak mid-grow-out, it's a capacity collision."
-        )
-        st.dataframe(pd.DataFrame(best.severe_rows), use_container_width=True,
-                     hide_index=True)
-    else:
-        st.info(f"No batch exceeds 1.2× cap in **{best.label}**.")
-
-    # The density KNOBS above can't lower density on a tank-full facility; the
-    # stocking-cut frontier is the lever that can. Always available (own button).
-    _stocking_frontier_section()
-
-
 # ============================================================
-# Configure / Tune modes — render and stop
+# Optimizer helpers
 # ============================================================
 
 def _opt_winner(results, rec):
@@ -4977,6 +4826,13 @@ def _ana_grade(res, targets, econ):
             rows, basis=targets.get("basis", "hog"))
         tr = _ana.review_targets(monthly, yearly, targets)
     rev = _ana.revenue_for(rows, econ) if (econ and rows) else None
+    dcached = res.get("_ana_density")
+    if not dcached or dcached.get("rid") != rid:
+        dcached = {"rid": rid,
+                   "review": (_ana.density_review(res["output_path"])
+                              if res.get("output_path") else None)}
+        res["_ana_density"] = dcached
+    dr = dcached["review"]
     sc = res.get("_score") or {}
     m = sc.get("metrics")
     v = sc.get("verdict") or {}
@@ -4991,9 +4847,10 @@ def _ana_grade(res, targets, econ):
                                    if m is not None else None),
         "peak_pct_of_cap": peak_pct,
         "targets_review": tr,
+        "density_review": dr,
     }
     return {"gates": _ana.evaluate_gates(ctx), "targets_review": tr,
-            "revenue": rev, "metrics": m}
+            "revenue": rev, "metrics": m, "density_review": dr}
 
 
 _ANA_ICON = {"PASS": "✅", "WARN": "⚠️", "FAIL": "❌", "N/A": "◽"}
@@ -5236,7 +5093,8 @@ def _analyze():
     for c in cands:
         g = _ana_grade(c["res"], targets, econ)
         c.update(gates=g["gates"], targets_review=g["targets_review"],
-                 revenue=g["revenue"], metrics=g["metrics"], score=None)
+                 revenue=g["revenue"], metrics=g["metrics"],
+                 density_review=g["density_review"], score=None)
     # Comparable emphasis score across candidates (same scorer as Optimize).
     _w = optimize.weights_for(ana.get("emphasis", "balanced"))
     _variants = [optimize.OptVariant(label=c["label"], overrides=c["overrides"],
@@ -5359,6 +5217,31 @@ def _analyze():
                  "Status": r["status"]}
                 for r in tr["rows"]]), hide_index=True,
                 use_container_width=True)
+    with st.expander("📊 Density quality — distribution + severe batches "
+                     "(the old Tune readout, per candidate)"):
+        st.caption("Read the DISTRIBUTION, not the raw over-cap count: 1.0–1.1× "
+                   "is normal at full utilisation; only **severe (≥1.3×)** rows "
+                   "matter — and if those cluster in time and peak mid-grow-out "
+                   "it's a **stocking/capacity** problem (use the stocking "
+                   "frontier below), not a knob to re-tune.")
+        for c in ranked:
+            dr = c.get("density_review")
+            if not dr:
+                continue
+            st.markdown(f"**{c['label']}** — {dr['n']} batches · worst "
+                        f"{dr['worst']:.2f}× · median {dr['median']:.2f}×")
+            st.dataframe(pd.DataFrame([dr["buckets"]]), hide_index=True,
+                         use_container_width=True)
+            if dr["severe_rows"]:
+                st.dataframe(pd.DataFrame(dr["severe_rows"]), hide_index=True,
+                             use_container_width=True)
+            else:
+                st.caption("No batch over 1.2× cap in this plan.")
+
+    # The stocking-for-quality frontier — the REMEDY for what the density lens
+    # diagnoses (severe cluster = stock fewer fish, no knob fixes it). Moved
+    # here from the retired Tune mode; runs on demand with its own button.
+    _stocking_frontier_section()
 
 
 if app_mode.startswith("Analyze"):
@@ -5373,9 +5256,6 @@ if app_mode.startswith("Configure"):
     _config_editor()
     st.stop()
 
-if app_mode.startswith("Tune"):
-    _tuner()
-    st.stop()
 
 if app_mode.startswith("Optimize"):
     _optimizer()
