@@ -4536,6 +4536,43 @@ def _restore_output_path(res: dict, tag: str) -> None:
         pass  # grading degrades gracefully (gates from the stored _score)
 
 
+def _res_for_disk(res: dict) -> dict:
+    """A pickle-safe copy: the _score's Metrics dataclass becomes a plain
+    dict. Class instances are tied to a module generation — after a source
+    hot-reload they can't be pickled at all ("not the same object as
+    forecast.optimize.Metrics", 2026-08-07) — plain data always can."""
+    import dataclasses
+    sc = res.get("_score")
+    if not sc or not dataclasses.is_dataclass(sc.get("metrics")):
+        return res
+    out = dict(res)
+    out["_score"] = {**sc, "metrics": None,
+                     "_metrics_plain": dataclasses.asdict(sc["metrics"])}
+    return out
+
+
+def _res_from_disk(res: dict) -> dict:
+    """Rebuild the Metrics instance from the CURRENT class. If the stored
+    fields no longer fit (schema drift), drop _score — _ensure_board_score
+    re-grades from the workbook on demand, so the worst case is a re-grade,
+    never a crash or a wrong verdict."""
+    import dataclasses
+    sc = res.get("_score")
+    if not (sc and sc.get("metrics") is None and sc.get("_metrics_plain")):
+        return res
+    from forecast import optimize as _o
+    out = dict(res)
+    try:
+        fields = {f.name for f in dataclasses.fields(_o.Metrics)}
+        m = _o.Metrics(**{k: v for k, v in sc["_metrics_plain"].items()
+                          if k in fields})
+        out["_score"] = {k: v for k, v in sc.items() if k != "_metrics_plain"}
+        out["_score"]["metrics"] = m
+    except Exception:  # noqa: BLE001
+        out.pop("_score", None)
+    return out
+
+
 def _board_store() -> dict:
     """The per-method finished-run store, hydrated from the DISK cache once
     per session — so a page reload, a frozen tab, or a browser restart never
@@ -4546,6 +4583,8 @@ def _board_store() -> dict:
         from forecast import analysis as _ana
         for name, obj in _ana.cache_load_all(prefix="board_").items():
             mkey = name[len("board_"):]
+            if obj.get("res"):
+                obj = {**obj, "res": _res_from_disk(obj["res"])}
             if store.setdefault(mkey, obj) is obj and obj.get("res"):
                 _restore_output_path(obj["res"], mkey)
         st.session_state["_board_cache_hydrated"] = True
@@ -4553,14 +4592,18 @@ def _board_store() -> dict:
 
 
 def _board_persist(mkey: str) -> None:
-    """Write one method's finished entry through to the disk cache. Failures
-    are non-fatal (the session copy still works) but surfaced."""
+    """Write one method's finished entry through to the disk cache (as plain
+    data — see _res_for_disk). Failures are non-fatal (the session copy still
+    works) but surfaced."""
     from forecast import analysis as _ana
     entry = st.session_state.get("_board_store", {}).get(mkey)
     if not entry:
         return
     try:
-        _ana.cache_save(f"board_{mkey}", entry)
+        payload = entry
+        if entry.get("res"):
+            payload = {**entry, "res": _res_for_disk(entry["res"])}
+        _ana.cache_save(f"board_{mkey}", payload)
     except Exception as e:  # noqa: BLE001
         st.caption(f"⚠ couldn't disk-cache {mkey}: {e} (session copy kept)")
 
@@ -5070,7 +5113,11 @@ def _analyze():
         # The card survives reloads/frozen tabs too — same disk cache as the
         # engine legs (the 2026-08-06 tab freeze made this non-optional).
         try:
-            _ana.cache_save("ana_summary", st.session_state["_ana"])
+            _payload = dict(st.session_state["_ana"])
+            if _payload.get("tuned") and _payload["tuned"].get("res"):
+                _payload["tuned"] = {**_payload["tuned"],
+                                     "res": _res_for_disk(_payload["tuned"]["res"])}
+            _ana.cache_save("ana_summary", _payload)
         except Exception as e:  # noqa: BLE001
             st.caption(f"⚠ couldn't disk-cache the analysis: {e}")
 
@@ -5081,6 +5128,8 @@ def _analyze():
         ana = _ana.cache_load_all(prefix="ana_summary").get("ana_summary")
         if ana is not None:
             if ana.get("tuned") and ana["tuned"].get("res"):
+                ana["tuned"] = {**ana["tuned"],
+                                "res": _res_from_disk(ana["tuned"]["res"])}
                 _restore_output_path(ana["tuned"]["res"], "tuned")
             st.session_state["_ana"] = ana
     if not ana:

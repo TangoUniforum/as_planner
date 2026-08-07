@@ -427,3 +427,28 @@ def test_sweep_pickling_break_degrades_to_sequential(monkeypatch):
                   variant_cache=vc)
     assert [v.label for v in res] == ["baseline", "a", "b"]
     assert len(calls) == 3 and len(vc) == 3
+
+
+def test_variant_cache_stores_only_plain_data(monkeypatch):
+    # The reload-proof invariant: cache VALUES must be plain dicts (a class
+    # instance tied to a module generation becomes unpicklable after a
+    # hot-reload — the 2026-08-07 disk-cache failures).
+    import pickle
+    from forecast import optimize as O
+
+    def fake_run(label, ov, cdir, sdir, inp):
+        return O.OptVariant(label=label, overrides=dict(ov),
+                            metrics=O._infeasible_metrics(), dropped=0,
+                            overprod=0)
+
+    monkeypatch.setattr(O, "run_variant", fake_run)
+    vc = {}
+    res = O.sweep("in", "cfg", "scn", grid=[("a", {"x": 1})], parallel=False,
+                  variant_cache=vc)
+    assert all(isinstance(v, dict) for v in vc.values())
+    pickle.dumps(vc)                       # must never raise
+    # And the rebuild path returns a real OptVariant with a real Metrics.
+    again = O.sweep("in", "cfg", "scn", grid=[("a", {"x": 1})], parallel=False,
+                    variant_cache=vc)
+    assert again[0].metrics is not None
+    assert again[0].metrics.weeks_over_harvest_cap == res[0].metrics.weeks_over_harvest_cap

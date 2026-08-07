@@ -168,3 +168,29 @@ def test_result_rid_prefers_an_explicit_id_and_tolerates_junk():
     assert app._result_rid({"_rid": "abc", "output_path": "/x"}) == "abc"
     app._result_rid({})      # must not raise
     app._result_rid(None)
+
+
+def test_res_disk_roundtrip_is_pickle_safe_and_rebuilds_metrics():
+    # Board results persist as PLAIN DATA and rebuild Metrics from the
+    # CURRENT class — reload-proof by construction (2026-08-07).
+    import pickle
+    app = pytest.importorskip("app")
+    from forecast import optimize as O
+    m = O._infeasible_metrics()
+    res = {"ok": True, "output_path": "x.xlsm",
+           "_score": {"metrics": m, "verdict": {"gate": "PASS"},
+                      "harvest": {"zero_weeks": 0}}}
+    disk = app._res_for_disk(res)
+    assert disk["_score"]["metrics"] is None
+    pickle.dumps(disk)                                  # must never raise
+    back = app._res_from_disk(disk)
+    assert isinstance(back["_score"]["metrics"], O.Metrics)
+    assert (back["_score"]["metrics"].weeks_over_harvest_cap
+            == m.weeks_over_harvest_cap)
+    assert back["_score"]["verdict"] == {"gate": "PASS"}
+    # Schema drift (junk fields) -> _score dropped, not a crash: the board
+    # re-grades from the workbook on demand.
+    bad = {"ok": True,
+           "_score": {"metrics": None, "_metrics_plain": {"nope": 1}}}
+    assert "_score" not in app._res_from_disk(bad) or \
+        app._res_from_disk(bad)["_score"].get("metrics") is not None

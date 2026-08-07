@@ -978,19 +978,49 @@ def _default_workers(n_tasks: int) -> int:
 def _vc_get(vc, overrides, label):
     """Fetch a finished measurement from the cross-run variant cache (keyed by
     the deterministic overrides key) and relabel it for THIS requester — the
-    same knob set can be reached under different labels by grid vs descent."""
+    same knob set can be reached under different labels by grid vs descent.
+
+    Entries are PLAIN DICTS (see _vc_put); the OptVariant/Metrics are rebuilt
+    from the CURRENT classes here, so a cache written before a source
+    hot-reload stays loadable. Legacy object entries are still honored."""
+    import dataclasses
     if vc is None:
         return None
     v = vc.get(_overrides_key(overrides))
     if v is None:
         return None
-    return OptVariant(label=label, overrides=dict(v.overrides), metrics=v.metrics,
-                      dropped=v.dropped, overprod=v.overprod, failed=v.failed)
+    if isinstance(v, OptVariant):        # legacy pre-plain-data entry
+        return OptVariant(label=label, overrides=dict(v.overrides),
+                          metrics=v.metrics, dropped=v.dropped,
+                          overprod=v.overprod, failed=v.failed)
+    try:
+        m = None
+        if v.get("metrics") is not None:
+            fields = {f.name for f in dataclasses.fields(Metrics)}
+            m = Metrics(**{k: x for k, x in v["metrics"].items()
+                           if k in fields})
+        return OptVariant(label=label, overrides=dict(v["overrides"]),
+                          metrics=m, dropped=v["dropped"],
+                          overprod=v["overprod"], failed=v.get("failed"))
+    except Exception:  # noqa: BLE001 — schema drift -> cache miss, re-run
+        return None
 
 
 def _vc_put(vc, variant) -> None:
-    if vc is not None:
-        vc[_overrides_key(variant.overrides)] = variant
+    """Record as PLAIN DATA — class instances tied to a module generation
+    become unpicklable after a hot-reload (the 2026-08-07 disk-cache
+    failures); dicts never do."""
+    import dataclasses
+    if vc is None:
+        return
+    vc[_overrides_key(variant.overrides)] = {
+        "overrides": dict(variant.overrides),
+        "metrics": (dataclasses.asdict(variant.metrics)
+                    if dataclasses.is_dataclass(variant.metrics) else None),
+        "dropped": variant.dropped,
+        "overprod": variant.overprod,
+        "failed": variant.failed,
+    }
 
 
 def sweep(input_path, config_dir, scenario_dir, grid=None, progress=None,
