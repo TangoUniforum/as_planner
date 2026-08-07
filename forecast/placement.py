@@ -60,6 +60,7 @@ from .biology import (
     sgr_pct_per_day, upper_truncated_split,
 )
 from .events import Grade, GradedHarvest, Harvest, OG12_SYSTEMS, OG12_MOVE_LOCK_WT_G, TankAllocation, Transfer, TranOGEntry
+from .tiers import move_allowed
 from .harvest_scheduler import HarvestDemand
 from .models import (
     BatchInput,
@@ -264,7 +265,7 @@ _OG_ALL_WITH_6N = ["OG1N", "OG1S", "OG2N", "OG2S", "OG3N", "OG3S",
 # by the rebalancer. Use OG6N only when 6N is in production mode.
 _OG_ALL = ["OG1N", "OG1S", "OG2N", "OG2S", "OG3N", "OG3S",
            "OG4N", "OG4S", "OG5N", "OG5S", "OG6S"]
-_OG12 = ["OG1N", "OG1S", "OG2N", "OG2S"]
+_OG12 = sorted(OG12_SYSTEMS)  # entry tier (tiers.ENTRY_SYSTEMS, via events alias)
 
 
 def _as_date(d):
@@ -868,6 +869,7 @@ def _pick_fifo_move_in_batches(
             t for t in state.tanks_by_id.values()
             if t.batch_id == b.batch_id and not t.is_empty
             and t.system_id not in _SIXN_SYSTEMS
+            and t.system_id not in OG12_SYSTEMS   # R5: no harvest/6N staging from entry tier
             and t.avg_wt_g >= min_wt
         ]
         if not prod_tanks:
@@ -935,6 +937,7 @@ def _try_graded_move_in(
             t for t in state.tanks_by_id.values()
             if t.batch_id == b.batch_id and not t.is_empty
             and t.system_id not in _SIXN_SYSTEMS
+            and t.system_id not in OG12_SYSTEMS   # R5: no graded 6N staging from entry tier
             and t.avg_wt_g < min_hv  # not eligible for regular move-in
         ]
         # Prefer largest avg first (closer to threshold => fatter tail).
@@ -1201,6 +1204,7 @@ def _run_sixn_purge_week(
             t for t in state.tanks_by_id.values()
             if t.batch_id == move_in_batch and not t.is_empty
             and t.system_id not in _SIXN_SYSTEMS
+            and t.system_id not in OG12_SYSTEMS   # R5: no 6N staging from entry tier
             and t.avg_wt_g >= control.min_harvest_weight_g
         ]
         # Biggest avg_wt first: prefer to move the largest fish into the
@@ -1252,6 +1256,64 @@ def _run_sixn_purge_week(
             moved_this_batch += take
         if moved_this_batch > 0:
             contributing_batches.append(move_in_batch)
+
+    # FORWARD-TRANSIT (R2/R5): the rotation may not pull from ENTRY tanks
+    # directly (R5 — no 6N staging from OG1/2), so when the grow-out pool
+    # leaves the fill short while market-ready fish sit in entry tanks, route
+    # them the physical way: entry -> free grow-out tank (R2, any weight),
+    # then that grow-out tank -> the fill pair via the normal make-room move
+    # (purge transfer weight, freeze, feed booking). No-op when no grow-out
+    # slot is free or no mature entry fish exist.
+    if count_moved < target:
+        _entry_srcs = sorted(
+            [t for t in state.tanks_by_id.values()
+             if not t.is_empty and t.type == "OG"
+             and t.system_id in OG12_SYSTEMS and t.stage == "SW"
+             and t.avg_wt_g >= control.min_harvest_weight_g],
+            key=lambda t: (-t.avg_wt_g, t.tank_id))
+        for _es in _entry_srcs:
+            if count_moved >= target:
+                break
+            _fg = next(
+                (t for t in sorted(state.tanks_by_id.values(),
+                                   key=lambda x: x.tank_id)
+                 if t.is_empty and t.type == "OG"
+                 and t.system_id not in _SIXN_SYSTEMS
+                 and t.system_id not in OG12_SYSTEMS
+                 and t.tank_id not in reserved),
+                None)
+            if _fg is None:
+                break  # no grow-out slot for the transit hop
+            _take = min(target - count_moved, _es.count)
+            if _take <= 0:
+                continue
+            _e_batch, _e_loc = _es.batch_id, _es.location_id
+            _hop = Transfer(
+                batch_id=_e_batch, event_date=week_start_date,
+                source_tank_id=_es.tank_id,
+                destinations=[TankAllocation(
+                    tank_id=_fg.tank_id, count=_take,
+                    avg_wt_g=_es.avg_wt_g, cv_pct=_es.cv_pct)],
+                leaves_source_empty=False,
+            )
+            warnings.extend(_hop.apply(state))
+            transfer_events.append(_hop)
+            if _fg.is_empty:   # hop refused
+                break
+            _hopped = _fg.count
+            if not _make_room_into_6n(
+                    state, _fg, week_start_date, fill_pair,
+                    transfer_events, warnings, week_label,
+                    reason=("6N rotation fill via entry forward-transit "
+                            f"(from {_e_loc})"),
+                    sixn_move_in_feed=sixn_move_in_feed, tables=tables,
+                    batch_meta=batch_meta, is_purge=True):
+                # 6N full — the fish stay in the grow-out tank (now normal
+                # SW grow-out, harvestable later). Stop the transit.
+                break
+            count_moved += _hopped
+            if _e_batch not in contributing_batches:
+                contributing_batches.append(_e_batch)
 
     # GRADE-TO-MIN top-up (opt-in `harvest_grade_to_min`): when the whole-tank move-in
     # leaves the resting pair below the harvest FLOOR (min_h), peel just enough of the
@@ -1435,6 +1497,12 @@ def _emit_transfers_for_batch_diff(
             state.tanks_by_id[t] for t in this_tanks
             if t in state.tanks_by_id
             and state.tanks_by_id[t].batch_id == batch_id
+            # R2-R4: only route the residual to destinations the tier rules
+            # allow from THIS source tank (no backward into entry, no
+            # intra-entry at >= 1 kg) — Transfer.apply is the final gate.
+            and move_allowed(tank.system_id,
+                             state.tanks_by_id[t].system_id,
+                             tank.avg_wt_g)[0]
         ]
         if not candidates:
             warnings.append(
@@ -1795,8 +1863,12 @@ def _rebalance_systems_realized(
                 continue
             pb = bbio.get(b, 0.0) / ntanks
             pf = bfeed.get(b, 0.0) / ntanks
-            elig = (growout_systems if bwt.get(b, 0.0) >= OG12_MOVE_LOCK_WT_G
-                    else (og_systems - growout_systems))
+            # Destination systems legal from the OVER-CAP source system big_s
+            # (R2-R4 via tiers.move_allowed): non-entry sources may never go
+            # back to entry; entry sources <1 kg may target entry or growout,
+            # >=1 kg forward (growout) only.
+            elig = {s for s in og_systems
+                    if move_allowed(big_s, s, bwt.get(b, 0.0))[0]}
             best = None
             for tgt in sorted(elig):
                 if tgt == big_s or tgt not in og_systems:
@@ -1871,8 +1943,16 @@ def _rebalance_systems_realized(
             if cand is None:
                 break
             bb = cand[1]
-            elig = (growout_systems if bwt.get(bb, 0.0) >= OG12_MOVE_LOCK_WT_G
-                    else (og_systems - growout_systems))
+            # The split's fish flow OUT of the batch's current tanks (Phase D
+            # evens them into the new tank), so the destination must be legal
+            # from EVERY system the batch currently occupies (R2-R4): any
+            # non-entry source tank forbids an entry-tier destination.
+            _src_syss = {_tank_to_system_of(tid, og_tanks_by_system)
+                         for tid in planned.get(bb, [])}
+            _src_syss.discard(None)
+            elig = {s for s in og_systems
+                    if all(move_allowed(ss, s, bwt.get(bb, 0.0))[0]
+                           for ss in _src_syss)}
             # Share reflects the FINAL spread, not n+1: a batch crammed in one
             # tank needs to fan across ceil(biomass / tank-capacity) tanks. Sizing
             # the share at n+1 would charge a target half the batch on the first
@@ -1993,6 +2073,11 @@ def _variable_quantity_rebalance(
                 T = sys_of.get(tid2)
                 if T is None or T == S:
                     continue
+                # R2-R4: the move goes from system S at the source tank's avg
+                # weight; skip destinations the tier rules forbid (backward
+                # into entry, or intra-entry at >=1 kg).
+                if not move_allowed(S, T, src.avg_wt_g)[0]:
+                    continue
                 tbc, tfc = cap_lookup(wl, T)
                 Tbio, Tfeed = sys_load(T)
                 bio_head = (tbc * _VARQTY_DST_FILL - Tbio) if tbc else 9e18
@@ -2059,8 +2144,9 @@ def _balance_loads(
     dimensions (system biomass, system feed, destination density). The move is
     capped by every dimension's headroom, so relieving a hot tank can never push
     a destination over its feed/biomass/density cap (the trap the naive density
-    split fell into). Eligibility honours the 1 kg lock (>=1 kg → growout only;
-    <1 kg → any OG); Transfer.apply is the final INV gate. New tanks are
+    split fell into). Eligibility follows tiers.move_allowed (R2-R4: non-entry
+    never back to entry; entry <1 kg → any OG, >=1 kg → forward only);
+    Transfer.apply is the final INV gate. New tanks are
     forward-persisted so the set stays stable (no diff churn). Continuity-safe.
     """
     sys_of = {tid: s for s, ids in og_tanks_by_system.items() for tid in ids}
@@ -2143,11 +2229,14 @@ def _balance_loads(
         if surplus_kg <= 1.0:
             stuck.add(src.tank_id)
             continue
-        growout = src.avg_wt_g >= OG12_MOVE_LOCK_WT_G
-        # Candidate destinations with per-dimension headroom.
+        # Candidate destinations with per-dimension headroom. Eligibility =
+        # tiers.move_allowed from the SOURCE tank's system at its avg weight
+        # (R2-R4): non-entry never back to entry; entry <1 kg anywhere, >=1 kg
+        # forward only.
         cands = []
         for s2, ids in og_tanks_by_system.items():
-            eligible = (s2 in growout_systems) if growout else (s2 in og_systems)
+            eligible = (s2 in og_systems
+                        and move_allowed(src.system_id, s2, src.avg_wt_g)[0])
             if not eligible:
                 continue
             tbc, tfc = cap_lookup(wl, s2)
@@ -2323,11 +2412,14 @@ def _make_room_into_6n(
             _xfer_wt = (_grow_weight_days(src.avg_wt_g, _bm, tables,
                                           PURGE_TRANSFER_GROWTH_DAYS)
                         if (is_purge and tables is not None) else src.avg_wt_g)
+            # Capture BEFORE apply: leaves_source_empty drains src, so reading
+            # src.batch_id/count afterwards logs "batch None, 0 fish".
+            _src_batch, _src_loc, _src_count = src.batch_id, src.location_id, src.count
             _mv = Transfer(
-                batch_id=src.batch_id, event_date=event_date,
+                batch_id=_src_batch, event_date=event_date,
                 source_tank_id=src.tank_id,
                 destinations=[TankAllocation(
-                    tank_id=_tk.tank_id, count=src.count,
+                    tank_id=_tk.tank_id, count=_src_count,
                     avg_wt_g=_xfer_wt, cv_pct=src.cv_pct)],
                 leaves_source_empty=True,
                 # In purge mode debit the source at its week-open weight (the
@@ -2340,12 +2432,12 @@ def _make_room_into_6n(
             if is_purge:
                 _freeze_6n_dest(state, _tk.tank_id)
                 if sixn_move_in_feed is not None and tables is not None:
-                    _book_move_in_feed(sixn_move_in_feed, src.batch_id,
-                                       week_label, _xfer_wt, src.count,
+                    _book_move_in_feed(sixn_move_in_feed, _src_batch,
+                                       week_label, _xfer_wt, _src_count,
                                        tables, _bm)
             warnings.append(
-                f"{week_label}: {reason} — MOVED {src.location_id} "
-                f"(batch {src.batch_id}, {src.count:.0f} fish) into 6N "
+                f"{week_label}: {reason} — MOVED {_src_loc} "
+                f"(batch {_src_batch}, {_src_count:.0f} fish) into 6N "
                 f"{_tk.location_id} to purge (no direct harvest in purge mode)")
             return True
     return False
@@ -2934,6 +3026,7 @@ def phase_d_emit_events(
                     src_tanks = sorted(
                         [t for t in state.tanks_by_id.values()
                          if t.batch_id == bid and not t.is_empty and t.stage == "SW"
+                         and t.system_id not in OG12_SYSTEMS   # R5: never purge-stage entry-tier tanks
                          and t.avg_wt_g >= control.min_harvest_weight_g],
                         key=lambda t: (-t.avg_wt_g, t.tank_id))
                     for src in src_tanks:
@@ -2947,6 +3040,55 @@ def phase_d_emit_events(
                             f"{week_label}: PRE-STAGE in-place purge {src.location_id} "
                             f"(batch {src.batch_id}, {src.count:.0f} fish) — readying "
                             f"the 6N->production harvest handoff (no gap)")
+                # FORWARD-PROMOTION (R2/R5): if the grow-out pool alone can't
+                # fill the priming target, mature fish parked in ENTRY tanks
+                # (which R5 forbids staging in place) are MOVED forward into a
+                # free grow-out tank — legal at any weight — and THAT tank is
+                # staged. Keeps the handoff pipeline full without entry-tier
+                # harvest; no-op when no grow-out slot is free.
+                if _in_pipe < _stage_cap and _entered < _prime_target:
+                    _prime_entry = sorted(
+                        [t for t in state.tanks_by_id.values()
+                         if not t.is_empty and t.type == "OG"
+                         and t.system_id in OG12_SYSTEMS
+                         and t.stage == "SW"
+                         and t.avg_wt_g >= control.min_harvest_weight_g],
+                        key=lambda t: (-t.avg_wt_g, t.tank_id))
+                    for _esrc in _prime_entry:
+                        if _in_pipe >= _stage_cap or _entered >= _prime_target:
+                            break
+                        _fg = next(
+                            (t for t in sorted(state.tanks_by_id.values(),
+                                               key=lambda x: x.tank_id)
+                             if t.is_empty and t.type == "OG"
+                             and t.system_id not in _SIXN_SYSTEMS
+                             and t.system_id not in OG12_SYSTEMS
+                             and t.tank_id not in _reserved_og),
+                            None)
+                        if _fg is None:
+                            break  # no grow-out slot to promote into
+                        _e_batch, _e_loc = _esrc.batch_id, _esrc.location_id
+                        _mv = Transfer(
+                            batch_id=_e_batch, event_date=week_start_date,
+                            source_tank_id=_esrc.tank_id,
+                            destinations=[TankAllocation(
+                                tank_id=_fg.tank_id, count=_esrc.count,
+                                avg_wt_g=_esrc.avg_wt_g, cv_pct=_esrc.cv_pct)],
+                            leaves_source_empty=True,
+                        )
+                        warnings.extend(_mv.apply(state))
+                        transfer_events.append(_mv)
+                        if _fg.is_empty:   # transfer refused
+                            break
+                        _fg.stage = STAGE_STARVE
+                        _fg.starvation_days_remaining = purge_days
+                        _in_pipe += _fg.count
+                        _entered += _fg.count
+                        warnings.append(
+                            f"{week_label}: PRE-STAGE promoted mature entry tank "
+                            f"{_e_loc} (batch {_e_batch}) forward into "
+                            f"{_fg.location_id} and staged it (R2/R5 — entry-tier "
+                            f"fish route forward before harvest)")
                 # Age the pre-staged tanks so they complete purge by production.
                 for t in state.tanks_by_id.values():
                     if t.stage == STAGE_STARVE and not t.is_empty:
@@ -2990,7 +3132,11 @@ def phase_d_emit_events(
                 for t in list(state.tanks_by_id.values()):
                     if t.stage == STAGE_STARVE and not t.is_empty:
                         t.starvation_days_remaining -= 7
-                        if t.starvation_days_remaining <= 0:
+                        # R5 guard: an entry-tier STARVE tank shouldn't exist
+                        # (entry never enters the purge pipeline post-rules);
+                        # if one does, never harvest it from the entry tier.
+                        if (t.starvation_days_remaining <= 0
+                                and t.system_id not in OG12_SYSTEMS):
                             _ready.append(t)
                 _ready.sort(key=lambda t: (-t.avg_wt_g, t.tank_id))
                 _hv = 0.0
@@ -3035,6 +3181,7 @@ def phase_d_emit_events(
                         src_tanks = [t for t in state.tanks_by_id.values()
                                      if t.batch_id == bid and not t.is_empty
                                      and t.stage == "SW"
+                                     and t.system_id not in OG12_SYSTEMS  # R5
                                      and t.avg_wt_g >= control.min_harvest_weight_g]
                         src_tanks.sort(key=lambda t: (-t.avg_wt_g, t.tank_id))
                         for src in src_tanks:
@@ -3043,6 +3190,56 @@ def phase_d_emit_events(
                             src.stage = STAGE_STARVE
                             src.starvation_days_remaining = purge_days
                             _entered += src.count
+                    # FORWARD-PROMOTION (R2/R5): market-ready fish parked in
+                    # ENTRY tanks can't be purged in place (R5 forbids harvest
+                    # / staging from OG1/2), so when the grow-out pool alone
+                    # can't fill the entry target, MOVE the biggest entry tank
+                    # forward into a free grow-out tank (legal at any weight —
+                    # R2; step (a)'s harvest just freed one) and stage THAT
+                    # tank. Without this the pipeline starves while supply
+                    # sits in OG1/2 (the 2028-W29 zero-harvest crater).
+                    if _entered < _entry_target:
+                        _entry_mature = sorted(
+                            [t for t in state.tanks_by_id.values()
+                             if not t.is_empty and t.type == "OG"
+                             and t.system_id in OG12_SYSTEMS
+                             and t.stage == "SW"
+                             and t.avg_wt_g >= control.min_harvest_weight_g],
+                            key=lambda t: (-t.avg_wt_g, t.tank_id))
+                        for _esrc in _entry_mature:
+                            if _entered >= _entry_target:
+                                break
+                            _fg = next(
+                                (t for t in sorted(state.tanks_by_id.values(),
+                                                   key=lambda x: x.tank_id)
+                                 if t.is_empty and t.type == "OG"
+                                 and t.system_id not in OG12_SYSTEMS
+                                 and t.tank_id not in _reserved_og),
+                                None)
+                            if _fg is None:
+                                break  # no grow-out slot to promote into
+                            _e_batch, _e_loc = _esrc.batch_id, _esrc.location_id
+                            _mv = Transfer(
+                                batch_id=_e_batch, event_date=week_start_date,
+                                source_tank_id=_esrc.tank_id,
+                                destinations=[TankAllocation(
+                                    tank_id=_fg.tank_id, count=_esrc.count,
+                                    avg_wt_g=_esrc.avg_wt_g, cv_pct=_esrc.cv_pct)],
+                                leaves_source_empty=True,
+                            )
+                            warnings.extend(_mv.apply(state))
+                            transfer_events.append(_mv)
+                            if _fg.is_empty:   # transfer refused
+                                break
+                            _fg.stage = STAGE_STARVE
+                            _fg.starvation_days_remaining = purge_days
+                            _entered += _fg.count
+                            warnings.append(
+                                f"{week_label}: PROMOTED mature entry tank "
+                                f"{_e_loc} (batch {_e_batch}) forward into "
+                                f"{_fg.location_id} and staged it for in-place "
+                                f"purge (R2/R5 — entry-tier fish route forward "
+                                f"before harvest)")
             elif target > 0:
                 # Immediate harvest (empty-phase tail, or purge_days unset).
                 harvested = 0.0
@@ -3051,6 +3248,7 @@ def phase_d_emit_events(
                         break
                     src_tanks = [t for t in state.tanks_by_id.values()
                                  if t.batch_id == bid and not t.is_empty
+                                 and t.system_id not in OG12_SYSTEMS  # R5: no entry-tier harvest
                                  and t.avg_wt_g >= control.min_harvest_weight_g]
                     src_tanks.sort(key=lambda t: t.avg_wt_g, reverse=True)
                     for src in src_tanks:
@@ -3209,6 +3407,7 @@ def phase_d_emit_events(
                         t for t in state.tanks_by_id.values()
                         if not t.is_empty and t.type == "OG"
                         and t.system_id not in _SIXN_SYSTEMS
+                        and t.system_id not in OG12_SYSTEMS  # R5: never purge entry-tier tanks into 6N
                         and t.stage != STAGE_STARVE
                         and t.avg_wt_g >= _min_hv_wt
                     ]
@@ -3251,18 +3450,21 @@ def phase_d_emit_events(
         if ws_we is not None:
             ws_date, we_date = ws_we
 
-            # PROACTIVE MAKE-ROOM HARVEST (pre-biology). The facility is a
-            # conveyor (OG1/2 -> ... -> OG6 -> harvest); harvest is biomass-
-            # driven, so when biomass is under cap it lets near-market fish keep
-            # growing — which OCCUPIES TANKS and can box out a TranOG arrival
-            # scheduled THIS week, forcing the arrival to be DROPPED (losing its
-            # entire stocked population — an input-fish-conservation breach; see
+            # PROACTIVE MAKE-ROOM (pre-biology). The facility is a conveyor
+            # (OG1/2 -> ... -> OG6 -> harvest); harvest is biomass-driven, so
+            # when biomass is under cap it lets near-market fish keep growing —
+            # which OCCUPIES TANKS and can box out a TranOG arrival scheduled
+            # THIS week, forcing the arrival to be DROPPED (losing its entire
+            # stocked population — an input-fish-conservation breach; see
             # InputConservationAudit). Before the week's biology runs, ensure
-            # enough empty OG growout tanks for this week's arrivals by harvesting
-            # the readiest tanks (biggest fish first — nearest market, would be
-            # harvested within days anyway). Done PRE-biology at week-open weight
-            # so it matches the continuity audit's event order (harvest before
-            # growth) and stays drift-free. Conserved via Harvest events.
+            # enough empty ENTRY-TIER (OG1/2) tanks for this week's arrivals
+            # (R1): vacate entry occupants FORWARD into free grow-out tanks
+            # (R2), freeing grow-out slots first via harvest / 6N purge of the
+            # readiest grow-out tanks where needed (entry tanks themselves are
+            # never harvested — R5). Done PRE-biology at week-open weight so it
+            # matches the continuity audit's event order (harvest before
+            # growth) and stays drift-free. Conserved via Harvest/Transfer
+            # events.
             _arrivals = [s for s in splits
                          if s.batch_id in og_entry_day
                          and ws_date <= og_entry_day[s.batch_id] < we_date]
@@ -3275,81 +3477,160 @@ def phase_d_emit_events(
                     _plan_n = len(_ta.tank_ids) if _ta and _ta.tank_ids else 0
                     _cohort_kg = s.post_cull_count * (s.post_cull_avg_wt_g / 1000.0)
                     _need += _tranog_tank_need(_cohort_kg, facility, control, _plan_n)
-                _empty_og = [t for t in state.tanks_by_id.values()
-                             if t.is_empty and t.type == "OG"
-                             and t.system_id not in _SIXN_SYSTEMS]
-                _deficit = _need - len(_empty_og)
+                # R1: arrivals may land ONLY in the entry tier (OG1/2), so the
+                # deficit is measured against EMPTY ENTRY tanks, and make-room
+                # means VACATING an entry tank: move its fish FORWARD (R2 —
+                # legal at any weight) into a free grow-out tank — preferring
+                # the tank(s) the anticipatory pass reserved for this very
+                # arrival. If no grow-out tank is free, first free one via the
+                # existing grow-out make-room (purge: move into 6N; production:
+                # whole-tank harvest — entry sources excluded per R5), then
+                # forward-move the entry occupant into it.
+                _empty_entry = [t for t in state.tanks_by_id.values()
+                                if t.is_empty and t.type == "OG"
+                                and t.system_id in OG12_SYSTEMS]
+                _deficit = _need - len(_empty_entry)
                 _min_hv_wt = control.min_harvest_weight_g or 0
                 while _deficit > 0:
-                    _cands = [t for t in state.tanks_by_id.values()
-                              if not t.is_empty and t.type == "OG"
-                              and t.system_id not in _SIXN_SYSTEMS
-                              and t.avg_wt_g >= _min_hv_wt]
-                    if not _cands:
-                        break  # genuinely saturated — arrival drop handled below
-                    if _level_load:
-                        # Under level-load, free the SMALLEST harvestable tank first
-                        # so the whole-tank make-room dump (which exceeds the cap) is
-                        # as SMALL as possible — i.e. drain the cheap remnant tanks
-                        # as the escape valve rather than the readiest/fullest tank.
-                        # This is the dominant spike lever on a tank-tight facility:
-                        # the make-room dump size IS the spike, so minimizing it
-                        # flattens harvest (config(8): CV 0.215->0.157, max 86k->67k).
-                        # Default (no level-load) keeps harvesting the readiest
-                        # (nearest-market) tank, so OFF behaviour is unchanged.
-                        _cands.sort(key=lambda t: (t.count, t.avg_wt_g, t.tank_id))
-                    else:
-                        _cands.sort(key=lambda t: (-t.avg_wt_g, t.tank_id))
-                    _src = _cands[0]
-                    # PURGE MODE — the operator rule is absolute: never harvest a
-                    # production tank directly. MOVE its fish into 6N to purge, which
-                    # both frees the tank for the arrival AND routes the fish to harvest
-                    # via the rotation. The anticipatory pacing pass above should have
-                    # already freed a slot; this is the reactive backstop. If 6N is full
-                    # this exact week, leave the tank and warn — a real 6N capacity
-                    # signal; the hard no-drop invariant below catches a genuine loss.
-                    if purge_this_week:
-                        if not _make_room_into_6n(
-                                state, _src, ws_date, sixn_resting_pair,
-                                transfer_events, warnings, week_label,
-                                reason="reactive make-room for a TranOG arrival",
-                                sixn_move_in_feed=sixn_move_in_feed, tables=tables,
-                                batch_meta=batch_meta, is_purge=True):
-                            warnings.append(
-                                f"{week_label}: make-room CANNOT free "
-                                f"{_src.location_id} for a TranOG arrival — 6N is full "
-                                f"and direct production harvest is forbidden in purge "
-                                f"mode (6N capacity signal)")
-                            break
-                        _deficit -= 1
-                        continue
-                    # PRODUCTION MODE — harvest the WHOLE tank directly (a partial
-                    # wouldn't free it). This pass may exceed the weekly ceiling:
-                    # dropping a stocked TranOG batch is worse and unrecoverable; the
-                    # overage is borrowed from next week's ceiling (_carry_debt).
-                    _over = max(0.0, _budget.used + _src.count - _budget.cap)
-                    _ev = Harvest(
-                        batch_id=_src.batch_id, event_date=ws_date,
-                        source_tank_id=_src.tank_id, count=_src.count,
-                        avg_wt_g=_src.avg_wt_g, min_tank_control=0,
-                    )
-                    warnings.extend(_ev.apply(state))
-                    harvest_events.append(_ev)
-                    _budget.record(_ev.count)
-                    warnings.append(
-                        f"{week_label}: proactive MAKE-ROOM harvest of "
-                        f"{_src.location_id} (batch {_src.batch_id}, "
-                        f"{_src.count:.0f} fish @ {_src.avg_wt_g / 1000:.2f}kg) — "
-                        f"freeing a tank for {len(_arrivals)} TranOG arrival(s) "
-                        f"this week to avoid dropping them"
-                    )
-                    if _level_load and _over > 0:
-                        warnings.append(
-                            f"{week_label}: make-room exceeded the weekly harvest "
-                            f"cap by {_over:.0f} fish to free a tank for a TranOG "
-                            f"arrival — conservation takes priority; the overage is "
-                            f"borrowed from next week's ceiling"
+                    # Entry occupants that can be vacated (readiest first —
+                    # biggest fish are nearest their forward move anyway).
+                    _entry_occ = sorted(
+                        [t for t in state.tanks_by_id.values()
+                         if not t.is_empty and t.type == "OG"
+                         and t.system_id in OG12_SYSTEMS
+                         and t.stage != STAGE_STARVE],
+                        key=lambda t: (-t.avg_wt_g, t.tank_id))
+                    if not _entry_occ:
+                        break  # nothing to vacate — arrival shortfall handled below
+                    # Forward-move destination: a free grow-out tank; reserved
+                    # (anticipatory-freed) tanks first — this arrival is what
+                    # they were held for.
+                    _free_grow = sorted(
+                        [t for t in state.tanks_by_id.values()
+                         if t.is_empty and t.type == "OG"
+                         and t.system_id not in _SIXN_SYSTEMS
+                         and t.system_id not in OG12_SYSTEMS],
+                        key=lambda t: (t.tank_id not in _reserved_og, t.tank_id))
+                    if not _free_grow:
+                        # No grow-out slot free — free one first (grow-out
+                        # sources only; R5 keeps entry tanks out of this pool).
+                        _cands = [t for t in state.tanks_by_id.values()
+                                  if not t.is_empty and t.type == "OG"
+                                  and t.system_id not in _SIXN_SYSTEMS
+                                  and t.system_id not in OG12_SYSTEMS
+                                  and t.stage != STAGE_STARVE  # purge-pipeline-owned
+                                  and t.avg_wt_g >= _min_hv_wt]
+                        if not _cands:
+                            # LAST RESORT: the purge pipeline's own (STARVE)
+                            # tanks — conservation (never drop an arrival)
+                            # outranks pipeline ownership. Prefer READY tanks
+                            # (purge complete, harvested next anyway); an
+                            # unfinished purge tank is taken only when nothing
+                            # else can free a slot.
+                            _cands = [t for t in state.tanks_by_id.values()
+                                      if not t.is_empty and t.type == "OG"
+                                      and t.system_id not in _SIXN_SYSTEMS
+                                      and t.system_id not in OG12_SYSTEMS
+                                      and t.stage == STAGE_STARVE
+                                      and t.avg_wt_g >= _min_hv_wt]
+                            if not _cands:
+                                break  # genuinely saturated — abort handled below
+                            _cands.sort(key=lambda t: (
+                                t.starvation_days_remaining, -t.avg_wt_g, t.tank_id))
+                        elif _level_load:
+                            # Under level-load, free the SMALLEST harvestable tank first
+                            # so the whole-tank make-room dump (which exceeds the cap) is
+                            # as SMALL as possible — i.e. drain the cheap remnant tanks
+                            # as the escape valve rather than the readiest/fullest tank.
+                            # This is the dominant spike lever on a tank-tight facility:
+                            # the make-room dump size IS the spike, so minimizing it
+                            # flattens harvest (config(8): CV 0.215->0.157, max 86k->67k).
+                            # Default (no level-load) keeps harvesting the readiest
+                            # (nearest-market) tank, so OFF behaviour is unchanged.
+                            _cands.sort(key=lambda t: (t.count, t.avg_wt_g, t.tank_id))
+                        else:
+                            _cands.sort(key=lambda t: (-t.avg_wt_g, t.tank_id))
+                        _src = _cands[0]
+                        # PURGE MODE — the operator rule is absolute: never harvest a
+                        # production tank directly. MOVE its fish into 6N to purge, which
+                        # both frees the tank AND routes the fish to harvest via the
+                        # rotation. The anticipatory pacing pass above should have
+                        # already freed a slot; this is the reactive backstop. If 6N is
+                        # full this exact week, leave the tank and warn — a real 6N
+                        # capacity signal; the hard no-drop invariant below catches a
+                        # genuine loss.
+                        if purge_this_week:
+                            if not _make_room_into_6n(
+                                    state, _src, ws_date, sixn_resting_pair,
+                                    transfer_events, warnings, week_label,
+                                    reason="reactive make-room for a TranOG arrival",
+                                    sixn_move_in_feed=sixn_move_in_feed, tables=tables,
+                                    batch_meta=batch_meta, is_purge=True):
+                                warnings.append(
+                                    f"{week_label}: make-room CANNOT free "
+                                    f"{_src.location_id} for a TranOG arrival — 6N is full "
+                                    f"and direct production harvest is forbidden in purge "
+                                    f"mode (6N capacity signal)")
+                                break
+                            continue  # freed a grow-out slot; forward-move next pass
+                        # PRODUCTION MODE — harvest the WHOLE tank directly (a partial
+                        # wouldn't free it). This pass may exceed the weekly ceiling:
+                        # dropping a stocked TranOG batch is worse and unrecoverable; the
+                        # overage is borrowed from next week's ceiling (_carry_debt).
+                        _over = max(0.0, _budget.used + _src.count - _budget.cap)
+                        _ev = Harvest(
+                            batch_id=_src.batch_id, event_date=ws_date,
+                            source_tank_id=_src.tank_id, count=_src.count,
+                            avg_wt_g=_src.avg_wt_g, min_tank_control=0,
                         )
+                        warnings.extend(_ev.apply(state))
+                        harvest_events.append(_ev)
+                        _budget.record(_ev.count)
+                        warnings.append(
+                            f"{week_label}: proactive MAKE-ROOM harvest of "
+                            f"{_src.location_id} (batch {_src.batch_id}, "
+                            f"{_src.count:.0f} fish @ {_src.avg_wt_g / 1000:.2f}kg) — "
+                            f"freeing a grow-out tank so an entry tank can be vacated "
+                            f"for {len(_arrivals)} TranOG arrival(s) this week"
+                        )
+                        if _level_load and _over > 0:
+                            warnings.append(
+                                f"{week_label}: make-room exceeded the weekly harvest "
+                                f"cap by {_over:.0f} fish to free a tank for a TranOG "
+                                f"arrival — conservation takes priority; the overage is "
+                                f"borrowed from next week's ceiling"
+                            )
+                        continue  # freed a grow-out slot; forward-move next pass
+                    _dst = _free_grow[0]
+                    # A reserved destination is consumed for its held purpose —
+                    # release it so Transfer.apply accepts the stock.
+                    if _dst.tank_id in _reserved_og:
+                        _reserved_for.pop(_dst.tank_id, None)
+                        _reserved_og.discard(_dst.tank_id)
+                        state.reserved_tanks = _reserved_og
+                    _src_e = _entry_occ[0]
+                    _se_batch, _se_loc = _src_e.batch_id, _src_e.location_id
+                    _mv = Transfer(
+                        batch_id=_se_batch, event_date=ws_date,
+                        source_tank_id=_src_e.tank_id,
+                        destinations=[TankAllocation(
+                            tank_id=_dst.tank_id, count=_src_e.count,
+                            avg_wt_g=_src_e.avg_wt_g, cv_pct=_src_e.cv_pct)],
+                        leaves_source_empty=True,
+                    )
+                    warnings.extend(_mv.apply(state))
+                    transfer_events.append(_mv)
+                    if not state.tanks_by_id[_src_e.tank_id].is_empty:
+                        warnings.append(
+                            f"{week_label}: entry-tank vacate {_se_loc} -> "
+                            f"{_dst.location_id} was refused; cannot free the entry "
+                            f"tier for this week's TranOG arrival(s)")
+                        break
+                    warnings.append(
+                        f"{week_label}: VACATED entry tank {_se_loc} "
+                        f"(batch {_se_batch}) forward into {_dst.location_id} "
+                        f"(R1/R2) — freeing the entry tier for {len(_arrivals)} "
+                        f"TranOG arrival(s) this week")
                     _deficit -= 1
 
             day = ws_date
@@ -3406,34 +3687,12 @@ def phase_d_emit_events(
                                 f"fell back to OG1/2 tank #{picked.tank_id} "
                                 f"({picked.location_id}); plan assigned {ta.tank_ids}"
                             )
-                        # Stage 2 fallback (density-preservation): if OG1/2
-                        # is genuinely exhausted, overflow into freshly-empty
-                        # OG3+ tanks. The biology rule "TranOG entries land
-                        # in OG1/2" gets degraded only when capacity forces
-                        # it, but the cohort gets spread across enough tanks
-                        # to keep density within cap. Better than cramming
-                        # the full ~290k fish cohort into 1 OG1/2 tank where
-                        # density grows to 200+ kg/m^3 over the lifecycle.
-                        if len(tanks_obj) < n_needed:
-                            og3plus_fallback = [
-                                t for t in state.tanks_by_id.values()
-                                if t.is_empty
-                                and t.system_id not in OG12_SYSTEMS
-                                and t.type == "OG"
-                                and t.system_id != "OG6N"   # owned by 6N pipeline
-                                and t.tank_id not in already_ids
-                            ]
-                            og3plus_fallback.sort(key=lambda t: t.tank_id)
-                            while len(tanks_obj) < n_needed and og3plus_fallback:
-                                picked = og3plus_fallback.pop(0)
-                                tanks_obj.append(picked)
-                                already_ids.add(picked.tank_id)
-                                warnings.append(
-                                    f"{week_label}: TranOG {split.batch_id} "
-                                    f"OVERFLOW to OG3+ tank #{picked.tank_id} "
-                                    f"({picked.location_id}) — OG1/2 exhausted; "
-                                    f"density-preservation fallback"
-                                )
+                        # NO OG3+ overflow (R1): TranOG arrivals may enter ONLY
+                        # the entry tier (OG1/2) — placing an arrival directly
+                        # in OG3+ is physically impossible. If the entry tier is
+                        # exhausted even after the pre-emptive eviction pass and
+                        # the make-room passes, fall through to the loud no-drop
+                        # abort below (an unrunnable scenario, not a forecast).
                     if not tanks_obj:
                         # HARD NO-DROP INVARIANT. A stocked, in-horizon batch is
                         # input fish; silently dropping it (the old `continue`)
@@ -3445,16 +3704,19 @@ def phase_d_emit_events(
                         # are harvestable to purge, which is an unrunnable scenario,
                         # not a forecast — so we ABORT loudly rather than ship a
                         # silent loss. Names batch / arrival day / required vs free.
-                        _free_og = sum(
+                        _free_entry = sum(
                             1 for t in state.tanks_by_id.values()
                             if t.is_empty and t.type == "OG"
-                            and t.system_id != "OG6N")
+                            and t.system_id in OG12_SYSTEMS)
                         raise RuntimeError(
                             f"{week_label}: TranOG arrival {split.batch_id} on "
-                            f"{day} CANNOT be placed — needs {n_needed} OG tank(s), "
-                            f"{_free_og} free; anticipatory purge pacing + reactive "
-                            f"make-room could not free one (6N saturated / no "
-                            f"harvestable fish to purge). Refusing to drop "
+                            f"{day} CANNOT be placed — needs {n_needed} entry-tier "
+                            f"(OG1/2) tank(s), {_free_entry} free, and arrivals may "
+                            f"enter ONLY the entry tier (rule R1); the eviction, "
+                            f"anticipatory pacing and entry-vacate make-room passes "
+                            f"could not free one (6N saturated / no harvestable "
+                            f"fish to purge / no grow-out slot to move entry fish "
+                            f"forward into). Refusing to drop "
                             f"{split.post_cull_count:.0f} stocked fish silently. "
                             f"Operator action required: add 6N depuration capacity, "
                             f"raise the facility biomass cap, or re-time the "
@@ -3552,13 +3814,13 @@ def phase_d_emit_events(
             # Reserve OG3+ tanks for upcoming TranOG (N=4 minimum).
             if len(grade_dest_pool) <= TRANOG_RESERVE:
                 break
-            # Pick a destination, honoring INV-4 if >= 1 kg.
-            high_wt = tank.avg_wt_g >= OG12_MOVE_LOCK_WT_G
+            # Pick a destination the tier rules allow from this source tank
+            # (R2-R4 via tiers.move_allowed): no backward split into entry
+            # from a non-entry source, no intra-entry split at >= 1 kg.
             tank_sys = tank.system_id
             candidate_dest = None
             for i, d in enumerate(grade_dest_pool):
-                if high_wt and tank_sys in OG12_SYSTEMS and d.system_id in OG12_SYSTEMS:
-                    # Intra-OG12 split forbidden above 1 kg — skip.
+                if not move_allowed(tank_sys, d.system_id, tank.avg_wt_g)[0]:
                     continue
                 candidate_dest = d
                 grade_dest_pool.pop(i)

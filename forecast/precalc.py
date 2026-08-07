@@ -48,11 +48,12 @@ from .models import (
 )
 from .sixn import SIXN_PAIRS, in_transition_window, is_purge_mode
 from .state import FacilityState
+from .tiers import ENTRY_SPLIT_MAX_WT_G, ENTRY_SYSTEMS
 from .time_grid import forecast_week_labels, parse_iso_label, week_start
 
 
-# Constant mirrored from events.py to avoid a circular import.
-_OG12_MOVE_LOCK_WT_G = 1000.0
+# Alias of the tier source of truth (tiers.py) — kept under the local name.
+_OG12_MOVE_LOCK_WT_G = ENTRY_SPLIT_MAX_WT_G
 
 # Forward-looking tank footprint (weeks). Each SW week's `tanks_needed` is
 # sized for the PEAK biomass over the next N weeks, so a growing batch reserves
@@ -64,7 +65,7 @@ _OG12_MOVE_LOCK_WT_G = 1000.0
 _FOOTPRINT_LOOKAHEAD_WEEKS = 6
 
 
-_OG12 = frozenset({"OG1N", "OG1S", "OG2N", "OG2S"})
+_OG12 = ENTRY_SYSTEMS  # entry tier — single source of truth in tiers.py
 _OG36 = frozenset({"OG3N", "OG3S", "OG4N", "OG4S",
                    "OG5N", "OG5S", "OG6N", "OG6S"})
 _OG_ALL = _OG12 | _OG36
@@ -1230,31 +1231,21 @@ def _build_facility_assignment_plan(
                 )
 
         elif etype == EVT_TRANOG:
-            # Hard placement: pick `delta` empty OG12 tanks; cascade to
-            # OG3+ if OG12 insufficient (density-preservation overflow).
+            # Hard placement: pick `delta` empty OG1/2 (entry-tier) tanks.
+            # NO OG3+ cascade (R1): TranOG arrivals may enter ONLY the entry
+            # tier — an OG3+ landing is physically impossible. An exhausted
+            # entry pool surfaces as a loud assignment_tranog_unmet
+            # bottleneck (never a silent drop, never a backward placement).
             og12_free = _free_pool_in_systems(set(_OG12))
             picked = list(og12_free[:delta])
-            if len(picked) < delta:
-                og3_systems = {s for s in eligible_set
-                               if s not in _OG12
-                               and s not in _SIXN_PIPELINE}
-                if not og3_systems:
-                    og3_systems = {"OG3N", "OG3S", "OG4N", "OG4S",
-                                   "OG5N", "OG5S", "OG6S"}
-                og3_free = _free_pool_in_systems(og3_systems)
-                picked.extend(og3_free[:delta - len(picked)])
-                if len(picked) > len(og12_free):
-                    notes.append(
-                        f"TranOG overflow to OG3+: {len(og12_free)}/{delta} "
-                        f"in OG1/2, remainder in OG3+"
-                    )
             if len(picked) < delta:
                 bottlenecks.append(Bottleneck(
                     week_label=wl,
                     system_id=None,
                     kind="assignment_tranog_unmet",
-                    detail=(f"TranOG {bid} needs {delta} tanks; "
-                            f"only {len(picked)} free"),
+                    detail=(f"TranOG {bid} needs {delta} entry-tier (OG1/2) "
+                            f"tanks; only {len(picked)} free (R1: no OG3+ "
+                            f"overflow)"),
                     deficit=delta - len(picked),
                 ))
             for tid in picked:
