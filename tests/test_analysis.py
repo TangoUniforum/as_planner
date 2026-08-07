@@ -389,3 +389,41 @@ def test_density_gate_pass_warn_na():
 
     st3 = {g["key"]: g["status"] for g in A.evaluate_gates({"dropped": 0})}
     assert st3["density_quality"] == "N/A"           # absent data never fails
+
+
+def test_sweep_pickling_break_degrades_to_sequential(monkeypatch):
+    # A hot-reload under a live run breaks pool serialization (PicklingError).
+    # The sweep must finish sequentially — reusing everything the cache
+    # already has — instead of dying (crashed a real run 2026-08-07).
+    import concurrent.futures as cf
+    from pickle import PicklingError
+    from forecast import optimize as O
+
+    class _BrokenPool:
+        def __init__(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def submit(self, *a, **k):
+            raise PicklingError("not the same object as forecast.optimize.run_variant")
+
+    calls = []
+
+    def fake_run(label, ov, cdir, sdir, inp):
+        calls.append(label)
+        return O.OptVariant(label=label, overrides=dict(ov), metrics=None,
+                            dropped=0, overprod=0)
+
+    monkeypatch.setattr(O, "run_variant", fake_run)
+    monkeypatch.setattr(cf, "ProcessPoolExecutor", _BrokenPool)
+    grid = [("baseline", {}), ("a", {"x": 1}), ("b", {"x": 2})]
+    vc = {}
+    res = O.sweep("in", "cfg", "scn", grid=grid, parallel=True, max_workers=4,
+                  variant_cache=vc)
+    assert [v.label for v in res] == ["baseline", "a", "b"]
+    assert len(calls) == 3 and len(vc) == 3

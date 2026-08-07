@@ -1045,6 +1045,7 @@ def sweep(input_path, config_dir, scenario_dir, grid=None, progress=None,
     if not todo:
         results.sort(key=lambda v: order.get(v.label, 1 << 30))
         return results
+    from pickle import PicklingError
     try:
         with ProcessPoolExecutor(max_workers=max_workers) as ex:
             futs = {ex.submit(run_variant, label, ov, config_dir, scenario_dir,
@@ -1056,6 +1057,13 @@ def sweep(input_path, config_dir, scenario_dir, grid=None, progress=None,
                 v = fut.result()
                 _vc_put(variant_cache, v)
                 results.append(v)
+    except PicklingError:
+        # Source hot-reload under a live run broke pool serialization (module
+        # identity changed). Direct calls still work — finish sequentially;
+        # the variant cache skips everything that already completed.
+        return sweep(input_path, config_dir, scenario_dir, grid=grid,
+                     progress=progress, parallel=False,
+                     variant_cache=variant_cache)
     except Exception:  # noqa: BLE001
         # A pool that can't even start (sandboxed env) -> sequential. But if some
         # variants already ran, a failure is a real variant error -> surface it.
@@ -1146,6 +1154,7 @@ def coordinate_descent(input_path, config_dir, scenario_dir, emphasis=DEFAULT_EM
     def _eval_many(items):
         """Evaluate a list of (key, overrides, label) — all uncached in THIS
         descent — reusing the cross-run variant cache, the rest in parallel."""
+        nonlocal pool
         if not items:
             return
         run_items = []
@@ -1162,12 +1171,25 @@ def coordinate_descent(input_path, config_dir, scenario_dir, emphasis=DEFAULT_EM
                 _eval(ov, label)
             return
         from concurrent.futures import as_completed
-        futs = {pool.submit(run_variant, label, dict(ov), config_dir, scenario_dir,
-                            input_path): k for k, ov, label in run_items}
-        for fut in as_completed(futs):
-            v = fut.result()
-            _vc_put(variant_cache, v)
-            _record(futs[fut], v)
+        from pickle import PicklingError
+        try:
+            futs = {pool.submit(run_variant, label, dict(ov), config_dir,
+                                scenario_dir, input_path): k
+                    for k, ov, label in run_items}
+            for fut in as_completed(futs):
+                v = fut.result()
+                _vc_put(variant_cache, v)
+                _record(futs[fut], v)
+        except PicklingError:
+            # A source hot-reload under a LIVE run (Streamlit re-imports local
+            # modules) changes run_variant's identity and the pool can no
+            # longer serialize it. Direct calls still work — finish this batch
+            # sequentially and stay sequential for the rest of the descent
+            # instead of dying (crashed once for real: 2026-08-07).
+            pool = None
+            for k, ov, label in run_items:
+                if k not in cache:
+                    _eval(ov, label)
 
     def _best_overrides():
         # Re-score the whole evaluated set (consistent normalization over all OK
