@@ -476,7 +476,7 @@ def pick_tanks(
         # After the base placement, an over-dense batch claims its next tank to
         # spread down toward the operating density target — in its OWN system if a
         # tank is free, ELSE in another ELIGIBLE system (same conveyor tier;
-        # grow-out may spill to nursery) that has a free tank AND cap headroom.
+        # NO grow-out -> nursery spill, rule R4) that has a free tank AND cap headroom.
         # That splits the batch and halves its density instead of cramming to 176
         # while tanks sit idle in another system (the controller's rebalancer
         # move). Multi-objective + bounded:
@@ -517,7 +517,9 @@ def pick_tanks(
                 if extra <= 0:
                     continue
                 feed = batch_feed.get(bid, 0.0)
-                elig = (grow_sys + nurs_sys) if avg >= 1000.0 else nurs_sys
+                # R4 (never backward): >=1 kg batches may spread to grow-out
+                # systems ONLY — no nursery (entry-tier) spill at any weight.
+                elig = grow_sys if avg >= 1000.0 else nurs_sys
                 cur_sys = {s for (b2, s) in chosen_by_ps if b2 == bid}
                 order = ([s for s in elig if s in cur_sys]
                          + [s for s in elig if s not in cur_sys])

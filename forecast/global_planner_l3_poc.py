@@ -475,28 +475,24 @@ class L3Result:
 
 
 # ---------------------------------------------------------------------------
-# Eligibility (conveyor + documented grow-out -> nursery spill)
+# Eligibility (conveyor; NO grow-out -> nursery spill — rule R4)
 # ---------------------------------------------------------------------------
 
 def _eligible_systems(
-    tier: str, systems: set[str], allow_growout_spill: bool
+    tier: str, systems: set[str], allow_growout_spill: bool = False
 ) -> list[str]:
     """Systems a batch of `tier` may occupy.
 
     A <1 kg (nursery) batch is tier-locked to the nursery systems. A >=1 kg
-    (grow-out) batch prefers grow-out systems but, when `allow_growout_spill`,
-    may ALSO occupy nursery systems — the documented OG2N-style "necessary
-    overflow". Without that spill the layout is *structurally* infeasible on this
-    facility: grow-out tank demand (up to ~34 tanks) exceeds the 21 grow-out
-    tanks, while the 12 nursery tanks sit nearly empty. The spill is a hard fact
-    of the conveyor geometry, not a packing defect; the LP still PREFERS grow-out
-    (lower transfers + the soft caps push load off over-full systems), so a
-    grow-out batch only lands in nursery when grow-out is genuinely full.
+    (grow-out) batch occupies grow-out systems ONLY — rule R4 (never backward):
+    a grow-out cohort may not be placed back into the entry tier (OG1/2), at
+    any weight. The former "documented OG2N-style overflow" was removed as
+    physically impossible; a grow-out tank shortfall now surfaces through the
+    LP's soft tank-count slack (passA_tank_slack) instead of a backward spill.
+
+    `allow_growout_spill` is retained for call-compatibility but is IGNORED —
+    the spill is illegal regardless of the flag.
     """
-    if tier == "growout" and allow_growout_spill:
-        # grow-out systems first, then nursery as overflow.
-        return (_tier_systems("growout", systems)
-                + _tier_systems("nursery", systems))
     return _tier_systems(tier, systems)
 
 
@@ -519,7 +515,7 @@ def plan_l3(
     system_limits: SystemLimits,
     *,
     slack_epsilon: float = 1.0,
-    allow_growout_spill: bool = True,
+    allow_growout_spill: bool = False,
     integer: bool = True,
     mip_time_limit: Optional[float] = 120.0,
     mip_rel_gap: float = 1e-4,
@@ -531,10 +527,11 @@ def plan_l3(
     Pass A's optimum (a tiny relaxation so Pass B's transfer objective has a
     feasible basis without re-opening a measurable cap violation).
 
-    `allow_growout_spill` lets >=1 kg batches occupy nursery systems as the
-    documented overflow. It MUST be on for this facility — grow-out tank demand
-    exceeds the grow-out tank count, so a strict tier lock is infeasible (the LP
-    raises). See `_eligible_systems`.
+    `allow_growout_spill` is retained for call-compatibility but IGNORED
+    (default False): rule R4 forbids placing >=1 kg batches back into the
+    entry tier at any weight. A grow-out tank shortfall surfaces through the
+    soft tank-count slack (`passA_tank_slack`) instead of a backward spill.
+    See `_eligible_systems`.
 
     `integer` (default True) solves the `y`/`t` tank counts as a true MILP via
     HiGHS branch-and-bound, so the layout is whole-tank by construction (no

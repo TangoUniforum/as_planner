@@ -84,19 +84,20 @@ from .caps import (
 )
 from .global_planner_poc import BatchStandingRow, PlannerResult
 from .models import ControlParams, FacilityConfig
+from .tiers import ENTRY_SPLIT_MAX_WT_G, ENTRY_SYSTEMS
 
 
 # ---------------------------------------------------------------------------
 # Conveyor tier definitions
 # ---------------------------------------------------------------------------
 
-NURSERY_SYSTEMS = ["OG1N", "OG1S", "OG2N", "OG2S"]
+NURSERY_SYSTEMS = sorted(ENTRY_SYSTEMS)  # entry tier — source of truth in tiers.py
 GROWOUT_SYSTEMS = ["OG3N", "OG3S", "OG4N", "OG4S", "OG5N", "OG5S", "OG6S"]
 PURGE_SYSTEMS = ["OG6N"]
 
 # The "1 kg lock": a batch is promoted nursery -> grow-out when its mean
 # weight crosses this threshold (grams).
-ONE_KG_LOCK_G = 1000.0
+ONE_KG_LOCK_G = ENTRY_SPLIT_MAX_WT_G
 
 TIER_NURSERY = "nursery"
 TIER_GROWOUT = "growout"
@@ -352,9 +353,10 @@ def _choose_system(
 
     1. Stay in last week's system if it's in this tier and still fits (sticky).
     2. Else least-loaded eligible system (feed-fill first, biomass-fill tiebreak).
-    3. Else OVERFLOW: spill a grow-out batch into nursery if a nursery system
-       fits; otherwise place into the globally least-loaded system in the tier
-       (or, as last resort, any system) accepting the over-cap.
+    3. Else no in-tier system has headroom: place into the least-loaded IN-TIER
+       system anyway and flag the over-cap (an OverflowRow quantifies the
+       shortfall — never dropped). NO grow-out -> nursery spill: rule R4
+       forbids backward placement into the entry tier at any weight.
     """
     add_b, add_f = r.biomass_kg, r.feed_kg_day
 
@@ -369,20 +371,10 @@ def _choose_system(
                                            state[s].bio_fill(), s))
         return best, False, ""
 
-    # 3) Overflow. A >= 1 kg grow-out batch spills into the nursery tier (the
-    #    documented OG2N-style overflow) if a nursery system has headroom.
-    if tier == TIER_GROWOUT:
-        nursery_sys = _tier_systems(TIER_NURSERY, available)
-        nfit = [s for s in nursery_sys if state[s].fits(add_b, add_f)]
-        if nfit:
-            best = min(nfit, key=lambda s: (state[s].feed_fill(),
-                                            state[s].bio_fill(), s))
-            return best, True, "growout full -> spilled into nursery"
-
-    # 4) No tier (and no overflow target) has headroom. Place into the
-    #    least-loaded in-tier system anyway and flag the over-cap, so the load
-    #    is conserved and the over-stock is quantified (never dropped).
-    pool = tier_sys or _tier_systems(TIER_NURSERY, available) or list(state)
+    # 3) No in-tier system has headroom. Place into the least-loaded in-tier
+    #    system anyway and flag the over-cap, so the load is conserved and the
+    #    over-stock is quantified (never dropped, never spilled backward — R4).
+    pool = tier_sys or list(state)
     best = min(pool, key=lambda s: (state[s].feed_fill(),
                                      state[s].bio_fill(), s))
     return best, True, "all systems at cap -> placed over-cap"

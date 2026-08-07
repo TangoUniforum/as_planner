@@ -58,11 +58,11 @@ class MilpWeek:
 
 
 def _eligible_tanks(avg_wt_g, og_tanks, growout_ids, nursery_ids):
-    """Tanks a batch may occupy this week (conveyor): >=1kg -> grow-out (may spill
-    to nursery); <1kg -> nursery only."""
+    """Tanks a batch may occupy this week (conveyor): >=1kg -> grow-out ONLY
+    (rule R4: never backward into the entry tier, no nursery spill at any
+    weight); <1kg -> nursery only."""
     if avg_wt_g >= 1000.0:
-        return [t for t in og_tanks if og_tanks[t] in growout_ids
-                or og_tanks[t] in nursery_ids]
+        return [t for t in og_tanks if og_tanks[t] in growout_ids]
     return [t for t in og_tanks if og_tanks[t] in nursery_ids]
 
 
