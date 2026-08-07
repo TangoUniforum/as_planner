@@ -23,15 +23,17 @@ from datetime import date
 from typing import Optional
 
 from .state import FacilityState, STAGE_FW, STAGE_SW, STAGE_STARVE
+from .tiers import ENTRY_SPLIT_MAX_WT_G, ENTRY_SYSTEMS, harvest_allowed
 
+# Backward-compatible aliases — the tier constants now live in tiers.py
+# (single source of truth for the operator transfer rules R1-R6).
+# Avg-weight threshold above which intra-OG1/2 tank moves are illegal (R3/INV-4).
+OG12_MOVE_LOCK_WT_G = ENTRY_SPLIT_MAX_WT_G
 
-# Avg-weight threshold above which intra-OG1/2 tank moves are illegal (INV-4).
-OG12_MOVE_LOCK_WT_G = 1000.0
-
-# Systems considered "OG1/OG2" for the INV-4 intra-OG1/2 movement lock.
-# FacilityConfig uses OG{1,2}{N,S} identifiers; SystemLimits uses {1,2}{N,S}.
-# Membership uses FacilityConfig's identifiers (events operate on TankState).
-OG12_SYSTEMS = frozenset({"OG1N", "OG1S", "OG2N", "OG2S"})
+# Systems considered "OG1/OG2" (the entry tier). FacilityConfig uses
+# OG{1,2}{N,S} identifiers; SystemLimits uses {1,2}{N,S}. Membership uses
+# FacilityConfig's identifiers (events operate on TankState).
+OG12_SYSTEMS = ENTRY_SYSTEMS
 
 # Sentinel "from" identifier for TranOG entries (FW pre-cull stream is not a
 # physical tank).
@@ -150,11 +152,22 @@ class Transfer:
                 warns.append(f"Transfer {self.batch_id}: unknown dest tank #{dest.tank_id}")
                 continue
 
-            # INV-4: no intra-OG1/2 move above 1 kg.
+            # R4: NEVER backward — a non-entry source may not target an
+            # entry-tier (OG1/2) destination, at any weight.
             tgt_in_og12 = tgt.system_id in OG12_SYSTEMS
+            if tgt_in_og12 and not src_in_og12:
+                warns.append(
+                    f"R4: refused backward transfer of batch {self.batch_id} "
+                    f"from {src.location_id} ({src.system_id}) to "
+                    f"{tgt.location_id} ({tgt.system_id}) — a non-entry source "
+                    f"may never target an entry-tier destination"
+                )
+                continue
+
+            # R3 / INV-4: no intra-OG1/2 move above 1 kg.
             if src_in_og12 and tgt_in_og12 and src_above_lock:
                 warns.append(
-                    f"INV-4: refused intra-OG1/2 transfer of batch {self.batch_id} "
+                    f"INV-4 (R3): refused intra-OG1/2 transfer of batch {self.batch_id} "
                     f"from {src.location_id} to {tgt.location_id} at "
                     f"{src.avg_wt_g:.0f}g (above 1 kg lock)"
                 )
@@ -343,6 +356,18 @@ class Harvest:
             )
             return warns
 
+        # R5: no harvest FROM an entry-tier (OG1/2) tank — fish route forward
+        # first. Non-destructive refusal (state unchanged, count zeroed so
+        # callers see "did not apply").
+        if not harvest_allowed(src.system_id):
+            warns.append(
+                f"R5: refused harvest of batch {self.batch_id} from "
+                f"{src.location_id} ({src.system_id}) — fish can't be harvested "
+                f"from the entry tier (OG1/2); move them forward first"
+            )
+            self.count = 0.0
+            return warns
+
         take = min(self.count, src.count)
         remaining = src.count - take
 
@@ -421,6 +446,17 @@ class GradedHarvest:
             warns.append(
                 f"GradedHarvest {self.batch_id}: source {src.location_id} holds "
                 f"batch {src.batch_id}"
+            )
+            return warns
+        # R5: no harvest / 6N staging FROM an entry-tier (OG1/2) tank — a
+        # GradedHarvest is precisely that (pickup routes to harvest or 6N
+        # depuration). Non-destructive refusal, state unchanged.
+        if not harvest_allowed(src.system_id):
+            warns.append(
+                f"R5: refused graded harvest of batch {self.batch_id} from "
+                f"{src.location_id} ({src.system_id}) — fish can't be harvested "
+                f"or staged to 6N from the entry tier (OG1/2); move them "
+                f"forward first"
             )
             return warns
         # Pickup may already hold this batch (cross-tank accumulation) or be empty.

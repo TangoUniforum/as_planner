@@ -29,9 +29,8 @@ from collections import defaultdict
 from datetime import timedelta
 
 from .biology import realized_feed_kg_day
+from .tiers import ENTRY_SYSTEMS as OG12_SYSTEMS  # entry tier — source of truth in tiers.py
 from .time_grid import iso_week_label
-
-OG12_SYSTEMS = frozenset({"OG1N", "OG1S", "OG2N", "OG2S"})
 
 
 # --------------------------------------------------------------------------- #
