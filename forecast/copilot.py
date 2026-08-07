@@ -80,7 +80,8 @@ def _handoff(input_path, config_dir, scenario_dir):
     pc, _og, _fw = read_production_report(wb)
     wb.close()
     fs0 = date(pc.year, pc.month, pc.day) + timedelta(days=1)
-    events = load_manual_events(str(scenario_dir))
+    events = load_manual_events(str(scenario_dir),
+                                pr_closing=date(pc.year, pc.month, pc.day))
     n = max((e.week or 1) for e in events) if events else 0
     handoff_date = fs0 + timedelta(days=7 * n)
     handoff = iso_week_label(handoff_date)

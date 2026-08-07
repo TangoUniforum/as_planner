@@ -876,10 +876,25 @@ def _rows_to_manual_events(rows):
 # dumps it back. (Single source of truth avoids the two surfaces clobbering each
 # other's unsaved edits at the YAML boundary.)
 
+def _pr_closing():
+    """The uploaded PR's closing date — the PR's business identity, and the
+    key manual-event files are scoped by. None when no valid PR is loaded."""
+    return pr["closing"] if (pr is not None and pr.get("ok")) else None
+
+
 def _mw_events():
+    """The working set — PR-SCOPED: seeded from THIS PR's event file, and
+    RESEEDED whenever the uploaded PR changes (events are statements about
+    one PR's starting reality; carrying them across PRs was the bug the
+    operator caught 2026-08-07)."""
     from forecast.manual_events import load_manual_events
-    if "mw_events" not in st.session_state:
-        st.session_state["mw_events"] = load_manual_events(SCENARIO_DIR)
+    cur = st.session_state.get("_pr_key")
+    if ("mw_events" not in st.session_state
+            or st.session_state.get("_mw_events_pr", "±") != cur):
+        st.session_state["mw_events"] = load_manual_events(
+            SCENARIO_DIR, pr_closing=_pr_closing())
+        st.session_state["_mw_events_pr"] = cur
+        _mw_bump_grid()
     return st.session_state["mw_events"]
 
 
@@ -2068,12 +2083,14 @@ def _mw_save_bar(events, bad):
     if c1.button("💾 Save window", key="mw_save", disabled=bool(bad),
                  help="Reject-at-entry: disabled while any operation is infeasible."):
         try:
-            dump_manual_events(SCENARIO_DIR, events)
-            st.success(f"Saved scenario/manual_events.yaml ({n}). Click ▶ Run forecast.")
+            dump_manual_events(SCENARIO_DIR, events, pr_closing=_pr_closing())
+            st.success(f"Saved {n} operation(s) for THIS PR (closing "
+                       f"{_pr_closing()}) — scenario/manual_events/. "
+                       f"Click ▶ Run forecast.")
         except Exception as e:  # noqa: BLE001
             st.error(f"Save failed: {e}")
     if c2.button("↻ Reload from file", key="mw_reload"):
-        _mw_set(load_manual_events(SCENARIO_DIR))
+        _mw_set(load_manual_events(SCENARIO_DIR, pr_closing=_pr_closing()))
         st.rerun()
     if c3.button("🧹 Clear window", key="mw_clear", disabled=not n):
         _mw_set([])
@@ -2137,7 +2154,7 @@ def _mw_copilot(uploaded, events, forecast_start=None, bad=None):
                       "saves your window to disk before it runs."
                       if _blocked else None):
         try:
-            dump_manual_events(SCENARIO_DIR, events)
+            dump_manual_events(SCENARIO_DIR, events, pr_closing=_pr_closing())
         except Exception as e:  # noqa: BLE001
             st.error(f"Couldn't save your events first: {e}")
             return
@@ -2246,7 +2263,7 @@ def _mw_copilot(uploaded, events, forecast_start=None, bad=None):
             for ev in to_manual_events(chosen, prop.window_week):
                 _mw_add(ev)
             try:
-                dump_manual_events(SCENARIO_DIR, _mw_events())
+                dump_manual_events(SCENARIO_DIR, _mw_events(), pr_closing=_pr_closing())
             except Exception as e:  # noqa: BLE001
                 # Never claim success on a failed write: scenario/ is OneDrive-
                 # synced and the dump can lose a lock race (see yaml_atomic).
@@ -2665,9 +2682,12 @@ def _config_fingerprint() -> str:
     h = hashlib.md5()
     for d in (CONFIG_DIR, SCENARIO_DIR):
         if d.exists():
-            for p in sorted(d.iterdir()):
+            # RECURSIVE: per-PR manual-event files live in a subdir
+            # (scenario/manual_events/<closing>.yaml) and are engine inputs —
+            # a flat scan would let their edits dodge staleness detection.
+            for p in sorted(d.rglob("*"), key=lambda x: str(x)):
                 if p.is_file() and p.name not in _NON_ENGINE_CONFIG:
-                    h.update(p.name.encode())
+                    h.update(str(p.relative_to(d)).encode())
                     h.update(str(p.stat().st_mtime_ns).encode())
     return h.hexdigest()
 

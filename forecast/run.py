@@ -199,8 +199,12 @@ def main(
     # `state` below). Window length N is implicit (last week with an event);
     # --advance-weeks can extend it with pure-biology weeks. The prefix weeks are
     # stitched into the output near the writers. See forecast/manual_window.py.
+    from datetime import timedelta as _td
     from .manual_events import load_manual_events
-    manual_events = load_manual_events(scenario_dir)
+    # Events are PR-SPECIFIC: keyed by the PR closing date, which at this
+    # point is forecast_start - 1 day (DetectForecastStart contract).
+    manual_events = load_manual_events(
+        scenario_dir, pr_closing=control.forecast_start - _td(days=1))
     _ev_max_week = max((e.week or 1) for e in manual_events) if manual_events else 0
     window_n = max(advance_weeks or 0, _ev_max_week)
     # The FW in-flight projection must cover the prefix window weeks (1..N) so

@@ -157,10 +157,13 @@ def _apply_manual_window(input_path, scenario_dir, control, tables, facility,
     (inflight_og, fw_inflight, purge_inflight, new_start_datetime, new_horizon,
     warnings, window_weeks). No manual events -> inputs unchanged (window_weeks=0).
     """
-    from datetime import datetime as _dt
+    from datetime import datetime as _dt, timedelta as _td
     from collections import defaultdict
     from forecast.manual_events import load_manual_events
-    events = load_manual_events(str(scenario_dir))
+    # PR-specific events: closing = forecast_start - 1 day (same contract
+    # as forecast.run).
+    events = load_manual_events(
+        str(scenario_dir), pr_closing=control.forecast_start - _td(days=1))
     if not events:
         return (inflight_og, fw_inflight, purge_inflight,
                 control.forecast_start, control.horizon_weeks, [], 0, None)

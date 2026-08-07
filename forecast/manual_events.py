@@ -130,26 +130,73 @@ def manual_events_from_list(data: list[dict]) -> list[ManualEvent]:
     return out
 
 
-def load_manual_events(scenario_dir) -> list[ManualEvent]:
-    path = Path(scenario_dir) / MANUAL_EVENTS_FILE
-    if not path.exists():
-        return []
+# Per-PR event files live here, one per PR closing date. Manual events are
+# statements about ONE PR's starting reality ("week 2, harvest tank 45")
+# — under a different PR the same words mean something else entirely, so a
+# shared file silently carried operations across PRs (operator-reported
+# 2026-08-07). The legacy shared MANUAL_EVENTS_FILE is honored only until
+# the first per-PR save exists (pre-migration), then never again.
+MANUAL_EVENTS_DIR = "manual_events"
+
+
+def _closing_key(pr_closing) -> str:
+    """'YYYY-MM-DD' from a date/datetime/ISO-string PR closing."""
+    if hasattr(pr_closing, "strftime"):
+        return pr_closing.strftime("%Y-%m-%d")
+    return str(pr_closing)[:10]
+
+
+def events_file_for(scenario_dir, pr_closing) -> Path:
+    return (Path(scenario_dir) / MANUAL_EVENTS_DIR
+            / f"{_closing_key(pr_closing)}.yaml")
+
+
+def _load_events_file(path: Path) -> list[ManualEvent]:
     data = yaml.safe_load(read_text_resilient(path)) or {}
     return manual_events_from_list(data.get("events", []))
 
 
-def dump_manual_events(scenario_dir, events: list[ManualEvent]) -> None:
-    d = Path(scenario_dir)
-    d.mkdir(parents=True, exist_ok=True)
-    text = (
-        "# Manual starting-state events (operator-authored). Applied to the\n"
-        "# PR-hydrated week-0 state BEFORE the forecast runs forward. See\n"
-        "# forecast/manual_events.py. Starting-state only (not future pins).\n"
-        + yaml.safe_dump({"events": manual_events_to_list(events)},
-                         sort_keys=False, allow_unicode=True,
-                         default_flow_style=False)
-    )
-    write_text_atomic(d / MANUAL_EVENTS_FILE, text)
+def load_manual_events(scenario_dir, pr_closing=None) -> list[ManualEvent]:
+    """Events for THIS PR (by closing date) when `pr_closing` is given:
+    the per-PR file if present; else the legacy shared file, but ONLY while
+    no per-PR file exists anywhere (pre-migration — so nothing already
+    scripted is lost); else empty (a new PR starts clean, never inheriting
+    another PR's operations). Without `pr_closing`: legacy behavior."""
+    legacy = Path(scenario_dir) / MANUAL_EVENTS_FILE
+    if pr_closing is not None:
+        f = events_file_for(scenario_dir, pr_closing)
+        if f.exists():
+            return _load_events_file(f)
+        d = Path(scenario_dir) / MANUAL_EVENTS_DIR
+        migrated = d.exists() and any(d.glob("*.yaml"))
+        if not migrated and legacy.exists():
+            return _load_events_file(legacy)
+        return []
+    if not legacy.exists():
+        return []
+    return _load_events_file(legacy)
+
+
+def dump_manual_events(scenario_dir, events: list[ManualEvent],
+                       pr_closing=None) -> None:
+    if pr_closing is not None:
+        path = events_file_for(scenario_dir, pr_closing)
+        header = (f"# Manual starting-state events for the PR closing "
+                  f"{_closing_key(pr_closing)} (operator-authored,\n"
+                  f"# PR-SPECIFIC — a different PR gets its own file). Applied "
+                  f"to the PR-hydrated\n# week-0 state BEFORE the forecast "
+                  f"runs forward. See forecast/manual_events.py.\n")
+    else:
+        path = Path(scenario_dir) / MANUAL_EVENTS_FILE
+        header = (
+            "# Manual starting-state events (operator-authored). Applied to the\n"
+            "# PR-hydrated week-0 state BEFORE the forecast runs forward. See\n"
+            "# forecast/manual_events.py. Starting-state only (not future pins).\n")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = header + yaml.safe_dump(
+        {"events": manual_events_to_list(events)},
+        sort_keys=False, allow_unicode=True, default_flow_style=False)
+    write_text_atomic(path, text)
 
 
 # ---------- application to the starting state ----------
