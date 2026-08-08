@@ -598,7 +598,18 @@ def main(
         best_worst = worst_probe
         for bid in candidates:
             trial_allowed = accepted_pr_corrections | {bid}
-            tc, tp, tfs, tv, tw = _build_and_place(trial_allowed)
+            try:
+                tc, tp, tfs, tv, tw = _build_and_place(trial_allowed)
+            except RuntimeError as _trial_err:
+                # A trial correction set can produce an UNRUNNABLE trajectory
+                # (the placement's no-drop abort — e.g. it consumes the entry
+                # tank a later TranOG arrival needed). That is a verdict on
+                # the CANDIDATE, not on the forecast: reject it and keep the
+                # best-so-far plan, exactly like a no-improvement trial. Only
+                # the accepted/base configuration must be runnable.
+                print(f"    +{bid}: trial UNRUNNABLE -> reject "
+                      f"({str(_trial_err)[:120]}...)")
+                continue
             if tv < best_viols:
                 print(f"    +{bid}: {tv} viols / {tw:.1f} worst  ->ACCEPT "
                       f"(was {best_viols})")

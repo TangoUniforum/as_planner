@@ -255,6 +255,12 @@ _BALANCE_SYS_FILL = 0.90
 # violation into the destination.
 _VARQTY_DST_FILL = 0.95
 
+# Pad applied to the 6N fill FLOOR clamp (and the graded floor fills) so a
+# fill sized to the weekly harvest floor still drains AT the floor after the
+# ~2-week purge-residency mortality (~0.15%); without it every floor-clamped
+# fill lands a permanent ~45 fish short (the 29,955-vs-30,000 miss class).
+_SIXN_FILL_MORTALITY_PAD = 1.002
+
 
 # Eligible system sets used by Phase A.
 _OG_ALL_WITH_6N = ["OG1N", "OG1S", "OG2N", "OG2S", "OG3N", "OG3S",
@@ -931,6 +937,12 @@ def _try_graded_move_in(
         key=lambda b: b.input_date.date() if hasattr(b.input_date, "date")
         else (b.input_date or date.max),
     )
+    # Candidate scan: largest avg first (closer to threshold => fatter tail),
+    # but a tank whose PEELABLE tail is below the operator floors must be
+    # SKIPPED, not allowed to end the search — a small nearly-ripe tank was
+    # blocking big peelable tanks right behind it and returning 0 (the
+    # 2026-W44 empty fill: a 6.4k tank at 3.43 kg shadowed 40k tanks at 3.38).
+    _min_tr = getattr(control, "min_transfer_count", 0.0) or 0.0
     chosen = None
     for b in fifo:
         cands = [
@@ -943,9 +955,18 @@ def _try_graded_move_in(
         # Prefer largest avg first (closer to threshold => fatter tail).
         cands.sort(key=lambda t: t.avg_wt_g, reverse=True)
         for t in cands:
-            if frac_above(t.avg_wt_g, t.cv_pct or 16.0, min_hv) >= min_fraction:
-                chosen = t
-                break
+            frac_t = frac_above(t.avg_wt_g, t.cv_pct or 16.0, min_hv)
+            if frac_t < min_fraction:
+                continue
+            peel_t = t.count * frac_t
+            if max_count is not None:
+                peel_t = min(peel_t, max_count)
+            if peel_t < max(1.0, _min_tr):
+                continue   # tail under min_transfer — try the next tank
+            if retain_in_source and (t.count - peel_t) < (control.min_tank_control or 0):
+                continue   # would leave a sub-min dribble behind
+            chosen = t
+            break
         if chosen:
             break
 
@@ -962,14 +983,6 @@ def _try_graded_move_in(
         big_count = max(0.0, max_count)
     small_count = chosen.count - big_count
     big_avg, small_avg = upper_truncated_split(chosen.avg_wt_g, cv, min_hv)
-
-    # Operator rules: never peel a sub-min group OUT (min_transfer_count), and in
-    # retain-in-source mode never leave a sub-min dribble BEHIND (min_tank_control).
-    _min_tr = getattr(control, "min_transfer_count", 0.0) or 0.0
-    if big_count < max(1.0, _min_tr):
-        return 0.0
-    if retain_in_source and small_count < (control.min_tank_control or 0):
-        return 0.0
 
     # Retention destination. retain_in_source (grade-to-min top-up): the small tail
     # STAYS in the SOURCE tank — same batch, no extra tank needed. Otherwise (make-
@@ -1015,8 +1028,16 @@ def _try_graded_move_in(
         retention_avg_wt_g=small_avg,
         cv_pct=cv,
     )
+    _pk = state.tanks_by_id.get(pair[0])
+    _pk_pre = _pk.count if (_pk is not None and not _pk.is_empty) else 0.0
     warns = ev.apply(state)
     warnings.extend(warns)
+    # Refusal-aware: GradedHarvest.apply refuses non-destructively (e.g. the
+    # pickup already holds a DIFFERENT batch). Returning big_count anyway
+    # would miscount the fill and book feed for fish that never moved.
+    _pk_post = _pk.count if (_pk is not None and not _pk.is_empty) else 0.0
+    if _pk is None or _pk_post - _pk_pre < big_count - 0.5:
+        return 0.0
     # Freeze the 6N pickup tank (off-feed depuration) and book its 4 pre-
     # transfer feed-days; the retention tank keeps growing/feeding normally.
     _freeze_6n_dest(state, pair[0])
@@ -1033,6 +1054,197 @@ def _try_graded_move_in(
     )
     transfer_events.append(ev)
     return big_count
+
+
+def _transit_entry_to_pair(
+    state: FacilityState,
+    batch_meta: dict[str, BatchInput],
+    control: ControlParams,
+    week_label: str,
+    week_start_date: date,
+    fill_pair,
+    goal: float,
+    already_moved: float,
+    transfer_events: list,
+    grade_events,
+    warnings: list[str],
+    reserved,
+    tables,
+    sixn_move_in_feed,
+) -> float:
+    """Route market-ready ENTRY-tier fish into the 6N fill pair the legal way.
+
+    R5 forbids staging fish into 6N FROM an entry tank, and R2 allows entry ->
+    grow-out at any weight — so the physical route is a two-hop transit:
+    entry -> free grow-out HOP tank -> pair (the second hop reuses
+    _make_room_into_6n: purge transfer weight, freeze, feed booking).
+
+    Two stages, readiest-first:
+      1. WHOLE-TANK transit of ripe entry tanks (avg >= min_harvest_weight),
+         pursued up to `goal` (the fill target);
+      2. GRADED transit of NEAR-ripe entry tanks (avg < min but a meaningful
+         upper tail >= min): a Grade event peels the ripe tail into the hop
+         tank at its conditional mean (small tail stays in the source at its
+         lower mean — count + biomass conserve exactly), pursued only up to
+         the harvest FLOOR (min_harvest_per_week) — an exception that keeps
+         the drain from going dark, never a bulk-grading rule.
+
+    Hop tanks: empty grow-out tanks, unreserved first. A tank RESERVED for an
+    imminent TranOG arrival may serve as a TRANSIENT hop (it is empty again the
+    moment the second leg completes) but only when the pair verifiably has an
+    open slot, so the fish can never strand in the held tank. The reservation
+    is lifted around the two legs and restored afterwards.
+
+    This is the marginal feedstock the entry-tier rules removed from the
+    rotation's direct pool (pre-rules it pulled/graded straight from OG1/2);
+    without it the pipeline runs dry for the 1-2 weeks a FIFO batch gap
+    leaves only entry-tier fish at/near harvest weight — the measured
+    empty-week regressions. Returns the count added to the pair.
+    """
+    min_hv = control.min_harvest_weight_g or 0.0
+    # CONTINUITY-ONLY: the transit exists to keep the drain from going dark,
+    # not to chase the controller's full demand target — entry-tier fish it
+    # doesn't take keep growing (they are 1 hop further from harvest, so
+    # taking them early costs more growth than a grow-out draw). Cap the
+    # whole transit at the padded FLOOR; demand above the floor is served by
+    # the grow-out cascade alone, exactly as it was pre-rules.
+    goal = min(goal, float(control.min_harvest_per_week or goal)
+               * _SIXN_FILL_MORTALITY_PAD)
+    if min_hv <= 0 or goal <= already_moved:
+        return 0.0
+    from statistics import NormalDist as _ND
+    _std = _ND()
+
+    def _frac_above(avg_wt: float, cv_pct: float, t: float) -> float:
+        if avg_wt <= 0 or cv_pct <= 0:
+            return 1.0 if avg_wt >= t else 0.0
+        z = (t - avg_wt) / (avg_wt * cv_pct / 100.0)
+        return max(0.0, min(1.0, 1.0 - _std.cdf(z)))
+
+    def _hop_tank():
+        """(tank, was_reserved) — empty grow-out hop tank, unreserved first;
+        a reserved tank only transiently and only if the pair can accept."""
+        frees = [t for t in sorted(state.tanks_by_id.values(),
+                                   key=lambda x: x.tank_id)
+                 if t.is_empty and t.type == "OG"
+                 and t.system_id not in _SIXN_SYSTEMS
+                 and t.system_id not in OG12_SYSTEMS]
+        for t in frees:
+            if t.tank_id not in reserved:
+                return t, False
+        if frees and _free_6n_slots(state, fill_pair):
+            return frees[0], True
+        return None, False
+
+    def _second_leg(hop, was_reserved, src_loc) -> bool:
+        """Move the hop tank into the pair; restore a transient reservation."""
+        if was_reserved:
+            state.reserved_tanks.discard(hop.tank_id)
+        ok = _make_room_into_6n(
+            state, hop, week_start_date, fill_pair,
+            transfer_events, warnings, week_label,
+            reason=f"6N rotation fill via entry forward-transit (from {src_loc})",
+            sixn_move_in_feed=sixn_move_in_feed, tables=tables,
+            batch_meta=batch_meta, is_purge=True)
+        if was_reserved:
+            state.reserved_tanks.add(hop.tank_id)
+        return ok
+
+    added = 0.0
+    # ---- Stage 1: whole-tank transit of ripe entry tanks --------------------
+    _ripe = sorted(
+        [t for t in state.tanks_by_id.values()
+         if not t.is_empty and t.type == "OG"
+         and t.system_id in OG12_SYSTEMS and t.stage == "SW"
+         and t.avg_wt_g >= min_hv],
+        key=lambda t: (-t.avg_wt_g, t.tank_id))
+    for _es in _ripe:
+        if already_moved + added >= goal:
+            break
+        hop, was_res = _hop_tank()
+        if hop is None:
+            break
+        _take = min(goal - (already_moved + added), _es.count)
+        if _take <= 0:
+            continue
+        _e_batch, _e_loc = _es.batch_id, _es.location_id
+        if was_res:
+            state.reserved_tanks.discard(hop.tank_id)
+        _hop_mv = Transfer(
+            batch_id=_e_batch, event_date=week_start_date,
+            source_tank_id=_es.tank_id,
+            destinations=[TankAllocation(
+                tank_id=hop.tank_id, count=_take,
+                avg_wt_g=_es.avg_wt_g, cv_pct=_es.cv_pct)],
+            leaves_source_empty=False,
+        )
+        warnings.extend(_hop_mv.apply(state))
+        transfer_events.append(_hop_mv)
+        if was_res:
+            state.reserved_tanks.add(hop.tank_id)
+        if hop.is_empty:   # first leg refused
+            break
+        _hopped = hop.count
+        if not _second_leg(hop, was_res, _e_loc):
+            break          # 6N full — fish stay in the hop tank as grow-out
+        added += _hopped
+
+    # ---- Stage 2: GRADED transit of near-ripe entry tanks (floor only) -----
+    _floor_goal = min(goal, float(control.min_harvest_per_week or goal)
+                      * _SIXN_FILL_MORTALITY_PAD)
+    _min_tr = getattr(control, "min_transfer_count", 0.0) or 0.0
+    if already_moved + added < _floor_goal and grade_events is not None:
+        _near = [t for t in state.tanks_by_id.values()
+                 if not t.is_empty and t.type == "OG"
+                 and t.system_id in OG12_SYSTEMS and t.stage == "SW"
+                 and t.avg_wt_g < min_hv
+                 and _frac_above(t.avg_wt_g, t.cv_pct or 16.0, min_hv) >= 0.10]
+        _near.sort(key=lambda t: (-t.avg_wt_g, t.tank_id))
+        for _es in _near:
+            if already_moved + added >= _floor_goal:
+                break
+            hop, was_res = _hop_tank()
+            if hop is None:
+                break
+            cv = _es.cv_pct or 16.0
+            frac = _frac_above(_es.avg_wt_g, cv, min_hv)
+            big = min(_es.count * frac,
+                      _floor_goal - (already_moved + added))
+            small = _es.count - big
+            if big < max(1.0, _min_tr):
+                continue
+            if small < (control.min_tank_control or 0):
+                continue   # never leave a sub-min dribble behind
+            big_avg, small_avg = upper_truncated_split(_es.avg_wt_g, cv, min_hv)
+            _e_batch, _e_loc = _es.batch_id, _es.location_id
+            if was_res:
+                state.reserved_tanks.discard(hop.tank_id)
+            g = Grade(
+                batch_id=_e_batch, event_date=week_start_date,
+                source_tank_ids=[_es.tank_id],
+                destinations=[
+                    TankAllocation(tank_id=_es.tank_id, count=small,
+                                   avg_wt_g=small_avg, cv_pct=cv),
+                    TankAllocation(tank_id=hop.tank_id, count=big,
+                                   avg_wt_g=big_avg, cv_pct=cv),
+                ],
+            )
+            warnings.extend(g.apply(state))
+            if was_res:
+                state.reserved_tanks.add(hop.tank_id)
+            if hop.is_empty:   # grade refused
+                continue
+            grade_events.append(g)
+            _hopped = hop.count
+            if not _second_leg(hop, was_res, _e_loc):
+                break
+            warnings.append(
+                f"{week_label}: GRADED entry transit — peeled the ripe tail "
+                f"({_hopped:,.0f} fish @ {big_avg / 1000:.2f}kg) of {_e_loc} "
+                f"(batch {_e_batch}) forward into the 6N fill pair; "
+                f"{small:,.0f} fish stay growing at {small_avg / 1000:.2f}kg")
+            added += _hopped
+    return added
 
 
 def _run_sixn_purge_week(
@@ -1053,6 +1265,7 @@ def _run_sixn_purge_week(
     reserved=frozenset(),
     tables: Optional[BiologyTables] = None,
     sixn_move_in_feed: Optional[dict] = None,
+    grade_events=None,
 ) -> Optional[tuple[int, int]]:
     """Run one week of the 6N purge pipeline (3-pair fallow rotation).
 
@@ -1131,30 +1344,12 @@ def _run_sixn_purge_week(
         pair_queue.append(fill_pair)
         return new_resting
 
-    # 2. Pick FIFO move-in source batches (cascade list).
-    move_in_batches = _pick_fifo_move_in_batches(state, batch_meta, control)
-    if not move_in_batches:
-        # Last-resort: graded move-in (DESIGN §5a) — peel the
-        # above-threshold tail from a tank whose average is below
-        # threshold but has a meaningful upper portion.
-        moved = _try_graded_move_in(
-            state, batch_meta, control, week_label, week_start_date,
-            fill_pair, transfer_events, warnings, reserved=reserved,
-            tables=tables, sixn_move_in_feed=sixn_move_in_feed,
-        )
-        if moved <= 0:
-            warnings.append(
-                f"{week_label}: 6N harvested {harvest_pair} but no production "
-                "batch above min_harvest_weight to fill resting pair "
-                f"{fill_pair} (stays in rotation, empty next harvest)"
-            )
-        pair_queue.append(fill_pair)
-        return new_resting
-
-    # 3. Move-in target — Layer 2 demand 2 weeks ahead, clamped to
+    # 2. Move-in target — Layer 2 demand 2 weeks ahead, clamped to
     #    [min_harvest_per_week, max_harvest_per_week]. The min clamp
     #    guarantees pair drains never fall below the operational floor
-    #    when sufficient production inventory exists.
+    #    when sufficient production inventory exists. (Computed BEFORE the
+    #    source-batch pick so the entry forward-transit below knows the goal
+    #    even when the grow-out pool is empty.)
     min_h = control.min_harvest_per_week or 0
     max_h = control.max_harvest_per_week or min_h
     # NOTE (measured 2026-08-01, DO NOT RETRY without re-measuring): the floor
@@ -1166,10 +1361,18 @@ def _run_sixn_purge_week(
     # 19,070->1,607 and weeks over the processing cap went 4->9. Asking for
     # thirty more fish per week cascades through tank selection and make-room
     # into a materially worse plan. The shortfall is real; this is not its fix.
+    # FLOOR MORTALITY PAD (re-measured 2026-08-07, superseding the 2026-08-01
+    # "do not retry" for THIS narrow form): a fill sized to exactly min_h
+    # drains min_h x survival^(purge weeks) ~ 45 fish short two weeks later —
+    # a permanent 29,955-vs-30,000 floor-miss class (8 weeks on the 7.17.26
+    # PR). The old backfire grossed the whole target and cascaded through
+    # WHOLE-TANK selection; this pads only the FLOOR CLAMP by ~0.2% and the
+    # draws are partial (count-exact) takes, so no extra tank is pulled.
+    _min_fill = min_h * _SIXN_FILL_MORTALITY_PAD
     if move_in_target is not None and move_in_target > 0:
-        target = max(min_h, min(max_h, move_in_target))
+        target = max(_min_fill, min(max_h, move_in_target))
     else:
-        target = min_h
+        target = _min_fill
     # LEVEL DRAINS (opt-in `sixn_level_drains`): cap the fill by the resting pair's
     # REMAINING headroom (one weekly harvest's worth, max_h) so fills don't ACCUMULATE
     # into one pair across its rotation residency — the root cause of the 90-113k drain
@@ -1188,6 +1391,16 @@ def _run_sixn_purge_week(
     if target <= 0:
         pair_queue.append(fill_pair)
         return new_resting
+
+    # 3. Pick FIFO move-in source batches (cascade list).
+    move_in_batches = _pick_fifo_move_in_batches(state, batch_meta, control)
+    # (An empty cascade list no longer early-returns: the FIFO loop below
+    # simply moves nothing and the last-resort continuity ladder — entry
+    # forward-transit + graded floor fill — still runs. Pre-rules the
+    # rotation pulled/graded straight from entry tanks; a FIFO batch-
+    # ripeness gap then left the fill EMPTY and the drain went dark two
+    # weeks later — the measured 2026-W47 / 2027-W21 empty weeks on the
+    # 7.17.26 PR.)
 
     # 4. Pull from FIFO batches in cascade. When the oldest batch's
     #    production tanks can't fill the target, fall through to the next
@@ -1259,84 +1472,53 @@ def _run_sixn_purge_week(
 
     # FORWARD-TRANSIT (R2/R5): the rotation may not pull from ENTRY tanks
     # directly (R5 — no 6N staging from OG1/2), so when the grow-out pool
-    # leaves the fill short while market-ready fish sit in entry tanks, route
-    # them the physical way: entry -> free grow-out tank (R2, any weight),
-    # then that grow-out tank -> the fill pair via the normal make-room move
-    # (purge transfer weight, freeze, feed booking). No-op when no grow-out
-    # slot is free or no mature entry fish exist.
+    # leaves the fill short while market-ready (or near-ready) fish sit in
+    # entry tanks, route them the physical way: entry -> grow-out hop ->
+    # fill pair. See _transit_entry_to_pair (whole-tank ripe transits to the
+    # target + graded ripe-tail peels up to the floor).
     if count_moved < target:
-        _entry_srcs = sorted(
-            [t for t in state.tanks_by_id.values()
-             if not t.is_empty and t.type == "OG"
-             and t.system_id in OG12_SYSTEMS and t.stage == "SW"
-             and t.avg_wt_g >= control.min_harvest_weight_g],
-            key=lambda t: (-t.avg_wt_g, t.tank_id))
-        for _es in _entry_srcs:
-            if count_moved >= target:
-                break
-            _fg = next(
-                (t for t in sorted(state.tanks_by_id.values(),
-                                   key=lambda x: x.tank_id)
-                 if t.is_empty and t.type == "OG"
-                 and t.system_id not in _SIXN_SYSTEMS
-                 and t.system_id not in OG12_SYSTEMS
-                 and t.tank_id not in reserved),
-                None)
-            if _fg is None:
-                break  # no grow-out slot for the transit hop
-            _take = min(target - count_moved, _es.count)
-            if _take <= 0:
-                continue
-            _e_batch, _e_loc = _es.batch_id, _es.location_id
-            _hop = Transfer(
-                batch_id=_e_batch, event_date=week_start_date,
-                source_tank_id=_es.tank_id,
-                destinations=[TankAllocation(
-                    tank_id=_fg.tank_id, count=_take,
-                    avg_wt_g=_es.avg_wt_g, cv_pct=_es.cv_pct)],
-                leaves_source_empty=False,
-            )
-            warnings.extend(_hop.apply(state))
-            transfer_events.append(_hop)
-            if _fg.is_empty:   # hop refused
-                break
-            _hopped = _fg.count
-            if not _make_room_into_6n(
-                    state, _fg, week_start_date, fill_pair,
-                    transfer_events, warnings, week_label,
-                    reason=("6N rotation fill via entry forward-transit "
-                            f"(from {_e_loc})"),
-                    sixn_move_in_feed=sixn_move_in_feed, tables=tables,
-                    batch_meta=batch_meta, is_purge=True):
-                # 6N full — the fish stay in the grow-out tank (now normal
-                # SW grow-out, harvestable later). Stop the transit.
-                break
-            count_moved += _hopped
-            if _e_batch not in contributing_batches:
-                contributing_batches.append(_e_batch)
+        count_moved += _transit_entry_to_pair(
+            state, batch_meta, control, week_label, week_start_date,
+            fill_pair, target, count_moved, transfer_events, grade_events,
+            warnings, reserved, tables, sixn_move_in_feed)
 
-    # GRADE-TO-MIN top-up (opt-in `harvest_grade_to_min`): when the whole-tank move-in
-    # leaves the resting pair below the harvest FLOOR (min_h), peel just enough of the
-    # over-weight tail from near-market tanks to REACH THE FLOOR — not the controller's
-    # full move-in target. The small tail stays in the source (no extra tank). Each
-    # peel is capped at the exact remaining shortfall, so it harvests the least, gives
-    # up the least yield/biomass, and disturbs the rotation the least. An EXCEPTION
-    # (fires only when below the floor), never a rule; routes the bigs through 6N purge.
-    _floor = min_h
-    if getattr(control, "harvest_grade_to_min", False) and count_moved < _floor:
+    # GRADE-TO-MIN floor fill: when the whole-tank move-in + entry transit leave
+    # the resting pair below the harvest FLOOR (min_h), peel just enough of the
+    # over-weight tail from near-market GROW-OUT tanks to REACH THE FLOOR — not
+    # the controller's full move-in target. The small tail stays in the source
+    # (no extra tank). Each peel is capped at the exact remaining shortfall, so
+    # it harvests the least, gives up the least yield/biomass, and disturbs the
+    # rotation the least. An EXCEPTION (fires only when below the floor), never
+    # a rule; routes the bigs through 6N purge.
+    # NOW UNCONDITIONAL (subsumes the old opt-in `harvest_grade_to_min`, which
+    # remains accepted but no longer gates this): with the entry tier barred
+    # from the rotation's direct pool (R5), this designed floor-exception is
+    # the remaining legal feedstock during a FIFO batch-ripeness gap — leaving
+    # it off produces empty harvest weeks, which breaks the operator's HARD
+    # steady-harvest contract (worth more than the handling it saves).
+    # Floor = padded floor, but NEVER past a level-drains-clamped target: when
+    # sixn_level_drains cut the target below the floor the pair is nearly full
+    # — that clamp is load-bearing (measured 2026-08-01) and grading past it
+    # would re-create the accumulation spike it exists to prevent.
+    _floor = min(_min_fill, target)
+    if count_moved < _floor:
         for ptank in fill_pair:
-            if count_moved >= _floor:
-                break
             pt = state.tanks_by_id.get(ptank)
-            if pt is None or not pt.is_empty:
-                continue  # already filled by the whole-tank move-in above
-            moved = _try_graded_move_in(
-                state, batch_meta, control, week_label, week_start_date,
-                (ptank,), transfer_events, warnings, reserved=reserved,
-                tables=tables, sixn_move_in_feed=sixn_move_in_feed,
-                retain_in_source=True, max_count=_floor - count_moved,
-            )
-            count_moved += moved
+            if pt is None:
+                continue
+            # Successive peels: each call takes one source tank's tail; loop
+            # until the floor is met or no candidate can contribute (the
+            # refusal-aware return breaks cleanly on a cross-batch pickup).
+            while count_moved < _floor:
+                moved = _try_graded_move_in(
+                    state, batch_meta, control, week_label, week_start_date,
+                    (ptank,), transfer_events, warnings, reserved=reserved,
+                    tables=tables, sixn_move_in_feed=sixn_move_in_feed,
+                    retain_in_source=True, max_count=_floor - count_moved,
+                )
+                if moved <= 0:
+                    break
+                count_moved += moved
 
     if count_moved == 0:
         warnings.append(
@@ -2992,6 +3174,7 @@ def phase_d_emit_events(
                 reserved=_reserved_og,
                 tables=tables,
                 sixn_move_in_feed=sixn_move_in_feed,
+                grade_events=grade_events,
             )
             # PRE-STAGE the in-place purge during WINDDOWN (sixn_refill is False
             # only in winddown). Depuration takes purge_days, so if the first
@@ -3240,6 +3423,98 @@ def phase_d_emit_events(
                                 f"{_fg.location_id} and staged it for in-place "
                                 f"purge (R2/R5 — entry-tier fish route forward "
                                 f"before harvest)")
+                    # GRADED STAGE (last resort, floor only): during a FIFO
+                    # batch-ripeness gap NO whole tank is at min harvest
+                    # weight anywhere, but the ripest tank's upper TAIL is.
+                    # Peel that tail via a Grade into a free grow-out tank
+                    # (entry sources grade FORWARD — R2-legal at any weight;
+                    # never into entry — R4) and stage THAT tank for in-place
+                    # purge. Without this the staircase skips a week and the
+                    # harvest goes dark purge_days later (measured: the
+                    # 2028-W43 zero on the 7.9.26 PR — every ripe fish sat in
+                    # tanks averaging 3.33-3.48 kg vs the 3.5 kg gate).
+                    _floor_p = min(_entry_target,
+                                   float(control.min_harvest_per_week
+                                         or _entry_target)
+                                   * _SIXN_FILL_MORTALITY_PAD)
+                    if _entered < _floor_p:
+                        from statistics import NormalDist as _ND_ps
+                        _std_ps = _ND_ps()
+                        _min_hv_p = control.min_harvest_weight_g or 0.0
+                        _min_tr_p = getattr(control, "min_transfer_count",
+                                            0.0) or 0.0
+
+                        def _frac_above_p(avg, cvp, thr):
+                            if avg <= 0 or cvp <= 0:
+                                return 1.0 if avg >= thr else 0.0
+                            z = (thr - avg) / (avg * cvp / 100.0)
+                            return max(0.0, min(1.0, 1.0 - _std_ps.cdf(z)))
+
+                        while _entered < _floor_p and _min_hv_p > 0:
+                            _near = [
+                                t for t in state.tanks_by_id.values()
+                                if not t.is_empty and t.type == "OG"
+                                and t.stage == "SW"
+                                and t.avg_wt_g < _min_hv_p
+                                and _frac_above_p(t.avg_wt_g, t.cv_pct or 16.0,
+                                                  _min_hv_p) >= 0.10]
+                            _near.sort(key=lambda t: (-t.avg_wt_g, t.tank_id))
+                            _staged_one = False
+                            for _gs in _near:
+                                _dst = next(
+                                    (t for t in sorted(
+                                        state.tanks_by_id.values(),
+                                        key=lambda x: x.tank_id)
+                                     if t.is_empty and t.type == "OG"
+                                     and t.system_id not in OG12_SYSTEMS
+                                     and t.tank_id not in _reserved_og),
+                                    None)
+                                if _dst is None:
+                                    break
+                                _cvg = _gs.cv_pct or 16.0
+                                _frac = _frac_above_p(_gs.avg_wt_g, _cvg,
+                                                      _min_hv_p)
+                                _big = min(_gs.count * _frac,
+                                           _floor_p - _entered)
+                                _small = _gs.count - _big
+                                if _big < max(1.0, _min_tr_p):
+                                    continue
+                                if _small < (control.min_tank_control or 0):
+                                    continue
+                                _bavg, _savg = upper_truncated_split(
+                                    _gs.avg_wt_g, _cvg, _min_hv_p)
+                                _g_batch, _g_loc = _gs.batch_id, _gs.location_id
+                                _gev = Grade(
+                                    batch_id=_g_batch,
+                                    event_date=week_start_date,
+                                    source_tank_ids=[_gs.tank_id],
+                                    destinations=[
+                                        TankAllocation(
+                                            tank_id=_gs.tank_id, count=_small,
+                                            avg_wt_g=_savg, cv_pct=_cvg),
+                                        TankAllocation(
+                                            tank_id=_dst.tank_id, count=_big,
+                                            avg_wt_g=_bavg, cv_pct=_cvg),
+                                    ],
+                                )
+                                warnings.extend(_gev.apply(state))
+                                if _dst.is_empty:   # grade refused
+                                    continue
+                                grade_events.append(_gev)
+                                _dst.stage = STAGE_STARVE
+                                _dst.starvation_days_remaining = purge_days
+                                _entered += _dst.count
+                                warnings.append(
+                                    f"{week_label}: GRADED STAGE — peeled the "
+                                    f"ripe tail ({_dst.count:,.0f} fish @ "
+                                    f"{_bavg / 1000:.2f}kg) of {_g_loc} (batch "
+                                    f"{_g_batch}) into {_dst.location_id} and "
+                                    f"staged it for in-place purge (floor "
+                                    f"continuity; {_small:,.0f} stay growing)")
+                                _staged_one = True
+                                break
+                            if not _staged_one:
+                                break
             elif target > 0:
                 # Immediate harvest (empty-phase tail, or purge_days unset).
                 harvested = 0.0
