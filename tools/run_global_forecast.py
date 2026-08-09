@@ -208,6 +208,14 @@ def _apply_manual_window(input_path, scenario_dir, control, tables, facility,
               for bid, (c, b) in og_agg.items() if c > 0}
     new_purge = {bid: (c, b * 1000.0 / c)
                  for bid, (c, b) in purge_agg.items() if c > 0}
+    # WINDOW SEMANTICS — the 6N contents at the window close carry their release
+    # timing into L1 explicitly (scripted stagings release _PURGE_HOLD_WEEKS
+    # after their scripted week; untouched PR-start fish from the handoff), so
+    # the purge hold is honored from the handoff. See
+    # manual_window.sixn_release_schedule.
+    from forecast.manual_window import sixn_release_schedule
+    purge_schedule = sixn_release_schedule(
+        state, win.get("transfer_events", []), fs_date, window_n)
     # FW batches manually crossed to OG are now in new_og -> drop from fw_inflight.
     transferred = set(win.get("transferred_fw_batches", set()))
     new_fw = {bid: v for bid, v in fw_inflight.items() if bid not in transferred}
@@ -226,6 +234,8 @@ def _apply_manual_window(input_path, scenario_dir, control, tables, facility,
         "opening_locations": win.get("opening_locations", []),  # manual-week ledger opens
         "initial_state": init_state,   # W23 audit opening (pre-window PR tanks)
         "window_close_state": state,   # W27 pick continuation (manual close tanks)
+        # Release timing for the window-close 6N contents (window semantics).
+        "purge_release_schedule": purge_schedule,
     }
     return (new_og, new_fw, new_purge, new_start,
             control.horizon_weeks - window_n, win.get("warnings", []), window_n, stitch)
@@ -295,6 +305,7 @@ def run_global(input_path, output_path, config_dir, scenario_dir, *,
     _facility_limits, system_limits = load_limits(str(scenario_dir))
     inflight_og, fw_inflight, purge_inflight = {}, {}, {}
     _mw_stitch = None   # manual-window rows/events to prepend into the output
+    _mw_weeks = 0       # manual-window length (0 = no window)
     if not no_pr:
         inflight_og, fw_inflight, derived_start, purge_inflight = _hydrate_pr(
             Path(input_path), batches)
@@ -326,7 +337,12 @@ def run_global(input_path, output_path, config_dir, scenario_dir, *,
             l3_kwargs=dict(slack_epsilon=slack_epsilon, mip_time_limit=mip_time_limit,
                            mip_rel_gap=mip_rel_gap, verbose=False),
             model_purge_hold=True, model_full_facility=True,
-            fw_inflight=fw_inflight, purge_inflight=purge_inflight, verbose=False)
+            fw_inflight=fw_inflight, purge_inflight=purge_inflight,
+            # Window semantics: no implicit pre-start 6N staging after a manual
+            # window; the window-close 6N contents carry explicit release timing.
+            purge_release_schedule=(_mw_stitch or {}).get("purge_release_schedule"),
+            manual_window_weeks=_mw_weeks,
+            verbose=False)
         grow_q = None
         if optimal:
             grow_q = _solve_cpsat_q(result, facility, system_limits, control,

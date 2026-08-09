@@ -148,6 +148,141 @@ def _build_fw_lookup(events, fw_records, control, pr_closing, tables, batch_by_i
     return lookup
 
 
+def sixn_release_schedule(state, transfer_events, window_start, window_n,
+                          hold_weeks=None):
+    """Release timing for the window-CLOSE 6N contents, honoring the purge hold
+    from the handoff (window semantics — the planner continues from operator
+    truth and must not release scripted stagings early).
+
+    `state` is the post-window facility state; `transfer_events` the window's
+    recorded transfers (events.Transfer / events.GradedHarvest — a 6N
+    destination marks the tank's fill week); `window_start` the date of window
+    week 1; `window_n` the window length in weeks. Returns L1's
+    `purge_release_schedule` entries {batch_id, count, biomass_kg, avg_wt_g,
+    release_week} where release_week is 0-based from the HANDOFF week:
+
+      * a tank a scripted og_to_6n / graded-to-6N filled at window week k
+        (1-based) releases `hold_weeks` after that week — global week
+        k + hold - (window_n + 1), clamped >= 0;
+      * a tank holding PR-start fish the window did not touch has already
+        served its hold (it sat frozen through the window) — releasable from
+        the handoff, spread over the first `hold_weeks` slots like the
+        no-window purge_inflight (the pair-per-week rotation).
+
+    A scripted top-up of a PR-start tank re-times the WHOLE tank to the
+    scripted week (conservative: never releases held fish early).
+    """
+    from .sixn import SIXN_ALL_TANKS
+    if hold_weeks is None:
+        from .global_planner_poc import _PURGE_HOLD_WEEKS as hold_weeks
+    entry_week: dict[int, int] = {}
+    for tr in transfer_events or []:
+        d0 = getattr(tr, "event_date", None)
+        if d0 is None:
+            continue
+        wk = (d0 - window_start).days // 7 + 1     # 1-based window week
+        dest_ids = ([tr.pickup_tank_id] if hasattr(tr, "pickup_tank_id")
+                    else [a.tank_id
+                          for a in getattr(tr, "destinations", []) or []])
+        for tid in dest_ids:
+            if tid in SIXN_ALL_TANKS:
+                entry_week[tid] = max(wk, entry_week.get(tid, 0))
+    out: list[dict] = []
+    for t in state.tanks_by_id.values():
+        if t.is_empty or t.tank_id not in SIXN_ALL_TANKS or t.count <= 0:
+            continue
+        wt = t.biomass_kg * 1000.0 / t.count
+        if t.tank_id in entry_week:
+            rel = max(0, entry_week[t.tank_id] + hold_weeks - (window_n + 1))
+            out.append({"batch_id": t.batch_id, "count": t.count,
+                        "biomass_kg": t.biomass_kg, "avg_wt_g": wt,
+                        "release_week": rel})
+        else:
+            for k in range(hold_weeks):
+                out.append({"batch_id": t.batch_id, "count": t.count / hold_weeks,
+                            "biomass_kg": t.biomass_kg / hold_weeks,
+                            "avg_wt_g": wt, "release_week": k})
+    return out
+
+
+def dark_handoff_weeks(sixn_start, events, window_weeks=None, hold_weeks=None):
+    """PURE handoff-continuity check for a scripted manual window (no Streamlit,
+    no biology): does the window drain the 6N depuration pipeline so that a
+    handoff-era week has NOTHING harvestable under the purge hold?
+
+    Inputs:
+      sixn_start    {tank_id: fish_count} — the 6N tanks' contents in the
+                    PR-hydrated starting state (week-1 open).
+      events        the scripted ManualEvents (forecast.manual_events).
+      window_weeks  N, the window length; default = the last scripted week.
+      hold_weeks    the depuration hold (default: the engine's 2).
+
+    Model (mirrors the engines' handoff semantics):
+      * PR-start 6N fish are releasable from the handoff (their hold is served
+        by sitting frozen through the window).
+      * A scripted harvest / graded_harvest FROM a 6N tank removes fish.
+      * A scripted og_to_6n / graded-to-6N staging at week k adds fish to the
+        destination, releasable from week k + hold. An unknown staged count
+        (count=None = "whole tank" — the source size isn't known here) counts
+        as a positive presence, which is all the zero-check needs.
+
+    Returns the list of 1-based ABSOLUTE week indices (window timeline, so the
+    handoff is week N+1) among weeks N+1 .. N+hold with ZERO releasable 6N
+    fish. Empty list = the handoff is covered.
+    """
+    from .manual_events import (
+        TYPE_GRADED_HARVEST, TYPE_HARVEST, TYPE_OG_TO_6N, TYPE_OG_TRANSFER)
+    from .sixn import SIXN_ALL_TANKS
+    if hold_weeks is None:
+        from .global_planner_poc import _PURGE_HOLD_WEEKS as hold_weeks
+    if window_weeks:
+        n = int(window_weeks)
+    elif events:
+        n = max(int(e.week or 1) for e in events)
+    else:
+        n = 0
+    if n <= 0:
+        return []
+    # Per-tank pools: list of [count, releasable_from_week]. PR-start fish are
+    # releasable from the handoff (week n+1).
+    pools: dict[int, list[list[float]]] = {
+        tid: [[float(c), float(n + 1)]]
+        for tid, c in (sixn_start or {}).items()
+        if tid in SIXN_ALL_TANKS and c and c > 0}
+    for ev in sorted(events or [], key=lambda e: (e.week or 1)):
+        wk = ev.week or 1
+        if ev.type in (TYPE_HARVEST, TYPE_GRADED_HARVEST) \
+                and ev.from_tank in SIXN_ALL_TANKS:
+            pool = pools.get(ev.from_tank, [])
+            take = (float(ev.count) if ev.count
+                    else sum(p[0] for p in pool))       # None = whole tank
+            for p in pool:                              # oldest-releasable first
+                got = min(p[0], take)
+                p[0] -= got
+                take -= got
+                if take <= 0:
+                    break
+        staged_to = []
+        if ev.type == TYPE_GRADED_HARVEST and ev.destinations \
+                and ev.destinations[0].tank in SIXN_ALL_TANKS:
+            # Graded->6N: the biggest `count` fish go to the 6N pickup tank.
+            staged_to = [(ev.destinations[0].tank, ev.count)]
+        elif ev.type in (TYPE_OG_TO_6N, TYPE_OG_TRANSFER):
+            staged_to = [(d.tank, d.count) for d in (ev.destinations or [])
+                         if d.tank in SIXN_ALL_TANKS]
+        for tid, cnt in staged_to:
+            # Unknown count (None) = "whole source tank" — a positive presence.
+            pools.setdefault(tid, []).append(
+                [float(cnt) if cnt else 1.0, float(wk + hold_weeks)])
+    dark = []
+    for w in range(n + 1, n + hold_weeks + 1):
+        releasable = sum(p[0] for pool in pools.values() for p in pool
+                         if p[1] <= w and p[0] > 0)
+        if releasable <= 0.5:
+            dark.append(w)
+    return dark
+
+
 def advance_facility_window(state, batch_by_id, tables, forecast_start,
                             n_weeks, events=None, control=None,
                             pr_closing=None, fw_records=None):

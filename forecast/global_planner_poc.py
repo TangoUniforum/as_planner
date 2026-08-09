@@ -626,6 +626,8 @@ def plan(
     model_full_facility: bool = False,
     fw_inflight: Optional[dict[str, tuple[float, float, "date"]]] = None,
     purge_inflight: Optional[dict[str, tuple[float, float]]] = None,
+    purge_release_schedule: Optional[list[dict]] = None,
+    manual_window_weeks: int = 0,
     fw_by_label: Optional[tuple[dict[str, float], dict[str, float]]] = None,
 ) -> PlannerResult:
     """Run the tankless L1 planner. See module docstring for the algorithm.
@@ -704,6 +706,28 @@ def plan(
     FW-in-flight batches (measured in FW units at PR closing); passed through to
     the FW projector so those batches are anchored to PR state. Only consulted
     when `model_full_facility` is True.
+
+    MANUAL OVERRIDE WINDOW semantics (`manual_window_weeks` +
+    `purge_release_schedule`): when the plan CONTINUES from an operator-scripted
+    manual window (forecast.manual_window), the pre-start weeks are operator
+    TRUTH — only scripted events happened there. The planner must therefore not
+    assume any unscripted pre-start 6N staging:
+
+      * `manual_window_weeks > 0` DISABLES the steady-fill 6N prime below (the
+        "assume a primed 6N" top-up that models fish staged during the weeks
+        BEFORE forecast start — exactly the window weeks, where nothing was
+        staged unless the operator scripted it). The plan's first possible
+        staging action is week 0 (the handoff week), releasable after the
+        purge hold — so the earliest UNSCRIPTED harvest is week
+        `_PURGE_HOLD_WEEKS`.
+      * `purge_release_schedule` (entries {batch_id, count, avg_wt_g,
+        release_week}) carries the window-close 6N contents WITH their release
+        timing: PR-start fish the window did not remove (hold already served —
+        releasable from week 0, spread like `purge_inflight`), and scripted
+        og_to_6n / graded-to-6N stagings (releasable `_PURGE_HOLD_WEEKS` after
+        their scripted week). When given it REPLACES the `purge_inflight`
+        spread (pass one or the other). Defaults (0 / None) keep every
+        existing caller byte-identical.
     """
     fs = _as_date(control.forecast_start)
     horizon = control.horizon_weeks
@@ -804,7 +828,28 @@ def plan(
     # overshoot). These fish are NOT in the grow-out seeds (the hydration split
     # them out), so they are added to seeded_count here for conservation; they
     # release as HOG in step 2b, which balances.
-    if model_purge_hold and purge_inflight:
+    if model_purge_hold and purge_release_schedule is not None:
+        # MANUAL-WINDOW handoff: the window-close 6N contents arrive with
+        # EXPLICIT release timing (built by the window applier from the scripted
+        # events) — PR-start fish release from week 0, scripted stagings release
+        # _PURGE_HOLD_WEEKS after their scripted week. This replaces the
+        # purge_inflight spread below, so the hold is honored from the handoff.
+        for entry in purge_release_schedule:
+            _bid = entry["batch_id"]
+            _c = float(entry["count"])
+            if _c <= 0:
+                continue
+            _cc = cons.setdefault(_bid, {
+                "input_count": 0.0, "seeded_count": 0.0,
+                "harvested_count": 0.0, "harvested_kg": 0.0,
+                "mortality_count": 0.0, "cull_count": 0.0, "cull_kg": 0.0})
+            _cc["seeded_count"] += _c
+            purge_buffer.setdefault(
+                max(0, int(entry.get("release_week", 0))), []).append({
+                    "batch_id": _bid, "count": _c,
+                    "biomass_kg": float(entry["biomass_kg"]),
+                    "avg_wt_g": float(entry["avg_wt_g"])})
+    elif model_purge_hold and purge_inflight:
         _nrel = _PURGE_HOLD_WEEKS
         for _bid, (_c, _wt) in purge_inflight.items():
             _cc = cons.setdefault(_bid, {
@@ -830,7 +875,14 @@ def plan(
     # it never adds to seeded_count. Result: harvest is at the steady rate from
     # week 1 (>= the contract min), so the facility rides UP TO and UNDER the cap
     # with no startup ramp/overshoot.
-    if model_purge_hold and is_purge_mode(control, fs):
+    # WINDOW SEMANTICS: this steady-fill prime models staging that would have
+    # happened in the weeks BEFORE forecast start. After a manual override
+    # window those weeks are operator-scripted truth (only scripted events
+    # happened), so the prime is an implicit unscripted staging — it must not
+    # run. The first plannable staging is then week 0 (the handoff), and the
+    # earliest unscripted release is week _PURGE_HOLD_WEEKS.
+    if (model_purge_hold and manual_window_weeks == 0
+            and is_purge_mode(control, fs)):
         _first_label = iso_week_label(fs)
         # Per-slot prime target = one harvest-tank (og_ceiling) PLUS a share of any
         # handover EXCESS-over-cap, so an over-cap starting state (e.g. from an

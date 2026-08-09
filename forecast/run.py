@@ -480,12 +480,26 @@ def main(
             b: (agg["count"], agg["biomass_kg"] * 1000.0 / agg["count"], pr_closing)
             for b, agg in fw_in_flight_aggregates.items()
             if b in fw_in_flight_ids and agg["count"] > 0}
+        # WINDOW SEMANTICS: after a manual override window the guide's L1 must
+        # not assume unscripted pre-start 6N staging, and the window-close 6N
+        # contents carry their release timing (scripted stagings release after
+        # the purge hold; untouched PR-start fish from the handoff) — so the
+        # envelope agrees with what the realized layer can actually release.
+        _guide_purge_schedule = None
+        if window_n > 0:
+            from .manual_window import sixn_release_schedule
+            _fs_orig = (_fw_proj_fs.date() if hasattr(_fw_proj_fs, "date")
+                        else _fw_proj_fs)
+            _guide_purge_schedule = sixn_release_schedule(
+                state, prefix_transfers, _fs_orig, window_n)
         _t0g = _time.time()
         harvest_guide = build_harvest_guide(
             control=control, tables=tables, facility=facility, batches=batches,
             inflight_og=_guide_inflight_og,
             fw_inflight=_guide_fw_inflight,
             purge_inflight=_guide_purge_inflight,
+            purge_release_schedule=_guide_purge_schedule,
+            manual_window_weeks=window_n,
             fw_by_label=fw_addends_by_week(states_by_batch),
             facility_limits=facility_limits)
         print(f"\n  HYBRID guide (hybrid_follow={control.hybrid_follow}): "

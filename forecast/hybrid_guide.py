@@ -161,12 +161,19 @@ def _condition(rows, modes, min_hv: float, max_hv: float,
 
 def build_harvest_guide(*, control, tables, facility, batches,
                         inflight_og=None, fw_inflight=None, purge_inflight=None,
-                        fw_by_label=None, facility_limits=None
+                        fw_by_label=None, facility_limits=None,
+                        purge_release_schedule=None, manual_window_weeks=0
                         ) -> Optional[HarvestGuide]:
     """Run standalone L1 once and condition its harvest curve.
 
     Returns None — never raises — whenever the guide would be unusable. The
     caller then runs as the plain controller.
+
+    `manual_window_weeks` / `purge_release_schedule`: the manual-override-window
+    semantics (see global_planner_poc.plan) — when the guide is built AFTER a
+    scripted window, L1 must not assume any unscripted pre-start 6N staging, so
+    its envelope agrees with what the realized controller can actually release
+    at the handoff.
     """
     follow = str(getattr(control, "hybrid_follow", "off") or "off").lower()
     if follow not in ("floor", "full"):
@@ -200,6 +207,8 @@ def build_harvest_guide(*, control, tables, facility, batches,
             model_full_facility=True,
             fw_inflight=fw_inflight or {},
             purge_inflight=purge_inflight or {},
+            purge_release_schedule=purge_release_schedule,
+            manual_window_weeks=int(manual_window_weeks or 0),
             fw_by_label=fw_by_label,
             biomass_ceiling=_per_week_bio_ceiling(control, facility_limits),
         )

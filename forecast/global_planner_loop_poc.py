@@ -202,6 +202,8 @@ def run_loop(
     model_full_facility: bool = True,
     fw_inflight: Optional[dict] = None,
     purge_inflight: Optional[dict] = None,
+    purge_release_schedule: Optional[list] = None,
+    manual_window_weeks: int = 0,
     verbose: bool = True,
 ) -> LoopResult:
     """Drive L1's per-week loading down to the tank-realizable envelope.
@@ -223,6 +225,11 @@ def run_loop(
     `tools/run_global_forecast.py` always hydrates and passes it). Pass both
     False (e.g. via `tools/run_loop_poc --no-purge-hold`) to recover the old
     OG-only instant-removal comparison.
+
+    `purge_release_schedule` / `manual_window_weeks` are passed through to L1
+    verbatim — the manual-override-window semantics (no implicit pre-start 6N
+    staging; explicit release timing for the window-close 6N contents). See
+    `global_planner_poc.plan`.
     """
     l3_kwargs = dict(l3_kwargs or {})
     l3_kwargs.setdefault("verbose", False)
@@ -252,6 +259,8 @@ def run_loop(
             model_full_facility=model_full_facility,
             fw_inflight=fw_inflight,
             purge_inflight=purge_inflight,
+            purge_release_schedule=purge_release_schedule,
+            manual_window_weeks=manual_window_weeks,
         )
         res = l3.plan_l3(l1, control, facility, system_limits, **l3_kwargs)
         last_l1, last_l3 = l1, res
