@@ -60,7 +60,7 @@ from .biology import (
     sgr_pct_per_day, upper_truncated_split,
 )
 from .events import Grade, GradedHarvest, Harvest, OG12_SYSTEMS, OG12_MOVE_LOCK_WT_G, TankAllocation, Transfer, TranOGEntry
-from .tiers import move_allowed
+from .tiers import move_allowed, sixn_exit_allowed
 from .harvest_scheduler import HarvestDemand
 from .models import (
     BatchInput,
@@ -4619,6 +4619,16 @@ def phase_d_emit_events(
         for tank in sorted(state.tanks_by_id.values(),
                            key=lambda t: t.density_kg_m3, reverse=True):
             if tank.is_empty:
+                continue
+            # R7: never grade-split a 6N DEPURATION tank (STARVE) — fish
+            # committed to 6N may only be harvested. Pre-R7 this pass would
+            # quietly pull half of an over-dense purge tank back into
+            # grow-out (STARVE stage leaking with it — frozen, unfed fish in
+            # a production tank); its density is governed by the sister-first
+            # fill cap, with the no-drop make-room overflow as the one
+            # documented exception (reported by the density gate, not
+            # "relieved" by breaking the commitment).
+            if not sixn_exit_allowed(tank.system_id, tank.stage):
                 continue
             cap = tank.max_density_kg_m3
             if cap <= 0:

@@ -4837,7 +4837,15 @@ def _board_score(out_path):
         "No empty week": (min_wk >= near_empty) if min_hv else True,
         "Under cap": under_cap,
     }
-    return {"metrics": m, "verdict": verdict, "harvest": harv, "gates": gates}
+    # R7 lens for the analysis checklist: depuration-era outbound 6N moves.
+    try:
+        from forecast import analysis as _r7ana
+        sixn_out = _r7ana.sixn_outbound_transfers(
+            out_path, str(_cfg.get("sixn_production_start") or ""))
+    except Exception:                                            # noqa: BLE001
+        sixn_out = None
+    return {"metrics": m, "verdict": verdict, "harvest": harv, "gates": gates,
+            "sixn_outbound_purge": sixn_out}
 
 
 def _board_badges(gates):
@@ -5267,6 +5275,7 @@ def _ana_grade(res, targets, econ):
         "weeks_over_harvest_target": (
             getattr(m, "weeks_over_harvest_target", None)
             if m is not None else None),
+        "sixn_outbound_purge": sc.get("sixn_outbound_purge"),
         "peak_pct_of_cap": peak_pct,
         "targets_review": tr,
         "density_review": dr,

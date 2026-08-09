@@ -289,6 +289,58 @@ def biomass_band_fraction(mean_kg: float, cv: float,
     return max(0.0, _F(hi_kg) - _F(lo_kg))
 
 
+def sixn_outbound_transfers(out_path, production_start_iso: str = ""
+                            ) -> Optional[int]:
+    """R7 lens: TransferPlan rows moving fish OUT of a 6N tank
+    (61/63/65/67/69/71) during the DEPURATION era (weeks before the 6N
+    production start). In production mode the mains are ordinary grow-out,
+    so later outbound moves are legal rebalancing, not violations.
+
+    Returns the violation count, or None when the sheet is absent (the gate
+    reports N/A, never a false verdict)."""
+    import openpyxl
+    sixn = {"61", "63", "65", "67", "69", "71"}
+    cutoff = ""
+    if production_start_iso:
+        try:
+            d = _dt.date.fromisoformat(str(production_start_iso)[:10])
+            iso = d.isocalendar()
+            cutoff = f"{iso[0]}-W{iso[1]:02d}"
+        except (ValueError, TypeError):
+            cutoff = ""
+    wb = openpyxl.load_workbook(out_path, read_only=True, data_only=True)
+    try:
+        if "TransferPlan" not in wb.sheetnames:
+            return None
+        ws = wb["TransferPlan"]
+        header = None
+        n = 0
+        for r in ws.iter_rows(values_only=True):
+            if header is None:
+                if r and str(r[0]).strip() == "Week" and any(
+                        str(c).strip() == "From_Tank" for c in r if c):
+                    header = {str(c).strip(): i for i, c in enumerate(r) if c}
+                continue
+            if not r or not str(r[0]).startswith("20"):
+                continue
+            week = str(r[0]).strip()
+            if cutoff and week >= cutoff:
+                continue                      # production era — legal moves
+            typ = str(r[header.get("Type", -1)] or "") if "Type" in header else ""
+            if typ != "Transfer":
+                continue
+            ft = r[header["From_Tank"]] if "From_Tank" in header else None
+            try:
+                ft_s = str(int(float(ft)))
+            except (TypeError, ValueError):
+                continue
+            if ft_s in sixn:
+                n += 1
+        return n
+    finally:
+        wb.close()
+
+
 def density_review(out_path) -> Optional[dict]:
     """Per-batch peak-density distribution for one plan — the diagnostic that
     was Tune mode's reason to exist, now a per-candidate lens. Reuses Tune's
@@ -540,6 +592,24 @@ def _gate_density_quality(ctx):
 
 register_gate("density_quality", "Per-batch density quality", hard=False,
               fn=_gate_density_quality)
+
+
+def _gate_sixn_one_way(ctx):
+    """R7 — 6N one-way commitment: fish moved into 6N depuration may never
+    transfer out (only harvest). Counts depuration-era outbound 6N moves."""
+    n = ctx.get("sixn_outbound_purge")
+    if n is None:
+        return "N/A", "TransferPlan unavailable for this plan"
+    n = int(n)
+    if n == 0:
+        return "PASS", "no fish left a 6N depuration tank except by harvest"
+    return "FAIL", (f"{n} transfer(s) moved fish OUT of a 6N depuration tank "
+                    f"— the one-way commitment (R7) forbids this; those fish "
+                    f"may only be harvested")
+
+
+register_gate("sixn_one_way", "6N one-way commitment (R7)", hard=False,
+              fn=_gate_sixn_one_way)
 
 
 # --------------------------------------------------------------------------- #
