@@ -1753,27 +1753,20 @@ def _emit_transfers_for_batch_diff(
         take = min(overs[i][1], unders[j][1])
         dst_id = unders[j][0]
         # REMNANT FLOOR guard (2): a partial drain must leave the source empty
-        # or >= min_keep. Reduced-take preferred (the deficit stays open for
-        # another surplus tank). When the floor forces TAKE-ALL (the source
-        # can't retain a workable population), the whole tank must go to a
-        # deficit that can absorb it — otherwise leave this source to the
-        # residual router below (which moves it WHOLE), never nibble it into
-        # a sub-min tail.
+        # or >= min_keep — the take is REDUCED so the padded floor stays (the
+        # deficit stays open for another surplus tank). The min() deliberately
+        # caps the take-all escalation at the deficit: in the rare corner where
+        # the source can't retain the floor AND its legal deficit can't absorb
+        # the whole tank, the sub-min tail is left for the residual router
+        # below (whole-tank move) and, failing that, the weekly remnant sweep.
+        # A stricter in-loop version (skip the pairing, route whole) was tried
+        # and REVERTED (2026-08-08): it measurably reshaped trajectories and
+        # put an EMPTY harvest week back on the 7.2.26 PR — the hard
+        # steady-harvest contract outranks a transient the sweep repairs a
+        # week later.
         cur = src_tank.count if not src_tank.is_empty else 0.0
         if min_keep > 0 and cur > 0:
-            adj = _floored_take(cur, take, min_keep)
-            if adj > take + 0.5:
-                j2 = next((k for k, u in enumerate(unders)
-                           if u[1] >= cur - 0.5
-                           and _pair_legal(src_tank, u[0])), None)
-                if j2 is None:
-                    i += 1
-                    continue     # residual routing moves the tank whole
-                j = j2
-                dst_id = unders[j][0]
-                take = cur
-            else:
-                take = adj
+            take = min(take, _floored_take(cur, take, min_keep))
         # Never set leaves_source_empty=True at the rebalance level —
         # earlier transfers from the same source can be REJECTED by
         # Transfer.apply (INV-4 etc.), so the rebalance can't know the

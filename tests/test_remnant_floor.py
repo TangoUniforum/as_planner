@@ -149,22 +149,29 @@ class TestDiffEmitterFloor:
         _no_submin(s)
         assert s.tanks_by_id[3].is_empty  # residual routing finished the job
 
-    def test_takeall_escalation_never_nibbles(self):
-        """The escalation corner: a full-drain source whose paired deficit
-        cannot absorb the whole tank must NOT be nibbled into a sub-min tail —
-        it is left to the residual router, which moves it WHOLE."""
+    def test_corner_tail_repaired_by_sweep(self):
+        """The corner the emitter deliberately does NOT solve in-loop (a
+        stricter version was tried and reverted — it put an empty harvest week
+        back on the 7.2.26 PR): a full-drain grow-out source whose only
+        planned destination is tier-illegal strands its tail (residual routing
+        has no legal this-tank either). The WEEKLY SWEEP then folds it into
+        the batch's other grow-out tank — the two-layer guarantee."""
         s = _mk_state()
-        s.tanks_by_id[3].assign("B1", 13852, 3000.0, 16.0, "SW")
-        s.tanks_by_id[4].assign("B1", 13852, 3000.0, 16.0, "SW")
+        s.tanks_by_id[1].assign("B1", 25000, 800.0, 16.0, "SW")   # entry, kept
+        s.tanks_by_id[3].assign("B1", 6500, 800.0, 16.0, "SW")    # growout, drops
+        s.tanks_by_id[5].assign("B1", 20000, 800.0, 16.0, "SW")   # growout, drops
         transfers, warns = [], []
-        # Tank 3 drops; the single kept tank's deficit (target - 13,852)
-        # absorbs only part of the source.
+        # Plan collapses the batch onto the entry tank only — illegal uphill
+        # for both grow-out sources (R4), so their fish stay put.
         _emit_transfers_for_batch_diff(
-            s, "B1", {3, 4}, {4}, TODAY, transfers, warns, min_keep=MIN)
+            s, "B1", {1, 3, 5}, {1}, TODAY, transfers, warns, min_keep=MIN)
         t3 = s.tanks_by_id[3]
-        assert t3.is_empty or t3.count >= MIN
-        assert abs(sum(t.count for t in s.tanks_by_id.values()) - 27704) < 0.5
+        assert 0 < t3.count < MIN            # the stranded sub-min tail
+        folds = _consolidate_remnants(s, TODAY, "2027-W07", transfers, warns, MIN)
+        assert folds == 1 and t3.is_empty    # swept into tank 5 (growout)
+        assert abs(s.tanks_by_id[5].count - 26500) < 0.5
         _no_submin(s)
+        assert abs(sum(t.count for t in s.tanks_by_id.values()) - 51500) < 0.5
 
     def test_conservation(self):
         s = _mk_state()
