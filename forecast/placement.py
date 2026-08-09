@@ -107,6 +107,25 @@ _SIXN_SYSTEMS = frozenset({"OG6N"})
 # in; the STARVE purge weeks themselves are excluded from realized feed.
 PURGE_TRANSFER_GROWTH_DAYS = 4
 
+# DEPURATION HOLD (operator rule): fish moved into a 6N purge tank must sit the
+# full ~2-week purge before that tank may be drained. Enforced in BOTH
+# directions: fills AVOID tanks of the pair that drains NEXT week (the audited
+# leak — the anticipatory/reactive make-room dumped into the empty sister of
+# the front-of-queue pair, shipping 17-33k fish with 1 week of purge), and the
+# rotation's drain HOLDS any tank filled after the PREVIOUS rotation step
+# (fail-safe; a held tank drains on the pair's next rotation).
+SIXN_MIN_RESIDENCY_DAYS = 14
+# Drain-guard threshold in EVENT-DATE days: a next-rotation drain is at most 7
+# calendar days after its fill (week_starts are 7 apart; the ragged partial
+# FIRST forecast week makes it shorter, never longer), while the legal
+# 2nd-rotation drain — the standard Wed-fill -> Fri-harvest two-week purge —
+# is at least 8 (7 + the >=1-day first week). 8 therefore separates the two
+# in every calendar. A raw 14-day floor was measured to misfire on the first
+# forecast week (fills dated at the mid-week forecast start reached their
+# on-schedule 2nd-rotation drain at 9-12 event days) and put a ZERO-harvest
+# week back on 2 of 3 July PRs — breaching the steady-harvest contract.
+SIXN_DRAIN_GUARD_MIN_DAYS = 8
+
 
 def _grow_weight_days(avg_wt_g: float, batch: Optional[BatchInput],
                       tables: BiologyTables, days: int) -> float:
@@ -1101,7 +1120,7 @@ def _try_graded_move_in(
         return 0.0
     # Freeze the 6N pickup tank (off-feed depuration) and book its 4 pre-
     # transfer feed-days; the retention tank keeps growing/feeding normally.
-    _freeze_6n_dest(state, pair[0])
+    _freeze_6n_dest(state, pair[0], fill_date=week_start_date)
     if tables is not None:
         _book_move_in_feed(sixn_move_in_feed, chosen.batch_id, week_label,
                            pickup_xfer_wt, big_count, tables, _bm)
@@ -1132,6 +1151,7 @@ def _transit_entry_to_pair(
     reserved,
     tables,
     sixn_move_in_feed,
+    avoid=frozenset(),
 ) -> float:
     """Route market-ready ENTRY-tier fish into the 6N fill pair the legal way.
 
@@ -1193,7 +1213,7 @@ def _transit_entry_to_pair(
         for t in frees:
             if t.tank_id not in reserved:
                 return t, False
-        if frees and _free_6n_slots(state, fill_pair):
+        if frees and _free_6n_slots(state, fill_pair, avoid):
             return frees[0], True
         return None, False
 
@@ -1206,7 +1226,7 @@ def _transit_entry_to_pair(
             transfer_events, warnings, week_label,
             reason=f"6N rotation fill via entry forward-transit (from {src_loc})",
             sixn_move_in_feed=sixn_move_in_feed, tables=tables,
-            batch_meta=batch_meta, is_purge=True)
+            batch_meta=batch_meta, is_purge=True, avoid=avoid)
         if was_reserved:
             state.reserved_tanks.add(hop.tank_id)
         return ok
@@ -1378,6 +1398,26 @@ def _run_sixn_purge_week(
         tank = state.tanks_by_id.get(tank_id)
         if tank is None or tank.is_empty:
             continue
+        # DEPURATION-HOLD fail-safe: never drain a tank on the rotation
+        # immediately after its recorded fill (< SIXN_DRAIN_GUARD_MIN_DAYS —
+        # that would be a 1-week purge; the standard 2nd-rotation drain is the
+        # legal 2-week purge and always measures >= the threshold, partial
+        # first forecast week included). With the fill-side avoidance in
+        # _free_6n_slots this should never fire; if it does (e.g. a same-batch
+        # top-up into a non-resting pair), the tank is HELD — its pair rests
+        # next, and it drains on the next rotation with the hold satisfied.
+        # Tanks with no recorded fill (PR-hydrated fish already purging at
+        # forecast start) are treated as old enough.
+        _fill_d = getattr(state, "sixn_fill_date", {}).get(tank_id)
+        if (_fill_d is not None
+                and (week_start_date - _fill_d).days < SIXN_DRAIN_GUARD_MIN_DAYS):
+            warnings.append(
+                f"{week_label}: DEPURATION HOLD — 6N {tank.location_id} "
+                f"(batch {tank.batch_id}, {tank.count:.0f} fish) was filled "
+                f"{(week_start_date - _fill_d).days}d ago (the rotation right "
+                f"after its fill — a 1-week purge); drain held until the "
+                f"pair's next rotation")
+            continue
         pair_drain_count += tank.count
         ev = Harvest(
             batch_id=tank.batch_id,
@@ -1513,6 +1553,20 @@ def _run_sixn_purge_week(
                 dest_tank_id = fill_pair[1]  # sister tank for second+ batch
             else:
                 dest_tank_id = main_tank_id
+            # A pair tank can now be OCCUPIED by a foreign batch at fill time
+            # (a depuration-held tank riding through the resting slot). The
+            # Transfer below would refuse it (INV-1) but the loop would still
+            # count the take as moved — so verify the destination accepts
+            # (empty or same batch), try the other pair tank, else stop.
+            def _dest_ok(tid, _b=move_in_batch):
+                tk = state.tanks_by_id.get(tid)
+                return tk is not None and (tk.is_empty or tk.batch_id == _b)
+            if not _dest_ok(dest_tank_id):
+                _alt = fill_pair[1] if dest_tank_id == fill_pair[0] else fill_pair[0]
+                if _dest_ok(_alt):
+                    dest_tank_id = _alt
+                else:
+                    break  # no usable pair tank (hold in effect) — stop filling
             # PURGE move-in: land the cohort at the mid-week (Friday) transfer
             # weight = source week-open avg grown 4 SW days, then FREEZE the 6N
             # destination (STARVE) so the daily loop neither grows nor feeds it
@@ -1534,7 +1588,7 @@ def _run_sixn_purge_week(
             warns = ev.apply(state)
             warnings.extend(warns)
             transfer_events.append(ev)
-            _freeze_6n_dest(state, dest_tank_id)
+            _freeze_6n_dest(state, dest_tank_id, fill_date=week_start_date)
             _book_move_in_feed(sixn_move_in_feed, move_in_batch, week_label,
                                _xfer_wt, take, tables, _bm)
             count_moved += take
@@ -1549,10 +1603,14 @@ def _run_sixn_purge_week(
     # fill pair. See _transit_entry_to_pair (whole-tank ripe transits to the
     # target + graded ripe-tail peels up to the floor).
     if count_moved < target:
+        # Front of the (already-popped) queue drains NEXT week — the transit's
+        # second-leg fallthrough must not land fish there (depuration hold).
+        _avoid_imminent = frozenset(pair_queue[0]) if pair_queue else frozenset()
         count_moved += _transit_entry_to_pair(
             state, batch_meta, control, week_label, week_start_date,
             fill_pair, target, count_moved, transfer_events, grade_events,
-            warnings, reserved, tables, sixn_move_in_feed)
+            warnings, reserved, tables, sixn_move_in_feed,
+            avoid=_avoid_imminent)
 
     # GRADE-TO-MIN floor fill: when the whole-tank move-in + entry transit leave
     # the resting pair below the harvest FLOOR (min_h), peel just enough of the
@@ -2721,7 +2779,8 @@ def _consolidate_remnants(
     return folds
 
 
-def _free_6n_slots(state: FacilityState, resting_pair) -> list[int]:
+def _free_6n_slots(state: FacilityState, resting_pair,
+                   avoid=frozenset()) -> list[int]:
     """6N tank ids that can ACCEPT a make-room move-in right now.
 
     A 6N tank is available if it is empty (any pair). The resting pair's
@@ -2729,20 +2788,32 @@ def _free_6n_slots(state: FacilityState, resting_pair) -> list[int]:
     any other empty 6N tank — so a make-room move-in prefers the slot the
     pipeline is about to fill anyway, and only spills onto extra empties
     when that one is taken.
+
+    `avoid` — tank ids whose pair DRAINS next rotation: offered LAST, never
+    first. Pre-fix these were the first fallthrough slots (the audited
+    1-week-residency leak: 33,206 fish into the front pair's empty sister),
+    so a dump landed there even when a legal slot existed. Demoting instead
+    of excluding keeps make-room's success/failure identical to the old
+    behaviour (minimal trajectory divergence — the PR_CORRECTION trial
+    evaluator re-runs whole placements, so a refusal here reshapes entire
+    plans); when the last-resort slot IS used, the rotation's drain guard
+    holds that tank through its full purge, so the hold still cannot leak.
     """
     pref: list[int] = []
+    last: list[int] = []
     for tid in list(resting_pair or ()):
         t = state.tanks_by_id.get(tid)
-        if t is not None and t.is_empty and tid not in pref:
-            pref.append(tid)
+        if t is not None and t.is_empty and tid not in pref and tid not in last:
+            (last if tid in avoid else pref).append(tid)
     for tid in sorted(SIXN_MAIN_TANKS | SIXN_SISTER_TANKS):
         t = state.tanks_by_id.get(tid)
-        if t is not None and t.is_empty and tid not in pref:
-            pref.append(tid)
-    return pref
+        if t is not None and t.is_empty and tid not in pref and tid not in last:
+            (last if tid in avoid else pref).append(tid)
+    return pref + last
 
 
-def _freeze_6n_dest(state: FacilityState, dest_tank_id: int) -> None:
+def _freeze_6n_dest(state: FacilityState, dest_tank_id: int,
+                    fill_date=None) -> None:
     """Freeze a 6N depuration destination after a purge-mode move-in.
 
     Sets the tank to STARVE so the daily biology loop neither grows nor feeds
@@ -2751,10 +2822,17 @@ def _freeze_6n_dest(state: FacilityState, dest_tank_id: int) -> None:
     source week-open avg grown PURGE_TRANSFER_GROWTH_DAYS). Only the 6N pipeline
     tanks are touched. No-op if the tank is empty (a fully refused transfer) so
     we never flag an empty tank as starving.
+
+    `fill_date` (when given) is recorded in state.sixn_fill_date — the
+    depuration-hold ledger the rotation's drain guard reads, so every fill
+    path that freezes a 6N tank stamps its residency clock at this single
+    chokepoint.
     """
     t = state.tanks_by_id.get(dest_tank_id)
     if t is not None and not t.is_empty and t.system_id in _SIXN_SYSTEMS:
         t.stage = STAGE_STARVE
+        if fill_date is not None:
+            getattr(state, "sixn_fill_date", {})[dest_tank_id] = fill_date
 
 
 def _book_move_in_feed(accum: dict, batch_id: str, week_label: str,
@@ -2793,6 +2871,7 @@ def _make_room_into_6n(
     tables: Optional[BiologyTables] = None,
     batch_meta: Optional[dict] = None,
     is_purge: bool = False,
+    avoid=frozenset(),
 ) -> bool:
     """PURGE-mode make-room: MOVE one growout tank's fish into a free 6N tank.
 
@@ -2804,8 +2883,12 @@ def _make_room_into_6n(
 
     Used by BOTH the anticipatory pacing pass (run in the weeks BEFORE a known
     TranOG arrival) and the reactive arrival-week make-room (the backstop).
+
+    `avoid` — 6N tanks of the pair draining next rotation; used only as the
+    LAST-RESORT destination (when no other slot is free), in which case the
+    rotation's drain guard holds the tank through its full purge.
     """
-    for _tid in _free_6n_slots(state, resting_pair):
+    for _tid in _free_6n_slots(state, resting_pair, avoid):
         _tk = state.tanks_by_id.get(_tid)
         # Empty slot, OR a 6N tank already holding this same batch (top-up,
         # INV-1-safe). Empty is the common case here.
@@ -2837,7 +2920,7 @@ def _make_room_into_6n(
             warnings.extend(_mv.apply(state))
             transfer_events.append(_mv)
             if is_purge:
-                _freeze_6n_dest(state, _tk.tank_id)
+                _freeze_6n_dest(state, _tk.tank_id, fill_date=event_date)
                 if sixn_move_in_feed is not None and tables is not None:
                     _book_move_in_feed(sixn_move_in_feed, _src_batch,
                                        week_label, _xfer_wt, _src_count,
@@ -3380,6 +3463,7 @@ def phase_d_emit_events(
         _carry_debt = 0.0
 
         # Harvest engine — 6N purge pipeline when in purge mode, else Layer-2 FIFO.
+        _sixn_avoid: frozenset = frozenset()  # imminent-drain 6N tanks (set below)
         if purge_this_week:
             sixn_resting_pair = _run_sixn_purge_week(
                 state=state,
@@ -3401,6 +3485,13 @@ def phase_d_emit_events(
                 sixn_move_in_feed=sixn_move_in_feed,
                 grade_events=grade_events,
             )
+            # DEPURATION HOLD, fill side: after this week's rotation the front
+            # of the queue drains NEXT week — any make-room dump into its tanks
+            # would ship fish with 1 week of purge (the audited leak: 33,206
+            # fish into OG6N-71 at 2026-W39, drained W40). Every downstream
+            # 6N fill this week must avoid those tanks.
+            _sixn_avoid = (frozenset(sixn_pair_queue[0])
+                           if sixn_pair_queue else frozenset())
             # PRE-STAGE the in-place purge during WINDDOWN (sixn_refill is False
             # only in winddown). Depuration takes purge_days, so if the first
             # STARVE tank only STARTS when production begins it isn't harvest-ready
@@ -3944,7 +4035,8 @@ def phase_d_emit_events(
                                     f"for TranOG arrival in {_wk} (needs "
                                     f"{_need_wk})"),
                             sixn_move_in_feed=sixn_move_in_feed, tables=tables,
-                            batch_meta=batch_meta, is_purge=True):
+                            batch_meta=batch_meta, is_purge=True,
+                            avoid=_sixn_avoid):
                         break  # 6N full this week — rotation frees a slot soon
                     # The fish have left the production layer (into 6N), so strip
                     # this tank from EVERY batch's PLAN until the arrival — else the
@@ -4166,7 +4258,8 @@ def phase_d_emit_events(
                                     transfer_events, warnings, week_label,
                                     reason="reactive make-room for a TranOG arrival",
                                     sixn_move_in_feed=sixn_move_in_feed, tables=tables,
-                                    batch_meta=batch_meta, is_purge=True):
+                                    batch_meta=batch_meta, is_purge=True,
+                                    avoid=_sixn_avoid):
                                 # 6N full — last try: forward-consolidation
                                 # vacate (same-batch top-up needs no empty
                                 # tank and no 6N slot).

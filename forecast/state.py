@@ -137,6 +137,14 @@ class FacilityState:
         # the anticipatory pass populates it, so production / committed-config
         # behaviour is unchanged.
         self.reserved_tanks: set[int] = set()
+        # DEPURATION-HOLD ledger: 6N tank id -> date of its most recent
+        # purge-mode fill (recorded by placement._freeze_6n_dest). The purge
+        # rotation refuses to DRAIN a tank filled fewer than
+        # SIXN_MIN_RESIDENCY_DAYS ago (the 2-week depuration hold), holding it
+        # for the pair's next rotation instead. Tanks with no entry (e.g.
+        # PR-hydrated fish already purging at forecast start) are treated as
+        # old enough — the hold can only be judged on fills we witnessed.
+        self.sixn_fill_date: dict[int, date] = {}
 
     # ---- Builders ----
     @classmethod
