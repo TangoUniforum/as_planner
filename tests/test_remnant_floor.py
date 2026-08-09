@@ -149,6 +149,23 @@ class TestDiffEmitterFloor:
         _no_submin(s)
         assert s.tanks_by_id[3].is_empty  # residual routing finished the job
 
+    def test_takeall_escalation_never_nibbles(self):
+        """The escalation corner: a full-drain source whose paired deficit
+        cannot absorb the whole tank must NOT be nibbled into a sub-min tail —
+        it is left to the residual router, which moves it WHOLE."""
+        s = _mk_state()
+        s.tanks_by_id[3].assign("B1", 13852, 3000.0, 16.0, "SW")
+        s.tanks_by_id[4].assign("B1", 13852, 3000.0, 16.0, "SW")
+        transfers, warns = [], []
+        # Tank 3 drops; the single kept tank's deficit (target - 13,852)
+        # absorbs only part of the source.
+        _emit_transfers_for_batch_diff(
+            s, "B1", {3, 4}, {4}, TODAY, transfers, warns, min_keep=MIN)
+        t3 = s.tanks_by_id[3]
+        assert t3.is_empty or t3.count >= MIN
+        assert abs(sum(t.count for t in s.tanks_by_id.values()) - 27704) < 0.5
+        _no_submin(s)
+
     def test_conservation(self):
         s = _mk_state()
         s.tanks_by_id[3].assign("B52", 15000, 3000.0, 16.0, "SW")

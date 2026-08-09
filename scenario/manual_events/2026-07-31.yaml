@@ -1,0 +1,59 @@
+# Manual starting-state events for the PR closing 2026-07-31 (operator-authored,
+# PR-SPECIFIC — a different PR gets its own file). Applied to the PR-hydrated
+# week-0 state BEFORE the forecast runs forward. See forecast/manual_events.py.
+events:
+- type: harvest
+  week: 1
+  from_tank: 65
+  destinations: []
+  count: null
+  batch: null
+  mode: transfer
+  notes: ''
+- type: harvest
+  week: 2
+  from_tank: 61
+  destinations: []
+  count: null
+  batch: null
+  mode: transfer
+  notes: ''
+- type: og_to_6n
+  week: 1
+  from_tank: 35
+  destinations:
+  - tank: 63
+    count: null
+    avg_wt_g: null
+  count: null
+  batch: null
+  mode: transfer
+  notes: ''
+- type: graded_harvest
+  week: 2
+  from_tank: 55
+  destinations:
+  - tank: 65
+    count: null
+    avg_wt_g: null
+  - tank: 45
+    count: null
+    avg_wt_g: null
+  count: 32000.0
+  batch: null
+  mode: transfer
+  notes: ''
+- type: graded_harvest
+  week: 3
+  from_tank: 32
+  destinations:
+  - tank: 61
+    count: null
+    avg_wt_g: null
+  - tank: 45
+    count: null
+    avg_wt_g: null
+  count: 32000.0
+  batch: null
+  mode: transfer
+  notes: ''
