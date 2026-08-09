@@ -115,6 +115,27 @@ PURGE_TRANSFER_GROWTH_DAYS = 4
 # rotation's drain HOLDS any tank filled after the PREVIOUS rotation step
 # (fail-safe; a held tank drains on the pair's next rotation).
 SIXN_MIN_RESIDENCY_DAYS = 14
+# Rule-2 stage (operator ruling): per-tank 6N FILL density cap. Never STOCK a
+# purge tank past the structural 95 kg/m3 — overflow goes to the pair's other
+# tank (the idle sister: 67/69/71 sat empty 80-90% of purge weeks while mains
+# rode 128-141). This caps what fills PLACE; the reporting/quality line stays
+# 85 (density gate). The no-drop make-room may still overflow the LAST slot
+# when total free 6N capacity is short — losing an arrival is worse.
+SIXN_FILL_DENSITY_CAP_KG_M3 = 95.0
+
+
+def _sixn_fill_capacity_fish(state: FacilityState, tank_id: int,
+                             avg_wt_g: float) -> float:
+    """Fish this 6N tank can still take before exceeding the structural
+    95 kg/m3 fill cap, judged at the given (transfer) weight."""
+    t = state.tanks_by_id.get(tank_id)
+    if t is None or avg_wt_g <= 0:
+        return 0.0
+    cap_kg = t.volume_m3 * SIXN_FILL_DENSITY_CAP_KG_M3
+    held_kg = (t.count * t.avg_wt_g / 1000.0) if not t.is_empty else 0.0
+    return max(0.0, (cap_kg - held_kg) * 1000.0 / avg_wt_g)
+
+
 def _harvest_target_fish(control) -> float:
     """Weekly harvest planning TARGET (fish/week) — the operator's 50/60 split.
 
@@ -150,7 +171,7 @@ def _grow_weight_days(avg_wt_g: float, batch: Optional[BatchInput],
     lookup × the batch's sgr_correction, compounded per day); NO mortality. Used
     to land the 6N move-in weight at the mid-week (Friday) transfer point.
     """
-    if avg_wt_g <= 0 or batch is None or days <= 0:
+    if avg_wt_g <= 0 or batch is None or tables is None or days <= 0:
         return avg_wt_g
     w = float(avg_wt_g)
     for _ in range(days):
@@ -1571,62 +1592,76 @@ def _run_sixn_purge_week(
         for src in src_tanks:
             if count_moved >= target:
                 break
-            # REMNANT FLOOR: never leave 0 < residue < min_tank_control behind.
-            # A partial draw is reduced so the floor stays growing in the source
-            # (a later tank/batch covers the difference); a source that can't
-            # retain the floor is taken WHOLE (it lands in 6N and is harvested
-            # at the pair drain — never a stranded grow-out remnant).
-            take = _floored_take(src.count, min(target - count_moved, src.count),
-                                 control.min_tank_control or 0.0)
-            if take <= 0:
-                continue
-            # First contributor goes to main tank; later contributors
-            # would need a sister tank, but we keep the move into a
-            # single physical tank (main) since INV-1 (one batch per
-            # tank) forbids mixing batches. So if there are multiple
-            # contributing batches, the LATER ones can't share main tank
-            # (already taken by first batch). Use sister tank for the
-            # second batch's contribution.
-            if moved_this_batch == 0 and contributing_batches:
-                dest_tank_id = fill_pair[1]  # sister tank for second+ batch
-            else:
-                dest_tank_id = main_tank_id
-            # A pair tank can now be OCCUPIED by a foreign batch at fill time
-            # (a depuration-held tank riding through the resting slot). The
-            # Transfer below would refuse it (INV-1) but the loop would still
-            # count the take as moved — so verify the destination accepts
-            # (empty or same batch), try the other pair tank, else stop.
-            def _dest_ok(tid, _b=move_in_batch):
-                tk = state.tanks_by_id.get(tid)
-                return tk is not None and (tk.is_empty or tk.batch_id == _b)
-            if not _dest_ok(dest_tank_id):
-                _alt = fill_pair[1] if dest_tank_id == fill_pair[0] else fill_pair[0]
-                if _dest_ok(_alt):
-                    dest_tank_id = _alt
-                else:
-                    break  # no usable pair tank (hold in effect) — stop filling
-            # PURGE move-in: land the cohort at the mid-week (Friday) transfer
-            # weight = source week-open avg grown 4 SW days, then FREEZE the 6N
-            # destination (STARVE) so the daily loop neither grows nor feeds it
-            # for the rest of the purge. The 4 pre-transfer feed-days are booked
-            # separately into the move-in feed accumulator below.
+            # PURGE move-in weight first — the per-tank fill cap is judged at
+            # the mid-week (Friday) transfer weight the fish actually land at.
             _bm = batch_meta.get(move_in_batch)
             _xfer_wt = _grow_weight_days(src.avg_wt_g, _bm, tables,
                                          PURGE_TRANSFER_GROWTH_DAYS)
+            # SISTER-FIRST FILL (rule-2 stage): allocate MAIN-first but never
+            # STOCK a pair tank past the structural 95 kg/m3 fill cap —
+            # overflow continues into the pair's other tank (the idle sister)
+            # instead of overloading the main (audit: mains rode 128-141
+            # while sisters sat empty 80-90% of purge weeks). A tank held by
+            # a FOREIGN batch (depuration-held rider) contributes 0 capacity
+            # (INV-1). Later contributor batches keep the historical
+            # sister-first order so they never collide with the first batch's
+            # main.
+            def _dest_ok(tid, _b=move_in_batch):
+                tk = state.tanks_by_id.get(tid)
+                return tk is not None and (tk.is_empty or tk.batch_id == _b)
+            _order = ((fill_pair[1], main_tank_id)
+                      if (moved_this_batch == 0 and contributing_batches)
+                      else (main_tank_id, fill_pair[1]))
+            _caps = [(tid, _sixn_fill_capacity_fish(state, tid, _xfer_wt))
+                     for tid in _order if _dest_ok(tid)]
+            _caps = [(tid, c) for tid, c in _caps if c > 0]
+            _cap_total = sum(c for _, c in _caps)
+            if _cap_total <= 0:
+                break   # pair at the 95 fill cap — surplus waits in grow-out
+            # REMNANT FLOOR: never leave 0 < residue < min_tank_control behind.
+            # A partial draw is reduced so the floor stays growing in the source
+            # (a later tank/batch covers the difference); a source that can't
+            # retain the floor is taken WHOLE — but a whole-tank escalation must
+            # not blow the pair's 95-capacity, so it degrades to the
+            # never-escalating partial form when it would.
+            _want = min(target - count_moved, src.count, _cap_total)
+            take = _floored_take(src.count, _want,
+                                 control.min_tank_control or 0.0)
+            if take > _cap_total + 0.5:
+                take = _floored_partial(src.count, _want,
+                                        control.min_tank_control or 0.0)
+            if take <= 0:
+                continue
+            # Split the take across the pair, capped per tank; FREEZE each
+            # destination (STARVE, no feed/growth for the rest of the purge)
+            # and book the 4 pre-transfer feed-days once for the whole take.
+            _allocs = []
+            _rem = take
+            for _tid, _c in _caps:
+                _a = min(_rem, _c)
+                if _a <= 0:
+                    continue
+                _allocs.append(TankAllocation(
+                    tank_id=_tid, count=_a, avg_wt_g=_xfer_wt,
+                    cv_pct=src.cv_pct))
+                _rem -= _a
+                if _rem <= 0:
+                    break
+            take = sum(a.count for a in _allocs)
+            if take <= 0:
+                continue
             ev = Transfer(
                 batch_id=move_in_batch,
                 event_date=week_start_date,
                 source_tank_id=src.tank_id,
-                destinations=[TankAllocation(
-                    tank_id=dest_tank_id, count=take,
-                    avg_wt_g=_xfer_wt, cv_pct=src.cv_pct,
-                )],
+                destinations=_allocs,
                 source_avg_wt_g=src.avg_wt_g,  # debit source at week-open weight
             )
             warns = ev.apply(state)
             warnings.extend(warns)
             transfer_events.append(ev)
-            _freeze_6n_dest(state, dest_tank_id, fill_date=week_start_date)
+            for _a in _allocs:
+                _freeze_6n_dest(state, _a.tank_id, fill_date=week_start_date)
             _book_move_in_feed(sixn_move_in_feed, move_in_batch, week_label,
                                _xfer_wt, take, tables, _bm)
             count_moved += take
@@ -2926,49 +2961,76 @@ def _make_room_into_6n(
     LAST-RESORT destination (when no other slot is free), in which case the
     rotation's drain guard holds the tank through its full purge.
     """
+    _usable = []
     for _tid in _free_6n_slots(state, resting_pair, avoid):
         _tk = state.tanks_by_id.get(_tid)
         # Empty slot, OR a 6N tank already holding this same batch (top-up,
         # INV-1-safe). Empty is the common case here.
         if _tk is not None and (_tk.is_empty or _tk.batch_id == src.batch_id):
-            # PURGE move-in: land at the mid-week (Friday) transfer weight
-            # (week-open avg grown 4 SW days) and FREEZE the 6N destination so
-            # it neither grows nor feeds for the rest of the purge. Book the 4
-            # pre-transfer feed-days. In production mode (is_purge False) keep
-            # the legacy week-open weight and SW stage — unchanged behaviour.
-            _bm = (batch_meta or {}).get(src.batch_id)
-            _xfer_wt = (_grow_weight_days(src.avg_wt_g, _bm, tables,
-                                          PURGE_TRANSFER_GROWTH_DAYS)
-                        if (is_purge and tables is not None) else src.avg_wt_g)
-            # Capture BEFORE apply: leaves_source_empty drains src, so reading
-            # src.batch_id/count afterwards logs "batch None, 0 fish".
-            _src_batch, _src_loc, _src_count = src.batch_id, src.location_id, src.count
-            _mv = Transfer(
-                batch_id=_src_batch, event_date=event_date,
-                source_tank_id=src.tank_id,
-                destinations=[TankAllocation(
-                    tank_id=_tk.tank_id, count=_src_count,
-                    avg_wt_g=_xfer_wt, cv_pct=src.cv_pct)],
-                leaves_source_empty=True,
-                # In purge mode debit the source at its week-open weight (the
-                # dest carries the grown transfer weight); in production mode
-                # both are week-open so this is the same value (no-op).
-                source_avg_wt_g=(src.avg_wt_g if is_purge else None),
-            )
-            warnings.extend(_mv.apply(state))
-            transfer_events.append(_mv)
-            if is_purge:
-                _freeze_6n_dest(state, _tk.tank_id, fill_date=event_date)
-                if sixn_move_in_feed is not None and tables is not None:
-                    _book_move_in_feed(sixn_move_in_feed, _src_batch,
-                                       week_label, _xfer_wt, _src_count,
-                                       tables, _bm)
-            warnings.append(
-                f"{week_label}: {reason} — MOVED {_src_loc} "
-                f"(batch {_src_batch}, {_src_count:.0f} fish) into 6N "
-                f"{_tk.location_id} to purge (no direct harvest in purge mode)")
-            return True
-    return False
+            _usable.append(_tk)
+    if not _usable:
+        return False
+    # PURGE move-in: land at the mid-week (Friday) transfer weight (week-open
+    # avg grown 4 SW days) and FREEZE each 6N destination so it neither grows
+    # nor feeds for the rest of the purge. Book the 4 pre-transfer feed-days.
+    # In production mode (is_purge False) keep the legacy week-open weight and
+    # SW stage — unchanged behaviour.
+    _bm = (batch_meta or {}).get(src.batch_id)
+    _xfer_wt = (_grow_weight_days(src.avg_wt_g, _bm, tables,
+                                  PURGE_TRANSFER_GROWTH_DAYS)
+                if (is_purge and tables is not None) else src.avg_wt_g)
+    # Capture BEFORE apply: leaves_source_empty drains src, so reading
+    # src.batch_id/count afterwards logs "batch None, 0 fish".
+    _src_batch, _src_loc, _src_count = src.batch_id, src.location_id, src.count
+    # SISTER-FIRST FILL (rule-2 stage): a whole-tank dump is SPLIT across the
+    # usable slots so no 6N tank is stocked past the structural 95 kg/m3 fill
+    # cap — the overflow lands in the next slot (the pair's idle sister)
+    # instead of riding one main to 128-141. The move must fully vacate the
+    # source (no-drop), so when total capacity is short the LAST slot takes
+    # the remainder anyway — an overloaded purge tank beats a dropped arrival.
+    _allocs = []
+    _rem = _src_count
+    for _i, _tk in enumerate(_usable):
+        if _rem <= 0:
+            break
+        _cap = _sixn_fill_capacity_fish(state, _tk.tank_id, _xfer_wt)
+        _a = _rem if _i == len(_usable) - 1 else min(_rem, _cap)
+        if _a <= 0:
+            continue
+        _allocs.append(TankAllocation(tank_id=_tk.tank_id, count=_a,
+                                      avg_wt_g=_xfer_wt, cv_pct=src.cv_pct))
+        _rem -= _a
+    if _rem > 0:                    # every slot at 0 capacity and none last?
+        _allocs.append(TankAllocation(tank_id=_usable[-1].tank_id, count=_rem,
+                                      avg_wt_g=_xfer_wt, cv_pct=src.cv_pct))
+        _rem = 0
+    _mv = Transfer(
+        batch_id=_src_batch, event_date=event_date,
+        source_tank_id=src.tank_id,
+        destinations=_allocs,
+        leaves_source_empty=True,
+        # In purge mode debit the source at its week-open weight (the
+        # dest carries the grown transfer weight); in production mode
+        # both are week-open so this is the same value (no-op).
+        source_avg_wt_g=(src.avg_wt_g if is_purge else None),
+    )
+    warnings.extend(_mv.apply(state))
+    transfer_events.append(_mv)
+    if is_purge:
+        for _a in _allocs:
+            _freeze_6n_dest(state, _a.tank_id, fill_date=event_date)
+        if sixn_move_in_feed is not None and tables is not None:
+            _book_move_in_feed(sixn_move_in_feed, _src_batch,
+                               week_label, _xfer_wt, _src_count,
+                               tables, _bm)
+    _dest_desc = " + ".join(
+        f"{state.tanks_by_id[_a.tank_id].location_id} ({_a.count:.0f})"
+        for _a in _allocs)
+    warnings.append(
+        f"{week_label}: {reason} — MOVED {_src_loc} "
+        f"(batch {_src_batch}, {_src_count:.0f} fish) into 6N "
+        f"{_dest_desc} to purge (no direct harvest in purge mode)")
+    return True
 
 
 def phase_d_emit_events(
