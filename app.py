@@ -375,115 +375,218 @@ def _frames_to_biology(growth_df, mort_df, feed_df, cull_df, models):
 # Per-parameter explanations shown as the hover-"?" tooltip on each Control
 # widget. Keep in sync with docs/USER_GUIDE.md §3.2 and ControlParams in
 # forecast/models.py (the authoritative descriptions).
+# Every knob the Control editor renders gets a tooltip here, written for an
+# operator who has never seen the codebase: (1) what it is in plain language,
+# (2) what raising/lowering (or toggling) it does to the plan, (3) the unit and
+# the current validated setting where one exists. Knobs whose values were
+# CHOSEN BY MEASUREMENT carry a closing caution to tune via Analyze, not by
+# hand.
+_VALIDATED = (" Validated setting — chosen by measurement; prefer tuning it "
+              "via Analyze rather than editing by hand.")
 _CONTROL_HELP = {
-    "forecast_start": "Week-0 of the forecast. DERIVED from the ProductionReport's "
-        "closing date at run time — the stored value is an ignored seed.",
-    "horizon_weeks": "Forecast length, in weeks.",
-    "scenario_name": "Label for this run; appears in the reports and the RunConfig "
-        "snapshot.",
-    "max_feed_per_day_kg": "Facility-wide daily feed ceiling (kg/day). Per-week "
-        "overrides come from FacilityLimits.",
-    "max_biomass_kg": "Facility biomass cap (kg). This is the default; per-week "
-        "overrides in FacilityLimits can raise it (e.g. later years).",
-    "max_harvest_per_week": "Weekly harvest / processing ceiling (fish). Enforced as "
-        "a HARD cap when harvest_level_load is on.",
-    "min_harvest_weight_g": "Minimum weight (g) at which a fish may be harvested.",
-    "min_harvest_per_week": "Weekly harvest floor (fish) the controller tries to meet.",
-    "min_tank_control": "Force-empty floor (fish): a harvest/transfer that would leave "
-        "fewer than this many fish empties the tank instead (invariant INV-5).",
-    "min_transfer_count": "Min rebalancer transfer size (fish): the density/load balancer "
-        "won't split a sub-group smaller than this OUT of a tank — the OUT-side mirror of "
-        "min_tank_control. 0 = off. Trades fewer transfers for more MARGINAL density "
-        "over-cap (the small moves do fine-grained relief); whole-tank consolidation "
-        "moves are unaffected. Sweep knee ~5000 on the current config.",
-    "default_hog_yield": "Gross→HOG (head-off, gutted) conversion factor. Per-week "
-        "overrides in FacilityLimits.",
-    "facility_biomass_deviation_pct": "± tolerance band around the biomass cap "
-        "(R24). 0.01 = 1%.",
-    "handling_mortality_pct": "Mortality PERCENT applied to fish on each transfer "
-        "(divided by 100 before use, unlike the deviation band above): 0.01 = "
-        "0.01%, 1 = 1%.",
-    "sixn_growth": "Run the OG6N system as a normal grow-out system for the whole "
-        "horizon, instead of depuration/purge rotation.",
-    "sixn_production_start": "Date OG6N flips from purge to production mode "
-        "(ignored if sixn_growth is on).",
-    "sixn_transition_weeks": "Empty/fallow window (weeks) at the 6N purge→production "
-        "switch. 0 = none.",
-    "tran_og_default_tanks": "Minimum number of tanks a new seawater arrival (TranOG) "
-        "is spread across — the strongest feed↔harvest lever. More (3, default) spreads "
-        "feed thinner (fewer feed-cap breaches) but tightens the facility (bigger "
-        "make-room harvest dumps); fewer (2) is the reverse (harvest-friendly, hotter "
-        "feed).",
-    "global_buffer_pct": "Safety buffer added when sizing against caps. 0.05 = 5%.",
-    "starvation_period_days": "In-place purge length (days) in 6N production mode. "
-        "7 = one weekly step (clean single-cohort pipeline).",
-    "density_target_pct": "Per-tank density target as a fraction of the cap — how full "
-        "to pack each tank. 0.9 = fill to 90% of the density cap.",
-    "density_welfare_threshold_kg_m3": "Welfare density line (kg/m³) — a SOFT quality "
-        "threshold below the hard cap (~95). Fish reared above it count as 'crowded'. "
-        "The Run 'Reared density' KPI, the Compare 'Best welfare' lens, and the Optimize "
-        "'Product quality' preset all measure against it. It only scores/reports — it "
-        "does NOT constrain the plan. 80 is the accepted salmon welfare line.",
-    "rebalance_varqty_budget": "Variable-quantity rebalancer moves per week: shave a "
-        "PRECISE count of fish off an over-cap system. 0 = off (opt-in; small benefit "
-        "for the extra transfers).",
-    "rebalance_split_budget": "Split-pass moves per week: fan an over-DENSE batch out "
-        "across free tanks (one crowded tank → several).",
-    "rebalance_balance_budget": "Main multi-objective balancer moves per week: relieve "
-        "over-cap tanks into destinations with headroom across density + feed + biomass "
-        "at once. Shared with rebalance_level.",
-    "rebalance_level": "Load-LEVELING (ON by default). Spreads load off the hottest OG "
-        "system onto the coldest, leveling feed + biomass + density together — the fix "
-        "for per-system feed spikes. Set false for the old density-only behavior.",
-    "harvest_setpoint_lookahead_weeks": "INACTIVE (audit L7): superseded by the "
-        "dual-limit setpoint (one facility_biomass_deviation_pct band below the FW-"
-        "inclusive cap). No harvest path reads this knob — tuning it has no effect; "
-        "kept only for config back-compatibility.",
-    "harvest_level_load": "Harvest smoother (ON by default). Holds the weekly harvest "
-        "cap as a hard ceiling and pre-harvests earlier so harvest is flat, not a "
-        "sawtooth. Pairs with rebalance_level (which otherwise spikes harvest).",
-    "harvest_smooth_lookahead_weeks": "Level-load window K: how many weeks of "
-        "coming-due biomass to spread the pre-harvest over. Only used when "
-        "harvest_level_load is on; bigger = smoother/earlier.",
-    "harvest_level_target": "Flat fish/week harvest floor when level-loading. Blank = "
-        "auto-computed from realized growth. Only used when harvest_level_load is on. "
-        "Good value = the sustainable average weekly harvest (between min and max).",
-    "harvest_grade_to_min": "Grade-harvest to the floor (opt-in, OFF by default). On a "
-        "6N purge week below min_harvest_per_week, peel just enough of the over-weight "
-        "tail from near-market tanks (big → 6N purge; small stays in the source tank) to "
-        "REACH the floor — honoring min_transfer_count + min_tank_control. An exception "
-        "(only fires when short), not a rule. Measured net production-positive (more cap "
-        "headroom, slightly higher avg harvest weight) while holding the harvest floor.",
-    "sixn_level_drains": "Level the 6N purge drains (ON by default). Caps how "
-        "full a 6N purge pair may get (at max_harvest_per_week) so weekly fills don't "
-        "ACCUMULATE into one pair across its rotation — the root cause of 90-113k drain "
-        "spikes that starve other pairs into sub-min troughs. Surplus waits in grow-out and "
-        "fills the next thin pair, lifting its drain toward the floor so every week meets "
-        "the harvest minimum. Only affects 6N PURGE mode.",
-    "placement_method": "Tank-placement engine. 'greedy' (default) is the production "
-        "engine. 'lns' runs greedy first, then an LNS pass that relocates/swaps grow-out "
-        "tank occupancy off the hottest systems onto cooler ones (each move a conserved "
-        "Transfer). Every edit is gated on the continuity audit (0 drift) + 0 dropped + a "
-        "strictly-lower hot spot, and greedy is the fallback — so it never makes a run "
-        "worse. Helps most when the facility has free-tank room; correctly no-ops when "
-        "capacity-bound. Adds runtime (a second, audit-checked pass).",
-    "lns_max_moves": "LNS budget: the most relocations/swaps the 'lns' placement engine "
-        "will make per run (only used when placement_method = lns). Higher = chases more "
-        "hot spots but slower.",
-    "auto_calibrate_fw": "Auto-calibrate freshwater growth (OPT-IN, default off). "
-        "Replaces each FW batch's FW_Correction with the value that lands its pre-cull "
-        "avg weight EXACTLY on its TranOG target at transfer (the Suggested_FW_Correction "
-        "shown in Diagnostics) — for incoming AND in-flight FW batches — so the FW "
-        "calibration residuals go to ~0. NOTE: this makes the forecast ASSUME the growth "
-        "needed to hit target (a planning assumption, NOT a guarantee the fish grow that "
-        "fast); a correction > 1 means faster-than-nominal growth. Solved values are "
-        "clamped to the [min, max] below, and any clamped (unreachable) batch is flagged.",
-    "auto_calibrate_fw_min": "Lower clamp on the auto FW correction (only used when "
-        "Auto-calibrate FW is on). A batch that would need a smaller correction is capped "
-        "here and flagged in the log.",
-    "auto_calibrate_fw_max": "Upper clamp on the auto FW correction (only used when "
-        "Auto-calibrate FW is on). A batch that would need MORE growth than this is capped "
-        "here and flagged as likely unreachable.",
+    "forecast_start": "The forecast's week 1. Computed automatically from the "
+        "uploaded ProductionReport (its closing date + 1 day) every run — the "
+        "value stored here is only a placeholder and is ignored.",
+    "horizon_weeks": "How far into the future the forecast plans. Longer shows "
+        "more of the plan but every run takes longer. Unit: weeks. Current "
+        "setting: 130 (about 2.5 years).",
+    "scenario_name": "A free-text name for this planning scenario. It appears "
+        "in report headers and the run's settings snapshot. Changes nothing in "
+        "the plan itself.",
+    "max_feed_per_day_kg": "The most feed the whole facility may deliver in one "
+        "day. The planner keeps every week under this; when feed (not space) is "
+        "the bottleneck it harvests or moves fish earlier to make feed room. "
+        "Unit: kg/day. Current setting: 34,000. Per-week overrides live on the "
+        "Limits tab.",
+    "max_biomass_kg": "The most fish, by total weight, the whole facility may "
+        "hold at once — freshwater, seawater grow-out AND fish waiting in "
+        "depuration all count. The harvest controller rides just under this "
+        "line: raising it lets fish grow bigger before harvest; lowering it "
+        "forces earlier harvests. Unit: kg. Current setting: 3,800,000. "
+        "Per-week overrides live on the Limits tab.",
+    "max_harvest_per_week": "The most fish the processing plant can take in one "
+        "week. With the harvest smoother on (further down) this is enforced as "
+        "a hard weekly ceiling; the planner spreads big harvests out instead of "
+        "dumping past it. Unit: fish/week. Current setting: 55,000.",
+    "min_harvest_weight_g": "The 3.5 kg sales gate: a fish must weigh at least "
+        "this (live weight) before it may be harvested. A business constant, "
+        "not a tuning knob. Unit: grams. Setting: 3,500.",
+    "min_harvest_per_week": "The weekly harvest floor from the sales contracts: "
+        "EVERY week must ship at least this many fish — never an empty week. "
+        "The planner holds fish back in fat weeks to cover lean ones. Unit: "
+        "fish/week. Current setting: 30,000.",
+    "min_tank_control": "The 'no dribbles' rule: if a harvest or transfer would "
+        "leave a tank holding fewer fish than this, the tank is emptied "
+        "completely instead — tiny leftover groups waste a whole tank. Unit: "
+        "fish. Current setting: 7,000.",
+    "min_transfer_count": "The smallest partial group the rebalancer may move "
+        "OUT of a tank — moves smaller than this cost handling for little "
+        "relief. Raising it = fewer, larger transfers but slightly more "
+        "crowding left unrelieved; 0 = no floor. Whole-tank moves are "
+        "unaffected. Unit: fish. Current setting: 7,000.",
+    "default_hog_yield": "Converts live (gross) weight to sold weight — HOG "
+        "means head-off, gutted. Sold kg = live kg × this. Used wherever "
+        "harvest tonnage or revenue is reported. Unit: ratio. Current setting: "
+        "0.81. Per-week overrides live on the Limits tab.",
+    "facility_biomass_deviation_pct": "The comfort band under the facility "
+        "biomass cap — how close to the cap the harvest controller aims to "
+        "ride. UNIT TRAP: this is a RAW FRACTION — 0.005 = 0.5% (the OPPOSITE "
+        "convention from Handling mortality below, which is a percent). "
+        "Smaller = closer to the cap (more production, more over-cap risk); "
+        "larger = harvest earlier, leaving more slack. Current setting: 0.005."
+        + _VALIDATED,
+    "handling_mortality_pct": "Fish lost to handling every time a group is "
+        "transferred between tanks. UNIT TRAP: this value is a PERCENT that is "
+        "divided by 100 before use — 0.01 means 0.01% (1 fish in 10,000) and "
+        "1 means 1%. That is the OPPOSITE convention from the biomass band "
+        "above, which is a raw fraction. Current setting: 0.01 (= 0.01% per "
+        "transfer).",
+    "sixn_growth": "MASTER SWITCH for the 6N system. Off (unchecked) = normal "
+        "operation: 6N is the depuration station (fish sit off-feed there "
+        "before harvest) until the production start date below, then becomes "
+        "grow-out. On = 6N is an ordinary grow-out system for the WHOLE "
+        "forecast and there is NO depuration model at all (the date below is "
+        "ignored). Leave off unless you truly mean to remove depuration — "
+        "switching it on by accident has produced misleading harvest craters "
+        "before. Current setting: off.",
+    "sixn_production_start": "The date the 6N system stops being the "
+        "depuration station and becomes ordinary grow-out (the facility's "
+        "planned mode change). Ignored when 'Run 6N as grow-out' is on. "
+        "Format: YYYY-MM-DD. Current setting: 2028-01-01.",
+    "sixn_transition_weeks": "Rest/empty weeks for the 6N tanks at the "
+        "switchover date above, before grow-out fish move in. Unit: weeks. "
+        "Current setting: 0 (no gap).",
+    "tran_og_default_tanks": "How many tanks a new seawater arrival is spread "
+        "across on entry — the strongest feed-vs-harvest lever. More tanks = "
+        "feed spread thinner (fewer feed-cap problems) but more of the "
+        "facility occupied (bigger make-room harvests); fewer tanks = the "
+        "reverse. Unit: tanks. Current setting: 2.",
+    "global_buffer_pct": "Safety margin used when judging plans against the "
+        "per-system caps: a system reading within ±this fraction of its cap "
+        "still counts as in-bounds. UNIT: raw fraction — 0.05 = 5%. Current "
+        "setting: 0.05.",
+    "starvation_period_days": "Only for 6N grow-out mode (after the production "
+        "start date): harvest-bound fish stop being fed IN PLACE for this many "
+        "days before harvest, since there is no separate depuration tank "
+        "anymore. Unit: days. Current setting: 7 (= one weekly planning step).",
+    "harvest_grade_to_min": "On a lean depuration week that would miss the "
+        "weekly harvest floor: size-sort a near-market tank and send just "
+        "enough of its BIGGEST fish to 6N to reach the floor. OFF because a "
+        "6-PR A/B measured it worse (0 wins, 3 losses, 3 ties on "
+        "weeks-below-floor; weeks-over-cap 3 → 5)." + _VALIDATED,
+    "sixn_level_drains": "Levels the flow through depuration: caps how full "
+        "one 6N pair may get (at the weekly harvest max) so weekly fills don't "
+        "pile into a single pair and starve the following weeks. On = steadier "
+        "weekly harvests (measured: biggest weekly drain 110k → 68k fish, more "
+        "weeks meeting the floor). Only affects depuration mode. Current "
+        "setting: on." + _VALIDATED,
+    "density_target_pct": "How full to pack each tank when placing fish, as a "
+        "fraction of the tank's density cap. 0.85 = fill to 85%, leaving 15% "
+        "headroom for growth between weekly checks. Higher = fewer tanks used "
+        "but more crowding risk; lower = gentler but needs more tanks. UNIT: "
+        "raw fraction. Current setting: 0.85." + _VALIDATED,
+    "density_welfare_threshold_kg_m3": "The fish-welfare crowding line, BELOW "
+        "the hard density cap (~95): fish reared above it count as 'crowded' "
+        "in the quality reports (Run KPI, Compare 'Best welfare', Optimize "
+        "'Product quality'). Reporting/scoring only — it never changes the "
+        "plan. Unit: kg/m³. Setting: 80, the accepted salmon welfare line.",
+    "rebalance_varqty_budget": "Fine-trim moves per week: shave a precise "
+        "number of fish off an over-full system into one with room. More "
+        "moves = slightly less over-crowding at the cost of extra handling; "
+        "0 = off. Unit: moves/week. Current setting: 20.",
+    "rebalance_split_budget": "Fan-out moves per week: split one over-crowded "
+        "tank's fish across several free tanks. Unit: moves/week. Current "
+        "setting: 8.",
+    "rebalance_balance_budget": "The main rebalancer's weekly move budget: "
+        "relieve tanks and systems over their caps into destinations with "
+        "room, weighing crowding, feed and biomass together. Load leveling "
+        "(below) shares this budget. Unit: moves/week. Current setting: 30.",
+    "rebalance_level": "Load leveling. On = each week, spread load off the "
+        "hottest grow-out system onto the coolest, leveling feed, biomass and "
+        "crowding together — the fix for per-system feed spikes (measured: "
+        "feed-over-cap system-weeks 312 → 25). Off = the old crowding-only "
+        "behavior. Uses the main rebalancer's move budget. Current setting: "
+        "on." + _VALIDATED,
+    "harvest_setpoint_lookahead_weeks": "DOES NOTHING (inactive). Superseded "
+        "by the newer harvest logic — no part of the plan reads this value "
+        "anymore; it remains only so older saved configs still load. Editing "
+        "it has no effect.",
+    "harvest_level_load": "The harvest smoother. On = the weekly processing "
+        "max is held as a hard ceiling and fish are pre-harvested a little "
+        "early, so weekly harvest is flat instead of dump-then-nothing "
+        "(measured: weeks over the 55k cap 15 → 10, steadier weekly totals). "
+        "Off = the old reactive behavior. Travels together with Load leveling "
+        "above, which otherwise makes harvest spikier. Current setting: on."
+        + _VALIDATED,
+    "harvest_smooth_lookahead_weeks": "The harvest smoother's look-ahead: how "
+        "many weeks of soon-to-be-ready fish it spreads early harvesting over. "
+        "Bigger = flatter and earlier; smaller = closer to reactive. Only used "
+        "when the harvest smoother is on. Unit: weeks. Current setting: 12.",
+    "harvest_level_target": "Optional flat weekly harvest target for the "
+        "smoother. Blank = computed automatically from how fast the fish are "
+        "actually growing (recommended). Only used when the harvest smoother "
+        "is on. Unit: fish/week. Current setting: blank (auto).",
+    "placement_method": "Which engine assigns fish to physical tanks. "
+        "'greedy' (the production engine) places week by week. 'lns' runs "
+        "greedy first, then a refinement pass moves groups off the most "
+        "crowded systems onto cooler ones; every move is audit-checked (no "
+        "fish lost, strictly less crowding) with greedy as the fallback, so it "
+        "can't make a run worse — it just takes longer, and only helps when "
+        "free tanks exist. Current setting: greedy.",
+    "lns_max_moves": "How many refinement moves the 'lns' placement engine may "
+        "make per run. Only used when the placement engine is 'lns'. Higher = "
+        "chases more crowding but runs slower. Unit: moves. Current setting: "
+        "30.",
+    "auto_calibrate_fw": "Auto-tune freshwater growth so each batch lands "
+        "exactly on its planned seawater-entry weight. On = the forecast "
+        "ASSUMES the growth needed to hit target (a planning assumption, not "
+        "a guarantee the fish grow that fast); each batch's tuned value is "
+        "clamped to the min/max below and flagged if it hits a clamp. Off = "
+        "use each batch's hand-set FW correction. Current setting: on.",
+    "auto_calibrate_fw_min": "Lower clamp on the auto-tuned freshwater growth "
+        "multiplier. A batch that would need LESS growth than this allows is "
+        "capped here and flagged in the log. Only used when auto-calibrate is "
+        "on. Unit: multiplier. Current setting: 0.5.",
+    "auto_calibrate_fw_max": "Upper clamp on the auto-tuned freshwater growth "
+        "multiplier. A batch that would need MORE growth than this allows is "
+        "capped here and flagged as likely unreachable. Only used when "
+        "auto-calibrate is on. Unit: multiplier. Current setting: 1.5.",
+    "hybrid_follow": "The long-horizon harvest guide (the 'hybrid'). 'full' "
+        "(current setting): before planning, the app computes a whole-horizon "
+        "harvest plan and the weekly controller must follow it as a target "
+        "band — it is told to harvest LESS in fat weeks so those fish are "
+        "still there for the lean ones, the one thing a week-by-week planner "
+        "cannot see for itself. Measured on 6 real PRs: totally empty harvest "
+        "weeks 6 → 0; the cost is a higher biomass peak (the held-back fish "
+        "are still in the water). 'off' = old reactive-only planning (leaves "
+        "empty weeks). 'floor' = only lifts short weeks (a no-op in practice)."
+        + _VALIDATED,
+    "hybrid_follow_band": "How tightly the weekly controller must follow the "
+        "long-horizon harvest guide, as ± a fraction of the guide's weekly "
+        "number. Tighter (smaller) = steadier harvest and better-protected "
+        "lean weeks; looser = more freedom to chase the current week. UNIT: "
+        "raw fraction — 0.05 = ±5%. Current setting: 0.05, which beat 0.10 in "
+        "a 90-cell paired sweep." + _VALIDATED,
+    "hybrid_guide_min_frac": "Housekeeping for the harvest guide: a guide week "
+        "below this fraction of the weekly harvest floor is ignored rather "
+        "than followed down to nothing — such weeks are structural gaps in the "
+        "long-horizon plan (its start-up and tail weeks), not real advice. "
+        "UNIT: raw fraction of the harvest floor. Default: 0.25. Ask before "
+        "changing.",
+    "hybrid_guide_smooth_weeks": "Optional averaging of the harvest guide's "
+        "weekly numbers over this many weeks before the controller follows "
+        "them. 0 or 1 = follow the raw curve — recommended; smoothing "
+        "measured worse (it blunts exactly the fat-week/lean-week signal the "
+        "guide exists to carry). Unit: weeks. Default: 0.",
+    "hybrid_purge_lever": "Diagnostic kill switch: allows the harvest guide to "
+        "steer how much is staged into 6N depuration each week. On by default; "
+        "turn off only to isolate a suspected guide misbehavior to one "
+        "mechanism (this one or the production lever) without a code change.",
+    "hybrid_production_lever": "Diagnostic kill switch: allows the harvest "
+        "guide to steer the weekly harvest ceiling and off-feed entry once 6N "
+        "is in grow-out mode. On by default; turn off only to isolate a "
+        "suspected guide misbehavior to one mechanism (this one or the purge "
+        "lever) without a code change.",
 }
 
 # Friendly display labels for the Control editor (the raw field name stays the key).
@@ -524,6 +627,12 @@ _CONTROL_LABEL = {
     "auto_calibrate_fw": "Auto-calibrate FW to transfer target",
     "auto_calibrate_fw_min": "  ↳ FW correction clamp — min",
     "auto_calibrate_fw_max": "  ↳ FW correction clamp — max",
+    "hybrid_follow": "Harvest guide (hybrid): off / floor / full",
+    "hybrid_follow_band": "  ↳ guide follow band (± fraction)",
+    "hybrid_guide_min_frac": "  ↳ guide week drop threshold",
+    "hybrid_guide_smooth_weeks": "  ↳ guide smoothing (weeks)",
+    "hybrid_purge_lever": "  ↳ guide lever: 6N staging (purge)",
+    "hybrid_production_lever": "  ↳ guide lever: harvest cap (production)",
 }
 
 
@@ -534,33 +643,79 @@ def _ctl_label(k: str) -> str:
 
 # Column tooltips for the tabular editors (shown on the column header in the grid).
 _FACILITY_HELP = {
-    "location_id": "Human label for the tank (free text).",
-    "system_id": "System the tank belongs to (e.g. OG3N) — groups tanks for the "
-        "per-system feed/biomass caps.",
-    "tank_id": "Unique tank number.",
-    "volume_m3": "Tank volume (m³). Drives the biomass cap = volume × max_density.",
-    "max_density_kg_m3": "Max stocking density (kg/m³). Tank biomass cap = volume × "
-        "this (OG tanks are 95).",
-    "max_feed_kg_day": "Max feed the tank can deliver per day (kg/day) — the binding "
-        "constraint for grow-out fish (OG tanks are 1000).",
-    "type": "Tank type: FW (freshwater stages) or OG (seawater grow-out).",
+    "location_id": "Human-readable tank name (free text), e.g. 'OG3N-1'. Used in "
+        "every report and the manual window grid.",
+    "system_id": "The system (water loop) this tank belongs to, e.g. OG3N. Tanks "
+        "in one system share the per-system feed and biomass caps set on the "
+        "Limits tab.",
+    "tank_id": "Unique tank number — the engine's identifier for this tank. Must "
+        "not repeat.",
+    "volume_m3": "Tank water volume. Sets the tank's biomass cap together with "
+        "the density cap: cap (kg) = volume × max density. Unit: m³.",
+    "max_density_kg_m3": "The most fish weight allowed per m³ of this tank — the "
+        "hard crowding cap. Tank biomass cap (kg) = volume × this. Unit: kg/m³. "
+        "Grow-out tanks are 95.",
+    "max_feed_kg_day": "The most feed this tank can deliver in one day. For "
+        "grow-out fish, feed is usually the binding limit before space is. "
+        "Unit: kg/day. Grow-out tanks are 1,000.",
+    "type": "What the tank is for: FW = freshwater stages (eggs to smolt), "
+        "OG = seawater grow-out (including the 6N depuration tanks).",
 }
 _BATCH_HELP = {
-    "batch_id": "Unique batch label (e.g. B53).",
-    "input_date": "When the fry are stocked into freshwater (YYYY-MM-DD).",
-    "input_count": "Number of fry stocked.",
-    "tran_sf_date": "Freshwater → start-feed/smolt transition date.",
-    "tran_og_date": "Smolt → seawater (TranOG) date — when the batch enters the OG "
-        "conveyor and the forecast starts tracking it by tank.",
-    "tran_og_count": "Planned number of fish entering seawater.",
-    "tran_og_avg_wt_g": "Planned average weight (g) at seawater entry (pre-cull target).",
-    "tran_og_cv": "Size-distribution CV (%) at entry — drives the big/small grade split.",
-    "fcr_model": "Feed-conversion curve, e.g. FCR_116_Quick → 1.16.",
-    "fw_correction": "Multiplier calibrating freshwater growth/survival (tunes the FW "
-        "projection so the batch lands on its target entry weight).",
-    "sgr_correction": "Multiplier calibrating seawater growth (tunes the SW SGR curve "
-        "for this batch).",
-    "notes": "Free-text notes.",
+    "batch_id": "Unique batch (cohort) label, e.g. B53. Must not repeat.",
+    "input_date": "The day the fry are stocked into freshwater. Format: "
+        "YYYY-MM-DD.",
+    "input_count": "How many fry are stocked on the input date. Unit: fish.",
+    "tran_sf_date": "The day the batch moves from first-feeding to the "
+        "smolt stage within freshwater. Format: YYYY-MM-DD.",
+    "tran_og_date": "The day the batch enters seawater (the TranOG transfer). "
+        "From here on the forecast tracks it tank by tank. Format: YYYY-MM-DD.",
+    "tran_og_count": "Planned number of fish entering seawater — fish above "
+        "this count at transfer are culled to hit it. Unit: fish.",
+    "tran_og_avg_wt_g": "Planned average fish weight at seawater entry (the "
+        "pre-cull target the freshwater phase aims for). Unit: grams.",
+    "tran_og_cv": "How spread-out the fish sizes are at entry (coefficient of "
+        "variation). Drives the big/small grading split at transfer. Unit: %. "
+        "Typical: 16.",
+    "fcr_model": "Which feed-conversion curve this batch eats by, e.g. "
+        "FCR_116_Quick = 1.16 kg feed per kg growth. The curves themselves "
+        "live on the Biology tab.",
+    "fw_correction": "Freshwater growth multiplier for this batch: 1.0 = grow "
+        "exactly by the freshwater growth table, 1.1 = 10% faster, 0.9 = 10% "
+        "slower. Ignored (auto-tuned) when 'Auto-calibrate FW' is on in "
+        "Control.",
+    "sgr_correction": "Seawater growth multiplier for this batch: 1.0 = grow "
+        "exactly by the seawater growth table; above/below = faster/slower. "
+        "Calibrate against how the cohort is actually performing.",
+    "notes": "Free-text notes — reporting only, changes nothing.",
+}
+
+# Biology-tab grids: one help per column, keyed per grid (growth FCR columns
+# are dynamic — one per model — and get a generated tooltip).
+_BIO_GROWTH_HELP = {
+    "size_g": "Fish size this row applies to. The tables form curves — the "
+        "engine interpolates between neighboring sizes. Unit: grams.",
+    "SGR_FW": "Freshwater growth rate at this size: % of body weight gained "
+        "per day (SGR). Unit: %/day.",
+    "SGR_SW": "Seawater growth rate at this size: % of body weight gained per "
+        "day (SGR). Unit: %/day.",
+}
+_BIO_MORT_HELP = {
+    "week_from_input": "Batch age, counted in weeks since freshwater stocking.",
+    "mortality_pct": "Fish lost during that week of age, as a % of the batch. "
+        "Unit: %/week.",
+}
+_BIO_FEED_HELP = {
+    "max_size_g": "Fish up to this size eat this feed type; the next row takes "
+        "over above it. Unit: grams.",
+    "feed_name": "Feed product name — used to break the feed forecast out by "
+        "type. Reporting only.",
+}
+_BIO_CULL_HELP = {
+    "days_since_input": "Batch age, in days since freshwater stocking, at "
+        "which this planned cull happens.",
+    "cull_pct": "Share of the batch removed at that age, taken from the "
+        "SMALLEST fish (a bottom cull). Unit: %.",
 }
 
 
@@ -628,21 +783,37 @@ def _edit_biology():
                                  "bio_cull": c, "bio_models": models})
     models = st.session_state["bio_models"]
     st.markdown("**Growth + FCR** (by fish size, grams)")
+    # Column tooltips: the FCR columns are dynamic (one per model), so their
+    # help is generated per model name.
+    _g_cfg = {c: st.column_config.Column(help=h)
+              for c, h in _BIO_GROWTH_HELP.items()}
+    for _m in models:
+        _g_cfg[f"FCR_{_m}"] = st.column_config.Column(
+            help=f"Feed-conversion curve '{_m}': kg of feed per kg of growth "
+                 f"at this fish size. A batch uses the one curve its "
+                 f"'fcr_model' names on the Batches tab.")
     g2 = st.data_editor(st.session_state["bio_growth"], num_rows="dynamic",
-                        hide_index=True, use_container_width=True, key="bio_growth_w")
+                        hide_index=True, use_container_width=True,
+                        key="bio_growth_w", column_config=_g_cfg)
     cols = st.columns(3)
     with cols[0]:
         st.markdown("**Mortality** (% / wk)")
         m2 = st.data_editor(st.session_state["bio_mort"], num_rows="dynamic",
-                            hide_index=True, key="bio_mort_w")
+                            hide_index=True, key="bio_mort_w",
+                            column_config={c: st.column_config.Column(help=h)
+                                           for c, h in _BIO_MORT_HELP.items()})
     with cols[1]:
         st.markdown("**Feed types**")
         f2 = st.data_editor(st.session_state["bio_feed"], num_rows="dynamic",
-                            hide_index=True, key="bio_feed_w")
+                            hide_index=True, key="bio_feed_w",
+                            column_config={c: st.column_config.Column(help=h)
+                                           for c, h in _BIO_FEED_HELP.items()})
     with cols[2]:
         st.markdown("**Culling**")
         c2 = st.data_editor(st.session_state["bio_cull"], num_rows="dynamic",
-                            hide_index=True, key="bio_cull_w")
+                            hide_index=True, key="bio_cull_w",
+                            column_config={c: st.column_config.Column(help=h)
+                                           for c, h in _BIO_CULL_HELP.items()})
     b1, b2, _ = st.columns([1, 1, 3])
     if b1.button("💾 Save Biology", key="save_bio"):
         try:
@@ -2682,10 +2853,26 @@ def _edit_limits():
         st.session_state["slim_wide"] = sysd
         st.session_state["_lim_weeks"] = weeks
     weeks = st.session_state["_lim_weeks"]
-    wk_cfg = {wk: st.column_config.NumberColumn(width="small") for wk in weeks}
-    fac_cfg = {"metric": st.column_config.Column(pinned=True, disabled=True), **wk_cfg}
-    sys_cfg = {"system": st.column_config.Column(pinned=True, disabled=True),
-               "metric": st.column_config.Column(pinned=True, disabled=True), **wk_cfg}
+    _metric_help = (
+        "Which cap this row sets, for the week in each column: "
+        "biomass_kg = most standing fish weight (kg); "
+        "feed_kg_day = most feed per day (kg); "
+        "max_harvest / min_harvest = weekly harvest ceiling / floor (fish); "
+        "hog_yield = live-to-sold weight ratio for that week.")
+    wk_cfg = {wk: st.column_config.NumberColumn(
+        width="small",
+        help=f"The cap value for ISO week {wk} (unit = whatever the row's "
+             f"metric uses). Blank facility cell = fall back to the Control "
+             f"default; blank system cell = no cap that week.")
+        for wk in weeks}
+    fac_cfg = {"metric": st.column_config.Column(
+        pinned=True, disabled=True, help=_metric_help), **wk_cfg}
+    sys_cfg = {"system": st.column_config.Column(
+        pinned=True, disabled=True,
+        help="The grow-out system (water loop) this row caps — its tanks "
+             "share the cap together."),
+        "metric": st.column_config.Column(
+            pinned=True, disabled=True, help=_metric_help), **wk_cfg}
     st.markdown("**Facility limits**")
     fdf = st.data_editor(st.session_state["flim_wide"], hide_index=True,
                          column_config=fac_cfg, key="flim_wide_w")
@@ -2930,12 +3117,16 @@ def _edit_targets_prices():
     c1, c2 = st.columns(2)
     basis = c1.radio("Target basis", ["hog", "gross"], horizontal=True,
                      index=0 if t["basis"] == "hog" else 1, key="tgt_basis",
-                     help="HOG = head-off gutted (sold) kg; gross = live kg.")
+                     help="Which weight your targets are written in: hog = "
+                          "head-off gutted (sold) kg; gross = live kg out of "
+                          "the water. Pick the one your sales plan uses.")
     tol = c2.number_input("Tolerance (%)", min_value=0.0, max_value=50.0,
                           value=float(t["tolerance_pct"]), step=1.0,
                           key="tgt_tol",
-                          help="Within this % under target counts as CLOSE "
-                               "(soft warn) instead of MISSED.")
+                          help="Grace margin when judging a target: landing "
+                               "within this % under it counts as CLOSE (a "
+                               "soft warning) instead of MISSED. Unit: %. "
+                               "Default 5.")
     mdf = st.data_editor(
         pd.DataFrame([{"Month": k, "Target_kg": v}
                       for k, v in sorted(t["monthly"].items())]
@@ -2944,9 +3135,12 @@ def _edit_targets_prices():
         key="tgt_monthly",
         column_config={
             "Month": st.column_config.TextColumn(
-                "Month (YYYY-MM)", help="e.g. 2026-11"),
+                "Month (YYYY-MM)",
+                help="Calendar month this target applies to, e.g. 2026-11."),
             "Target_kg": st.column_config.NumberColumn(
-                "Target (kg)", min_value=0.0, step=1000.0),
+                "Target (kg)", min_value=0.0, step=1000.0,
+                help="Harvest the plan should deliver that month, in the "
+                     "chosen basis (hog/gross). Unit: kg."),
         })
     ydf = st.data_editor(
         pd.DataFrame([{"Year": k, "Target_kg": v}
@@ -2955,9 +3149,13 @@ def _edit_targets_prices():
         num_rows="dynamic", hide_index=True, use_container_width=True,
         key="tgt_yearly",
         column_config={
-            "Year": st.column_config.TextColumn("Year (YYYY)"),
+            "Year": st.column_config.TextColumn(
+                "Year (YYYY)",
+                help="Calendar year this target applies to, e.g. 2027."),
             "Target_kg": st.column_config.NumberColumn(
-                "Target (kg)", min_value=0.0, step=10000.0),
+                "Target (kg)", min_value=0.0, step=10000.0,
+                help="Harvest the plan should deliver that year, in the "
+                     "chosen basis (hog/gross). Unit: kg."),
         })
 
     st.divider()
@@ -2969,10 +3167,14 @@ def _edit_targets_prices():
                                             "model_cv_pct": 18.0,
                                             "price_bands": []}
     c3, c4, c5 = st.columns(3)
-    cur = c3.text_input("Currency", value=e["currency"], key="eco_cur")
+    cur = c3.text_input("Currency", value=e["currency"], key="eco_cur",
+                        help="Currency label shown on revenue figures (e.g. "
+                             "USD). Display only — no conversion happens.")
     ebasis = c4.radio("Price basis", ["hog", "gross"], horizontal=True,
                       index=0 if e["basis"] == "hog" else 1, key="eco_basis",
-                      help="Which weight the bands + revenue are on.")
+                      help="Which weight the price bands and revenue are "
+                           "written in: hog = head-off gutted (sold) kg; "
+                           "gross = live kg. Match your sales price list.")
     mcv = c5.number_input(
         "Sales model CV (%)", min_value=0.0, max_value=60.0,
         value=float(e.get("model_cv_pct", 18.0)), step=1.0, key="eco_cv",
@@ -2988,11 +3190,19 @@ def _edit_targets_prices():
         key="eco_bands",
         column_config={
             "min_kg": st.column_config.NumberColumn(
-                "Min fish wt (kg, incl.)", min_value=0.0, step=0.25),
+                "Min fish wt (kg, incl.)", min_value=0.0, step=0.25,
+                help="Smallest fish weight this price band covers (included). "
+                     "In the chosen basis (hog/gross). Unit: kg per fish."),
             "max_kg": st.column_config.NumberColumn(
-                "Max fish wt (kg, excl.)", min_value=0.0, step=0.25),
+                "Max fish wt (kg, excl.)", min_value=0.0, step=0.25,
+                help="Fish weight where this band ends (excluded — the next "
+                     "band takes over exactly here, so bands never overlap). "
+                     "Unit: kg per fish."),
             "price_per_kg": st.column_config.NumberColumn(
-                "Price / kg", min_value=0.0, step=0.1),
+                "Price / kg", min_value=0.0, step=0.1,
+                help="Default sales price for fish in this size band, per kg "
+                     "in the chosen basis. Per-month price overrides live in "
+                     "config/economics.yaml under each band's 'monthly:' key."),
         })
 
     if st.button("💾 Save targets & prices", key="tgt_save", type="primary"):
@@ -4219,8 +4429,13 @@ def _optimizer():
 
     emphasis = st.radio("Objective emphasis", list(optimize.EMPHASIS_PRESETS.keys()),
                         horizontal=True,
-                        help="Re-scoring is instant — change this after a sweep "
-                             "without re-running.")
+                        help="What 'best' should mean when ranking the tried "
+                             "settings — each preset weighs the soft goals "
+                             "differently (steady biomass, less feed strain, "
+                             "fewer transfers, gentler crowding). Hard rules "
+                             "(contracts, caps, conservation) always come "
+                             "first. Re-scoring is instant — change this after "
+                             "a sweep without re-running.")
     custom = None
     with st.expander("Advanced: custom weights"):
         st.caption("Override the preset (all 'less is better'). 0 drops a component.")
