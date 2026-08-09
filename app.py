@@ -435,6 +435,15 @@ _CONTROL_HELP = {
         "relief. Raising it = fewer, larger transfers but slightly more "
         "crowding left unrelieved; 0 = no floor. Whole-tank moves are "
         "unaffected. Unit: fish. Current setting: 7,000.",
+    "max_transfers_per_week": "The weekly HANDLING BUDGET: the most tank-to-"
+        "tank transfer moves the crew should perform in one week. When a "
+        "week's essential moves (6N purge fills, making room for an arriving "
+        "batch, following the plan) have used the budget, the optional "
+        "quality passes (density leveling, load balancing, remnant clean-up) "
+        "wait for a calmer week. Essential moves are never blocked — a week "
+        "they alone exceed the budget shows amber/red on the checklist "
+        "instead. 0 switches the budget off. Unit: moves/week. Current "
+        "setting: 15.",
     "default_hog_yield": "Converts live (gross) weight to sold weight — HOG "
         "means head-off, gutted. Sold kg = live kg × this. Used wherever "
         "harvest tonnage or revenue is reported. Unit: ratio. Current setting: "
@@ -613,6 +622,7 @@ _CONTROL_LABEL = {
     "min_harvest_weight_g": "Min harvest weight (g)",
     "min_tank_control": "Force-empty floor (fish)",
     "min_transfer_count": "Min transfer size (fish)",
+    "max_transfers_per_week": "Handling budget (moves / week)",
     "default_hog_yield": "Default HOG yield",
     "facility_biomass_deviation_pct": "Biomass setpoint band (R24)",
     "handling_mortality_pct": "Handling mortality (per transfer)",
@@ -4815,9 +4825,11 @@ def _board_score(out_path):
     hv_tgt = float(_cfg.get("harvest_target_per_week", 0) or 0) or None
     min_hv = float(_cfg.get("min_harvest_per_week", 0) or 0)
     welfare = float(_cfg.get("density_welfare_threshold_kg_m3", 80) or 80)
+    mv_cap = int(float(_cfg.get("max_transfers_per_week", 15) or 0)) or None
     m, _dropped, _overprod = _opt.metrics_from_workbook(out_path, hv_cap,
                                                         welfare_density=welfare,
-                                                        harvest_target=hv_tgt)
+                                                        harvest_target=hv_tgt,
+                                                        move_cap=mv_cap)
     verdict = _conservation_verdict(out_path)
     harv = _harvest_extras(out_path, min_hv)
     # "No empty week": the HARD contract rule is "never a NEAR-EMPTY week". A week a
@@ -5276,6 +5288,12 @@ def _ana_grade(res, targets, econ):
             getattr(m, "weeks_over_harvest_target", None)
             if m is not None else None),
         "sixn_outbound_purge": sc.get("sixn_outbound_purge"),
+        "weeks_moves_over_cap": (getattr(m, "weeks_moves_over_cap", None)
+                                 if m is not None else None),
+        "weeks_moves_warn": (getattr(m, "weeks_moves_warn", None)
+                             if m is not None else None),
+        "moves_week_max": (getattr(m, "moves_week_max", None)
+                           if m is not None else None),
         "peak_pct_of_cap": peak_pct,
         "targets_review": tr,
         "density_review": dr,

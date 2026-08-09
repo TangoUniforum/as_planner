@@ -1977,6 +1977,7 @@ def _even_out_density(
     event_date: date,
     transfer_events: list,
     warnings: list[str],
+    max_moves: Optional[int] = None,
 ) -> None:
     """Even fish across a batch's tanks when any tank is over density cap.
 
@@ -2000,6 +2001,11 @@ def _even_out_density(
              if t.batch_id == batch_id and not t.is_empty
              and t.stage != STAGE_STARVE]   # STARVE tanks are purge-pipeline-owned
     if len(tanks) < 2:
+        return
+    # HANDLING BUDGET (rule 4): this is a deferrable quality pass — stop
+    # emitting once the week's move budget is spent (None = unlimited).
+    _mv_left = [max_moves if max_moves is not None else 10 ** 9]
+    if _mv_left[0] <= 0:
         return
 
     og12_sub = [t for t in tanks
@@ -2027,7 +2033,7 @@ def _even_out_density(
                          for t in group if t.count < target - 0.5],
                         key=lambda x: -x[1])
         i = j = 0
-        while i < len(overs) and j < len(unders):
+        while i < len(overs) and j < len(unders) and _mv_left[0] > 0:
             if overs[i][1] <= 0.5:
                 i += 1; continue
             if unders[j][1] <= 0.5:
@@ -2046,6 +2052,8 @@ def _even_out_density(
             )
             warnings.extend(ev.apply(state))
             transfer_events.append(ev)
+            if ev.count_transferred > 0:
+                _mv_left[0] -= 1
             overs[i][1] -= take
             unders[j][1] -= take
             if overs[i][1] < 0.5:
@@ -2091,6 +2099,8 @@ def _even_out_density(
             take = min(shed, room)
             if take <= 0.5:
                 continue
+            if _mv_left[0] <= 0:
+                return                    # handling budget spent
             ev = Transfer(
                 batch_id=batch_id, event_date=event_date,
                 source_tank_id=src.tank_id,
@@ -2102,6 +2112,8 @@ def _even_out_density(
             )
             warnings.extend(ev.apply(state))
             transfer_events.append(ev)
+            if ev.count_transferred > 0:
+                _mv_left[0] -= 1
             if src.count <= src_cap_fish + 0.5:
                 break
 
@@ -2765,6 +2777,7 @@ def _consolidate_remnants(
     transfer_events: list,
     warnings: list[str],
     min_keep: float,
+    max_moves: Optional[int] = None,
 ) -> int:
     """Weekly remnant sweep (INV-5 repair): fold any occupied grow-out/entry
     tank holding 0 < count < min_keep into its OWN batch's other tanks.
@@ -2793,6 +2806,9 @@ def _consolidate_remnants(
     """
     if min_keep <= 0:
         return 0
+    # HANDLING BUDGET (rule 4): deferrable pass — a remnant left unswept this
+    # week is swept on a calmer one (the emitters stop new ones forming).
+    _mv_left = max_moves if max_moves is not None else 10 ** 9
     folds = 0
     remnants = sorted(
         [t for t in state.tanks_by_id.values()
@@ -2805,6 +2821,8 @@ def _consolidate_remnants(
     for src in remnants:
         if src.is_empty:
             continue
+        if _mv_left <= 0:
+            break                        # handling budget spent — defer
         cands = []
         for d in state.tanks_by_id.values():
             if (d.tank_id == src.tank_id or d.is_empty
@@ -2841,6 +2859,8 @@ def _consolidate_remnants(
             leaves_source_empty=True)
         warnings.extend(mv.apply(state))
         transfer_events.append(mv)
+        if mv.count_transferred > 0:
+            _mv_left -= 1
         if state.tanks_by_id[src.tank_id].is_empty:
             folds += 1
             warnings.append(
@@ -3267,7 +3287,26 @@ def phase_d_emit_events(
     _reserved_for: dict[int, str] = {}
     _reserved_og: set[int] = set()
 
+    # HANDLING BUDGET (operator rule 4): weekly cap on transfer MOVES. The
+    # deferrable quality passes check remaining budget before emitting;
+    # essential moves never do (see ControlParams.max_transfers_per_week).
+    _move_cap = int(getattr(control, "max_transfers_per_week", 0) or 0)
+
     for week_label in sorted_weeks:
+        # Moves emitted so far THIS week = applied Transfers appended since the
+        # week opened (refused events have count_transferred 0 and don't count).
+        _wk_ev0 = len(transfer_events)
+
+        def _moves_left() -> int:
+            """Remaining weekly move budget. Counts APPLIED Transfer events —
+            the same thing the handling gate counts (TransferPlan 'Transfer'
+            rows); TranOG/Grade rows are not moves."""
+            if _move_cap <= 0:
+                return 10 ** 9
+            used = sum(1 for e in transfer_events[_wk_ev0:]
+                       if isinstance(e, Transfer) and e.count_transferred > 0)
+            return max(0, _move_cap - used)
+
         # Release reservations whose arrival week has arrived/passed (the arrival
         # itself consumes the tank below; anything still held past its week is
         # stale and freed back to the rebalancer). Also drop any reservation
@@ -3751,6 +3790,21 @@ def phase_d_emit_events(
                     if _budget.remaining() <= 0:
                         break              # HARD weekly ceiling reached
                     take = _budget.take(take)
+                    # INV-5-aware sizing: a take leaving 0 < residue < floor
+                    # would force-empty the tank — up to min_tank_control fish
+                    # PAST the hard ceiling (the measured 66,907 week = 60,000
+                    # + a 6,907 force-empty). Take the whole tank only when it
+                    # fits the budget; otherwise take LESS, leaving the floor
+                    # (the frozen remnant fronts next week's drain).
+                    _resid = t.count - take
+                    _floor_ = control.min_tank_control or 0.0
+                    if 0 < _resid < _floor_:
+                        if _budget.take(t.count) >= t.count - 0.5:
+                            take = t.count
+                        else:
+                            take = _budget.take(max(0.0, t.count - _floor_))
+                    if take <= 0:
+                        continue
                     ev = Harvest(
                         batch_id=t.batch_id, event_date=week_start_date,
                         source_tank_id=t.tank_id, count=take,
@@ -3949,6 +4003,16 @@ def phase_d_emit_events(
                         if _budget.remaining() <= 0:
                             break          # HARD weekly ceiling reached
                         take = _budget.take(take)
+                        # INV-5-aware sizing (see the STARVE loop above): never
+                        # let a force-empty escalate past the hard ceiling.
+                        _resid = src.count - take
+                        _floor_ = control.min_tank_control or 0.0
+                        if 0 < _resid < _floor_:
+                            if _budget.take(src.count) >= src.count - 0.5:
+                                take = src.count
+                            else:
+                                take = _budget.take(
+                                    max(0.0, src.count - _floor_))
                         if take <= 0:
                             continue
                         ev = Harvest(
@@ -4014,8 +4078,11 @@ def phase_d_emit_events(
             # over density cap and the moves are legal. Runs for ALL
             # active batches (including unchanged sets the diff skipped).
             for b in sorted(set(prev_by_batch) | set(this_by_batch)):
+                if _moves_left() <= 0:
+                    break             # handling budget spent — deferrable pass
                 _even_out_density(
                     state, b, transfer_date, transfer_events, warnings,
+                    max_moves=_moves_left(),
                 )
 
             # Multi-objective balancer: relieve any tank still over density cap
@@ -4023,7 +4090,9 @@ def phase_d_emit_events(
             # feed + system biomass — cutting out-of-bounds on all three at once
             # without trading one for another. Continuity-safe (conserved
             # Transfers; new tanks forward-persisted).
-            _bal_budget = int(getattr(control, "rebalance_balance_budget", 0) or 0)
+            _bal_budget = min(
+                int(getattr(control, "rebalance_balance_budget", 0) or 0),
+                _moves_left())            # handling budget: deferrable pass
             if _rebal_on and _bal_budget > 0:
                 _balance_loads(
                     state, week_label, transfer_date, transfer_events, warnings,
@@ -4040,8 +4109,10 @@ def phase_d_emit_events(
             # any system still over its biomass/feed cap by moving a PRECISE
             # count of fish between a batch's existing tanks into a system with
             # headroom — exactly enough, no overshoot. Continuity-safe.
-            _vq_budget = int(getattr(control, "rebalance_varqty_budget",
-                                     _REBALANCE_VARQTY_BUDGET) or 0)
+            _vq_budget = min(
+                int(getattr(control, "rebalance_varqty_budget",
+                            _REBALANCE_VARQTY_BUDGET) or 0),
+                _moves_left())            # handling budget: deferrable pass
             if _rebal_on and _vq_budget > 0:
                 _variable_quantity_rebalance(
                     state, week_label, transfer_date, transfer_events, warnings,
@@ -4060,6 +4131,7 @@ def phase_d_emit_events(
             _consolidate_remnants(
                 state, transfer_date, week_label, transfer_events, warnings,
                 control.min_tank_control or 0.0,
+                max_moves=_moves_left(),  # handling budget: deferrable pass
             )
 
         # ANTICIPATORY PURGE PACING (purge mode only). The TranOG arrival
@@ -4149,6 +4221,75 @@ def phase_d_emit_events(
                     # HOLD the just-freed growout slot for this arrival week.
                     _reserved_for[_src_tid] = _wk
                     _reserved_og.add(_src_tid)
+                    _deficit_wk -= 1
+
+        # ANTICIPATORY ARRIVAL FREEING — PRODUCTION mode (the ceiling's last
+        # gap). The purge-era pass above pre-frees tanks by purging into 6N;
+        # in production the only escape is a DIRECT harvest, so the reactive
+        # make-room below had to whole-tank-dump PAST the hard ceiling in the
+        # arrival week itself (conservation > cap — the measured 81,460-fish
+        # week: two whole tanks at once). Pre-free here instead, WITHIN this
+        # week's remaining ceiling budget only (budget.take — never a
+        # borrow): the same fish are harvested a few weeks earlier across the
+        # 50-60k stretch band, and the freed tank is RESERVED for the arrival
+        # exactly like the purge-era pass. Purge-complete STARVE tanks first
+        # (harvest-ready anyway — gentler than the reactive pass, which
+        # prefers un-starved SW), then the smallest dump.
+        if (not purge_this_week) and ws_we is not None:
+            _aw_start = ws_we[0]
+            _cur_i = sorted_weeks.index(week_label)
+            _min_hv_wt = control.min_harvest_weight_g or 0
+            for _j in range(1, 4 + 1):
+                _wi = _cur_i + _j
+                if _wi >= len(sorted_weeks):
+                    break
+                _wk = sorted_weeks[_wi]
+                _need_wk = arrival_tank_need.get(_wk, 0)
+                if _need_wk <= 0:
+                    continue
+                _avail = sum(
+                    1 for t in state.tanks_by_id.values()
+                    if t.is_empty and t.type == "OG"
+                    and t.system_id not in _SIXN_SYSTEMS
+                    and _reserved_for.get(t.tank_id, _wk) == _wk
+                )
+                _deficit_wk = _need_wk - _avail
+                while _deficit_wk > 0:
+                    _cands = [t for t in state.tanks_by_id.values()
+                              if not t.is_empty and t.type == "OG"
+                              and t.system_id not in _SIXN_SYSTEMS
+                              and t.system_id not in OG12_SYSTEMS
+                              and t.avg_wt_g >= _min_hv_wt
+                              and (t.stage != STAGE_STARVE
+                                   or t.starvation_days_remaining <= 0)
+                              # affordable inside THIS week's ceiling budget
+                              and _budget.take(t.count) >= t.count - 0.5]
+                    if not _cands:
+                        break        # no headroom this week — later weeks retry
+                    _cands.sort(key=lambda t: (
+                        0 if t.stage == STAGE_STARVE else 1, t.count, t.tank_id))
+                    _src = _cands[0]
+                    _src_tid, _src_batch = _src.tank_id, _src.batch_id
+                    _src_cnt, _src_loc = _src.count, _src.location_id
+                    _ev = Harvest(
+                        batch_id=_src_batch, event_date=_aw_start,
+                        source_tank_id=_src_tid, count=_src_cnt,
+                        avg_wt_g=_src.avg_wt_g, min_tank_control=0)
+                    warnings.extend(_ev.apply(state))
+                    harvest_events.append(_ev)
+                    _budget.record(_ev.count)
+                    _persist_tank_reserve(
+                        _src_tid, week_label, _wk,
+                        sorted_weeks, week_index_r, ta_index, week_tank_owner,
+                        tank_assignments)
+                    _reserved_for[_src_tid] = _wk
+                    _reserved_og.add(_src_tid)
+                    warnings.append(
+                        f"{week_label}: anticipatory arrival freeing — "
+                        f"harvested {_src_loc} (batch {_src_batch}, "
+                        f"{_src_cnt:.0f} fish) within the weekly ceiling and "
+                        f"RESERVED it for the TranOG arrival in {_wk} "
+                        f"(needs {_need_wk})")
                     _deficit_wk -= 1
 
         # Day-by-day biology + TranOG entries within this week.

@@ -612,6 +612,32 @@ register_gate("sixn_one_way", "6N one-way commitment (R7)", hard=False,
               fn=_gate_sixn_one_way)
 
 
+def _gate_handling_budget(ctx):
+    """Operator rule 4 — weekly handling budget (15 transfer moves/week).
+    FAIL: any week over the cap; WARN: any week over ~80% of it (>12);
+    PASS: every week within. The engine defers its quality passes to hold
+    the cap, so an overrun means ESSENTIAL moves alone (arrival make-room,
+    rotation fills, the plan-diff) exceeded it that week."""
+    over = ctx.get("weeks_moves_over_cap")
+    warn = ctx.get("weeks_moves_warn")
+    if over is None and warn is None:
+        return "N/A", "weekly transfer counts unavailable"
+    over, warn = int(over or 0), int(warn or 0)
+    mx = ctx.get("moves_week_max")
+    mx_s = f" (worst week {int(mx)} moves)" if mx else ""
+    if over > 0:
+        return "FAIL", (f"{over} week(s) over the 15-move handling budget"
+                        f"{mx_s} — essential moves alone exceeded it")
+    if warn > 0:
+        return "WARN", (f"{warn} week(s) above ~80% of the handling budget "
+                        f"(>12 moves){mx_s}")
+    return "PASS", f"every week within the 15-move handling budget{mx_s}"
+
+
+register_gate("handling_budget", "Weekly handling budget (15 moves)",
+              hard=False, fn=_gate_handling_budget)
+
+
 # --------------------------------------------------------------------------- #
 # Ranking — the operator-approved pick order
 # --------------------------------------------------------------------------- #

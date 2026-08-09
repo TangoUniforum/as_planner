@@ -16,6 +16,10 @@ harvest_target_per_week: 50000
 min_harvest_weight_g: 3500
 min_harvest_per_week: 30000
 min_tank_control: 7000
+# HANDLING BUDGET: max transfer moves/week. Deferrable quality passes stop
+# at the cap; essential moves (rotation fills, arrival make-room, plan-diff)
+# never blocked — overruns show on the handling gate instead. 0 = off.
+max_transfers_per_week: 15
 default_hog_yield: 0.81
 facility_biomass_deviation_pct: 0.005
 handling_mortality_pct: 0.01

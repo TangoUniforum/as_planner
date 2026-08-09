@@ -41,6 +41,15 @@ class ControlParams:
     # rotation rather than exceed it. 0/unset = no split (pre-split configs:
     # the ceiling serves as both, the historical behaviour).
     harvest_target_per_week: float = 50000.0
+    # HANDLING BUDGET (operator ruling 2026-08): max transfer MOVES per week.
+    # Once the week's emitted move count reaches this, the DEFERRABLE quality
+    # passes (even-out, multi-objective balancer, variable-quantity shave,
+    # remnant sweep) stop emitting — their work waits for a calmer week.
+    # ESSENTIAL moves (6N rotation fills, arrival make-room/entry-vacate, the
+    # plan-diff) are never blocked: a week they alone push past the cap is
+    # REPORTED by the handling gate (WARN above ~80% of the cap, FAIL above
+    # it), never silently truncated at the contract's expense. 0 = off.
+    max_transfers_per_week: int = 15
     # Minimum rebalancer transfer size (fish): the density/load rebalancer will not
     # split a sub-group smaller than this OUT of a tank (tiny moves cost handling for
     # little relief) — the OUT-side mirror of min_tank_control's "don't leave a
