@@ -3766,6 +3766,84 @@ def phase_d_emit_events(
                                 and t.system_id in OG12_SYSTEMS]
                 _deficit = _need - len(_empty_entry)
                 _min_hv_wt = control.min_harvest_weight_g or 0
+
+                def _consolidate_entry_forward() -> bool:
+                    """Vacate ONE entry tank by topping up SAME-BATCH grow-out
+                    tanks with density headroom — a forward move (R2, legal at
+                    any weight), INV-1-safe, and a WHOLE-TANK move so the
+                    min-transfer split floor does not apply.
+
+                    ABORT-PREVENTION ONLY: fires exclusively when the entry
+                    tier is COMPLETELY full — i.e. the arrival would otherwise
+                    hit the hard no-drop abort. A mere tank-count deficit with
+                    at least one free entry tank keeps the historical
+                    behaviour (the cohort crams into fewer tanks), because
+                    firing on non-fatal deficits measurably reshaped no-window
+                    trajectories through the PR_CORRECTION trial evaluator.
+
+                    The measured case (2026-W50 abort, 7.29.26 PR + operator
+                    window): OG1N-15 held 765 fish of B48 and OG1S-16 held 474
+                    of B47 while both batches had grow-out headroom — the two
+                    tanks the arrival needed. Smallest occupant first (least
+                    handling, likeliest to fit). Returns True if an entry
+                    tank was freed."""
+                    if any(t.is_empty and t.type == "OG"
+                           and t.system_id in OG12_SYSTEMS
+                           for t in state.tanks_by_id.values()):
+                        return False   # not abort-bound — keep legacy behaviour
+                    _occ = sorted(
+                        [t for t in state.tanks_by_id.values()
+                         if not t.is_empty and t.type == "OG"
+                         and t.system_id in OG12_SYSTEMS
+                         and t.stage != STAGE_STARVE],
+                        key=lambda t: (t.count, t.tank_id))
+                    for _se in _occ:
+                        if _se.avg_wt_g <= 0:
+                            continue
+                        _room = []
+                        for _d in sorted(state.tanks_by_id.values(),
+                                         key=lambda x: x.tank_id):
+                            if (_d.is_empty or _d.batch_id != _se.batch_id
+                                    or _d.type != "OG"
+                                    or _d.system_id in _SIXN_SYSTEMS
+                                    or _d.system_id in OG12_SYSTEMS
+                                    or _d.stage == STAGE_STARVE
+                                    or _d.max_density_kg_m3 <= 0):
+                                continue
+                            _head_kg = _d.max_biomass_kg * 0.98 - _d.biomass_kg
+                            if _head_kg <= 0:
+                                continue
+                            _room.append(
+                                (_d, _head_kg / (_se.avg_wt_g / 1000.0)))
+                        if sum(r for _, r in _room) < _se.count:
+                            continue  # this batch can't absorb the whole tank
+                        _allocs, _left = [], _se.count
+                        for _d, _r in _room:
+                            _take = min(_left, _r)
+                            if _take <= 0:
+                                break
+                            _allocs.append(TankAllocation(
+                                tank_id=_d.tank_id, count=_take,
+                                avg_wt_g=_se.avg_wt_g, cv_pct=_se.cv_pct))
+                            _left -= _take
+                        _sb, _sl, _sn = _se.batch_id, _se.location_id, _se.count
+                        _cmv = Transfer(
+                            batch_id=_sb, event_date=ws_date,
+                            source_tank_id=_se.tank_id,
+                            destinations=_allocs, leaves_source_empty=True)
+                        warnings.extend(_cmv.apply(state))
+                        transfer_events.append(_cmv)
+                        if not state.tanks_by_id[_se.tank_id].is_empty:
+                            continue  # refused — try the next occupant
+                        warnings.append(
+                            f"{week_label}: VACATED entry tank {_sl} (batch "
+                            f"{_sb}, {_sn:.0f}-fish remnant absorbed) by "
+                            f"CONSOLIDATING forward into its own grow-out "
+                            f"tanks (R2) — freeing the entry tier for "
+                            f"{len(_arrivals)} TranOG arrival(s) this week")
+                        return True
+                    return False
+
                 while _deficit > 0:
                     # Entry occupants that can be vacated (readiest first —
                     # biggest fish are nearest their forward move anyway).
@@ -3809,6 +3887,15 @@ def phase_d_emit_events(
                                       and t.stage == STAGE_STARVE
                                       and t.avg_wt_g >= _min_hv_wt]
                             if not _cands:
+                                # FORWARD-CONSOLIDATION VACATE: nothing is
+                                # harvest-ripe and no tank is empty, but an
+                                # entry tank whose batch has grow-out headroom
+                                # can still vacate by same-batch top-up
+                                # (strictly additive — only tried where the
+                                # ladder previously gave up and aborted).
+                                if _consolidate_entry_forward():
+                                    _deficit -= 1
+                                    continue
                                 break  # genuinely saturated — abort handled below
                             _cands.sort(key=lambda t: (
                                 t.starvation_days_remaining, -t.avg_wt_g, t.tank_id))
@@ -3841,6 +3928,12 @@ def phase_d_emit_events(
                                     reason="reactive make-room for a TranOG arrival",
                                     sixn_move_in_feed=sixn_move_in_feed, tables=tables,
                                     batch_meta=batch_meta, is_purge=True):
+                                # 6N full — last try: forward-consolidation
+                                # vacate (same-batch top-up needs no empty
+                                # tank and no 6N slot).
+                                if _consolidate_entry_forward():
+                                    _deficit -= 1
+                                    continue
                                 warnings.append(
                                     f"{week_label}: make-room CANNOT free "
                                     f"{_src.location_id} for a TranOG arrival — 6N is full "
