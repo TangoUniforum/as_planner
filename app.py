@@ -404,10 +404,21 @@ _CONTROL_HELP = {
         "line: raising it lets fish grow bigger before harvest; lowering it "
         "forces earlier harvests. Unit: kg. Current setting: 3,800,000. "
         "Per-week overrides live on the Limits tab.",
-    "max_harvest_per_week": "The most fish the processing plant can take in one "
-        "week. With the harvest smoother on (further down) this is enforced as "
-        "a hard weekly ceiling; the planner spreads big harvests out instead of "
-        "dumping past it. Unit: fish/week. Current setting: 55,000.",
+    "max_harvest_per_week": "The HARD weekly ceiling: the most fish the "
+        "processing plant can physically take in one week — the plan must "
+        "never ask for more. Works as a pair with the harvest target below: "
+        "ordinary weeks are planned at the target, and a week may stretch up "
+        "toward this ceiling only when biomass forces it (the 6N drain even "
+        "holds a purge tank back a rotation rather than exceed it). "
+        "Unit: fish/week. Current setting: 60,000.",
+    "harvest_target_per_week": "The weekly harvest level the plan AIMS for — "
+        "what the sales/processing plan considers a normal week. The planner "
+        "sizes its 6N purge fills and harvest leveling to this number, so "
+        "most weeks land at or below it; anything between here and the hard "
+        "ceiling above is a 'stretch' week (allowed, flagged amber on the "
+        "checklist), and anything past the ceiling is a hard fail. Set equal "
+        "to the ceiling to switch the split off. Unit: fish/week. Current "
+        "setting: 50,000.",
     "min_harvest_weight_g": "The 3.5 kg sales gate: a fish must weigh at least "
         "this (live weight) before it may be harvested. A business constant, "
         "not a tuning knob. Unit: grams. Setting: 3,500.",
@@ -596,7 +607,8 @@ _CONTROL_LABEL = {
     "scenario_name": "Scenario name",
     "max_feed_per_day_kg": "Max feed / day (kg)",
     "max_biomass_kg": "Max facility biomass (kg)",
-    "max_harvest_per_week": "Max harvest / week (fish)",
+    "max_harvest_per_week": "Harvest ceiling / week (fish)",
+    "harvest_target_per_week": "Harvest target / week (fish)",
     "min_harvest_per_week": "Min harvest / week (fish)",
     "min_harvest_weight_g": "Min harvest weight (g)",
     "min_tank_control": "Force-empty floor (fish)",
@@ -4800,10 +4812,12 @@ def _board_score(out_path):
     with open(CONFIG_DIR / "control.yaml") as _f:
         _cfg = _yaml.safe_load(_f) or {}
     hv_cap = float(_cfg.get("max_harvest_per_week", 55000) or 55000)
+    hv_tgt = float(_cfg.get("harvest_target_per_week", 0) or 0) or None
     min_hv = float(_cfg.get("min_harvest_per_week", 0) or 0)
     welfare = float(_cfg.get("density_welfare_threshold_kg_m3", 80) or 80)
     m, _dropped, _overprod = _opt.metrics_from_workbook(out_path, hv_cap,
-                                                        welfare_density=welfare)
+                                                        welfare_density=welfare,
+                                                        harvest_target=hv_tgt)
     verdict = _conservation_verdict(out_path)
     harv = _harvest_extras(out_path, min_hv)
     # "No empty week": the HARD contract rule is "never a NEAR-EMPTY week". A week a
@@ -5250,6 +5264,9 @@ def _ana_grade(res, targets, econ):
         "zero_weeks": h.get("zero_weeks"),
         "weeks_over_harvest_cap": (m.weeks_over_harvest_cap
                                    if m is not None else None),
+        "weeks_over_harvest_target": (
+            getattr(m, "weeks_over_harvest_target", None)
+            if m is not None else None),
         "peak_pct_of_cap": peak_pct,
         "targets_review": tr,
         "density_review": dr,

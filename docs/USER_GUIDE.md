@@ -109,7 +109,8 @@ Facility-wide knobs read into `ControlParams`:
 | `horizon_weeks` | forecast length | 130 |
 | `max_biomass_kg` | facility biomass cap — checked against **TOTAL** facility biomass (FW + OG + 6N purge), per-week overrides in FacilityLimits | (config default; overridable per week) |
 | `max_feed_per_day_kg` | facility daily feed cap — checked against total **feeding** (SW + FW) feed/day; off-feed purge fish excluded (§4.1) | (config default) |
-| `max_harvest_per_week` | weekly harvest/processing ceiling (fish) | 55,000 |
+| `max_harvest_per_week` | **HARD** weekly harvest/processing ceiling (fish) — the plant's physical intake limit. The plan must never exceed it; the 6N drain holds a purge tank back one rotation rather than breach it (target/ceiling split, operator ruling 2026-08) | 60,000 |
+| `harvest_target_per_week` | weekly harvest planning **TARGET** (fish): what the plan sizes 6N fills/leveling to — ordinary weeks land at/below it; 50k–60k is the legal "stretch" band (amber on the Analyze checklist), above 60k is a hard fail. Set equal to the ceiling to disable the split | 50,000 |
 | `min_harvest_per_week` | weekly harvest floor | 30,000 |
 | `min_harvest_weight_g` | minimum weight a fish can be harvested at | 3,500 |
 | `min_tank_control` | force-empty floor (fish): a harvest/transfer leaving fewer than this empties the tank (INV-5) | 7,000 |
@@ -123,7 +124,7 @@ Facility-wide knobs read into `ControlParams`:
 | `sixn_growth` | 6N runs as growout (vs purge) for the whole horizon | false |
 | `sixn_production_start` | date 6N flips purge → production | e.g. 2028-01-01 |
 | `sixn_transition_weeks` | empty/fallow window at the 6N transition (0 = none) | 0 |
-| `sixn_level_drains` | **ON by default.** 6N PURGE mode only. Caps how full a 6N purge pair may get (at `max_harvest_per_week`) so weekly fills don't **accumulate** into one pair across its rotation residency — the root cause of the 90–113k drain spikes that starve other pairs into sub-`min_harvest_per_week` troughs. Surplus stays in grow-out and becomes the move-in for the next thin pair, lifting its drain toward the floor so every week meets the harvest minimum (the steady-weekly-harvest contract). *Verified vs OFF:* 6N drain peak 110k→68k (−38%), CV 0.46→0.32, weeks-below-min 38→27, fish conserved. Joins `rebalance_level` + `harvest_level_load` as a leveling default; set `false` for the old accumulate-then-dump behavior. No effect in 6N production mode | true |
+| `sixn_level_drains` | **ON by default.** 6N PURGE mode only. Caps how full a 6N purge pair may get (at `harvest_target_per_week`) so weekly fills don't **accumulate** into one pair across its rotation residency — the root cause of the 90–113k drain spikes that starve other pairs into sub-`min_harvest_per_week` troughs. Surplus stays in grow-out and becomes the move-in for the next thin pair, lifting its drain toward the floor so every week meets the harvest minimum (the steady-weekly-harvest contract). *Verified vs OFF:* 6N drain peak 110k→68k (−38%), CV 0.46→0.32, weeks-below-min 38→27, fish conserved. Joins `rebalance_level` + `harvest_level_load` as a leveling default; set `false` for the old accumulate-then-dump behavior. No effect in 6N production mode | true |
 | `starvation_period_days` | in-place purge length in 6N production mode | **7** (= one weekly step; clean single-cohort pipeline) |
 | `tran_og_default_tanks` | min tanks a TranOG arrival gets | 2–3 |
 | `density_target_pct` | per-tank density target as a fraction of cap | 0.85–0.99 |

@@ -468,12 +468,33 @@ def _gate_biomass_cap(ctx):
 
 
 def _gate_harvest_cap(ctx):
-    w = ctx.get("weeks_over_harvest_cap")
-    if w is None:
+    """Weekly harvest target/ceiling gate (operator ruling: 50/60 split).
+
+    FAIL — any week above the HARD processing ceiling (max_harvest_per_week,
+           60k): the plan asks the plant for more than it can take.
+    WARN — week(s) in the stretch band between the planning target
+           (harvest_target_per_week, 50k) and the ceiling: legal, but the
+           plan leans on the stretch allowance.
+    PASS — every week at/below the target.
+    Legacy contexts that only provide `weeks_over_harvest_cap` (no target
+    count) keep the historical WARN-only reading of that single number."""
+    wc = ctx.get("weeks_over_harvest_cap")
+    wt = ctx.get("weeks_over_harvest_target")
+    if wc is None and wt is None:
         return "N/A", "weekly harvest series unavailable"
-    w = int(w)
-    return (("PASS", "no week over the 55k processing cap") if w == 0
-            else ("WARN", f"{w} week(s) over the 55k processing cap"))
+    wc = int(wc or 0)
+    if wt is None:                              # legacy single-number context
+        return (("PASS", "no week over the processing cap") if wc == 0
+                else ("WARN", f"{wc} week(s) over the processing cap"))
+    wt = int(wt)
+    if wc > 0:
+        return "FAIL", (f"{wc} week(s) over the HARD processing ceiling "
+                        f"(60k) — must be replanned, the plant cannot take it")
+    if wt > 0:
+        return "WARN", (f"{wt} week(s) in the 50-60k stretch band (over the "
+                        f"weekly target, under the hard ceiling) — legal "
+                        f"when biomass demands it")
+    return "PASS", "every week at/below the 50k weekly harvest target"
 
 
 def _gate_targets(ctx):
@@ -497,8 +518,8 @@ register_gate("no_empty_week", "Never an empty harvest week", hard=True,
               fn=_gate_no_empty_week)
 register_gate("biomass_cap", "Facility biomass cap", hard=False,
               fn=_gate_biomass_cap)
-register_gate("harvest_cap", "Weekly processing cap (55k)", hard=False,
-              fn=_gate_harvest_cap)
+register_gate("harvest_cap", "Weekly harvest target/ceiling (50k/60k)",
+              hard=False, fn=_gate_harvest_cap)
 register_gate("targets", "Harvest targets (monthly/yearly)", hard=False,
               fn=_gate_targets)
 

@@ -31,6 +31,16 @@ class ControlParams:
     tran_og_default_tanks: int = 3
     global_buffer_pct: float = 0.05      # R29: system-limits symmetric buffer
     starvation_period_days: int = 7      # R30: in-place purge length (production mode); 7d = one weekly step (single-cohort pipeline)
+    # HARVEST TARGET vs CEILING split (operator ruling 2026-08). The weekly
+    # harvest TARGET (fish/week): the level the planner SIZES to — 6N purge
+    # fills and the level-drains headroom are capped here, and the L1 envelope
+    # plans its harvest curve at this level, so ordinary weeks land at or below
+    # it. `max_harvest_per_week` above is the HARD processing ceiling (60k): a
+    # plan may STRETCH between target and ceiling when biomass demands it, but
+    # never above the ceiling — the purge drain defers a pair tank to its next
+    # rotation rather than exceed it. 0/unset = no split (pre-split configs:
+    # the ceiling serves as both, the historical behaviour).
+    harvest_target_per_week: float = 50000.0
     # Minimum rebalancer transfer size (fish): the density/load rebalancer will not
     # split a sub-group smaller than this OUT of a tank (tiny moves cost handling for
     # little relief) — the OUT-side mirror of min_tank_control's "don't leave a

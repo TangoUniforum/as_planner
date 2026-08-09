@@ -6,7 +6,13 @@ horizon_weeks: 130
 scenario_name: Forecast
 max_feed_per_day_kg: 34000
 max_biomass_kg: 3800000
-max_harvest_per_week: 55000
+# HARD processing ceiling (operator ruling 2026-08: target/ceiling split).
+# Was 55000 when it served as both the planning level and the cap; the
+# planning level now lives in harvest_target_per_week below.
+max_harvest_per_week: 60000
+# Weekly harvest planning TARGET: fills/leveling size to 50k; weeks may
+# stretch to the 60k ceiling when biomass demands, never past it.
+harvest_target_per_week: 50000
 min_harvest_weight_g: 3500
 min_harvest_per_week: 30000
 min_tank_control: 7000

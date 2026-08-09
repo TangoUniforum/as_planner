@@ -115,6 +115,21 @@ PURGE_TRANSFER_GROWTH_DAYS = 4
 # rotation's drain HOLDS any tank filled after the PREVIOUS rotation step
 # (fail-safe; a held tank drains on the pair's next rotation).
 SIXN_MIN_RESIDENCY_DAYS = 14
+def _harvest_target_fish(control) -> float:
+    """Weekly harvest planning TARGET (fish/week) — the operator's 50/60 split.
+
+    The level the planner SIZES to (6N fills, level-drains headroom, L1
+    envelope); `max_harvest_per_week` stays the hard processing ceiling.
+    Clamped to the ceiling; 0/unset falls back to the ceiling, which restores
+    the historical single-number behaviour for pre-split configs.
+    """
+    cap = float(getattr(control, "max_harvest_per_week", 0) or 0)
+    tgt = float(getattr(control, "harvest_target_per_week", 0) or 0)
+    if tgt <= 0:
+        return cap
+    return min(tgt, cap) if cap > 0 else tgt
+
+
 # Drain-guard threshold in EVENT-DATE days: a next-rotation drain is at most 7
 # calendar days after its fill (week_starts are 7 apart; the ragged partial
 # FIRST forecast week makes it shorter, never longer), while the legal
@@ -1418,6 +1433,26 @@ def _run_sixn_purge_week(
                 f"after its fill — a 1-week purge); drain held until the "
                 f"pair's next rotation")
             continue
+        # HARVEST CEILING (target/ceiling split): never drain a tank past the
+        # hard processing ceiling — HOLD it for the pair's next rotation
+        # instead (its fill date is old, so the depuration guard won't block
+        # that later drain, and sixn_level_drains shrinks the pair's next fill
+        # so the combined drain stays level). Fills are sized to the TARGET,
+        # so this fires only when an out-of-rotation make-room dump stacked a
+        # pair past the ceiling — the audited 86,956-fish weeks. Deferral
+        # requires something already harvested this week: a whole-week
+        # deferral would make an EMPTY week, and the steady-harvest contract
+        # outranks the ceiling (the harvest gate reports the overage loudly).
+        if (budget is not None and math.isfinite(budget.cap)
+                and (budget.used > 0 or pair_drain_count > 0)
+                and tank.count > budget.remaining()):
+            warnings.append(
+                f"{week_label}: HARVEST CEILING — holding 6N "
+                f"{tank.location_id} (batch {tank.batch_id}, "
+                f"{tank.count:.0f} fish): draining it would exceed the "
+                f"weekly processing ceiling ({budget.remaining():.0f} fish "
+                f"left of {budget.cap:.0f}); drains next rotation")
+            continue
         pair_drain_count += tank.count
         ev = Harvest(
             batch_id=tank.batch_id,
@@ -1457,7 +1492,10 @@ def _run_sixn_purge_week(
     #    source-batch pick so the entry forward-transit below knows the goal
     #    even when the grow-out pool is empty.)
     min_h = control.min_harvest_per_week or 0
-    max_h = control.max_harvest_per_week or min_h
+    # TARGET/CEILING split: fills are SIZED to the planning target (50k) so
+    # ordinary pair drains land at/below it; max_harvest_per_week remains the
+    # hard processing ceiling and gates the DRAIN (below), not the fill.
+    max_h = _harvest_target_fish(control) or min_h
     # NOTE (measured 2026-08-01, DO NOT RETRY without re-measuring): the floor
     # is judged at the DRAIN but sized HERE, and the fish carry ~lead weeks of
     # mortality between the two — so 12 of 19 sub-floor weeks land at exactly
