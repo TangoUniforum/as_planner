@@ -476,6 +476,12 @@ class TestWindowHorizonGuard:
         import forecast.run as run_mod
         sdir = tmp_path / "scenario"
         shutil.copytree(SCENARIO_DIR, sdir)
+        # The live scenario/ may contain operator-saved PER-PR event files
+        # (scenario/manual_events/<closing>.yaml). Their mere presence marks
+        # the environment "migrated", which correctly DISABLES the legacy
+        # shared-file fallback this test relies on — purge the copy so the
+        # test's legacy manual_events.yaml is actually honored.
+        shutil.rmtree(sdir / "manual_events", ignore_errors=True)
         # A harvest event at a week far beyond any plausible horizon forces
         # window_n >= horizon_weeks.
         (sdir / "manual_events.yaml").write_text(
