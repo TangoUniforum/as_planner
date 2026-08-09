@@ -1037,6 +1037,45 @@ def _mw_proj_error():
     return (st.session_state.get("_mw_proj_cache") or {}).get("error")
 
 
+def _mw_dark_handoff(state, ctx, events):
+    """Handoff-continuity lint for the scripted window: which handoff-era weeks
+    have NO harvestable 6N fish under the depuration hold?
+
+    Pure arithmetic on the hydrated start state + the scripted events (the
+    detector is forecast.manual_window.dark_handoff_weeks — the same handoff
+    semantics both engines now honor); no biology, no extra runs. Returns
+    (dark_week_labels, window_n, hold_weeks, stage_lo, stage_hi) or None when
+    the handoff is covered. stage_lo..stage_hi is the window-week range where a
+    scripted Send-to-6N / Graded-to-6N would arrive in time to cover the dark
+    week(s).
+    """
+    from forecast.global_planner_poc import _PURGE_HOLD_WEEKS as _hold
+    from forecast.manual_window import dark_handoff_weeks
+    from forecast.sixn import SIXN_ALL_TANKS
+    from forecast.time_grid import forecast_week_labels
+    if not events:
+        return None
+    try:
+        sixn_start = {t.tank_id: t.count for t in state.tanks_by_id.values()
+                      if t.tank_id in SIXN_ALL_TANKS and not t.is_empty}
+        n = max(int(e.week or 1) for e in events)
+        dark = dark_handoff_weeks(sixn_start, events,
+                                  window_weeks=n, hold_weeks=_hold)
+        if not dark:
+            return None
+        labels = forecast_week_labels(ctx["forecast_start"], n + _hold)
+        dark_labels = [labels[w - 1] for w in dark if 0 < w <= len(labels)]
+        # A staging at window week k releases at k + hold: to cover the first
+        # dark week the move must land by (first_dark - hold); anything later
+        # than (last_dark - hold) arrives too late for every dark week.
+        stage_lo = max(1, min(dark) - _hold)
+        stage_hi = min(n, max(dark) - _hold)
+        stage_hi = max(stage_hi, stage_lo)
+        return dark_labels, n, _hold, stage_lo, stage_hi
+    except Exception:  # noqa: BLE001 — a lint must never break the editor
+        return None
+
+
 def _mw_validate(state, ctx, events):
     """{event_index(1-based): [messages]} for every infeasible event, faithful to
     the run (forecast.manual_events.validate_manual_events). Cached by the working
@@ -2363,6 +2402,27 @@ def _manual_window_editor(uploaded):
 
         events = _mw_events()
         bad = _mw_validate(state, ctx, events) if hydrated else {}
+
+        # Handoff lint (WARNING, not a block — the operator may intend it): a
+        # window that drains 6N without restaging leaves the planner nothing
+        # releasable at handoff under the depuration hold — a dark week the
+        # engines will now faithfully show instead of papering over.
+        if hydrated:
+            _dh = _mw_dark_handoff(state, ctx, events)
+            if _dh:
+                _dl, _dn, _dhold, _slo, _shi = _dh
+                _wk_txt = ", ".join(f"**{w}**" for w in _dl)
+                _rng = (f"week {_slo}" if _slo == _shi
+                        else f"weeks {_slo}-{_shi}")
+                st.warning(
+                    f"⚠ **Your window drains 6N without restaging** — "
+                    f"{'week ' if len(_dl) == 1 else 'weeks '}{_wk_txt} will "
+                    f"have **no harvestable fish** under the {_dhold}-week "
+                    f"depuration hold (fish must sit off-feed in 6N for "
+                    f"{_dhold} weeks before harvest, so the planner can't "
+                    f"release anything it hasn't staged in time). Script "
+                    f"**Send-to-6N** / **Graded-to-6N** moves in {_rng}, or "
+                    f"accept a dark week.")
 
         if hydrated:
             horizon = int(getattr(ctx["control"], "horizon_weeks", 52) or 52)
