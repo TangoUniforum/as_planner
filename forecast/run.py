@@ -583,18 +583,30 @@ def main(
                 continue
             if r.density_kg_m3 > cap:
                 viols.append(r.density_kg_m3)
-        return c, p, fs, len(viols), max(viols, default=0.0)
+        # ZERO-HARVEST weeks (the hard steady-harvest contract): horizon weeks
+        # with no harvested fish at all. Ranked ABOVE density in the trial
+        # acceptance below — the evaluator used to judge candidates on density
+        # viols alone, so it would happily trade an empty harvest week for a
+        # lower viol count (measured on the 7.29.26 PR: a trial set with 101
+        # viols but 2 empty 2028 weeks beat the 111-viol zero-empty set).
+        horizon_weeks = {r.week_label for r in p.batch_locations}
+        harvested_weeks: set[str] = set()
+        for ev in p.harvest_events:
+            if getattr(ev, "count", 0) and ev.count > 0:
+                iso = ev.event_date.isocalendar()
+                harvested_weeks.add(f"{iso[0]}-W{iso[1]:02d}")
+        zero_weeks = len(horizon_weeks - harvested_weeks)
+        return c, p, fs, len(viols), max(viols, default=0.0), zero_weeks
 
     # Probe run to discover candidates.
-    canvas_probe, placement_probe, final_state_probe, viols_probe, worst_probe = (
-        _build_and_place(set())
-    )
+    (canvas_probe, placement_probe, final_state_probe, viols_probe,
+     worst_probe, zeros_probe) = _build_and_place(set())
     candidates = list(canvas_probe.pr_correction_candidates)
 
     if not candidates:
         print(f"\n  PR_CORRECTION evaluator: no over-concentrated PR cohorts; "
               f"advisory-only mode (baseline {viols_probe} viols / "
-              f"{worst_probe:.1f} worst).")
+              f"{worst_probe:.1f} worst / {zeros_probe} empty wks).")
         canvas = canvas_probe
         placement = placement_probe
         final_state = final_state_probe
@@ -603,17 +615,18 @@ def main(
         print(f"\n  PR_CORRECTION evaluator (Q-COORD.L 2-pass): "
               f"{len(candidates)} candidate(s)")
         print(f"    baseline (no actions): {viols_probe} viols / "
-              f"{worst_probe:.1f} worst")
+              f"{worst_probe:.1f} worst / {zeros_probe} empty wks")
         accepted_pr_corrections = set()
         best_canvas = canvas_probe
         best_placement = placement_probe
         best_final_state = final_state_probe
         best_viols = viols_probe
         best_worst = worst_probe
+        best_zeros = zeros_probe
         for bid in candidates:
             trial_allowed = accepted_pr_corrections | {bid}
             try:
-                tc, tp, tfs, tv, tw = _build_and_place(trial_allowed)
+                tc, tp, tfs, tv, tw, tz = _build_and_place(trial_allowed)
             except RuntimeError as _trial_err:
                 # A trial correction set can produce an UNRUNNABLE trajectory
                 # (the placement's no-drop abort — e.g. it consumes the entry
@@ -624,21 +637,29 @@ def main(
                 print(f"    +{bid}: trial UNRUNNABLE -> reject "
                       f"({str(_trial_err)[:120]}...)")
                 continue
-            if tv < best_viols:
-                print(f"    +{bid}: {tv} viols / {tw:.1f} worst  ->ACCEPT "
-                      f"(was {best_viols})")
+            # LEXICOGRAPHIC acceptance: the steady-harvest contract (no empty
+            # harvest week — a HARD business rule) outranks density quality.
+            # A trial that trades an empty week for fewer viols is a worse
+            # plan, full stop; a trial that removes an empty week wins even
+            # at a higher viol count.
+            if (tz, tv) < (best_zeros, best_viols):
+                print(f"    +{bid}: {tv} viols / {tw:.1f} worst / {tz} empty "
+                      f"->ACCEPT (was {best_viols} viols / {best_zeros} empty)")
                 accepted_pr_corrections = trial_allowed
                 best_canvas, best_placement, best_final_state = tc, tp, tfs
-                best_viols, best_worst = tv, tw
+                best_viols, best_worst, best_zeros = tv, tw, tz
             else:
-                print(f"    +{bid}: {tv} viols / {tw:.1f} worst  ->reject "
-                      f"(no improvement over {best_viols})")
+                print(f"    +{bid}: {tv} viols / {tw:.1f} worst / {tz} empty "
+                      f"->reject (no improvement over {best_viols} viols / "
+                      f"{best_zeros} empty)")
         if accepted_pr_corrections:
             print(f"    accepted: {sorted(accepted_pr_corrections)}; "
-                  f"final {best_viols} viols / {best_worst:.1f} worst")
+                  f"final {best_viols} viols / {best_worst:.1f} worst / "
+                  f"{best_zeros} empty wks")
         else:
             print(f"    no corrections net-positive; advisory-only mode "
-                  f"({best_viols} viols / {best_worst:.1f} worst)")
+                  f"({best_viols} viols / {best_worst:.1f} worst / "
+                  f"{best_zeros} empty wks)")
         canvas = best_canvas
         placement = best_placement
         final_state = best_final_state
