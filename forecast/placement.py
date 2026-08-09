@@ -281,6 +281,63 @@ def _as_date(d):
 
 
 # ============================================================
+# Remnant floor (INV-5 at the SOURCE)
+# ============================================================
+# Every operation that removes fish from a tank must obey "take all, or leave
+# >= min_tank_control": a sub-min "remnant" ties up a whole tank + feed line
+# for a rounding error of fish (min_tank_control is the operator's "a tank
+# under this is not worth operating" floor). These two helpers implement the
+# rule at the EMITTER, so remnants are never created rather than repaired.
+
+# Mortality pad on the KEEP side of the floor. A residue left at exactly the
+# floor erodes below it by weekly mortality (~0.05-0.1%/wk) before the weekly
+# snapshot — measured: every "leave exactly 7,000" residue showed up as a
+# 6,996-fish sub-min row the same week. Keeping floor x 1.02 (~30 weeks of
+# erosion headroom) makes a floor-kept tank stay a legal tank for the
+# remainder of its natural plan life; the weekly sweep catches the long tail.
+_REMNANT_KEEP_PAD = 1.02
+# The sweep's trigger mirrors one week of erosion ABOVE the floor, so a tank
+# about to dip under the floor by mortality is folded the week BEFORE the
+# sub-min snapshot row would appear, not the week after.
+_REMNANT_SWEEP_PAD = 1.002
+
+
+def _floored_take(src_count: float, want: float, min_keep: float) -> float:
+    """Clamp a removal so the source ends EMPTY or with >= min_keep fish.
+
+    Preference order: (1) an unaffected take when the residue is legal;
+    (2) a REDUCED take that leaves exactly min_keep growing (no overshoot of
+    the caller's target — later sources make up the difference); (3) TAKE-ALL
+    when the source can't retain a workable population (src_count <= min_keep
+    — including a pre-existing remnant, which this drains). min_keep <= 0
+    disables the floor (returns `want` clamped to the tank).
+    """
+    want = min(want, src_count)
+    if want >= src_count - 0.5:
+        return src_count                       # full drain intended anyway
+    keep = min_keep * _REMNANT_KEEP_PAD        # floor + mortality-erosion pad
+    if min_keep <= 0 or (src_count - want) >= keep:
+        return want                            # legal residue
+    reduced = src_count - keep
+    if reduced > 0.5:
+        return reduced                         # leave the (padded) floor
+    return src_count                           # can't retain a workable tank
+
+
+def _floored_partial(src_count: float, want: float, min_keep: float) -> float:
+    """`_floored_take` for passes that must NEVER escalate to take-all (the
+    rebalancers, whose move size is capped by destination headroom): returns a
+    possibly reduced take, 0.0 meaning "skip this move"."""
+    want = min(want, src_count)
+    if want >= src_count - 0.5:
+        return want
+    keep = min_keep * _REMNANT_KEEP_PAD        # floor + mortality-erosion pad
+    if min_keep <= 0 or (src_count - want) >= keep:
+        return want
+    return max(0.0, src_count - keep)
+
+
+# ============================================================
 # Outputs
 # ============================================================
 
@@ -963,7 +1020,11 @@ def _try_graded_move_in(
                 peel_t = min(peel_t, max_count)
             if peel_t < max(1.0, _min_tr):
                 continue   # tail under min_transfer — try the next tank
-            if retain_in_source and (t.count - peel_t) < (control.min_tank_control or 0):
+            # REMNANT FLOOR (both modes): the small tail becomes a standing
+            # tank population — in the SOURCE (retain_in_source) or in the
+            # retention tank. Either way a sub-min tail would strand a
+            # remnant, so skip the candidate.
+            if 0 < (t.count - peel_t) < (control.min_tank_control or 0):
                 continue   # would leave a sub-min dribble behind
             chosen = t
             break
@@ -1164,7 +1225,12 @@ def _transit_entry_to_pair(
         hop, was_res = _hop_tank()
         if hop is None:
             break
-        _take = min(goal - (already_moved + added), _es.count)
+        # REMNANT FLOOR: a partial transit must leave the entry source empty or
+        # >= min_tank_control (reduced take preferred; take-all when the source
+        # can't retain the floor — the fish route to harvest via the pair).
+        _take = _floored_take(_es.count,
+                              min(goal - (already_moved + added), _es.count),
+                              control.min_tank_control or 0.0)
         if _take <= 0:
             continue
         _e_batch, _e_loc = _es.batch_id, _es.location_id
@@ -1427,7 +1493,13 @@ def _run_sixn_purge_week(
         for src in src_tanks:
             if count_moved >= target:
                 break
-            take = min(target - count_moved, src.count)
+            # REMNANT FLOOR: never leave 0 < residue < min_tank_control behind.
+            # A partial draw is reduced so the floor stays growing in the source
+            # (a later tank/batch covers the difference); a source that can't
+            # retain the floor is taken WHOLE (it lands in 6N and is harvested
+            # at the pair drain — never a stranded grow-out remnant).
+            take = _floored_take(src.count, min(target - count_moved, src.count),
+                                 control.min_tank_control or 0.0)
             if take <= 0:
                 continue
             # First contributor goes to main tank; later contributors
@@ -1545,6 +1617,7 @@ def _emit_transfers_for_batch_diff(
     event_date: date,
     transfer_events: list,
     warnings: list[str],
+    min_keep: float = 0.0,
 ) -> None:
     """Rebalance a batch's fish across its new tank set via Transfer events.
 
@@ -1554,6 +1627,17 @@ def _emit_transfers_for_batch_diff(
     dests (new tanks) start at zero and are filled up to target. Result:
     each this_tank ends at ~target count, eliminating density spikes
     from earlier consolidations or uneven hydrations.
+
+    min_keep (min_tank_control): two remnant guards. (1) The even-split target
+    itself must not be sub-min — when total/len(this_tanks) < min_keep, planned
+    NEW destinations are dropped (never a kept/source tank) until each tank's
+    share is at least the floor, so the plan can't fan a batch into remnant
+    tanks. (2) Over->under pairing is TIER-LEGALITY-AWARE (R3/R4 via
+    move_allowed): a pair the rules would certainly refuse is skipped at
+    PLANNING time. Before this, the emitter planned e.g. growout->entry refills
+    that Transfer.apply refused, while the entry tank's own OUTBOUND leg
+    succeeded — stranding a sub-min remnant in the entry tank (the OG1S-16 /
+    OG1N-15 operator finding).
     """
     sources = sorted(prev_tanks - this_tanks)
     dests = sorted(this_tanks - prev_tanks)
@@ -1605,7 +1689,23 @@ def _emit_transfers_for_batch_diff(
                 )
         return
 
-    target_per_tank = total_count / len(this_tanks)
+    # REMNANT FLOOR guard (1): never PLAN a per-tank share below the operating
+    # floor. Drop planned NEW destinations (highest tank_id first — the plan's
+    # least-preferred pick) while the even-split share is sub-min; kept/source
+    # tanks are never dropped (they hold fish the diff must still reconcile).
+    this_eff = set(this_tanks)
+    if min_keep > 0:
+        while (len(this_eff) > 1 and total_count / len(this_eff)
+               < min_keep * _REMNANT_KEEP_PAD):
+            new_dests = sorted(this_eff - prev_tanks)
+            if not new_dests:
+                break
+            this_eff.discard(new_dests[-1])
+        if this_eff != set(this_tanks):
+            dests = sorted(this_eff - prev_tanks)
+            kept = sorted(prev_tanks & this_eff)
+
+    target_per_tank = total_count / len(this_eff)
 
     # Build over/under lists.
     overs: list[list] = []   # [tank_id, surplus, tank_obj]
@@ -1632,16 +1732,33 @@ def _emit_transfers_for_batch_diff(
     overs.sort(key=lambda x: -x[1])
     unders.sort(key=lambda x: -x[1])
 
-    i = j = 0
-    src_is_drop = {tid: True for tid in sources}
-    while i < len(overs) and j < len(unders):
+    def _pair_legal(src_tank, dst_id) -> bool:
+        """R2-R4 at PLANNING time: don't emit a transfer the tier rules will
+        certainly refuse (the refused leg strands fish; see docstring)."""
+        dst = state.tanks_by_id.get(dst_id)
+        if dst is None:
+            return False
+        return move_allowed(src_tank.system_id, dst.system_id,
+                            src_tank.avg_wt_g)[0]
+
+    i = 0
+    while i < len(overs):
         if overs[i][1] <= 0.5:
             i += 1; continue
-        if unders[j][1] <= 0.5:
-            j += 1; continue
-        take = min(overs[i][1], unders[j][1])
         src_id, _, src_tank = overs[i]
+        j = next((k for k, u in enumerate(unders)
+                  if u[1] > 0.5 and _pair_legal(src_tank, u[0])), None)
+        if j is None:
+            i += 1; continue   # no legal deficit for this source; residual below
+        take = min(overs[i][1], unders[j][1])
         dst_id = unders[j][0]
+        # REMNANT FLOOR guard (2): a partial drain must leave the source empty
+        # or >= min_keep. Reduced-take preferred (the deficit stays open for
+        # another surplus tank); a source that can't retain the floor is
+        # surplus-adjusted to drain WHOLE only if the deficit absorbs it.
+        cur = src_tank.count if not src_tank.is_empty else 0.0
+        if min_keep > 0 and cur > 0:
+            take = min(take, _floored_take(cur, take, min_keep))
         # Never set leaves_source_empty=True at the rebalance level —
         # earlier transfers from the same source can be REJECTED by
         # Transfer.apply (INV-4 etc.), so the rebalance can't know the
@@ -1663,8 +1780,6 @@ def _emit_transfers_for_batch_diff(
         unders[j][1] -= take
         if overs[i][1] < 0.5:
             i += 1
-        if unders[j][1] < 0.5:
-            j += 1
 
     # If any source still has fish after the rebalance, ROUTE them to
     # this-tanks holding the same batch (via Transfer event). If routing is
@@ -1676,7 +1791,7 @@ def _emit_transfers_for_batch_diff(
         if tank is None or tank.is_empty:
             continue
         candidates = [
-            state.tanks_by_id[t] for t in this_tanks
+            state.tanks_by_id[t] for t in this_eff
             if t in state.tanks_by_id
             and state.tanks_by_id[t].batch_id == batch_id
             # R2-R4: only route the residual to destinations the tier rules
@@ -2185,7 +2300,7 @@ def _rebalance_systems_realized(
 def _variable_quantity_rebalance(
     state, wl, event_date, transfer_events, warnings,
     cap_lookup, buf, batch_meta, tables, og_systems, og_tanks_by_system,
-    budget, min_transfer=0.0,
+    budget, min_transfer=0.0, min_keep=0.0,
 ):
     """Shave over-cap systems by moving a PRECISE count of fish between a
     batch's EXISTING tanks in different systems.
@@ -2285,6 +2400,11 @@ def _variable_quantity_rebalance(
             continue
         move_bio, bid, src, dst = best
         move_count = move_bio / (src.avg_wt_g / 1000.0)
+        # REMNANT FLOOR: never leave 0 < residue < min_tank_control in the
+        # source. Reduced take only (never take-all — the move is bounded by
+        # destination headroom); a reduced move that then falls under the
+        # min_transfer floor is skipped entirely.
+        move_count = _floored_partial(src.count, move_count, min_keep)
         # MIN-TRANSFER floor: don't split a sub-group smaller than min_transfer out
         # of a tank — a tiny partial move costs handling for marginal relief. This
         # is a PARTIAL move (leaves the source non-empty), so the floor applies;
@@ -2315,7 +2435,7 @@ def _balance_loads(
     ta_index, week_tank_owner, sorted_weeks, week_index,
     cap_lookup, buf, batch_meta, tables,
     og_systems, growout_systems, og_tanks_by_system, budget,
-    level=False, reserved=frozenset(), min_transfer=0.0,
+    level=False, reserved=frozenset(), min_transfer=0.0, min_keep=0.0,
 ):
     """Multi-objective balancer: cut out-of-bounds across per-tank DENSITY,
     per-system FEED, and per-system BIOMASS *together*.
@@ -2470,6 +2590,9 @@ def _balance_loads(
             stuck.add(src.tank_id)
             continue
         move_count = move_kg / (src.avg_wt_g / 1000.0)
+        # REMNANT FLOOR (see _variable_quantity_rebalance): reduce the take so
+        # the source keeps >= min_tank_control, or skip.
+        move_count = _floored_partial(src.count, move_count, min_keep)
         # MIN-TRANSFER floor (see _variable_quantity_rebalance): skip a partial
         # split smaller than min_transfer fish. 0 = no floor.
         if move_count < max(1.0, min_transfer):
@@ -2494,6 +2617,100 @@ def _balance_loads(
                                 ta_index, week_tank_owner)
         moves += 1
     return moves
+
+
+def _consolidate_remnants(
+    state: FacilityState,
+    event_date: date,
+    week_label: str,
+    transfer_events: list,
+    warnings: list[str],
+    min_keep: float,
+) -> int:
+    """Weekly remnant sweep (INV-5 repair): fold any occupied grow-out/entry
+    tank holding 0 < count < min_keep into its OWN batch's other tanks.
+
+    The emitter-side floors (_floored_take/_floored_partial + the diff
+    emitter's guards) stop remnants being CREATED; this sweep is the systemic
+    net for the two remaining sources — mortality attrition eroding a tank
+    below the floor over time, and a refused transfer stranding a tail. Rules:
+
+      - SAME-BATCH TOP-UP only (INV-1: one batch per tank; relocating the
+        remnant to an empty tank would just move the problem).
+      - Tier-legal destinations only (R2-R4 via move_allowed; entry sources
+        prefer FORWARD grow-out destinations, and intra-entry only below the
+        1 kg lock — move_allowed enforces).
+      - 6N depuration + STARVE (in-place purge) tanks are pipeline-owned:
+        neither swept as sources (their small counts are transient staging,
+        drained at harvest) nor topped up as destinations.
+      - Fold only when the batch's other tanks can absorb the WHOLE remnant
+        within density headroom — a partial fold would leave a smaller
+        remnant, defeating the point.
+
+    A remnant whose batch has no absorbing tank (e.g. the batch's total
+    remainder is itself < min_keep, living alone) legitimately stays; the
+    abort-time _consolidate_entry_forward remains the last-resort backstop.
+    Returns the number of tanks folded (emptied).
+    """
+    if min_keep <= 0:
+        return 0
+    folds = 0
+    remnants = sorted(
+        [t for t in state.tanks_by_id.values()
+         if not t.is_empty and t.type == "OG"
+         and t.system_id not in _SIXN_SYSTEMS
+         and t.stage != STAGE_STARVE
+         and t.avg_wt_g > 0
+         and 0 < t.count < min_keep * _REMNANT_SWEEP_PAD],
+        key=lambda t: (t.count, t.tank_id))
+    for src in remnants:
+        if src.is_empty:
+            continue
+        cands = []
+        for d in state.tanks_by_id.values():
+            if (d.tank_id == src.tank_id or d.is_empty
+                    or d.batch_id != src.batch_id or d.type != "OG"
+                    or d.system_id in _SIXN_SYSTEMS
+                    or d.stage == STAGE_STARVE
+                    or d.max_density_kg_m3 <= 0):
+                continue
+            if not move_allowed(src.system_id, d.system_id, src.avg_wt_g)[0]:
+                continue
+            head_kg = d.max_biomass_kg * 0.98 - d.biomass_kg
+            if head_kg <= 0:
+                continue
+            cands.append((d, head_kg / (src.avg_wt_g / 1000.0)))
+        # Forward-first (out of the entry tier), then most headroom (fewest
+        # destination hops), tank_id for determinism.
+        cands.sort(key=lambda c: (c[0].system_id in OG12_SYSTEMS, -c[1],
+                                  c[0].tank_id))
+        if not cands or sum(r for _, r in cands) < src.count:
+            continue   # can't absorb the whole remnant — leave it intact
+        allocs, left = [], src.count
+        for d, room in cands:
+            take = min(left, room)
+            if take <= 0.5:
+                break
+            allocs.append(TankAllocation(
+                tank_id=d.tank_id, count=take,
+                avg_wt_g=src.avg_wt_g, cv_pct=src.cv_pct))
+            left -= take
+        _sb, _sl, _sn = src.batch_id, src.location_id, src.count
+        mv = Transfer(
+            batch_id=_sb, event_date=event_date,
+            source_tank_id=src.tank_id, destinations=allocs,
+            leaves_source_empty=True)
+        warnings.extend(mv.apply(state))
+        transfer_events.append(mv)
+        if state.tanks_by_id[src.tank_id].is_empty:
+            folds += 1
+            warnings.append(
+                f"{week_label}: REMNANT SWEEP — folded {_sl} (batch {_sb}, "
+                f"{_sn:.0f} fish < min_tank_control {min_keep:.0f}) into its "
+                f"own batch's tank(s) "
+                f"{[a.tank_id for a in allocs]} (same-batch top-up; frees the "
+                f"tank + feed line)")
+    return folds
 
 
 def _free_6n_slots(state: FacilityState, resting_pair) -> list[int]:
@@ -3591,6 +3808,7 @@ def phase_d_emit_events(
                     continue
                 _emit_transfers_for_batch_diff(
                     state, b, p, n, transfer_date, transfer_events, warnings,
+                    min_keep=control.min_tank_control or 0.0,
                 )
             # Even-out pass: fix PR/residual over-concentration by
             # leveling fish across each batch's tanks where a tank is
@@ -3616,6 +3834,7 @@ def phase_d_emit_events(
                     level=bool(getattr(control, "rebalance_level", False)),
                     reserved=_reserved_og,
                     min_transfer=getattr(control, "min_transfer_count", 0.0) or 0.0,
+                    min_keep=control.min_tank_control or 0.0,
                 )
 
             # Variable-quantity pass: with the week's placement realized, shave
@@ -3630,7 +3849,19 @@ def phase_d_emit_events(
                     _sys_cap, _rebal_buf, batch_meta, tables, og_systems_set,
                     og_tanks_by_system_r, _vq_budget,
                     min_transfer=getattr(control, "min_transfer_count", 0.0) or 0.0,
+                    min_keep=control.min_tank_control or 0.0,
                 )
+
+            # REMNANT SWEEP (runs with the rebalancer every week): fold any
+            # occupied tank still under min_tank_control — mortality attrition
+            # or a refused transfer's stranded tail — into its own batch's
+            # other tanks (same-batch top-up, tier-legal, whole-remnant only).
+            # This makes the abort-time _consolidate_entry_forward (the
+            # arrival-week backstop below) nearly unreachable.
+            _consolidate_remnants(
+                state, transfer_date, week_label, transfer_events, warnings,
+                control.min_tank_control or 0.0,
+            )
 
         # ANTICIPATORY PURGE PACING (purge mode only). The TranOG arrival
         # schedule is known up front, but the reactive make-room below only acts
@@ -4100,6 +4331,21 @@ def phase_d_emit_events(
                     if N >= 2:
                         big_n = (N + 1) // 2
                         small_n = N - big_n
+                        # REMNANT FLOOR on the arrival split: never CREATE a
+                        # tank occupancy under min_tank_control when avoidable.
+                        # Shrink each class's tank count until its per-tank
+                        # share clears the floor (a final short split goes into
+                        # the previous destination instead of its own tank).
+                        # A class whose WHOLE population is under the floor
+                        # keeps 1 tank — unavoidable, INV-1 forbids mixing.
+                        _mtc = control.min_tank_control or 0.0
+                        if _mtc > 0:
+                            while (big_n > 1
+                                   and split.big_class_count / big_n < _mtc):
+                                big_n -= 1
+                            while (small_n > 1
+                                   and split.small_class_count / small_n < _mtc):
+                                small_n -= 1
                         per_big = (split.big_class_count / big_n) if big_n else 0
                         per_small = (split.small_class_count / small_n) if small_n else 0
                         allocations = []
@@ -4182,6 +4428,17 @@ def phase_d_emit_events(
             # Reserve OG3+ tanks for upcoming TranOG (N=4 minimum).
             if len(grade_dest_pool) <= TRANOG_RESERVE:
                 break
+            # REMNANT FLOOR: a half/half grade of a tank under 2x the floor
+            # would CREATE two sub-min tanks — worse than the density it
+            # relieves (a tank below min_tank_control is not worth operating).
+            if (control.min_tank_control
+                    and tank.count < 2 * control.min_tank_control):
+                warnings.append(
+                    f"{week_label}: tank {tank.location_id} over density "
+                    f"trigger but grade-split declined — {tank.count:.0f} fish "
+                    f"would split into two tanks under min_tank_control "
+                    f"{control.min_tank_control:.0f}")
+                continue
             # Pick a destination the tier rules allow from this source tank
             # (R2-R4 via tiers.move_allowed): no backward split into entry
             # from a non-entry source, no intra-entry split at >= 1 kg.
