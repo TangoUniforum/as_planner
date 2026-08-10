@@ -457,6 +457,22 @@ def _system_overshoot(wb):
     return (over / tot) if tot else 0.0
 
 
+def _is_purge_row(row, si, sti):
+    """True for a BatchLocations row that is off-feed purge/depuration — excluded
+    from the density metrics (harvest-size fish held at high density just before
+    shipping is expected, not a compliance/welfare breach).
+
+    Discriminates by Stage == STARVE, NOT by System == OG6N: from 2028 the 6N
+    MAINS are grow-out production tanks whose fish are reared and fed — excluding
+    the whole system would blind the metrics to real crowding there (and an OG
+    tank starving in place IS purge, wherever it sits). Workbooks without a Stage
+    value fall back to the legacy System == OG6N rule."""
+    stg = row[sti] if sti is not None and len(row) > sti else None
+    if isinstance(stg, str) and stg.strip():
+        return stg.strip().upper() == "STARVE"
+    return len(row) > si and row[si] == "OG6N"
+
+
 def _density_overshoot(wb):
     """Fraction of (tank, week) cells over the ~95 kg/m3 density cap (per-tank
     density compliance — the trade leveling can create)."""
@@ -467,14 +483,14 @@ def _density_overshoot(wb):
                     and any(str(c).strip().startswith("Density") for c in r if c))
     di = _find_col(cols, "Density", default=8)   # "Density (kg/m3)"
     si = _find_col(cols, "System", default=4)
+    sti = _find_col(cols, "Stage", default=9)
     over = tot = 0
     for i, row in enumerate(ws.iter_rows(values_only=True), 1):
         if i < 5 or not row or row[0] is None:
             continue
-        # EXCLUDE the OG6N depuration/purge pool: harvest-size fish held off-feed
-        # at high density just before shipping is expected, not a compliance breach
-        # (consistent with the engine, the app alert, and the smoothness term above).
-        if len(row) > si and row[si] == "OG6N":
+        # EXCLUDE off-feed purge/depuration rows (see _is_purge_row — consistent
+        # with the engine, the app alert, and the smoothness term above).
+        if _is_purge_row(row, si, sti):
             continue
         dens = row[di] if len(row) > di else None
         if isinstance(dens, (int, float)):
@@ -485,10 +501,11 @@ def _density_overshoot(wb):
 
 
 def _density_peak(wb):
-    """The single HIGHEST per-tank density (kg/m3) across BatchLocations (OG6N
-    depuration excluded). A COMPLEMENT to _density_overshoot (a fraction): a PEAK
-    surfaces one physically-impossible tank — e.g. a placement collapse cramming
-    a whole batch into one tank at 600+ kg/m3 — that a fraction dilutes to ~0."""
+    """The single HIGHEST per-tank density (kg/m3) across BatchLocations (off-feed
+    purge rows excluded, see _is_purge_row). A COMPLEMENT to _density_overshoot (a
+    fraction): a PEAK surfaces one physically-impossible tank — e.g. a placement
+    collapse cramming a whole batch into one tank at 600+ kg/m3 — that a fraction
+    dilutes to ~0."""
     if "BatchLocations" not in wb.sheetnames:
         return 0.0
     ws = wb["BatchLocations"]
@@ -496,11 +513,12 @@ def _density_peak(wb):
                     and any(str(c).strip().startswith("Density") for c in r if c))
     di = _find_col(cols, "Density", default=8)
     si = _find_col(cols, "System", default=4)
+    sti = _find_col(cols, "Stage", default=9)
     peak = 0.0
     for i, row in enumerate(ws.iter_rows(values_only=True), 1):
         if i < 5 or not row or row[0] is None:
             continue
-        if len(row) > si and row[si] == "OG6N":
+        if _is_purge_row(row, si, sti):
             continue
         dens = row[di] if len(row) > di else None
         if isinstance(dens, (int, float)):
@@ -512,8 +530,9 @@ WELFARE_DENSITY_KG_M3 = 80.0   # soft welfare/quality line, below the ~95 hard c
 
 
 def _density_quality(wb, welfare=WELFARE_DENSITY_KG_M3):
-    """Product-QUALITY view of per-tank density (OG6N depuration excluded). Reads
-    the realized density on every BatchLocations (batch, week, tank) row and, vs
+    """Product-QUALITY view of per-tank density (off-feed purge rows excluded,
+    see _is_purge_row — from 2028 the 6N mains rear production fish and DO count).
+    Reads the realized density on every BatchLocations (batch, week, tank) row and, vs
     the `welfare` threshold (kg/m3 — a SOFT line below the ~95 hard cap), returns:
 
       mean_density  — biomass-weighted mean rearing density: the density the
@@ -533,13 +552,14 @@ def _density_quality(wb, welfare=WELFARE_DENSITY_KG_M3):
                     and any(str(c).strip().startswith("Density") for c in r if c))
     di = _find_col(cols, "Density", default=8)
     si = _find_col(cols, "System", default=4)
+    sti = _find_col(cols, "Stage", default=9)
     mi = _find_col(cols, "Biomass", default=7)
     ci = _find_col(cols, "Count", default=5)
     sum_bd = sum_b = crowded_b = crowded_fw = 0.0
     for i, row in enumerate(ws.iter_rows(values_only=True), 1):
         if i < 5 or not row or row[0] is None:
             continue
-        if len(row) > si and row[si] == "OG6N":
+        if _is_purge_row(row, si, sti):
             continue
         dens = row[di] if len(row) > di else None
         bio = row[mi] if len(row) > mi else None
@@ -906,7 +926,11 @@ def _welfare_density(config_dir, overrides):
     except (OSError, ValueError, TypeError):
         pass
     if "density_welfare_threshold_kg_m3" in overrides:
-        wl = float(overrides["density_welfare_threshold_kg_m3"])
+        # `or default`: a 0/None override resolves to the default 80, matching
+        # the config path above and every app surface — previously an explicit
+        # 0 here (and only here) meant "everything is crowded".
+        wl = float(overrides["density_welfare_threshold_kg_m3"]
+                   or WELFARE_DENSITY_KG_M3)
     return wl
 
 

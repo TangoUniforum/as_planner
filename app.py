@@ -4308,7 +4308,11 @@ def _parse_output_workbook(path: Path) -> dict:
     _wl = WELFARE_DENSITY_KG_M3
     try:                                    # operator's welfare line from Configure
         from forecast.config_io import load_control
-        _wl = float(load_control(CONFIG_DIR).density_welfare_threshold_kg_m3)
+        # `or default`: an unset/zero line means "the default 80", the SAME
+        # resolution every other surface (board, optimizer, frontier) uses —
+        # a 0 here would mark ALL biomass crowded on this KPI only.
+        _wl = float(load_control(CONFIG_DIR).density_welfare_threshold_kg_m3
+                    or WELFARE_DENSITY_KG_M3)
     except Exception:  # noqa: BLE001
         pass
     _q_mean, _q_fw, _q_frac = _density_quality(wb, _wl)
@@ -4365,7 +4369,9 @@ def _stocking_frontier_section():
         from forecast.stocking_frontier import stocking_frontier
         _wl = 80.0
         try:
-            _wl = float(load_control(CONFIG_DIR).density_welfare_threshold_kg_m3)
+            # `or 80`: unset/zero resolves to the default, same as every surface.
+            _wl = float(load_control(CONFIG_DIR).density_welfare_threshold_kg_m3
+                        or 80.0)
         except Exception:  # noqa: BLE001
             pass
         import shutil
@@ -4412,9 +4418,17 @@ def _stocking_frontier_section():
         xaxis_title="Harvest volume (t) — more is better →",
         yaxis_title="Reared density (kg/m³) — lower is gentler ↓")
     st.plotly_chart(fig, use_container_width=True)
-    base = next((p for p in ok if p.reduction == 0), ok[0])
+    base = next((p for p in ok if p.reduction == 0), None)
+    if base is None:
+        # The 0% run failed/broke conservation — the smallest surviving cut
+        # stands in, and the captions must SAY so: silently labelling deltas
+        # "vs 0%" against a non-zero base misstates every number.
+        base = ok[0]
+        st.caption(f"⚠ The 0% (no-cut) baseline failed — deltas below are vs "
+                   f"the **{base.reduction * 100:.0f}% cut**, not vs today's "
+                   f"stocking.")
     for p in ok:
-        if p.reduction > 0:
+        if p is not base and p.reduction > base.reduction:
             dq = base.mean_rearing_density - p.mean_rearing_density
             dv = base.harvest_t - p.harvest_t
             st.caption(
