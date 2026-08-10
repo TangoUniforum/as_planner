@@ -2506,8 +2506,11 @@ def _mw_copilot(uploaded, events, forecast_start=None, bad=None):
     if prop.sixn_recs:
         st.markdown("**② Stage into 6N for harvest — controller**")
         for m in prop.sixn_recs:
-            _row(m, i, f"**{m.from_loc} → {m.to_loc}** · {m.batch} · "
-                       f"{m.count:,.0f} fish", True)
+            _lbl = (f"**{m.from_loc} → {m.to_loc}** · {m.batch} · "
+                    f"{m.count:,.0f} fish")
+            if m.kind == "grade_to_6n":     # graded pickup — say what approval does
+                _lbl += f" · _{m.note}_"
+            _row(m, i, _lbl, True)
             i += 1
     for opt in prop.transfer_options:
         mv = sorted(opt.moves, key=lambda x: -x.count)

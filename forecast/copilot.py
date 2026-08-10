@@ -27,7 +27,7 @@ from pathlib import Path
 @dataclass
 class Move:
     """One recommended operation for the handoff week."""
-    kind: str            # "harvest" | "to_6n" | "og_transfer"
+    kind: str            # "harvest" | "to_6n" | "grade_to_6n" | "og_transfer"
     engine: str          # "controller" | "global-lp"
     priority: int        # 1 harvest/contract · 2 6N staging/cap · 3 transfer/balance
     from_tank: int
@@ -38,6 +38,10 @@ class Move:
     count: float
     avg_wt_kg: float
     note: str            # human-readable "why"
+    # grade_to_6n only: where the smaller remainder goes (None / == from_tank =
+    # it stays in the source tank). Carried so approval can rebuild the graded
+    # event exactly instead of degrading it to a mean-weight og_to_6n.
+    retention_tank: int | None = None
 
 
 @dataclass
@@ -64,7 +68,7 @@ class Proposal:
 
 def _handoff(input_path, config_dir, scenario_dir):
     """(handoff ISO week label, forecast-relative week#, handoff week-start date,
-    tank->system, tank->loc).
+    tank->system, tank->loc, control).
 
     The manual window runs weeks 1..N from the PR-derived start; the next week to
     recommend is N+1, whose ISO label filters the planners' output sheets. The
@@ -79,6 +83,10 @@ def _handoff(input_path, config_dir, scenario_dir):
     wb = load_workbook(str(input_path), data_only=True)
     pc, _og, _fw = read_production_report(wb)
     wb.close()
+    if pc is None:                      # tolerant PR parse — fail with WHY, not .year
+        raise ValueError(
+            "ProductionReport has no readable 'Closing Month' date — the co-pilot "
+            "cannot derive the handoff week (fix the PR's closing-date cell)")
     fs0 = date(pc.year, pc.month, pc.day) + timedelta(days=1)
     events = load_manual_events(str(scenario_dir),
                                 pr_closing=date(pc.year, pc.month, pc.day))
@@ -87,7 +95,7 @@ def _handoff(input_path, config_dir, scenario_dir):
     handoff = iso_week_label(handoff_date)
     tank_sys = {t.tank_id: t.system_id for t in facility.tanks}
     tank_loc = {t.tank_id: t.location_id for t in facility.tanks}
-    return handoff, n + 1, handoff_date, tank_sys, tank_loc
+    return handoff, n + 1, handoff_date, tank_sys, tank_loc, _c
 
 
 def _extract_harvests(wb, wk_label, tank_loc):
@@ -114,10 +122,18 @@ def _extract_harvests(wb, wk_label, tank_loc):
 def _extract_transfers(wb, wk_label, tank_sys, tank_loc, is6n, *, only_to_6n, engine):
     """TransferPlan rows for `wk_label` -> Moves. `only_to_6n` keeps OG->6N staging;
     else keeps OG<->OG relocations (both ends real non-6N OG tanks).
-    Columns: Week|Batch|Type|From_Tank|To_Tank|Count|Avg_Weight|Grade|CV."""
+    Columns: Week|Batch|Type|From_Tank|To_Tank|Count|Avg_Weight|Grade|CV.
+
+    Type='Grade' rows are a GRADED pickup (the controller size-sorts the source:
+    the biggest N fish go to 6N, the smaller remainder to a retention tank).
+    They are surfaced as kind='grade_to_6n' with the retention tank attached, so
+    approval re-emits a `graded_harvest` manual event — NOT a plain og_to_6n,
+    which would move `count` MEAN-weight fish and lose the top-N-by-size
+    selection (wrong biomass to 6N, wrong remainder left growing)."""
     if "TransferPlan" not in wb.sheetnames:
         return []
     out = []
+    retention: dict = {}          # (batch, from_tank) -> retention To_Tank
     for r in wb["TransferPlan"].iter_rows(values_only=True):
         if not r or not isinstance(r[0], str) or "-W" not in r[0] or str(r[0]) != wk_label:
             continue
@@ -130,7 +146,30 @@ def _extract_transfers(wb, wk_label, tank_sys, tank_loc, is6n, *, only_to_6n, en
         if not isinstance(r[5], (int, float)):
             continue
         avg = r[6] if len(r) > 6 and isinstance(r[6], (int, float)) else 0.0
+        typ = str(r[2] or "") if len(r) > 2 else ""
+        grade = str(r[7] or "") if len(r) > 7 else ""
         from_is6n, to_is6n = ft in is6n, tt in is6n
+        if typ == "Grade":
+            # Grade legs are 6N-staging business only — never plain OG<->OG picks
+            # (an approved 'retention' leg as og_transfer would also move mean-
+            # weight fish and break the graded split).
+            if not only_to_6n:
+                continue
+            if grade == "retention":
+                retention[(str(r[1]), ft)] = tt
+                continue
+            if not (grade == "pickup" and ft in tank_sys
+                    and not from_is6n and to_is6n):
+                continue
+            out.append(Move(
+                kind="grade_to_6n", engine=engine, priority=2,
+                from_tank=ft, to_tank=tt,
+                from_loc=tank_loc.get(ft, f"#{ft}"),
+                to_loc=tank_loc.get(tt, f"#{tt}"),
+                batch=str(r[1]), count=float(r[5]), avg_wt_kg=float(avg),
+                note=f"grade: the biggest {r[5]:,.0f} fish → 6N to purge; "
+                     f"the smaller remainder keeps growing"))
+            continue
         if only_to_6n:
             if not (ft in tank_sys and not from_is6n and to_is6n):
                 continue
@@ -148,7 +187,23 @@ def _extract_transfers(wb, wk_label, tank_sys, tank_loc, is6n, *, only_to_6n, en
                         to_loc=tank_loc.get(tt, f"#{tt}"),
                         batch=str(r[1]), count=float(r[5]), avg_wt_kg=float(avg),
                         note=note))
+    for m in out:                 # pair each graded pickup with its retention leg
+        if m.kind == "grade_to_6n":
+            m.retention_tank = retention.get((m.batch, m.from_tank))
     return out
+
+
+def _staging_6n_tanks(control, d):
+    """The 6N tanks that count as depuration/harvest STAGING on date `d`.
+
+    In PURGE mode every 6N tank is staging. In PRODUCTION mode (2028+) the 6N
+    MAINS are grow-out production tanks — a move into one is a regular
+    relocation, and classing it 'to_6n' would approve an og_to_6n that FREEZES
+    the destination to STAGE_STARVE (a frozen production tank). Only the
+    SISTERS stay harvest-staging in both modes."""
+    from forecast.sixn import (SIXN_ALL_TANKS, SIXN_SISTER_TANKS, is_purge_mode)
+    return (set(SIXN_ALL_TANKS) if is_purge_mode(control, d)
+            else set(SIXN_SISTER_TANKS))
 
 
 def _short_horizon_config(config_dir, window_n, n_weeks, buffer):
@@ -220,14 +275,17 @@ def propose_upcoming(input_path, config_dir, scenario_dir, *,
 
     from openpyxl import load_workbook
     from forecast.run import main as run_pipeline
-    from forecast.sixn import SIXN_ALL_TANKS
     from forecast.time_grid import iso_week_label
 
-    handoff, window_week, handoff_date, tank_sys, tank_loc = _handoff(
+    handoff, window_week, handoff_date, tank_sys, tank_loc, control = _handoff(
         input_path, config_dir, scenario_dir)
-    is6n = set(SIXN_ALL_TANKS)
+
+    def _is6n_for(d):
+        return _staging_6n_tanks(control, d)
+
     n_weeks = max(1, int(n_weeks))
-    weeks = [(iso_week_label(handoff_date + timedelta(days=7 * j)), window_week + j)
+    weeks = [(iso_week_label(handoff_date + timedelta(days=7 * j)), window_week + j,
+              handoff_date + timedelta(days=7 * j))
              for j in range(n_weeks)]
     warnings: list[str] = []
 
@@ -244,10 +302,10 @@ def propose_upcoming(input_path, config_dir, scenario_dir, *,
             run_pipeline(input_path=str(input_path), output_path=str(out),
                          config_dir=str(plan_cfg), scenario_dir=str(scenario_dir))
             wb = load_workbook(str(out), read_only=True, data_only=True)
-            for wk, _ww in weeks:
+            for wk, _ww, wd in weeks:
                 ctrl[wk] = (
                     _extract_harvests(wb, wk, tank_loc),
-                    _extract_transfers(wb, wk, tank_sys, tank_loc, is6n,
+                    _extract_transfers(wb, wk, tank_sys, tank_loc, _is6n_for(wd),
                                        only_to_6n=True, engine="controller"),
                 )
             wb.close()
@@ -261,9 +319,20 @@ def propose_upcoming(input_path, config_dir, scenario_dir, *,
                     out = Path(td) / "copilot_global.xlsm"
                     run_global(str(input_path), str(out), str(plan_cfg),
                                str(scenario_dir), optimal=False)
+                    # Conservation gate — the controller run ships through the
+                    # audited pipeline, but the global plan reaches the operator
+                    # ONLY through this extraction: never surface transfer picks
+                    # from a plan that dropped or over-produced fish.
+                    from forecast.tuning import _conservation
+                    dropped, overprod = _conservation(str(out))
+                    if dropped or overprod:
+                        raise ValueError(
+                            f"plan fails conservation (dropped={dropped}, "
+                            f"over-produced={overprod}) — transfers withheld")
                     wb = load_workbook(str(out), read_only=True, data_only=True)
-                    for wk, _ww in weeks:
-                        glob[wk] = _extract_transfers(wb, wk, tank_sys, tank_loc, is6n,
+                    for wk, _ww, wd in weeks:
+                        glob[wk] = _extract_transfers(wb, wk, tank_sys, tank_loc,
+                                                      _is6n_for(wd),
                                                       only_to_6n=False, engine="global-lp")
                     wb.close()
             except Exception as e:  # noqa: BLE001 — optimizer is optional; degrade gracefully
@@ -274,7 +343,7 @@ def propose_upcoming(input_path, config_dir, scenario_dir, *,
             shutil.rmtree(_cfg_tmp, ignore_errors=True)
 
     proposals: list[Proposal] = []
-    for wk, ww in weeks:
+    for wk, ww, _wd in weeks:
         harvest_recs, sixn_recs = ctrl.get(wk, ([], []))
         transfer_options: list[TransferOption] = []
         og = glob.get(wk, [])
@@ -307,13 +376,25 @@ def to_manual_events(moves, window_week):
     read only the per-destination count and treat a single count=None dest as
     "all remaining", so an approved PARTIAL move would silently drain the WHOLE
     source tank. `harvest` is the exception — _apply_harvest reads ManualEvent.count
-    (None = whole tank), so the count belongs on the event there."""
+    (None = whole tank), so the count belongs on the event there.
+
+    `grade_to_6n` becomes a `graded_harvest` event (count = the biggest-N pickup,
+    destinations[0] = the 6N tank, destinations[1] = the retention tank when the
+    remainder moves) — NOT a plain og_to_6n, which would move mean-weight fish
+    and lose the top-N-by-size selection."""
     from forecast.manual_events import ManualEvent, ManualDest
     evs = []
     for m in moves:
         if m.kind == "harvest":
             evs.append(ManualEvent(type="harvest", week=window_week,
                                    from_tank=m.from_tank, count=m.count))
+        elif m.kind == "grade_to_6n":
+            dests = [ManualDest(tank=m.to_tank, count=m.count)]
+            if m.retention_tank and m.retention_tank != m.from_tank:
+                dests.append(ManualDest(tank=m.retention_tank))
+            evs.append(ManualEvent(type="graded_harvest", week=window_week,
+                                   from_tank=m.from_tank, count=m.count,
+                                   destinations=dests))
         elif m.kind == "to_6n":
             evs.append(ManualEvent(type="og_to_6n", week=window_week,
                                    from_tank=m.from_tank, count=m.count,
