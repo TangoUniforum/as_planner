@@ -1636,6 +1636,35 @@ def _run_sixn_purge_week(
                 _rem -= _a
                 if _rem <= 0:
                     break
+            # SLIVER-LEG consolidation (handling budget): a split leg below the
+            # operator's min-transfer size is a whole extra pumping setup for a
+            # handful of fish (measured: a 208-fish leg into the near-full main
+            # while 2,233 went to the sister). Fold such a leg into the pair's
+            # other tank when its 95-cap headroom absorbs it — same total
+            # move-in, one fewer tank-move. Capacity-bound splits keep both
+            # legs (never trade the fill target away).
+            _min_leg = float(getattr(control, "min_transfer_count", 0.0) or 0.0)
+            if _min_leg > 0 and len(_allocs) > 1:
+                _cap_by_tid = dict(_caps)
+                _kept_allocs = []
+                for _al in sorted(_allocs, key=lambda a: -a.count):
+                    if _al.count < _min_leg and _kept_allocs:
+                        _spill = _al.count
+                        for _kb in _kept_allocs:
+                            _head = _cap_by_tid.get(_kb.tank_id, 0.0) - _kb.count
+                            _add = min(_spill, max(0.0, _head))
+                            _kb.count += _add
+                            _spill -= _add
+                            if _spill <= 0:
+                                break
+                        if _spill > 0.5:
+                            # No headroom elsewhere — the split is capacity-
+                            # bound; keep the small leg after all.
+                            _al.count = _spill
+                            _kept_allocs.append(_al)
+                    else:
+                        _kept_allocs.append(_al)
+                _allocs = _kept_allocs
             take = sum(a.count for a in _allocs)
             if take <= 0:
                 continue
@@ -1738,6 +1767,7 @@ def _emit_transfers_for_batch_diff(
     transfer_events: list,
     warnings: list[str],
     min_keep: float = 0.0,
+    moves_left=None,
 ) -> None:
     """Rebalance a batch's fish across its new tank set via Transfer events.
 
@@ -1747,6 +1777,16 @@ def _emit_transfers_for_batch_diff(
     dests (new tanks) start at zero and are filled up to target. Result:
     each this_tank ends at ~target count, eliminating density spikes
     from earlier consolidations or uneven hydrations.
+
+    `moves_left` (optional callable -> int): the weekly handling budget.
+    Draining SOURCES is essential — those tanks leave the batch's plan and
+    another batch may claim them, so those moves are never blocked. The
+    kept-tank EVENING moves (topping up under-target/new tanks from tanks
+    the batch keeps) are QUALITY moves: once the budget is spent they stop,
+    leaving the remaining deficit for the budgeted quality passes (even-out
+    / balancer) to finish in calmer weeks. This is what spreads a rotation-
+    week consolidation burst (measured: 7 same-week top-ups into one freed
+    tank) across the following weeks instead of blowing the weekly cap.
 
     min_keep (min_tank_control): two remnant guards. (1) The even-split target
     itself must not be sub-min — when total/len(this_tanks) < min_keep, planned
@@ -1827,16 +1867,20 @@ def _emit_transfers_for_batch_diff(
 
     target_per_tank = total_count / len(this_eff)
 
-    # Build over/under lists.
-    overs: list[list] = []   # [tank_id, surplus, tank_obj]
-    unders: list[list] = []  # [tank_id, deficit, tank_obj]
+    # Build over/under lists. Source surpluses are ESSENTIAL (the plan gave
+    # those tanks away — they must drain this week or the incoming batch
+    # collides, INV-1); kept-tank surpluses are QUALITY evening moves and are
+    # handled separately below (budget-gated via `moves_left`).
+    overs: list[list] = []        # essential: [tank_id, surplus, tank_obj]
+    overs_kept: list[list] = []   # quality evening, deferrable
+    unders: list[list] = []       # [tank_id, deficit, tank_obj]
     for tid in kept:
         tank = state.tanks_by_id.get(tid)
         if tank is None:
             continue
         cur = tank.count if not tank.is_empty else 0.0
         if cur > target_per_tank + 0.5:
-            overs.append([tid, cur - target_per_tank, tank])
+            overs_kept.append([tid, cur - target_per_tank, tank])
         elif cur < target_per_tank - 0.5:
             unders.append([tid, target_per_tank - cur, tank])
     for tid in sources:
@@ -1850,6 +1894,7 @@ def _emit_transfers_for_batch_diff(
 
     # Largest surpluses → largest deficits.
     overs.sort(key=lambda x: -x[1])
+    overs_kept.sort(key=lambda x: -x[1])
     unders.sort(key=lambda x: -x[1])
 
     def _pair_legal(src_tank, dst_id) -> bool:
@@ -1861,53 +1906,68 @@ def _emit_transfers_for_batch_diff(
         return move_allowed(src_tank.system_id, dst.system_id,
                             src_tank.avg_wt_g)[0]
 
-    i = 0
-    while i < len(overs):
-        if overs[i][1] <= 0.5:
-            i += 1; continue
-        src_id, _, src_tank = overs[i]
-        j = next((k for k, u in enumerate(unders)
-                  if u[1] > 0.5 and _pair_legal(src_tank, u[0])), None)
-        if j is None:
-            i += 1; continue   # no legal deficit for this source; residual below
-        take = min(overs[i][1], unders[j][1])
-        dst_id = unders[j][0]
-        # REMNANT FLOOR guard (2): a partial drain must leave the source empty
-        # or >= min_keep — the take is REDUCED so the padded floor stays (the
-        # deficit stays open for another surplus tank). The min() deliberately
-        # caps the take-all escalation at the deficit: in the rare corner where
-        # the source can't retain the floor AND its legal deficit can't absorb
-        # the whole tank, the sub-min tail is left for the residual router
-        # below (whole-tank move) and, failing that, the weekly remnant sweep.
-        # A stricter in-loop version (skip the pairing, route whole) was tried
-        # and REVERTED (2026-08-08): it measurably reshaped trajectories and
-        # put an EMPTY harvest week back on the 7.2.26 PR — the hard
-        # steady-harvest contract outranks a transient the sweep repairs a
-        # week later.
-        cur = src_tank.count if not src_tank.is_empty else 0.0
-        if min_keep > 0 and cur > 0:
-            take = min(take, _floored_take(cur, take, min_keep))
-        # Never set leaves_source_empty=True at the rebalance level —
-        # earlier transfers from the same source can be REJECTED by
-        # Transfer.apply (INV-4 etc.), so the rebalance can't know the
-        # source's actual remaining count. Setting True would empty the
-        # source after a successful tail-end transfer, losing whatever
-        # fish were rejected upstream. Transfer.apply self-empties when
-        # the actual remaining count is ~0.
-        ev = Transfer(
-            batch_id=batch_id, event_date=event_date, source_tank_id=src_id,
-            destinations=[TankAllocation(
-                tank_id=dst_id, count=take,
-                avg_wt_g=src_tank.avg_wt_g, cv_pct=src_tank.cv_pct,
-            )],
-            leaves_source_empty=False,
-        )
-        warnings.extend(ev.apply(state))
-        transfer_events.append(ev)
-        overs[i][1] -= take
-        unders[j][1] -= take
-        if overs[i][1] < 0.5:
-            i += 1
+    def _pair_surpluses(over_list: list[list], budgeted: bool) -> None:
+        i = 0
+        while i < len(over_list):
+            if over_list[i][1] <= 0.5:
+                i += 1; continue
+            # HANDLING BUDGET: quality evening moves (kept-tank surpluses)
+            # yield once the weekly budget is spent — the deficit stays and
+            # the budgeted passes (even-out / balancer) resume the leveling
+            # in a calmer week. Essential source drains never yield.
+            if budgeted and moves_left is not None and moves_left() <= 0:
+                return
+            src_id, _, src_tank = over_list[i]
+            j = next((k for k, u in enumerate(unders)
+                      if u[1] > 0.5 and _pair_legal(src_tank, u[0])), None)
+            if j is None:
+                i += 1; continue   # no legal deficit for this source; residual below
+            take = min(over_list[i][1], unders[j][1])
+            dst_id = unders[j][0]
+            # REMNANT FLOOR guard (2): a partial drain must leave the source empty
+            # or >= min_keep — the take is REDUCED so the padded floor stays (the
+            # deficit stays open for another surplus tank). The min() deliberately
+            # caps the take-all escalation at the deficit: in the rare corner where
+            # the source can't retain the floor AND its legal deficit can't absorb
+            # the whole tank, the sub-min tail is left for the residual router
+            # below (whole-tank move) and, failing that, the weekly remnant sweep.
+            # A stricter in-loop version (skip the pairing, route whole) was tried
+            # and REVERTED (2026-08-08): it measurably reshaped trajectories and
+            # put an EMPTY harvest week back on the 7.2.26 PR — the hard
+            # steady-harvest contract outranks a transient the sweep repairs a
+            # week later.
+            cur = src_tank.count if not src_tank.is_empty else 0.0
+            if min_keep > 0 and cur > 0:
+                take = min(take, _floored_take(cur, take, min_keep))
+            if take <= 0.5:
+                # Nothing movable for this pairing (floor guard zeroed it) —
+                # advance; a zero-count Transfer is not a move and emitting one
+                # would only spin the pairing loop.
+                i += 1; continue
+            # Never set leaves_source_empty=True at the rebalance level —
+            # earlier transfers from the same source can be REJECTED by
+            # Transfer.apply (INV-4 etc.), so the rebalance can't know the
+            # source's actual remaining count. Setting True would empty the
+            # source after a successful tail-end transfer, losing whatever
+            # fish were rejected upstream. Transfer.apply self-empties when
+            # the actual remaining count is ~0.
+            ev = Transfer(
+                batch_id=batch_id, event_date=event_date, source_tank_id=src_id,
+                destinations=[TankAllocation(
+                    tank_id=dst_id, count=take,
+                    avg_wt_g=src_tank.avg_wt_g, cv_pct=src_tank.cv_pct,
+                )],
+                leaves_source_empty=False,
+            )
+            warnings.extend(ev.apply(state))
+            transfer_events.append(ev)
+            over_list[i][1] -= take
+            unders[j][1] -= take
+            if over_list[i][1] < 0.5:
+                i += 1
+
+    _pair_surpluses(overs, budgeted=False)       # essential: dropped tanks drain
+    _pair_surpluses(overs_kept, budgeted=True)   # quality: evening, budget-gated
 
     # If any source still has fish after the rebalance, ROUTE them to
     # this-tanks holding the same batch (via Transfer event). If routing is
@@ -3287,14 +3347,23 @@ def phase_d_emit_events(
         _wk_ev0 = len(transfer_events)
 
         def _moves_left() -> int:
-            """Remaining weekly move budget. Counts APPLIED Transfer events —
-            the same thing the handling gate counts (TransferPlan 'Transfer'
-            rows); TranOG/Grade rows are not moves."""
+            """Remaining weekly move budget. Counts what the handling gate
+            counts: DISTINCT applied (source, dest) tank pairs this week —
+            one physical src->dst pumping event each (a multi-destination
+            Transfer is as many moves as it has destinations; two same-pair
+            legs are one move; TranOG/Grade rows are not moves). Counting
+            EVENTS here (the old unit) under-counted multi-destination
+            purge fills and let the deferrable passes overshoot the very
+            budget they were clamping to."""
             if _move_cap <= 0:
                 return 10 ** 9
-            used = sum(1 for e in transfer_events[_wk_ev0:]
-                       if isinstance(e, Transfer) and e.count_transferred > 0)
-            return max(0, _move_cap - used)
+            used_pairs = set()
+            for e in transfer_events[_wk_ev0:]:
+                if isinstance(e, Transfer) and e.count_transferred > 0:
+                    for a in e.destinations:
+                        if a.count >= 0.5:
+                            used_pairs.add((e.source_tank_id, a.tank_id))
+            return max(0, _move_cap - len(used_pairs))
 
         # Release reservations whose arrival week has arrived/passed (the arrival
         # itself consumes the tank below; anything still held past its week is
@@ -4061,6 +4130,7 @@ def phase_d_emit_events(
                 _emit_transfers_for_batch_diff(
                     state, b, p, n, transfer_date, transfer_events, warnings,
                     min_keep=control.min_tank_control or 0.0,
+                    moves_left=_moves_left,
                 )
             # Even-out pass: fix PR/residual over-concentration by
             # leveling fish across each batch's tanks where a tank is
