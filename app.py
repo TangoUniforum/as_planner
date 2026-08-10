@@ -921,7 +921,8 @@ def _edit_batches():
 # operations the forecast EXECUTES before the planner takes over.
 # ============================================================
 
-_MANUAL_COLS = ["week", "type", "batch", "from_tank", "to_tanks", "count", "notes"]
+_MANUAL_COLS = ["week", "type", "batch", "from_tank", "to_tanks", "count",
+                "mode", "notes"]
 
 
 def _hydrate_state_from_upload(uploaded):
@@ -1006,9 +1007,18 @@ def _manual_events_to_df_rows(events):
         # quietly planned a different transfer than the one that was saved.
         to_tanks = ",".join(_dest_token(d) for d in e.destinations)
         count = e.count if e.type not in ("og_transfer", "og_to_6n") else None
+        # `mode` matters only for graded_harvest ("stage" = 6N purge staging —
+        # the 6N-pickup default; "harvest" = drained to processing in the
+        # scripted week) — round-trip the EFFECTIVE timing explicitly, or
+        # applying the grid could silently flip an in-week harvest back to the
+        # staged default.
+        from forecast.manual_events import is_staged_graded
+        mode = ""
+        if e.type == "graded_harvest":
+            mode = "stage" if is_staged_graded(e) else "harvest"
         rows.append({"week": e.week, "type": e.type, "batch": e.batch or "",
                      "from_tank": e.from_tank, "to_tanks": to_tanks,
-                     "count": count, "notes": e.notes})
+                     "count": count, "mode": mode, "notes": e.notes})
     return rows
 
 
@@ -1056,11 +1066,15 @@ def _rows_to_manual_events(rows):
                                    destinations=dests, notes=notes))
         elif typ == "graded_harvest":
             # from_tank = source, count = biggest-N to harvest, to_tanks =
-            # pickup[,retention] (retention defaults to the source).
+            # pickup[,retention] (retention defaults to the source). mode
+            # "harvest" = drain the pickup in the scripted week; blank/"stage"
+            # on a 6N pickup = purge staging (the default; harvested later).
+            _mode = str(r.get("mode") or "").strip().lower()
             dests = [ManualDest(tank=t, size_class=s) for t, c, s in specs]
             out.append(ManualEvent(type=typ, week=week, from_tank=from_tank,
                                    count=count, destinations=dests,
-                                   batch=batch, notes=notes))
+                                   batch=batch, notes=notes,
+                                   mode=(_mode or "transfer")))
         else:
             out.append(ManualEvent(type=typ, week=week, notes=notes))
     return out
@@ -1911,10 +1925,25 @@ def _mw_action_panel(state, ctx, rows, labels, sel, date_for):
                        f"6N staging from entry-tier tanks; move them forward "
                        f"first.")
             return
-        st.caption("Grade the tank by size — it **empties**: the **biggest N fish** "
-                   "go to a 6N depuration tank (frozen, off-feed to purge, harvested "
-                   "later from 6N) and the **smaller remainder moves to an OG tank** "
-                   "to keep growing. Conserves count + biomass exactly.")
+        st.caption("Grade the tank by size — it **empties**: the **biggest N "
+                   "fish** route through a 6N tank and the **smaller remainder "
+                   "moves to an OG tank** to keep growing. Conserves count + "
+                   "biomass exactly.")
+        from forecast.manual_events import MODE_HARVEST, MODE_STAGE
+        _timing = st.radio(
+            "When are the graded fish harvested?",
+            ["Purge first — stage in 6N off-feed, harvested after the "
+             "~2-week hold",
+             "Harvest them this week (via the 6N staging tank)"],
+            key=f"mw_g6_timing_{sfx}",
+            help="Purge-first parks the biggest N in the 6N tank frozen "
+                 "off-feed; script a later harvest of that tank, or the "
+                 "planner takes it after the depuration hold. "
+                 "Harvest-this-week drains them to processing in the scripted "
+                 "week (the 6N tank is just the staging route — it ends the "
+                 "week empty). Either way the run logs a MANUAL EVENT OK line "
+                 "saying exactly what happened.")
+        _g6_staged = _timing.startswith("Purge")
         # Destinations = EMPTY tanks OR tanks already holding THIS batch (top-up),
         # roomiest-first; each option shows its current batch + density.
         def _dest_opts(tank_ids):
@@ -1974,7 +2003,8 @@ def _mw_action_panel(state, ctx, rows, labels, sel, date_for):
                      disabled=(dest6n is None or ret_tank is None
                                or not n_big or n_big <= 0)):
             _mw_add(ManualEvent(type="graded_harvest", week=wk, from_tank=tid,
-                                count=n_big, destinations=dests))
+                                count=n_big, destinations=dests,
+                                mode=(MODE_STAGE if _g6_staged else MODE_HARVEST)))
             st.rerun()
 
     elif act == "Move (OG→OG)":
@@ -2252,17 +2282,20 @@ def _mw_event_summary(state, ev, forecast_start=None):
                     f"smaller {small or '—'} ({tgt})")
         return f"{wk}: **FW→OG** {ev.batch} → {dests} ({tgt})"
     if ev.type == "graded_harvest":
+        from forecast.manual_events import is_staged_graded
         from forecast.sixn import SIXN_ALL_TANKS
         amt = f"{ev.count:,.0f}" if ev.count else "?"
         pk_id = ev.destinations[0].tank if ev.destinations else None
         pk = loc(pk_id) if pk_id is not None else "—"
         ret = (loc(ev.destinations[1].tank) if len(ev.destinations) >= 2
                else "source")
-        if pk_id in SIXN_ALL_TANKS:
-            return (f"{wk}: **Graded → 6N** biggest {amt} from "
-                    f"{loc(ev.from_tank)} → 6N {pk}, retain smaller in {ret}")
+        if pk_id in SIXN_ALL_TANKS and is_staged_graded(ev):
+            return (f"{wk}: **Graded → 6N (purge)** biggest {amt} from "
+                    f"{loc(ev.from_tank)} → 6N {pk} off-feed (harvested "
+                    f"later), retain smaller in {ret}")
         return (f"{wk}: **Graded harvest** biggest {amt} from "
-                f"{loc(ev.from_tank)} (via {pk}), retain smaller in {ret}")
+                f"{loc(ev.from_tank)} harvested this week (via {pk}), "
+                f"retain smaller in {ret}")
     return f"{wk}: {ev.type}"
 
 
@@ -2299,7 +2332,9 @@ def _mw_raw_grid(state):
     st.caption(
         "**og_transfer**: from_tank → to_tanks (count split evenly) · "
         "**harvest**: from_tank, count · **graded_harvest**: from_tank, "
-        "count=biggest-N, to_tanks=pickup[,retention] · "
+        "count=biggest-N, to_tanks=pickup[,retention]; a 6N pickup defaults to "
+        "mode `stage` (purge, harvested later) — set mode `harvest` to drain "
+        "it in the scripted week · "
         "**og_to_6n**: from_tank → 6N to_tanks · "
         "**fw_to_og**: batch + count=target → to_tanks. "
         "to_tanks: comma-separated; `tank:count` for an explicit per-tank "
@@ -2321,6 +2356,12 @@ def _mw_raw_grid(state):
             "to_tanks": st.column_config.TextColumn("To tanks",
                 help="comma-separated tank IDs; tank:count for an explicit amount"),
             "count": st.column_config.NumberColumn("Count / target", step=1000),
+            "mode": st.column_config.SelectboxColumn("Mode",
+                options=["", "stage", "harvest"],
+                help="graded_harvest only: 'stage' (the 6N-pickup default) = "
+                     "park the biggest N in the 6N pickup to purge, harvested "
+                     "later; 'harvest' = drain them to processing in the "
+                     "scripted week"),
             "notes": st.column_config.TextColumn("Notes"),
         })
     if st.button("Apply to window", key="mw_grid_apply"):
@@ -2410,9 +2451,12 @@ def _mw_copilot(uploaded, events, forecast_start=None, bad=None):
         "approve, and it's added as that week's ops — then run again for the week "
         "after. Look-ahead weeks are view-only projections. **~20-30 s per run.**")
     if events:
+        from forecast.manual_events import is_staged_graded as _isg
         _tr = sum(1 for e in events if e.type == "og_transfer")
-        _hv = sum(1 for e in events if e.type == "harvest")
-        _s6 = sum(1 for e in events if e.type in ("og_to_6n", "graded_harvest"))
+        _hv = sum(1 for e in events if e.type == "harvest"
+                  or (e.type == "graded_harvest" and not _isg(e)))
+        _s6 = sum(1 for e in events if e.type == "og_to_6n"
+                  or (e.type == "graded_harvest" and _isg(e)))
         _fw = sum(1 for e in events if e.type == "fw_to_og")
         st.caption(
             f"✓ Building on your **{len(events)} scripted operation(s)** through "

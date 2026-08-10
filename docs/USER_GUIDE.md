@@ -347,17 +347,31 @@ grid — is one of these):
 - **`harvest`** — directly harvest `Count` fish from `From tank` (blank = the
   whole tank), recorded as a real harvest in that week.
 - **`graded_harvest`** — a **size-sorted grade**: take the **biggest `Count`
-  fish** from `From tank` and move them to the **first `To tank`**, keeping the
-  smaller remainder growing (in the source, or an optional **second `To tank`**).
-  The **destination decides what happens**: a **6N tank** → the graded fish
-  **depurate** (frozen off-feed, harvested *later* from 6N) — this is the panel's
-  **"Graded → 6N"** button and the realistic OG→6N→harvest flow, with a live
-  read-out of the **cut weight** (the average weight of the biggest `Count` you're
-  moving); an **OG tank** → the graded fish are **harvested** straight to
-  processing (raw-grid / power use). Either way the split is exact — the biggest
-  `Count` leave at their (higher) mean, the rest stay at their (lower) mean — so
-  **count + biomass conserve** and it reconciles in the **TankContinuityAudit**
-  (0 drift) + **InputConservationAudit** like every other event.
+  fish** from `From tank` and move them to the **first `To tank`** (the pickup),
+  keeping the smaller remainder growing (in the source, or an optional
+  **second `To tank`**). The pickup type + **Mode decide WHEN they are
+  harvested**:
+  - **6N pickup, default** (Mode blank or `stage` — the panel's "Purge first"
+    choice; also what a co-pilot-approved planner Grade leg uses) — the graded
+    fish **depurate** in the 6N tank (frozen off-feed, harvested *later* —
+    script a later `harvest` of that tank, or the planner takes it after the
+    ~2-week hold). **They do NOT appear in that week's HarvestPlan** — the
+    ValidationLog's `MANUAL EVENT OK` line says so explicitly, and if that
+    leaves the week with no harvest at all, a `MANUAL WINDOW` warning flags
+    the zero-harvest week (steady-harvest contract).
+  - **Mode `harvest`** (the panel's "Harvest them this week" choice), or an
+    **OG pickup** — the graded fish are **harvested in the scripted week**:
+    the pickup is drained to processing that same week and the harvest appears
+    in that week's HarvestPlan (a 6N pickup is just the staging route and ends
+    the week empty).
+  The panel shows a live read-out of the **cut weight** (the average weight of
+  the biggest `Count` you're moving). Either way the split is exact — the
+  biggest `Count` leave at their (higher) mean, the rest stay at their (lower)
+  mean — so **count + biomass conserve** and it reconciles in the
+  **TankContinuityAudit** (0 drift) + **InputConservationAudit** like every
+  other event. Every scripted event writes a **`MANUAL EVENT OK`** line into
+  the ValidationLog saying exactly what it did — and one that cannot run writes
+  a **`MANUAL EVENT REFUSED`** line with the reason (never a silent no-op).
 - **`og_to_6n`** — move OG fish from `From tank` into a **6N depuration tank**.
   The pickers offer all six 6N tanks — mains (61, 63, 65) **and** sisters (67, 69,
   71) — each labelled with its **current batch + density** (or *empty*). Note the
@@ -404,8 +418,9 @@ editor + timeline.
 | **Type** | one of the five event types above |
 | **Batch** | the FW batch id — **only** for `fw_to_og` |
 | **From tank** | source tank id — for `og_transfer` / `harvest` / `graded_harvest` / `og_to_6n` |
-| **To tanks** | destination tank id(s), comma-separated; use `tank:count` to send an explicit count to a tank, or a bare `tank` to split the row's Count evenly across the bare tanks. For `graded_harvest` the **first** tank is the graded-fish destination — a **6N tank** (depurate) or an OG tank (harvest) — and an optional **second** is the retention tank for the smaller fish |
+| **To tanks** | destination tank id(s), comma-separated; use `tank:count` to send an explicit count to a tank, or a bare `tank` to split the row's Count evenly across the bare tanks. For `graded_harvest` the **first** tank is the graded-fish pickup (a 6N pickup parks them to purge by default; Mode `harvest` drains it that week) and an optional **second** is the retention tank for the smaller fish |
 | **Count / target** | `harvest` = fish to harvest (blank = whole tank); `graded_harvest` = the number of **biggest** fish to grade out; `og_transfer` / `og_to_6n` = split across To tanks; `fw_to_og` = the **target** count entering seawater (the engine culls down to it) |
+| **Mode** | `graded_harvest` only: `stage` (the 6N-pickup default) = the graded fish are **parked in the 6N pickup to purge** (frozen off-feed, harvested later); `harvest` = they are **harvested in the scripted week** |
 | **Notes** | free text |
 
 **Reject-at-entry validation.** As you edit, each event is dry-run against your
