@@ -1,4 +1,20 @@
 # Manual starting-state events (operator-authored). Applied to the
 # PR-hydrated week-0 state BEFORE the forecast runs forward. See
 # forecast/manual_events.py. Starting-state only (not future pins).
-events: []
+events:
+- type: harvest
+  week: 1
+  from_tank: 65
+  destinations: []
+  count: null
+  batch: null
+  mode: transfer
+  notes: ''
+- type: harvest
+  week: 2
+  from_tank: 61
+  destinations: []
+  count: null
+  batch: null
+  mode: transfer
+  notes: ''

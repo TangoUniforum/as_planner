@@ -1,16 +1,14 @@
-method: controller-hybrid
+method: global-lp
 overrides: {}
-promoted_ts: '2026-08-06T09:55:00'
-note: 'operator promotion after the level-load 6-PR A/B: tuned config (LL off) REFUTED
-  (worse on 4/6 PRs, worst_week 13575->8842, density 126->134); plain hybrid promoted
-  instead'
+promoted_ts: '2026-08-07T13:55:27'
+note: won analysis on 7.29.26 PR.xlsx
 evidence:
-  analysis_pr: 7.29.26 PR.xlsx
-  emphasis: Walk the line
   gates:
     conservation: PASS
     no_empty_week: PASS
-    biomass_cap: WARN 106.8%
-    harvest_cap: WARN 2wk
-    targets: PASS 5/5 (placeholder targets)
-  ab: 'levelload_ab 2026-08-06: 12 runs, conservation ALL PASS'
+    biomass_cap: PASS
+    harvest_cap: WARN
+    targets: PASS
+    density_quality: N/A
+  score: 9.99107859409525
+  emphasis: Walk the line

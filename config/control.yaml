@@ -4,12 +4,12 @@
 forecast_start: '2026-05-15'
 horizon_weeks: 130
 scenario_name: Forecast
-max_feed_per_day_kg: 34000
-max_biomass_kg: 3800000
-max_harvest_per_week: 55000
-min_harvest_weight_g: 3500
-min_harvest_per_week: 30000
-min_tank_control: 7000
+max_feed_per_day_kg: 34000.0
+max_biomass_kg: 3800000.0
+max_harvest_per_week: 55000.0
+min_harvest_weight_g: 3500.0
+min_harvest_per_week: 30000.0
+min_tank_control: 7000.0
 default_hog_yield: 0.81
 facility_biomass_deviation_pct: 0.005
 handling_mortality_pct: 0.01
@@ -20,31 +20,10 @@ tran_og_default_tanks: 2
 global_buffer_pct: 0.05
 starvation_period_days: 7
 min_transfer_count: 7000.0
-# OFF as of 2026-08-05: the corrected 4-way sweep (6 real July PRs, both knobs
-# pinned per arm) measured grading NEVER better paired with the hybrid (0 wins,
-# 3 losses, 3 ties on weeks-below-floor; weeks-over-cap 3 -> 5) and WORSE alone
-# (median 21.5 -> 22.5, worst_week 0). The earlier "inert" A/B was broken
-# because this knob was already true here — pin it explicitly in any future arm.
 harvest_grade_to_min: false
 sixn_level_drains: true
-# L1-GUIDED HARVEST (the hybrid). Feeds the Global engine's whole-horizon L1
-# harvest envelope into the validated controller as a per-week target band, so
-# the controller is told to harvest LESS in the fat weeks and those fish stay
-# available for the lean ones — the one thing a purely reactive controller can
-# never do for itself (every one of its own levers is a max()).
-# ON because the plain controller leaves a TOTALLY EMPTY harvest week on 5 of 6
-# real July-2026 PRs, breaking the hard steady-harvest contract rule. That was
-# invisible until zero-harvest weeks were actually counted (34ecbaf).
-# Cost, and it is real: peak biomass 102.6 -> 107.1% of cap, peak density
-# 102 -> 124. Holding fish back means they are still in the water. Every knob
-# that shrinks that peak puts empty weeks back — measured, not assumed.
-# band 0.05 (not the 0.10 knob default): chosen by a 90-cell paired sweep as the
-# most STABLE arm, holding 0-1 empty weeks under neutral perturbation where the
-# alternatives drift to 3-4. Set hybrid_follow: off for the old reactive-only
-# behaviour (and see forecast/methods.py for the full measurement record).
-hybrid_follow: full
-hybrid_follow_band: 0.05
-density_target_pct: 0.85
+density_target_pct: 0.9
+density_welfare_threshold_kg_m3: 85.0
 rebalance_varqty_budget: 20
 rebalance_split_budget: 8
 rebalance_balance_budget: 30
@@ -58,3 +37,9 @@ lns_max_moves: 30
 auto_calibrate_fw: true
 auto_calibrate_fw_min: 0.5
 auto_calibrate_fw_max: 1.5
+hybrid_follow: full
+hybrid_follow_band: 0.05
+hybrid_guide_min_frac: 0.25
+hybrid_guide_smooth_weeks: 0
+hybrid_purge_lever: true
+hybrid_production_lever: true
