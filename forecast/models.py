@@ -31,16 +31,19 @@ class ControlParams:
     tran_og_default_tanks: int = 3
     global_buffer_pct: float = 0.05      # R29: system-limits symmetric buffer
     starvation_period_days: int = 7      # R30: in-place purge length (production mode); 7d = one weekly step (single-cohort pipeline)
-    # HARVEST TARGET vs CEILING split (operator ruling 2026-08). The weekly
-    # harvest TARGET (fish/week): the level the planner SIZES to — 6N purge
-    # fills and the level-drains headroom are capped here, and the L1 envelope
-    # plans its harvest curve at this level, so ordinary weeks land at or below
-    # it. `max_harvest_per_week` above is the HARD processing ceiling (60k): a
-    # plan may STRETCH between target and ceiling when biomass demands it, but
-    # never above the ceiling — the purge drain defers a pair tank to its next
-    # rotation rather than exceed it. 0/unset = no split (pre-split configs:
-    # the ceiling serves as both, the historical behaviour).
-    harvest_target_per_week: float = 50000.0
+    # HARVEST PRESSURE RELIEF (operator semantic correction 2026-08-09,
+    # replacing the short-lived target/ceiling pair — the removed
+    # `harvest_target_per_week` knob is IGNORED with a console note when an
+    # old YAML still carries it). `max_harvest_per_week` above is THE weekly
+    # processing LIMIT (55k): a CONSTRAINT the demand-driven harvest respects
+    # — no pass ever sizes harvest UP to reach it. This knob is the relief
+    # band as a fraction of that limit: the derived absolute ceiling is
+    # max_harvest_per_week * (1 + harvest_relief_pct), and a week may sit in
+    # the band only EXCEPTIONALLY (a whole 6N tank that must drain, a
+    # make-room dump that saves an arrival). The checklist gate WARNs at 1-3
+    # relief weeks and FAILs beyond — a plan that pins to relief every week
+    # must ramp its harvests up earlier instead. 0 = no relief band.
+    harvest_relief_pct: float = 0.10
     # HANDLING BUDGET (operator ruling 2026-08): max transfer MOVES per week.
     # Once the week's emitted move count reaches this, the DEFERRABLE quality
     # passes (even-out, multi-objective balancer, variable-quantity shave,

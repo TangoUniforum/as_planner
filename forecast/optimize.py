@@ -184,11 +184,14 @@ class Metrics:
     system_load: float
     feed_peak: float
     density_peak: float
+    # Weeks over the weekly processing LIMIT (max_harvest_per_week) — i.e.
+    # weeks that USED the pressure-relief band. Relief is exceptional: the
+    # harvest gate WARNs at 1-3 and FAILs beyond.
     weeks_over_harvest_cap: int
-    # Weeks in/above the 50-60k STRETCH BAND: harvested more than the planning
-    # target (harvest_target_per_week). Superset of weeks_over_harvest_cap
-    # (which counts ceiling breaches). 0 when no target is configured.
-    weeks_over_harvest_target: int = 0
+    # Weeks above the DERIVED relief ceiling (limit * (1 + harvest_relief_pct))
+    # — never legal; any such week FAILs the harvest gate. Subset of
+    # weeks_over_harvest_cap.
+    weeks_over_relief_ceiling: int = 0
     # HANDLING BUDGET (rule 4): weeks whose TransferPlan 'Transfer' row count
     # exceeds the weekly move cap / the ~80% warn line, + the worst week.
     weeks_moves_over_cap: int = 0
@@ -694,11 +697,12 @@ def _within_system_variation(wb):
 
 def metrics_from_workbook(out_path, harvest_cap,
                           welfare_density=WELFARE_DENSITY_KG_M3,
-                          harvest_target=None,
+                          relief_ceiling=None,
                           move_cap=None) -> tuple["Metrics", int, int]:
-    """`harvest_cap` = the HARD processing ceiling (60k post target/ceiling
-    split); `harvest_target` = the planning target (50k) for the stretch-band
-    count. None (legacy callers) counts the band against the ceiling only.
+    """`harvest_cap` = the weekly processing LIMIT (max_harvest_per_week);
+    weeks over it are relief-band weeks. `relief_ceiling` = the derived
+    absolute ceiling (limit * (1 + harvest_relief_pct)) for the never-legal
+    count; None (legacy callers) counts ceiling breaches against the limit.
     `move_cap` = the weekly handling budget (15) for the move-count fields;
     None leaves them 0 (legacy callers)."""
     wb = openpyxl.load_workbook(out_path, data_only=True)
@@ -756,8 +760,8 @@ def metrics_from_workbook(out_path, harvest_cap,
         feed_peak=max(feed) if feed else 0.0,
         density_peak=_density_peak(wb),
         weeks_over_harvest_cap=sum(1 for x in fish if x > harvest_cap),
-        weeks_over_harvest_target=sum(
-            1 for x in fish if x > (harvest_target or harvest_cap)),
+        weeks_over_relief_ceiling=sum(
+            1 for x in fish if x > (relief_ceiling or harvest_cap)),
         weeks_moves_over_cap=(
             sum(1 for n in _mv_counts if n > move_cap) if move_cap else 0),
         weeks_moves_warn=(
@@ -862,22 +866,25 @@ def _move_cap(config_dir, overrides):
     return int(cap) if cap > 0 else None
 
 
-def _harvest_target(config_dir, overrides):
-    """Effective harvest_target_per_week (fish/week) for a variant — the
-    planning target of the 50/60 split. None when unconfigured (legacy)."""
-    tgt = None
+def _relief_ceiling(config_dir, overrides):
+    """Derived absolute relief ceiling (fish/week) for a variant:
+    max_harvest_per_week * (1 + harvest_relief_pct). None when the relief
+    band is off (pct 0/unset) — ceiling breaches then count vs the limit."""
+    pct = 0.10                              # models.ControlParams default
     try:
         with open(os.path.join(config_dir, "control.yaml")) as f:
-            v = yaml.safe_load(f).get("harvest_target_per_week")
-            tgt = float(v) if v else None
+            v = yaml.safe_load(f).get("harvest_relief_pct", pct)
+            pct = float(v) if v is not None else 0.0
     except (OSError, ValueError, TypeError):
         pass
-    if "harvest_target_per_week" in overrides:
+    if "harvest_relief_pct" in overrides:
         try:
-            tgt = float(overrides["harvest_target_per_week"]) or None
+            pct = float(overrides["harvest_relief_pct"])
         except (ValueError, TypeError):
             pass
-    return tgt
+    if pct <= 0:
+        return None
+    return _harvest_cap(config_dir, overrides) * (1.0 + pct)
 
 
 def _welfare_density(config_dir, overrides):
@@ -909,7 +916,7 @@ def _infeasible_metrics() -> "Metrics":
         elif f.name in ("transfers_by_type", "per_system",
                         "between_system", "within_system"):
             continue                     # use the default_factory (empty dict)
-        elif f.name in ("weeks_over_harvest_cap", "weeks_over_harvest_target",
+        elif f.name in ("weeks_over_harvest_cap", "weeks_over_relief_ceiling",
                         "weeks_moves_over_cap", "weeks_moves_warn",
                         "moves_week_max"):
             kw[f.name] = 0
@@ -929,7 +936,7 @@ def run_variant(label, overrides, config_dir, scenario_dir, input_path) -> OptVa
         metrics, dropped, overprod = metrics_from_workbook(
             out, _harvest_cap(config_dir, overrides),
             welfare_density=_welfare_density(config_dir, overrides),
-            harvest_target=_harvest_target(config_dir, overrides),
+            relief_ceiling=_relief_ceiling(config_dir, overrides),
             move_cap=_move_cap(config_dir, overrides))
         return OptVariant(label=label, overrides=dict(overrides),
                           metrics=metrics, dropped=dropped, overprod=overprod)

@@ -757,15 +757,13 @@ def plan(
         return biomass_ceiling.get(label, biomass_cap)
     feed_cap = control.max_feed_per_day_kg
     min_wt = control.min_harvest_weight_g
-    # TARGET/CEILING split (operator ruling): L1 plans its weekly harvest
-    # envelope at the planning TARGET (50k), not the hard processing ceiling
-    # (60k) — the envelope is the SHAPE ordinary weeks should follow; the
-    # realized controller may stretch toward the ceiling only when biomass
-    # demands it. Unset/0 target falls back to the ceiling (pre-split configs).
-    _tgt = float(getattr(control, "harvest_target_per_week", 0) or 0)
-    max_harvest_fish = (min(_tgt, control.max_harvest_per_week)
-                        if _tgt > 0 and control.max_harvest_per_week
-                        else (_tgt or control.max_harvest_per_week))
+    # RELIEF SEMANTICS (operator correction 2026-08-09): the L1 envelope is
+    # demand-driven (biomass/caps decide the draw) and CAPPED at the weekly
+    # processing LIMIT — max_harvest_per_week is a constraint, never a level
+    # to plan up to. The relief band (harvest_relief_pct above the limit) is
+    # for the realized controller's exceptional weeks only; L1 never plans
+    # into it, so the guide the hybrid follows ramps up EARLIER instead.
+    max_harvest_fish = control.max_harvest_per_week
     # Contract MIN weekly harvest (fish). The facility must never miss a weekly
     # harvest: draw at least this many fish every week even when biomass is under
     # cap (the controller applies the same clamp at placement.py:1139). 0 = off.

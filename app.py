@@ -404,21 +404,23 @@ _CONTROL_HELP = {
         "line: raising it lets fish grow bigger before harvest; lowering it "
         "forces earlier harvests. Unit: kg. Current setting: 3,800,000. "
         "Per-week overrides live on the Limits tab.",
-    "max_harvest_per_week": "The HARD weekly ceiling: the most fish the "
-        "processing plant can physically take in one week — the plan must "
-        "never ask for more. Works as a pair with the harvest target below: "
-        "ordinary weeks are planned at the target, and a week may stretch up "
-        "toward this ceiling only when biomass forces it (the 6N drain even "
-        "holds a purge tank back a rotation rather than exceed it). "
-        "Unit: fish/week. Current setting: 60,000.",
-    "harvest_target_per_week": "The weekly harvest level the plan AIMS for — "
-        "what the sales/processing plan considers a normal week. The planner "
-        "sizes its 6N purge fills and harvest leveling to this number, so "
-        "most weeks land at or below it; anything between here and the hard "
-        "ceiling above is a 'stretch' week (allowed, flagged amber on the "
-        "checklist), and anything past the ceiling is a hard fail. Set equal "
-        "to the ceiling to switch the split off. Unit: fish/week. Current "
-        "setting: 50,000.",
+    "max_harvest_per_week": "THE weekly processing limit: the most fish the "
+        "plant takes in a normal week. It is a CONSTRAINT, not a goal — the "
+        "harvest is decided by what the fish need (biomass, density, the "
+        "weekly floor, contracts) and then capped here; the planner never "
+        "harvests extra just to reach this number (the 6N drain even holds a "
+        "purge tank back a rotation rather than exceed it). The relief "
+        "setting below allows rare weeks slightly over. Unit: fish/week. "
+        "Current setting: 55,000.",
+    "harvest_relief_pct": "The pressure-relief band: how far past the weekly "
+        "processing limit an EXCEPTIONAL week may go, as a fraction of the "
+        "limit (0.10 = +10%, i.e. a 60,500-fish absolute ceiling at the "
+        "55,000 limit). Relief is for the odd week a whole depuration tank "
+        "must drain or a make-room dump saves an arrival — allowed more, but "
+        "not every time: the checklist flags 1-3 relief weeks amber and more "
+        "than 3 (or any week past the ceiling) red, meaning the plan should "
+        "ramp its harvests up earlier instead. Unit: fraction. Current "
+        "setting: 0.10.",
     "min_harvest_weight_g": "The 3.5 kg sales gate: a fish must weigh at least "
         "this (live weight) before it may be harvested. A business constant, "
         "not a tuning knob. Unit: grams. Setting: 3,500.",
@@ -616,8 +618,8 @@ _CONTROL_LABEL = {
     "scenario_name": "Scenario name",
     "max_feed_per_day_kg": "Max feed / day (kg)",
     "max_biomass_kg": "Max facility biomass (kg)",
-    "max_harvest_per_week": "Harvest ceiling / week (fish)",
-    "harvest_target_per_week": "Harvest target / week (fish)",
+    "max_harvest_per_week": "Harvest limit / week (fish)",
+    "harvest_relief_pct": "Harvest relief band (fraction of limit)",
     "min_harvest_per_week": "Min harvest / week (fish)",
     "min_harvest_weight_g": "Min harvest weight (g)",
     "min_tank_control": "Force-empty floor (fish)",
@@ -4700,7 +4702,8 @@ def _optimizer():
                             "perfectly flat harvest.")
             cc3.metric("Weeks over 55k", run_out["over"],
                        help="Number of weeks whose harvest exceeds the 55,000-fish "
-                            "processing ceiling — spikes your plant has to absorb.")
+                            "weekly processing limit — pressure-relief weeks, "
+                            "acceptable only as rare exceptions.")
             st.download_button(
                 "⬇ Download optimized forecast workbook",
                 data=r["output_bytes"], file_name="Forecast_optimized.xlsm",
@@ -4822,13 +4825,15 @@ def _board_score(out_path):
     with open(CONFIG_DIR / "control.yaml") as _f:
         _cfg = _yaml.safe_load(_f) or {}
     hv_cap = float(_cfg.get("max_harvest_per_week", 55000) or 55000)
-    hv_tgt = float(_cfg.get("harvest_target_per_week", 0) or 0) or None
+    _relief = _cfg.get("harvest_relief_pct", 0.10)
+    _relief = float(_relief) if _relief is not None else 0.0
+    hv_ceiling = hv_cap * (1.0 + _relief) if _relief > 0 else None
     min_hv = float(_cfg.get("min_harvest_per_week", 0) or 0)
     welfare = float(_cfg.get("density_welfare_threshold_kg_m3", 80) or 80)
     mv_cap = int(float(_cfg.get("max_transfers_per_week", 15) or 0)) or None
     m, _dropped, _overprod = _opt.metrics_from_workbook(out_path, hv_cap,
                                                         welfare_density=welfare,
-                                                        harvest_target=hv_tgt,
+                                                        relief_ceiling=hv_ceiling,
                                                         move_cap=mv_cap)
     verdict = _conservation_verdict(out_path)
     harv = _harvest_extras(out_path, min_hv)
@@ -5284,8 +5289,8 @@ def _ana_grade(res, targets, econ):
         "zero_weeks": h.get("zero_weeks"),
         "weeks_over_harvest_cap": (m.weeks_over_harvest_cap
                                    if m is not None else None),
-        "weeks_over_harvest_target": (
-            getattr(m, "weeks_over_harvest_target", None)
+        "weeks_over_relief_ceiling": (
+            getattr(m, "weeks_over_relief_ceiling", None)
             if m is not None else None),
         "sixn_outbound_purge": sc.get("sixn_outbound_purge"),
         "weeks_moves_over_cap": (getattr(m, "weeks_moves_over_cap", None)

@@ -136,21 +136,6 @@ def _sixn_fill_capacity_fish(state: FacilityState, tank_id: int,
     return max(0.0, (cap_kg - held_kg) * 1000.0 / avg_wt_g)
 
 
-def _harvest_target_fish(control) -> float:
-    """Weekly harvest planning TARGET (fish/week) — the operator's 50/60 split.
-
-    The level the planner SIZES to (6N fills, level-drains headroom, L1
-    envelope); `max_harvest_per_week` stays the hard processing ceiling.
-    Clamped to the ceiling; 0/unset falls back to the ceiling, which restores
-    the historical single-number behaviour for pre-split configs.
-    """
-    cap = float(getattr(control, "max_harvest_per_week", 0) or 0)
-    tgt = float(getattr(control, "harvest_target_per_week", 0) or 0)
-    if tgt <= 0:
-        return cap
-    return min(tgt, cap) if cap > 0 else tgt
-
-
 # Drain-guard threshold in EVENT-DATE days: a next-rotation drain is at most 7
 # calendar days after its fill (week_starts are 7 apart; the ragged partial
 # FIRST forecast week makes it shorter, never longer), while the legal
@@ -1454,24 +1439,26 @@ def _run_sixn_purge_week(
                 f"after its fill — a 1-week purge); drain held until the "
                 f"pair's next rotation")
             continue
-        # HARVEST CEILING (target/ceiling split): never drain a tank past the
-        # hard processing ceiling — HOLD it for the pair's next rotation
-        # instead (its fill date is old, so the depuration guard won't block
-        # that later drain, and sixn_level_drains shrinks the pair's next fill
-        # so the combined drain stays level). Fills are sized to the TARGET,
-        # so this fires only when an out-of-rotation make-room dump stacked a
-        # pair past the ceiling — the audited 86,956-fish weeks. Deferral
-        # requires something already harvested this week: a whole-week
-        # deferral would make an EMPTY week, and the steady-harvest contract
-        # outranks the ceiling (the harvest gate reports the overage loudly).
+        # HARVEST LIMIT (relief semantics): never drain a tank past the weekly
+        # processing limit (max_harvest_per_week) — HOLD it for the pair's
+        # next rotation instead (its fill date is old, so the depuration guard
+        # won't block that later drain, and sixn_level_drains shrinks the
+        # pair's next fill so the combined drain stays level). Fills are
+        # demand-sized and CAPPED at the limit, so this fires only when an
+        # out-of-rotation make-room dump stacked a pair past it — the audited
+        # 86,956-fish weeks. Deferral requires something already harvested
+        # this week: a whole-week deferral would make an EMPTY week, and the
+        # steady-harvest contract outranks the limit — such a week lands in
+        # the EXCEPTIONAL relief band (limit .. limit*(1+harvest_relief_pct))
+        # and the harvest gate counts every use.
         if (budget is not None and math.isfinite(budget.cap)
                 and (budget.used > 0 or pair_drain_count > 0)
                 and tank.count > budget.remaining()):
             warnings.append(
-                f"{week_label}: HARVEST CEILING — holding 6N "
+                f"{week_label}: HARVEST LIMIT — holding 6N "
                 f"{tank.location_id} (batch {tank.batch_id}, "
                 f"{tank.count:.0f} fish): draining it would exceed the "
-                f"weekly processing ceiling ({budget.remaining():.0f} fish "
+                f"weekly processing limit ({budget.remaining():.0f} fish "
                 f"left of {budget.cap:.0f}); drains next rotation")
             continue
         pair_drain_count += tank.count
@@ -1513,10 +1500,12 @@ def _run_sixn_purge_week(
     #    source-batch pick so the entry forward-transit below knows the goal
     #    even when the grow-out pool is empty.)
     min_h = control.min_harvest_per_week or 0
-    # TARGET/CEILING split: fills are SIZED to the planning target (50k) so
-    # ordinary pair drains land at/below it; max_harvest_per_week remains the
-    # hard processing ceiling and gates the DRAIN (below), not the fill.
-    max_h = _harvest_target_fish(control) or min_h
+    # RELIEF SEMANTICS (operator correction 2026-08-09): the fill is DEMAND-
+    # driven (move_in_target from the controller) and CAPPED at the weekly
+    # processing limit — max_harvest_per_week is a constraint the harvest
+    # respects, never a level to size up to. The same limit gates the DRAIN
+    # (the hold above); the relief band exists only for exceptional drains.
+    max_h = float(control.max_harvest_per_week or 0) or min_h
     # NOTE (measured 2026-08-01, DO NOT RETRY without re-measuring): the floor
     # is judged at the DRAIN but sized HERE, and the fish carry ~lead weeks of
     # mortality between the two — so 12 of 19 sub-floor weeks land at exactly
@@ -4226,12 +4215,13 @@ def phase_d_emit_events(
         # ANTICIPATORY ARRIVAL FREEING — PRODUCTION mode (the ceiling's last
         # gap). The purge-era pass above pre-frees tanks by purging into 6N;
         # in production the only escape is a DIRECT harvest, so the reactive
-        # make-room below had to whole-tank-dump PAST the hard ceiling in the
+        # make-room below had to whole-tank-dump PAST the weekly limit in the
         # arrival week itself (conservation > cap — the measured 81,460-fish
         # week: two whole tanks at once). Pre-free here instead, WITHIN this
-        # week's remaining ceiling budget only (budget.take — never a
-        # borrow): the same fish are harvested a few weeks earlier across the
-        # 50-60k stretch band, and the freed tank is RESERVED for the arrival
+        # week's remaining limit budget only (budget.take — never a borrow):
+        # the same fish are harvested a few weeks earlier UNDER the limit —
+        # the pull-forward the operator prefers over touching the relief
+        # band — and the freed tank is RESERVED for the arrival
         # exactly like the purge-era pass. Purge-complete STARVE tanks first
         # (harvest-ready anyway — gentler than the reactive pass, which
         # prefers un-starved SW), then the smallest dump.
