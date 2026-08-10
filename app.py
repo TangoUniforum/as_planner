@@ -5185,9 +5185,10 @@ _BOARD_LENSES = [
 
 def _board_score(out_path):
     """Metrics + HARD-GATE status for one method's output workbook. Gates are
-    pass/fail badges shown on every method; a method that fails Conserves is
-    excluded from winning a lens (it lost fish), the rest are warning flags the
-    operator weighs. Reuses the compare lobby's authoritative verdicts."""
+    pass/fail badges shown on every method; a method that fails Conserves or
+    Fully placed is excluded from winning a lens (it lost / never reared fish —
+    see _board_lens_pool), the rest are warning flags the operator weighs.
+    Reuses the compare lobby's authoritative verdicts."""
     import yaml as _yaml
     from forecast import optimize as _opt
     from tools.run_compare import _conservation_verdict, _harvest_extras
@@ -5236,6 +5237,19 @@ def _board_score(out_path):
 
 def _board_badges(gates):
     return "  ".join(f"{'✅' if ok else '⚠️'} {name}" for name, ok in gates.items())
+
+
+def _board_lens_pool(scored: dict) -> dict:
+    """The methods allowed to WIN a grading lens: must conserve AND be fully
+    placed. A PARTIAL plan (fish dropped for lack of space) would otherwise win
+    quality lenses on the fish it never reared — unplaced fish can't be crowded,
+    moved, or crammed, so every per-fish/per-biomass metric flatters it. Falls
+    back to the whole board when nothing passes (cards still render, badges show
+    why)."""
+    eligible = {k: v for k, v in scored.items()
+                if v["_score"]["gates"]["Conserves"]
+                and v["_score"]["gates"]["Fully placed"]}
+    return eligible or scored
 
 
 _BOARD_ORDER = tuple(_methods.DEFAULT_ROSTER)
@@ -5527,7 +5541,8 @@ def _compare_and_choose():
             "(0 drift). ⚠️ = the plan lost fish, which disqualifies it from winning "
             "any lens.\n"
             "- **Fully placed** — every batch got tanks; none dropped for lack of "
-            "space.\n"
+            "space. ⚠️ also disqualifies from winning a lens: unplaced fish can't "
+            "be crowded or moved, so every quality metric flatters the plan.\n"
             "- **No empty week** — never a near-empty harvest week (meets the weekly "
             "contract floor); ⚠️ = a crater week.\n"
             "- **Under cap** — facility biomass stays within its cap plus the "
@@ -5555,9 +5570,7 @@ def _compare_and_choose():
             "density, smallest footprint, fastest). No method wins them all — the "
             "board shows the trade-offs so **you** pick the plan that fits your "
             "priority, then press **Use this plan**.")
-    eligible = {k: v for k, v in scored.items()
-                if v["_score"]["gates"]["Conserves"]}
-    pool = eligible or scored
+    pool = _board_lens_pool(scored)
     cols = st.columns(2)
     for i, (label, getter, blurb) in enumerate(_BOARD_LENSES):
         vals = {}

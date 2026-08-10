@@ -194,3 +194,27 @@ def test_res_disk_roundtrip_is_pickle_safe_and_rebuilds_metrics():
            "_score": {"metrics": None, "_metrics_plain": {"nope": 1}}}
     assert "_score" not in app._res_from_disk(bad) or \
         app._res_from_disk(bad)["_score"].get("metrics") is not None
+
+
+# --------------------------------------------------------------------------- #
+# Compare board: a PARTIAL (fish-dropping) plan could win a grading lens
+# --------------------------------------------------------------------------- #
+def test_board_lens_pool_excludes_partial_plans():
+    """DEFECT (2026-07-13 audit): lens eligibility only checked the Conserves
+    gate, so a PARTIAL plan (batches dropped for lack of space, gate='PARTIAL')
+    could be crowned 'Best welfare' — unplaced fish can't be crowded, so every
+    quality metric flatters the plan that reared fewer fish."""
+    def _res(conserves, placed):
+        return {"_score": {"gates": {"Conserves": conserves,
+                                     "Fully placed": placed,
+                                     "No empty week": True,
+                                     "Under cap": True}}}
+    scored = {"full": _res(True, True),
+              "partial": _res(True, False),      # conserves per its OWN proof...
+              "lossy": _res(False, True)}
+    pool = app._board_lens_pool(scored)
+    assert set(pool) == {"full"}, "only the fully-placed conserving plan may win"
+
+    # Nothing passes -> fall back to the whole board (cards still render).
+    scored_bad = {"a": _res(False, True), "b": _res(True, False)}
+    assert set(app._board_lens_pool(scored_bad)) == {"a", "b"}
