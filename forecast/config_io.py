@@ -114,8 +114,9 @@ def control_from_dict(d: dict) -> ControlParams:
     # allowance is now the relief band (harvest_relief_pct). Old YAMLs that
     # still carry the key load fine; the value is ignored, loudly.
     if "harvest_target_per_week" in d:
+        # ASCII only: this prints to Windows consoles (cp1252) too.
         print("NOTE: control config carries the removed knob "
-              "'harvest_target_per_week' — ignored. The weekly harvest plans "
+              "'harvest_target_per_week' - ignored. The weekly harvest plans "
               "to demand capped at max_harvest_per_week; the relief band is "
               "harvest_relief_pct (ceiling = max * (1 + relief)).")
     kwargs = {k: v for k, v in d.items() if k in fields}
