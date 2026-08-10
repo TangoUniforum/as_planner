@@ -107,6 +107,7 @@ def load_economics(config_dir) -> Optional[dict]:
                           "price_per_kg": float(b["price_per_kg"]),
                           "monthly": monthly})
         except (KeyError, TypeError, ValueError):
+            print(f"WARN: economics.yaml: malformed price band skipped: {b!r}")
             continue
     if not bands:
         return None
@@ -450,7 +451,11 @@ def cache_load_all(cache_dir=None, prefix: str = "") -> dict:
         try:
             with p.open("rb") as fh:
                 out[p.stem] = pickle.load(fh)
-        except Exception:  # noqa: BLE001 — see docstring
+        except Exception as e:  # noqa: BLE001 — see docstring
+            # Skipping is the right degrade (worst case = a re-run), but a
+            # silent skip is how a "finished" leg quietly vanishes — say so.
+            print(f"WARN: result cache: skipping unreadable {p.name} "
+                  f"({type(e).__name__}) — that entry will re-run")
             continue
     return out
 

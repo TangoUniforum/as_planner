@@ -148,6 +148,11 @@ def biology_to_dict(t: BiologyTables) -> dict:
 
 
 def biology_from_dict(d: dict) -> BiologyTables:
+    if not d.get("mortality_pct_weekly"):
+        # biology._mortality_weekly_pct treats an empty table as 0.0 mortality
+        # for the WHOLE forecast — a valid model choice only if deliberate.
+        print("WARN: biology.yaml has an EMPTY mortality table — the forecast "
+              "will apply zero mortality throughout")
     return BiologyTables(
         sgr_size_g=[float(x) for x in d.get("sgr_size_g", [])],
         sgr_fw_pct_day=[None if x is None else float(x) for x in d.get("sgr_fw_pct_day", [])],

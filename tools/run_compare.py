@@ -188,7 +188,11 @@ def run_compare(input_path, *, config_dir=None, scenario_dir=None,
     et_path = out_dir / "_elapsed.json"
     try:
         elapsed_cache = json.loads(et_path.read_text())
-    except Exception:                                            # noqa: BLE001
+    except FileNotFoundError:
+        elapsed_cache = {}
+    except Exception as e:                                       # noqa: BLE001
+        print(f"  note: {et_path.name} unreadable ({type(e).__name__}) — "
+              f"cached runtimes reset (display only)")
         elapsed_cache = {}
 
     def _score(rec, wb_path):
@@ -233,7 +237,16 @@ def run_compare(input_path, *, config_dir=None, scenario_dir=None,
             if reuse and cached.exists() and cached.stat().st_size > 0:
                 rec["elapsed"] = elapsed_cache.get(m.key)
                 rec["workbook"] = cached.name
-                print(f"    reusing cached workbook {cached.name}")
+                # Unlike the app's board legs, --reuse does NOT verify the
+                # workbook against the CURRENT config/scenario — say so, so a
+                # pre-edit engine run can't silently pass as current (the
+                # stale-board failure mode, CLI edition).
+                from datetime import datetime as _dt
+                _mt = _dt.fromtimestamp(cached.stat().st_mtime)
+                print(f"    reusing cached workbook {cached.name} "
+                      f"(written {_mt:%Y-%m-%d %H:%M}; NOT re-checked against "
+                      f"the current config/scenario — delete it to force a "
+                      f"fresh run)")
                 _score(rec, cached)
             else:
                 rc, elapsed = _methods.run_method(

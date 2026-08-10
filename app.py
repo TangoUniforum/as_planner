@@ -201,8 +201,14 @@ def _ingest_pr(uploaded):
                     if unk_t:
                         res["warnings"].append(
                             f"PR tank ids not in Facility config: {unk_t}.")
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as e:  # noqa: BLE001
+                    # The cross-check DEGRADING is fine (config may be mid-
+                    # edit); degrading SILENTLY is not — this check is what
+                    # warns about fish that would be dropped.
+                    res["warnings"].append(
+                        f"Config cross-check skipped ({type(e).__name__}: {e})"
+                        f" — PR-vs-config batch/tank mismatches were NOT "
+                        f"checked.")
         wb.close()
         res["ok"] = not res["errors"]
     except Exception as e:  # noqa: BLE001
@@ -1282,7 +1288,11 @@ def _mw_dark_handoff(state, ctx, events):
         stage_hi = min(n, max(dark) - _hold)
         stage_hi = max(stage_hi, stage_lo)
         return dark_labels, n, _hold, stage_lo, stage_hi
-    except Exception:  # noqa: BLE001 — a lint must never break the editor
+    except Exception as e:  # noqa: BLE001 — a lint must never break the editor
+        # ...but a crashed lint must not read as "handoff covered": None is
+        # also the all-clear return, so say the check didn't run.
+        st.caption(f"⚠ dark-handoff lint unavailable ({type(e).__name__}: {e}) "
+                   f"— handoff coverage NOT checked.")
         return None
 
 
@@ -1322,6 +1332,7 @@ def _mw_fw_avail(ctx, window_labels):
         agg[r.batch_id]["biomass_kg"] += r.closing_biomass_kg
     win = set(window_labels)
     out: dict[str, dict] = {}
+    _skipped = []
     for bid, a in agg.items():
         b_meta = ctx["batch_by_id"].get(bid)
         if a["count"] <= 0 or b_meta is None:
@@ -1332,12 +1343,16 @@ def _mw_fw_avail(ctx, window_labels):
                 b_meta, ctx["tables"], ctx["control"], a["count"], avg_wt,
                 ctx["pr_closing"])
         except Exception:  # noqa: BLE001
+            _skipped.append(bid)
             continue
         cv = b_meta.tran_og_cv or 16.0
         wk = {s.week_label: (s.close_count, s.close_avg_weight_g, cv)
               for s in states if s.stage == "FW" and s.week_label in win}
         if wk:
             out[bid] = wk
+    if _skipped:
+        st.caption(f"⚠ FW cohort(s) {', '.join(sorted(_skipped))} could not be "
+                   f"projected — excluded from the FW-intake picker.")
     return out
 
 
@@ -1363,6 +1378,7 @@ def _mw_fw_load(ctx, window_labels):
     win = set(window_labels)
     out: dict[str, dict] = defaultdict(
         lambda: {"open_bio": 0.0, "close_bio": 0.0, "feed": 0.0})
+    _skipped = []
     for bid, a in agg.items():
         b_meta = ctx["batch_by_id"].get(bid)
         if a["count"] <= 0 or b_meta is None:
@@ -1373,6 +1389,7 @@ def _mw_fw_load(ctx, window_labels):
                 b_meta, ctx["tables"], ctx["control"], a["count"], avg_wt,
                 ctx["pr_closing"])
         except Exception:  # noqa: BLE001
+            _skipped.append(bid)
             continue
         for s in states:
             if s.stage != "FW" or s.week_label not in win:
@@ -1381,6 +1398,10 @@ def _mw_fw_load(ctx, window_labels):
             rec["open_bio"] += s.open_biomass_kg or s.biomass_kg
             rec["close_bio"] += s.close_biomass_kg or s.biomass_kg
             rec["feed"] += s.feed_kg_day
+    if _skipped:
+        st.caption(f"⚠ FW cohort(s) {', '.join(sorted(_skipped))} could not be "
+                   f"projected — the FW row and facility totals UNDERSTATE "
+                   f"their load.")
     return dict(out)
 
 
@@ -2869,8 +2890,9 @@ def _og_systems_app():
                     if t.type == "OG" and t.system_id})
         if s:
             return s
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as e:  # noqa: BLE001
+        st.caption(f"⚠ facility config unreadable ({type(e).__name__}) — "
+                   f"showing the standard 12 OG systems.")
     return ["OG1N", "OG1S", "OG2N", "OG2S", "OG3N", "OG3S",
             "OG4N", "OG4S", "OG5N", "OG5S", "OG6N", "OG6S"]
 
@@ -3018,8 +3040,9 @@ def _current_horizon_start():
             h = int(c.horizon_weeks)
             fs = c.forecast_start
             s = fs.date() if hasattr(fs, "date") else (fs or s)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:  # noqa: BLE001
+            st.caption(f"⚠ Control unreadable ({type(e).__name__}) — template "
+                       f"defaults to {h} weeks from today.")
     return h, s
 
 
@@ -4111,7 +4134,13 @@ def _run_with_workbook_bytes(
         try:
             from forecast.config_io import load_control, control_to_dict
             config_used = control_to_dict(load_control(run_config_dir))
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            # Config WAS used — only the read-back for display failed. An
+            # empty dict makes the "Configuration this run used" panel vanish
+            # as if no config existed; say what actually happened.
+            print(f"WARN: could not read back the effective run config "
+                  f"({type(e).__name__}: {e}) — the config panel will be "
+                  f"empty for this run")
             config_used = {}
     parsed.update({
         "ok": True,
@@ -4164,8 +4193,12 @@ def _parse_output_workbook(path: Path) -> dict:
                  if t.system_id.startswith("OG") and t.system_id != "OG6N"]
         if _grow:
             growout_cap = float(max(_grow))
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as e:  # noqa: BLE001
+        # Degrading to the 95 default is fine; doing it silently undoes the
+        # per-tank-cap fix without a word — land the warning in the run log.
+        print(f"WARN: facility config unreadable ({type(e).__name__}: {e}) — "
+              f"density KPI/heatmap judged against the {growout_cap:g} kg/m³ "
+              f"default cap")
 
     # Density violations from BatchLocations (header at row 4).
     violations = []
@@ -5829,13 +5862,21 @@ def _ana_grade(res, targets, econ):
     rid = _result_rid(res)
     cached = res.get("_ana_rows")
     if not cached or cached.get("rid") != rid or cached.get("schema") != _schema:
+        _rows_err = None
         try:
             rows = (_ana.harvest_rows(res["output_path"])
                     if res.get("output_path") else [])
-        except Exception:  # noqa: BLE001 — grading must not kill the board
+        except Exception as e:  # noqa: BLE001 — grading must not kill the board
             rows = []
-        cached = {"rid": rid, "schema": _schema, "rows": rows}
+            _rows_err = f"{type(e).__name__}: {e}"
+        cached = {"rid": rid, "schema": _schema, "rows": rows, "err": _rows_err}
         res["_ana_rows"] = cached
+    if cached.get("err"):
+        # Empty-because-unreadable must not display as empty-because-no-harvest:
+        # without this the targets gate says "no harvest targets configured"
+        # and revenue silently disappears.
+        st.caption(f"⚠ {res.get('_label', 'this run')}: HarvestPlan unreadable "
+                   f"({cached['err']}) — targets/revenue unavailable for it.")
     rows = cached["rows"]
     tr = None
     if targets:
@@ -6293,6 +6334,12 @@ def _analyze():
                           "prov": _provenance_line(
                               done["res"], sig=done.get("sig", ""),
                               fresh=_res_is_fresh(done["res"]))})
+        elif done["res"].get("ok"):
+            # An engine leg that RAN but couldn't be graded must not vanish
+            # without a word (Compare & Choose st.error()s the same state).
+            st.warning(f"{done['res'].get('_label', k)}: grading failed "
+                       f"({done['res'].get('_score_err', 'unknown')}) — left "
+                       f"off the candidate board.")
     if _skipped_stale:
         st.warning(f"{len(_skipped_stale)} stock engine leg(s) were computed on "
                    f"different inputs (PR/config/scenario) and are left OFF the "

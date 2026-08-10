@@ -48,10 +48,15 @@ class _FileCache(dict):
 
     def __init__(self, path: Path):
         self._path = path
+        self._save_warned = False
         try:
             with path.open("rb") as fh:
                 super().__init__(pickle.load(fh))
-        except Exception:                            # noqa: BLE001
+        except FileNotFoundError:                    # first run — expected
+            super().__init__()
+        except Exception as e:                       # noqa: BLE001
+            print(f"  [cache] {path.name} unreadable ({type(e).__name__}) — "
+                  f"starting empty; finished variants will re-run")
             super().__init__()
 
     def __setitem__(self, key, value):
@@ -61,8 +66,12 @@ class _FileCache(dict):
             with tmp.open("wb") as fh:
                 pickle.dump(dict(self), fh, protocol=pickle.HIGHEST_PROTOCOL)
             tmp.replace(self._path)
-        except Exception:                            # noqa: BLE001
-            pass
+        except Exception as e:                       # noqa: BLE001
+            if not self._save_warned:                # once, not per variant
+                self._save_warned = True
+                print(f"  [cache] can't persist {self._path.name} "
+                      f"({type(e).__name__}) — results are NOT crash-durable "
+                      f"this run")
 
 
 def _grade(out_path, cfg: dict, targets) -> dict:

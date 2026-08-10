@@ -3294,6 +3294,14 @@ def phase_d_emit_events(
     else:
         sixn_phase = "purge"
     sixn_empty_weeks = 0
+    if sixn_phase == "purge" and sixn_pair_queue and sixn_resting_pair is None:
+        # The degrade is principled (nothing else is possible with all 3 pairs
+        # stocked) but must be VISIBLE: refill-in-place was the 65/71-idle bug
+        # (9b8aa17) and the operator should know the run STARTS in that shape.
+        warnings.append(
+            "6N: all 3 purge pairs are stocked at forecast start — no fallow "
+            "pair, so the Wed-fill/Fri-harvest rotation degrades to "
+            "refill-in-place until a pair empties")
 
     # Compute forecast_start once for day-by-day biology.
     forecast_start = initial_state.today
@@ -4674,6 +4682,16 @@ def phase_d_emit_events(
                         None,
                     )
                     if ta is None:
+                        # No Phase-C tank-assignment row for this arrival's
+                        # entry week: the batch cannot be placed here. The
+                        # input-conservation audit will report it as dropped;
+                        # name the CAUSE at the site instead of leaving only
+                        # the downstream symptom.
+                        warnings.append(
+                            f"{week_label}: TranOG arrival {split.batch_id} on "
+                            f"{day} has NO Phase-C tank assignment this week — "
+                            f"entry skipped; will surface as an "
+                            f"input-conservation failure")
                         continue
                     tanks_obj = [state.tanks_by_id[tid] for tid in ta.tank_ids
                                  if tid in state.tanks_by_id and state.tanks_by_id[tid].is_empty]

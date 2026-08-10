@@ -75,10 +75,19 @@ def batches_to_list(batches: list[BatchInput]) -> list[dict]:
 
 
 def batches_from_list(data: list[dict]) -> list[BatchInput]:
+    import re as _re
     out: list[BatchInput] = []
     for d in data or []:
         tog_count = d.get("tran_og_count")
         tog_wt = d.get("tran_og_avg_wt_g")
+        _fcr = str(d.get("fcr_model") or "")
+        if _fcr and not _re.search(r"\d{2,3}", _fcr):
+            # biology._fcr_model_key silently falls back to "1.18" for a
+            # string it can't parse — a typo'd model must be named at LOAD
+            # time, not quietly change the feed math.
+            print(f"WARN: batch {d.get('batch_id')}: fcr_model {_fcr!r} has "
+                  f"no parseable FCR digits — biology will use the 1.18 "
+                  f"fallback")
         out.append(BatchInput(
             batch_id=str(d["batch_id"]),
             input_date=_from_iso(d.get("input_date")),

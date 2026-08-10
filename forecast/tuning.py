@@ -133,6 +133,13 @@ def _peaks_and_detail(out_path):
         pc = _col(hdr, "Peak_Density")
         wc = _col(hdr, "Peak_Wk")
         ec = _col(hdr, "Wks_from_Start")
+        if pc is None:
+            # No Peak_Density column: without this guard every batch parsed as
+            # peak 0.0 and the distribution reported "all clean" — a missing
+            # MEASUREMENT must read as "no data" (gate N/A), never as a pass.
+            print("WARN: TransferTemplate Section B has no Peak_Density column "
+                  "— per-batch density review unavailable for this workbook")
+            return [], []
         try:
             pk = float(d.get(pc) or 0)
         except (TypeError, ValueError):
@@ -153,6 +160,13 @@ def _conservation(out_path):
     """Scan the audit sheets for dropped / over-produced fish (both must be 0)."""
     wb = openpyxl.load_workbook(out_path, data_only=True)
     dropped = overprod = 0
+    if not any(sh in wb.sheetnames
+               for sh in ("TankContinuityAudit", "InputConservationAudit")):
+        # Absence of evidence must not read as evidence of conservation: both
+        # engines write both sheets, so a workbook with neither is foreign —
+        # the (0, 0) returned below is "unverified", not "verified clean".
+        print(f"WARN: {out_path}: no conservation audit sheet found — "
+              f"dropped/over-produced counts are UNVERIFIED (reported as 0)")
     for sh in ("TankContinuityAudit", "InputConservationAudit"):
         if sh not in wb.sheetnames:
             continue

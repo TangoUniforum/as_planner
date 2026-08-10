@@ -549,8 +549,11 @@ def refine_realized(placement, *, initial_state, batch_week_states, control,
             break
 
     if moves == 0:
+        # stdout, not stderr: the app captures stdout only (_TeeIO), so a
+        # stderr fallback line is invisible exactly where it matters — the
+        # operator would see ACCEPTED runs narrated but never the fallbacks.
         print("  LNS placement: no beneficial relocation (greedy already near the "
-              "capacity floor); greedy stands", file=sys.stderr)
+              "capacity floor); greedy stands")
         return None
     # belt-and-suspenders final gate — check BOTH reconciliations: the modelled
     # one (the per-move gate) AND, when realized biology exists, the ground-truth
@@ -563,7 +566,7 @@ def refine_realized(placement, *, initial_state, batch_week_states, control,
                 and drift_count(work, batch_week_states, initial_state,
                                 realized_biology=_rb) > 0)
             or {r.batch_id for r in work.batch_locations} < g_batches):
-        print("  LNS placement: final safety gate failed; greedy stands", file=sys.stderr)
+        print("  LNS placement: final safety gate failed; greedy stands")
         return None
     print(f"  LNS placement: ACCEPTED — {moves} move(s): peak "
           f"{start_score[0]:.3f}->{base_score[0]:.3f}, over-cap area "
