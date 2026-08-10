@@ -11,9 +11,11 @@ hottest systems onto cooler ones, emitting each move as a conserved `Transfer`.
 
 How it stays continuity-safe (the operator's hard constraint): every candidate edit
 is checked against the REAL `write_tank_continuity_audit` reconciliation (0 drift) and
-input conservation (no batch dropped), and accepted only if it STRICTLY lowers the
-hot-spot peak. Anything else is reverted. The greedy plan is always the floor — you
-cannot lose a fish, and turning LNS on can never make the forecast worse.
+input conservation (no batch dropped), and accepted only if it NEVER raises the
+hot-spot peak and strictly improves the lexicographic (peak, over-cap area, balance
+CV) objective — see `_better`. Anything else is reverted. The greedy plan is always
+the floor — you cannot lose a fish, and turning LNS on can never make the forecast
+worse.
 
 Build phases (each keeps greedy byte-identical when off):
   A. (this) realized relocate + audit-gated accept, greedy hot-spot targeting.
@@ -144,7 +146,10 @@ def _better(new, base, *, peak_eps=1e-9, area_eps=1e-3, cv_eps=5e-3):
     if new[0] > base[0] + peak_eps:
         return False                       # hard rule: never raise the peak
     if new[0] < base[0] - peak_eps:
-        return True                        # strictly lower peak — always good
+        # Strictly lower peak — good, but it may not be BOUGHT with more total
+        # over-cap area (shaving the hottest cell while pushing other systems
+        # over cap is a placement failure, not an improvement).
+        return new[1] <= base[1] + area_eps
     if new[1] < base[1] - area_eps:
         return True                        # peak tied, less total over-cap area
     if new[1] > base[1] + area_eps:
@@ -175,15 +180,31 @@ def drift_count(placement, batch_week_states, initial_state, realized_biology=No
         placement.harvest_events, placement.transfer_events,
         placement.grade_events, placement.tranog_events, initial_state,
         realized_biology=realized_biology)
-    ws = wb["TankContinuityAudit"]
+    return _count_drift_rows(wb["TankContinuityAudit"])
+
+
+def _count_drift_rows(ws):
+    """TANK_DRIFT + BIO_DRIFT rows on a TankContinuityAudit sheet.
+
+    Locates the flag columns BY HEADER NAME, not by hardcoded index: a column
+    inserted into the audit layout would silently shift the flags and make this
+    gate fail OPEN (0 drift reported for a drifting plan). No header found =
+    fail CLOSED (a huge count, so every candidate is rejected and greedy stands)."""
+    flag_i = bio_i = None
     n = 0
-    for i, row in enumerate(ws.iter_rows(values_only=True), 1):
-        if i < 5 or not row:
+    for row in ws.iter_rows(values_only=True):
+        if flag_i is None:
+            if row and "Flag" in row and "Bio_Flag" in row:
+                flag_i, bio_i = row.index("Flag"), row.index("Bio_Flag")
             continue
-        if len(row) > 14 and row[14] == "TANK_DRIFT":
+        if not row:
+            continue
+        if len(row) > flag_i and row[flag_i] == "TANK_DRIFT":
             n += 1
-        if len(row) > 27 and row[27] == "BIO_DRIFT":
+        if len(row) > bio_i and row[bio_i] == "BIO_DRIFT":
             n += 1
+    if flag_i is None:
+        return 10 ** 9        # header not found — fail closed, never fail open
     return n
 
 
@@ -322,6 +343,18 @@ def _invert(relmap):
     return {(b, nt, w): t for (b, t, w), nt in relmap.items()}
 
 
+def _density_legal(seg, tank_id, tank_by_id, batch_meta, tables):
+    """True if `seg`'s biomass respects `tank_id`'s per-tank density cap on every
+    week of the segment (a no-volume tank cannot be checked — treat as legal,
+    matching _best_target)."""
+    tk = tank_by_id[tank_id]
+    if not tk.volume_m3:
+        return True
+    load = seg.bio(batch_meta, tables)
+    return all(load[w][0] / tk.volume_m3 <= tk.max_density_kg_m3
+               for w in seg.week_labels)
+
+
 # --------------------------------------------------------------------------- #
 # Target selection — coldest grow-out system with a free tank that keeps density
 # legal and lands the segment below the current hot-spot ratio.
@@ -330,7 +363,11 @@ def _best_target(seg, grow, hot_sys, hot_ratio, sys_tanks, occ, sb, sf, cap,
                  tank_by_id, batch_meta, tables):
     seg_load = seg.bio(batch_meta, tables)
     best_tank = None
-    best_worst = hot_ratio                              # must STRICTLY beat the hot spot
+    # Must STRICTLY beat the hot spot AND land legal: without the 1.0 floor a
+    # relocation could push a legal system over its cap just because it ends
+    # cooler than the hot spot (a system over cap while another has room is a
+    # placement failure — see docs/GLOBAL placement design principle).
+    best_worst = min(hot_ratio, 1.0)
     for s in grow:                                      # grow is sorted -> deterministic
         if s == hot_sys:
             continue
@@ -367,7 +404,8 @@ def refine_realized(placement, *, initial_state, batch_week_states, control,
                     facility, system_limits, facility_limits, batch_meta, tables):
     """Relocate realized grow-out occupancy off the hottest systems; return the
     edited PlacementResult, or None to keep greedy. Every move is gated on 0 drift
-    + no dropped batch + a strictly-lower peak; otherwise it is reverted."""
+    + no dropped batch + a strict `_better` improvement (never a higher peak);
+    otherwise it is reverted."""
     grow = sorted({t.system_id for t in facility.tanks
                    if t.type == "OG" and t.system_id not in OG12_SYSTEMS
                    and t.system_id != "OG6N"})
@@ -382,7 +420,6 @@ def refine_realized(placement, *, initial_state, batch_week_states, control,
         sys_tanks[s].sort()
     cap = _carry_forward_caps(system_limits)
 
-    start_peak = system_peak(placement.batch_locations, batch_meta, tables, system_limits)
     g_batches = {r.batch_id for r in placement.batch_locations}
     work = copy.deepcopy(placement)                    # greedy stays untouched
     # Lexicographic objective (peak, over-cap area, balance CV): peak is the
@@ -481,6 +518,15 @@ def refine_realized(placement, *, initial_state, batch_week_states, control,
                     sbl = sb_seg.bio(batch_meta, tables).get(hot_wk, (0.0, 0.0, 0.0))
                     if sbl[0] >= sa_hot[0] and sbl[1] >= sa_hot[1]:
                         continue                       # SB not lighter — swap won't relieve
+                    # Per-tank density must stay legal on BOTH swapped tanks
+                    # (the relocate path checks this in _best_target; a swap
+                    # exchanges tanks, so check each segment against the tank
+                    # it is moving INTO).
+                    if not (_density_legal(seg, sb_seg.tank_id,
+                                           tank_by_id, batch_meta, tables)
+                            and _density_legal(sb_seg, seg.tank_id,
+                                               tank_by_id, batch_meta, tables)):
+                        continue
                     relmap = {(seg.batch_id, seg.tank_id, w): sb_seg.tank_id
                               for w in seg.week_labels}
                     relmap.update({(sb_seg.batch_id, sb_seg.tank_id, w): seg.tank_id
