@@ -103,8 +103,18 @@ def main(argv=None):
     else:
         print("(config/control.yaml NOT changed — pass --save-config to persist)")
 
-    # Log this run (settings + results) to optimize_history.jsonl.
+    # Log this run (settings + results) to optimize_history.jsonl. Resolve the
+    # winning VARIANT by overrides (labels recur across descent rounds — same
+    # rule as the app's _opt_winner); previously this line referenced an
+    # undefined name and the CLI crashed after writing the workbook, so the
+    # history line silently never happened.
     from datetime import datetime
+    best = next((v for v in results
+                 if v.label == getattr(rec, "best_label", None)
+                 and dict(v.overrides) == dict(winning or {})), None)
+    if best is None:
+        best = next((v for v in results
+                     if dict(v.overrides) == dict(winning or {})), None)
     optimize.append_run_log(optimize.make_run_record(
         best, args.method, "custom" if weights else emphasis,
         ts=datetime.now().isoformat(timespec="seconds"),

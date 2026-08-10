@@ -158,7 +158,11 @@ def _fw_biology_states(batches, tables, control, *, fw_inflight=None):
     batch_by_id = {b.batch_id: b for b in batches}
     for bid, (count, avg_wt, pr_close) in fw_inflight.items():
         b = batch_by_id.get(bid)
-        if b is None or count <= 0:
+        if b is None:
+            print(f"WARN: FW in-flight batch {bid} has no BatchInput — "
+                  f"omitted from FW feed/ledger projections")
+            continue
+        if count <= 0:
             continue
         fw_states, _r2, _s2 = project_in_flight_fw_batch(
             b, tables, control, count, avg_wt, pr_close)

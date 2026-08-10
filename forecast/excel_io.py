@@ -1469,7 +1469,13 @@ def write_monthly_report(
         for w in sorted(wks, key=lambda x: x["week"]):
             wkd = _wk_date(w)
             if wkd is None:
-                continue  # unparseable week — cannot attribute, skip (rare)
+                # Unparseable week — cannot attribute to a month. Skipping is
+                # the only sane degrade, but the month totals then silently
+                # omit the row's flows, so name it in the run log.
+                print(f"WARN: MonthlyLedger skipped a row with unparseable "
+                      f"week {w.get('week')!r} (batch {b}) — its flows are "
+                      f"missing from the monthly totals")
+                continue
             split_c = calendar_day_month_split(wkd)   # daily flows
             split_w = working_day_month_split(wkd)     # harvest (no fs clip —
             #        pre-start manual weeks must split by working day like the rest)

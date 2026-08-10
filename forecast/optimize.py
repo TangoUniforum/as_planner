@@ -405,6 +405,13 @@ def _harvest_weekly_series(wb):
         for row in wb["Advisory"].iter_rows(values_only=True):
             if row and _is_week(row[0]):
                 horizon.add(row[0])
+    if not horizon and weekly:
+        # Without the Advisory horizon the series only spans HARVESTED weeks,
+        # so zero-harvest weeks become invisible to the graders (the pre-fix
+        # "optimistic" behaviour). Both engines write Advisory; if it's ever
+        # absent the operator must know the empty-week gate is blind.
+        print("WARN: Advisory sheet missing — harvest series spans harvested "
+              "weeks only; zero-harvest weeks CANNOT be detected for this run")
     weeks = sorted(horizon | set(weekly)) if horizon else sorted(weekly)
     return weeks, [weekly.get(w, 0.0) for w in weeks]
 
@@ -902,8 +909,9 @@ def _harvest_cap(config_dir, overrides):
     try:
         with open(os.path.join(config_dir, "control.yaml")) as f:
             cap = float(yaml.safe_load(f).get("max_harvest_per_week", cap) or cap)
-    except (OSError, ValueError, TypeError):
-        pass
+    except (OSError, ValueError, TypeError) as e:
+        print(f"WARN: control.yaml unreadable for grading "
+              f"({type(e).__name__}) — judging vs default harvest cap {cap:g}")
     if "max_harvest_per_week" in overrides:
         cap = float(overrides["max_harvest_per_week"])
     return cap
@@ -916,8 +924,9 @@ def _move_cap(config_dir, overrides):
     try:
         with open(os.path.join(config_dir, "control.yaml")) as f:
             cap = float(yaml.safe_load(f).get("max_transfers_per_week", cap) or 0)
-    except (OSError, ValueError, TypeError):
-        pass
+    except (OSError, ValueError, TypeError) as e:
+        print(f"WARN: control.yaml unreadable for grading "
+              f"({type(e).__name__}) — judging vs default move cap {cap:g}")
     if "max_transfers_per_week" in overrides:
         try:
             cap = float(overrides["max_transfers_per_week"])
@@ -935,8 +944,9 @@ def _relief_ceiling(config_dir, overrides):
         with open(os.path.join(config_dir, "control.yaml")) as f:
             v = yaml.safe_load(f).get("harvest_relief_pct", pct)
             pct = float(v) if v is not None else 0.0
-    except (OSError, ValueError, TypeError):
-        pass
+    except (OSError, ValueError, TypeError) as e:
+        print(f"WARN: control.yaml unreadable for grading "
+              f"({type(e).__name__}) — judging vs default relief pct {pct:g}")
     if "harvest_relief_pct" in overrides:
         try:
             pct = float(overrides["harvest_relief_pct"])
@@ -954,8 +964,9 @@ def _welfare_density(config_dir, overrides):
     try:
         with open(os.path.join(config_dir, "control.yaml")) as f:
             wl = float(yaml.safe_load(f).get("density_welfare_threshold_kg_m3", wl) or wl)
-    except (OSError, ValueError, TypeError):
-        pass
+    except (OSError, ValueError, TypeError) as e:
+        print(f"WARN: control.yaml unreadable for grading "
+              f"({type(e).__name__}) — judging vs default welfare line {wl:g}")
     if "density_welfare_threshold_kg_m3" in overrides:
         # `or default`: a 0/None override resolves to the default 80, matching
         # the config path above and every app surface — previously an explicit
@@ -1241,15 +1252,26 @@ def sweep(input_path, config_dir, scenario_dir, grid=None, progress=None,
     except PicklingError:
         # Source hot-reload under a live run broke pool serialization (module
         # identity changed). Direct calls still work — finish sequentially;
-        # the variant cache skips everything that already completed.
+        # the variant cache skips everything that already completed. SAY SO:
+        # a principled fallback the operator can't see is still a silent one.
+        if progress is not None:
+            progress(done, n, "process pool broke (source hot-reload) — "
+                              "finishing the sweep sequentially")
+        print("WARN: sweep process pool broke (PicklingError, likely a source "
+              "hot-reload) — finishing sequentially")
         return sweep(input_path, config_dir, scenario_dir, grid=grid,
                      progress=progress, parallel=False,
                      variant_cache=variant_cache)
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
         # A pool that can't even start (sandboxed env) -> sequential. But if some
         # variants already ran, a failure is a real variant error -> surface it.
         if len(results) > n - len(todo):
             raise
+        if progress is not None:
+            progress(done, n, "process pool unavailable — running the sweep "
+                              "sequentially")
+        print(f"WARN: sweep process pool unavailable "
+              f"({type(e).__name__}: {e}) — running sequentially")
         return sweep(input_path, config_dir, scenario_dir, grid=grid,
                      progress=progress, parallel=False,
                      variant_cache=variant_cache)
@@ -1310,7 +1332,9 @@ def coordinate_descent(input_path, config_dir, scenario_dir, emphasis=DEFAULT_EM
         from concurrent.futures import ProcessPoolExecutor
         try:
             pool = ProcessPoolExecutor(max_workers=workers)
-        except Exception:  # noqa: BLE001 — restricted env -> sequential
+        except Exception as e:  # noqa: BLE001 — restricted env -> sequential
+            print(f"WARN: descent process pool unavailable "
+                  f"({type(e).__name__}: {e}) — running sequentially")
             pool = None
 
     def _record(k, v):
@@ -1366,7 +1390,12 @@ def coordinate_descent(input_path, config_dir, scenario_dir, emphasis=DEFAULT_EM
             # modules) changes run_variant's identity and the pool can no
             # longer serialize it. Direct calls still work — finish this batch
             # sequentially and stay sequential for the rest of the descent
-            # instead of dying (crashed once for real: 2026-08-07).
+            # instead of dying (crashed once for real: 2026-08-07). SAY SO.
+            print("WARN: descent process pool broke (PicklingError, likely a "
+                  "source hot-reload) — continuing sequentially")
+            if progress is not None:
+                progress(len(evaluated), None,
+                         "pool broke — descent continues sequentially")
             pool = None
             for k, ov, label in run_items:
                 if k not in cache:

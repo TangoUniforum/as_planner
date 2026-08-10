@@ -329,6 +329,8 @@ def run_global(input_path, output_path, config_dir, scenario_dir, *,
     _prev = (_l3._OVERSTOCK_DENSITY_PCT, _l3._OVERSTOCK_MAX_WT_G)
     if overstock:
         _l3._OVERSTOCK_DENSITY_PCT, _l3._OVERSTOCK_MAX_WT_G = 1.0, 2500.0
+        print("  overstock=True: selective over-stock active — <2.5 kg fish "
+              "may be placed to the HARD density cap (100%)")
     try:
         result = loop.run_loop(
             batches, tables, control, facility, system_limits,
@@ -625,9 +627,15 @@ def _emit_workbook(gft, result, batches, tables, control, facility,
 def _scan_audit_drift(ws):
     """Scan a written TankContinuityAudit sheet for TANK_DRIFT / BIO_DRIFT flags
     + the facility count signed/abs totals. Columns (1-based): Flag=15,
-    Bio_Flag=28; the facility summary row 'Count (fish)' carries signed/abs."""
+    Bio_Flag=28; the facility summary row 'Count (fish)' carries signed/abs.
+
+    The facility totals start as NaN, not 0.0: a summary row that is missing
+    or unparseable must FAIL the caller's `abs(fac_signed) < 1.0` cleanliness
+    test (NaN comparisons are False), never default to the passing value — a
+    verdict read off a row that was never read is the forbidden class."""
     n_tank = n_bio = 0
-    fac_signed = fac_abs = 0.0
+    fac_signed = fac_abs = float("nan")
+    fac_row_seen = False
     for row in ws.iter_rows(values_only=True):
         if not row:
             continue
@@ -637,11 +645,16 @@ def _scan_audit_drift(ws):
             if row[27] == "BIO_DRIFT":
                 n_bio += 1
         if row and row[0] == "Count (fish)" and len(row) >= 3:
+            fac_row_seen = True
             try:
                 fac_signed = float(row[1] or 0.0)
                 fac_abs = float(row[2] or 0.0)
             except (TypeError, ValueError):
-                pass
+                print("  WARN: TankContinuityAudit facility 'Count (fish)' row "
+                      "is unparseable — verdict reads INVESTIGATE, not PASS")
+    if not fac_row_seen:
+        print("  WARN: TankContinuityAudit facility 'Count (fish)' summary row "
+              "not found — verdict reads INVESTIGATE, not PASS")
     return n_tank, n_bio, fac_signed, fac_abs
 
 

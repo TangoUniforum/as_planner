@@ -1229,6 +1229,14 @@ def _build_facility_assignment_plan(
                     + (f"; {remaining} OG1/2 left (pool short, retry next week)"
                        if remaining else "")
                 )
+            elif og12_held:
+                # ZERO swaps must narrate too: a week where the whole OG3-6
+                # pool is full previously left no note at all, so a >=1kg
+                # batch silently overstayed in the nursery tier that week.
+                notes.append(
+                    f"MIGRATE: 0/{len(og12_held)} OG1/2 tank(s) swapped "
+                    f"(OG3-6 pool full) — batch overstays the entry tier; "
+                    f"retry next week")
 
         elif etype == EVT_TRANOG:
             # Hard placement: pick `delta` empty OG1/2 (entry-tier) tanks.

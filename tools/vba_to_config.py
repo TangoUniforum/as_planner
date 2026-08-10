@@ -471,6 +471,8 @@ def read_system_limits(ws) -> SystemLimits:
             continue
         metric = _METRIC_MAP.get(metric_raw)
         if metric is None:
+            print(f"  WARN: SystemLimits row {r}: unrecognized metric "
+                  f"{metric_raw!r} — row skipped (cap NOT converted)")
             continue
         if not sysid.upper().startswith("OG") and sysid[:1].isdigit():
             sysid = "OG" + sysid
@@ -498,6 +500,9 @@ def read_facility_limits(ws) -> FacilityLimits:
         metric_raw = _norm(ws.cell(r, c_metric).value).lower()
         metric = _METRIC_MAP.get(metric_raw)
         if metric is None:
+            if metric_raw:
+                print(f"  WARN: FacilityLimits row {r}: unrecognized metric "
+                      f"{metric_raw!r} — row skipped (cap NOT converted)")
             continue
         for c in range(first_data_col, ws.max_column + 1):
             val = _num(ws.cell(r, c).value)

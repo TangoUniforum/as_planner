@@ -200,6 +200,7 @@ def hydrate_facility_state(
     """
     warns: list[str] = []
     batch_by_id = {b.batch_id: b for b in batches}
+    _no_meta_warned: set[str] = set()
     for r in records:
         tank = state.tanks_by_id.get(r.tank_id)
         if tank is None:
@@ -215,6 +216,15 @@ def hydrate_facility_state(
             )
             continue
         b = batch_by_id.get(r.batch_id)
+        if b is None and r.batch_id not in _no_meta_warned:
+            # Downstream biology silently FREEZES tanks whose batch has no
+            # metadata (no growth, no mortality — 0-drift still passes).
+            # Warn once per batch at the hydration site, where the cause is.
+            _no_meta_warned.add(r.batch_id)
+            warns.append(
+                f"PR: batch {r.batch_id} has no Batches-sheet metadata — its "
+                f"tank(s) hydrate but biology will NOT advance them "
+                f"(no growth/mortality)")
         cv = b.tran_og_cv if b else 16.0
         stage = STAGE_FW if tank.type == "FW" else STAGE_SW
         tank.assign(
