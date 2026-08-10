@@ -3051,10 +3051,16 @@ def _config_fingerprint() -> str:
 def _sweep_inputs_sig() -> str:
     """Identity of the inputs a sweep ran against (PR content + config/scenario
     state) — stored beside Tune/Optimize/Frontier results so a recommendation
-    computed on different inputs is flagged instead of presented as current."""
+    computed on different inputs is flagged instead of presented as current.
+    Folds in the metric-semantics version too: identical inputs measured under
+    changed counter rules (e.g. the manual-window exclusion) are DIFFERENT
+    measurements, so cached variants graded under old rules age out instead of
+    silently defeating a metrics fix."""
     import hashlib
+    from forecast import optimize as _opt_sig
     return hashlib.md5(
         f"{st.session_state.get('_pr_key', '')}|{_config_fingerprint()}"
+        f"|{_opt_sig.METRICS_SCHEMA}"
         .encode()).hexdigest()
 
 
@@ -5727,6 +5733,7 @@ def _ana_grade(res, targets, econ):
     ctx = {
         "dropped": v.get("dropped", 0), "overprod": v.get("overprod", 0),
         "zero_weeks": h.get("zero_weeks"),
+        "zero_weeks_excluded": h.get("window_weeks_excluded"),
         "weeks_over_harvest_cap": (m.weeks_over_harvest_cap
                                    if m is not None else None),
         "weeks_over_relief_ceiling": (

@@ -99,6 +99,7 @@ def _grade(out_path, cfg: dict, targets) -> dict:
     ctx = {
         "dropped": verdict["dropped"], "overprod": verdict["overprod"],
         "zero_weeks": harv.get("zero_weeks"),
+        "zero_weeks_excluded": harv.get("window_weeks_excluded"),
         "weeks_over_harvest_cap": m.weeks_over_harvest_cap,
         "weeks_over_relief_ceiling": m.weeks_over_relief_ceiling,
         "sixn_outbound_purge": sixn_out,
@@ -155,6 +156,10 @@ def main(argv=None) -> int:
             if p.is_file():
                 h.update(str(p.relative_to(d)).encode())
                 h.update(p.read_bytes())
+    # Metric-SEMANTICS version: identical inputs measured under changed rules
+    # (e.g. v2's manual-window exclusion) are different measurements — never
+    # reuse a cached variant graded under the old counters.
+    h.update(_opt.METRICS_SCHEMA.encode())
     inputs_sig = h.hexdigest()[:12]
 
     print(f"TUNED TOURNAMENT — {len(roster)} method(s) on {wb.name} "

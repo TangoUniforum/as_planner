@@ -1393,7 +1393,13 @@ that whole composition in one flow and ends in a single recommendation card:
 3. **The checklist** — every candidate is judged on the hard-rule checklist:
    conservation and never-an-empty-week are **hard** (a fail disqualifies);
    the biomass cap, the 55k processing cap, and your **harvest targets** are
-   soft (flagged and penalized, never hidden).
+   soft (flagged and penalized, never hidden). Harvest-compliance gates judge
+   the **planner weeks only**: manual-override window weeks you scripted
+   yourself (§3.5 manual override window) are excluded from the zero-week /
+   over-cap counts — those weeks execute exactly your script and are policed
+   by the ValidationLog `MANUAL WINDOW` lints instead, so a deliberately
+   harvest-free scripted week can't fail every engine at once. Conservation
+   stays whole-horizon.
 4. **The card** — one recommended plan (pick order: hard rules → soft rules →
    target shortfall → emphasis score), with **✅ Adopt this plan** (saves the
    knobs, sets the ▶ Run forecast method, loads the run) and **⭐ Promote as

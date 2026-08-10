@@ -39,30 +39,41 @@ if str(ROOT) not in sys.path:
 from forecast import methods as _methods           # noqa: E402
 from forecast import optimize as _opt              # noqa: E402
 from forecast.excel_io import write_run_comparison  # noqa: E402
+from forecast.window_weeks import manual_window_weeks  # noqa: E402
 
 
 def _harvest_extras(out_path, min_harvest):
     """Harvest-contract counts from a produced workbook's HarvestPlan: total
     weeks, min/max weekly fish, weeks below the min-harvest floor, and zero-
-    harvest weeks (the 'never an empty week' contract). Computed over ALL harvest
-    weeks — the manual override weeks are identical across every method, so they
-    offset every column equally and the comparison stays fair."""
+    harvest weeks (the 'never an empty week' contract).
+
+    The COMPLIANCE counts (min_week, weeks_below_min, zero_weeks) are computed
+    over PLANNER weeks only: operator-scripted manual-window weeks (self-
+    described by the workbook's ValidationLog — empty set on old workbooks)
+    execute only the operator's scripted events, so no engine can be blamed for
+    (or fix) what those weeks harvest; the MANUAL WINDOW lints already police
+    the script itself. n_weeks/max_week stay whole-horizon (display)."""
     wb = openpyxl.load_workbook(out_path, data_only=True)
     try:
-        fish = _opt._harvest_weekly_fish(wb)
+        weeks, fish = _opt._harvest_weekly_series(wb)
+        window = manual_window_weeks(wb)
     finally:
         wb.close()
+    planner = ([x for w, x in zip(weeks, fish) if w not in window]
+               if window else fish)
     if not fish:
         return {"n_weeks": 0, "min_week": 0.0, "max_week": 0.0,
-                "weeks_below_min": 0, "zero_weeks": 0, "min_harvest": min_harvest}
+                "weeks_below_min": 0, "zero_weeks": 0, "min_harvest": min_harvest,
+                "window_weeks_excluded": 0}
     return {
         "n_weeks": len(fish),
-        "min_week": min(fish),
+        "min_week": min(planner) if planner else 0.0,
         "max_week": max(fish),
-        "weeks_below_min": (sum(1 for x in fish if x < min_harvest)
+        "weeks_below_min": (sum(1 for x in planner if x < min_harvest)
                             if min_harvest else 0),
-        "zero_weeks": sum(1 for x in fish if x < 1.0),
+        "zero_weeks": sum(1 for x in planner if x < 1.0),
         "min_harvest": min_harvest,
+        "window_weeks_excluded": len(fish) - len(planner),
     }
 
 

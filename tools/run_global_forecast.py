@@ -383,7 +383,8 @@ def run_global(input_path, output_path, config_dir, scenario_dir, *,
         _emit_workbook(gft, result, batches, tables, control, facility,
                        _facility_limits, cons, Path(output_path),
                        initial_state=(_mw_stitch or {}).get("initial_state"),
-                       manual_week_states=_mw_states, system_limits=system_limits)
+                       manual_week_states=_mw_states, system_limits=system_limits,
+                       manual_warnings=_mw_warns)
     finally:
         _l3._OVERSTOCK_DENSITY_PCT, _l3._OVERSTOCK_MAX_WT_G = _prev
     return 0
@@ -444,7 +445,7 @@ def _solve_cpsat_q(result, facility, system_limits, control, time_limit,
 def _emit_workbook(gft, result, batches, tables, control, facility,
                    facility_limits, cons, out_path: Path,
                    initial_state=None, manual_week_states=None,
-                   system_limits=None) -> None:
+                   system_limits=None, manual_warnings=None) -> None:
     from openpyxl import Workbook
     from forecast.excel_io import (
         write_advisory, write_batch_locations, write_batch_plan,
@@ -453,7 +454,8 @@ def _emit_workbook(gft, result, batches, tables, control, facility,
         write_harvest_plan_report, write_harvest_report,
         write_input_conservation_audit, write_monthly_report,
         write_system_limits_audit, write_tank_continuity_audit,
-        write_transfer_plan_output, write_weekly_report,
+        write_transfer_plan_output, write_validation_log,
+        write_weekly_report,
     )
 
     batch_by_id = {b.batch_id: b for b in batches}
@@ -605,6 +607,14 @@ def _emit_workbook(gft, result, batches, tables, control, facility,
         grade_events=[], tranog_events=gft.tranog_events,
         initial_state=initial_state,
         realized_biology=gft.realized_biology)
+    # Manual-window narration (MANUAL EVENT OK / MANUAL WINDOW lints): the
+    # workbook must SELF-DESCRIBE its operator-scripted window weeks — the
+    # cross-method scorer (forecast.window_weeks.manual_window_weeks) reads
+    # them back to exclude window weeks from harvest-compliance metrics, same
+    # as the controller's workbook. Only written when a window ran, so
+    # no-window global outputs keep their exact previous sheet set.
+    if manual_warnings:
+        write_validation_log(wb, invariant_warnings=list(manual_warnings))
 
     # Order: RunConfig first.
     wb.move_sheet("RunConfig", -(wb.sheetnames.index("RunConfig")))

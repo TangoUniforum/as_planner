@@ -502,11 +502,21 @@ def _gate_conservation(ctx):
 
 
 def _gate_no_empty_week(ctx):
+    """Judges the PLANNER on the weeks the planner controls: operator-scripted
+    manual-window weeks are excluded upstream (the counts in ctx already leave
+    them out — see forecast.window_weeks) and reported here so the verdict
+    says what it judged. The MANUAL WINDOW ValidationLog lints police the
+    scripted weeks themselves."""
     z = ctx.get("zero_weeks")
     if z is None:
         return "N/A", "zero-week count unavailable"
-    return (("PASS", "harvests something every week") if int(z) == 0
-            else ("FAIL", f"{int(z)} totally empty harvest week(s)"))
+    ex = int(ctx.get("zero_weeks_excluded") or 0)
+    scope = (f" ({ex} operator-scripted window week(s) excluded — "
+             f"see the ValidationLog MANUAL WINDOW lints)" if ex else "")
+    if int(z) == 0:
+        return "PASS", (f"harvests something every planner week{scope}"
+                        if ex else "harvests something every week")
+    return "FAIL", f"{int(z)} totally empty harvest week(s){scope}"
 
 
 def _gate_biomass_cap(ctx):

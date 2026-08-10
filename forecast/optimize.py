@@ -34,6 +34,14 @@ import openpyxl
 import yaml
 
 from . import tuning
+from . import window_weeks
+
+# Bumped whenever the MEANING of a measured metric changes, so caches keyed by
+# input content alone also fold this in and never reuse a measurement graded
+# under old rules (the 2026-08 lesson: stale cached metrics defeat a metrics
+# fix silently). v2 = harvest-compliance counts exclude operator-scripted
+# manual-window weeks (forecast.window_weeks).
+METRICS_SCHEMA = "metrics-v2-window-weeks-excluded"
 
 # Knob grid: (label, {control-knob: value}); baseline first. Every variant
 # inherits the caller's config (both leveling defaults — rebalance_level +
@@ -376,6 +384,13 @@ def _harvest_weekly_fish(wb):
     that sheet is missing we fall back to the harvested weeks alone — the old,
     optimistic behaviour — rather than inventing a horizon.
     """
+    return _harvest_weekly_series(wb)[1]
+
+
+def _harvest_weekly_series(wb):
+    """(week_labels, fish) — the full-horizon weekly harvest series of
+    `_harvest_weekly_fish` WITH its aligned week labels, so callers can tell
+    operator-scripted manual-window weeks apart from planner weeks."""
     ws = wb["HarvestPlan"]
     cols = _col_map(ws, lambda r: r and str(r[0]).strip() == "Week"
                     and any(str(c).strip() == "Batch" for c in r if c))
@@ -391,7 +406,7 @@ def _harvest_weekly_fish(wb):
             if row and _is_week(row[0]):
                 horizon.add(row[0])
     weeks = sorted(horizon | set(weekly)) if horizon else sorted(weekly)
-    return [weekly.get(w, 0.0) for w in weeks]
+    return weeks, [weekly.get(w, 0.0) for w in weeks]
 
 
 def _transfers_per_fish(wb):
@@ -740,7 +755,17 @@ def metrics_from_workbook(out_path, harvest_cap,
     None leaves them 0 (legacy callers)."""
     wb = openpyxl.load_workbook(out_path, data_only=True)
     bio, feed, bcap, fcap, per = _biomass_and_feed(wb)
-    fish = _harvest_weekly_fish(wb)
+    hv_weeks, fish = _harvest_weekly_series(wb)
+    # Operator-scripted manual-window weeks (self-described by the workbook's
+    # ValidationLog; empty set on old workbooks). Window weeks execute ONLY
+    # the operator's scripted events — no engine may add or trim a harvest
+    # there — so the harvest-COMPLIANCE counts below (zero weeks, min week,
+    # over-limit / over-ceiling weeks) judge the planner on planner weeks
+    # only. Everything else (totals, variability, conservation) stays
+    # whole-horizon. Reuses the already-open workbook — no second load.
+    _window = window_weeks.manual_window_weeks(wb)
+    planner_fish = ([x for wk, x in zip(hv_weeks, fish) if wk not in _window]
+                    if _window else fish)
     tpf, by_type = _transfers_per_fish(wb)
     _mv_counts = _weekly_move_counts(wb)
 
@@ -792,9 +817,9 @@ def metrics_from_workbook(out_path, harvest_cap,
         system_load=system_load,
         feed_peak=max(feed) if feed else 0.0,
         density_peak=_density_peak(wb),
-        weeks_over_harvest_cap=sum(1 for x in fish if x > harvest_cap),
+        weeks_over_harvest_cap=sum(1 for x in planner_fish if x > harvest_cap),
         weeks_over_relief_ceiling=sum(
-            1 for x in fish if x > (relief_ceiling or harvest_cap)),
+            1 for x in planner_fish if x > (relief_ceiling or harvest_cap)),
         weeks_moves_over_cap=(
             sum(1 for n in _mv_counts if n > move_cap) if move_cap else 0),
         weeks_moves_warn=(
@@ -812,8 +837,8 @@ def metrics_from_workbook(out_path, harvest_cap,
         crowded_biomass_fraction=crowded_frac,
         mean_rearing_density=mean_rear_d,
         crowded_fish_weeks=crowded_fw,
-        harvest_zero_weeks=sum(1 for x in fish if x < 1.0),
-        harvest_min_week=(min(fish) if fish else 0.0),
+        harvest_zero_weeks=sum(1 for x in planner_fish if x < 1.0),
+        harvest_min_week=(min(planner_fish) if planner_fish else 0.0),
     )
     dropped, overprod = tuning._conservation(out_path)
     return metrics, dropped, overprod
