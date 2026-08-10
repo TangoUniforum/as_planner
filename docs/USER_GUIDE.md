@@ -1066,10 +1066,14 @@ you choose a *whole* plan — never a splice.
   widget interaction), the board still shows the legs that completed and names the ones
   that didn't. Click **▶ Run all methods & compare** again and it reuses the finished
   work, running only what's missing. Use **↻ Re-run all from scratch** to discard
-  everything and start over. You rarely need it: if you change config or upload a
-  different PR, the affected cards are flagged **⚠️ stale** and the next ▶ re-runs
-  exactly those. Stale results stay on screen until then — they aren't wrong, they
-  were just computed under different inputs, so check the flag before picking a plan.
+  everything and start over. You rarely need it: if you change config, edit the
+  scenario (including manual events) or upload a different PR, the affected legs are
+  treated as **not run** — a warning names them and they come OFF the board until the
+  next ▶ re-runs exactly those. A plan computed under different inputs is never shown
+  next to current ones (that once let a stale board blame every stock method for an
+  empty harvest week the current scenario had already scripted away). Changing only
+  the harvest **targets or prices** re-judges the existing board instantly — those are
+  scoring overlays, not run inputs, so nothing re-runs.
 - **Reading the progress bar.** It advances when a method *finishes*, not while one is
   running: the engine call blocks the app, so nothing can animate during it. The text
   tells you which method is in flight, its typical duration, and the wall-clock time it

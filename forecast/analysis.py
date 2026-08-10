@@ -455,6 +455,69 @@ def cache_load_all(cache_dir=None, prefix: str = "") -> dict:
     return out
 
 
+def dirs_fingerprint(dirs, exclude=frozenset()) -> str:
+    """CONTENT hash of every file under `dirs` (recursive), minus names listed
+    in `exclude`. Content, not mtimes: the 2026-08-10 stale-board incident was
+    a scenario edit (a W33 manual harvest) that the previous name+mtime scan
+    did not register, so disk-cached engine legs keyed on the mtime proxy
+    replayed the pre-edit scenario as if current. Bytes cannot lie, and the
+    files here are small YAML — hashing them outright costs nothing.
+    tools/run_tuned_tournament.py already keys its caches on content; this
+    aligns the app. An unreadable file degrades to its stat identity rather
+    than failing the whole fingerprint."""
+    import hashlib
+    h = hashlib.md5()
+    for d in dirs:
+        d = Path(d)
+        if not d.exists():
+            continue
+        for p in sorted(d.rglob("*"), key=lambda x: str(x)):
+            if p.is_file() and p.name not in exclude:
+                h.update(str(p.relative_to(d)).encode())
+                try:
+                    h.update(p.read_bytes())
+                except OSError:
+                    h.update(str(p.stat().st_mtime_ns).encode())
+    return h.hexdigest()
+
+
+def board_leg_current(entry, expected_sig: str) -> bool:
+    """Whether a cached board engine leg may be REPLAYED for the inputs on
+    screen. A leg is usable only when it carries the exact signature of the
+    current inputs — anything else (old-format entry with no stored sig, a
+    sig mismatch after a PR/config/scenario change, a malformed entry) is
+    treated as ABSENT so the caller re-runs the engine instead of replaying
+    a plan built for different inputs. Never raises on junk."""
+    try:
+        return bool(entry) and entry.get("sig") == expected_sig \
+            and isinstance(entry.get("res"), dict)
+    except AttributeError:  # entry isn't a dict — corrupt/foreign cache object
+        return False
+
+
+def drop_stale_grades(res, schema: str) -> bool:
+    """Strip grading artifacts computed under an older METRICS_SCHEMA from a
+    result dict, leaving the ENGINE output (workbook bytes/path, run stats)
+    untouched. A schema bump changes how a run is JUDGED, not what the engine
+    produced — so the remedy is a re-grade from the cached workbook, never an
+    engine re-run. Grades from before schema-stamping existed (no "schema"
+    key) are stale by definition. Returns True when anything was dropped."""
+    if not isinstance(res, dict):
+        return False
+    stale = False
+    sc = res.get("_score")
+    if sc is not None and sc.get("schema") != schema:
+        res.pop("_score", None)
+        res.pop("_score_err", None)
+        stale = True
+    for k in ("_ana_rows", "_ana_density"):
+        c = res.get(k)
+        if c is not None and c.get("schema") != schema:
+            res.pop(k, None)
+            stale = True
+    return stale
+
+
 # --------------------------------------------------------------------------- #
 # Gate registry — the checklist
 # --------------------------------------------------------------------------- #

@@ -3030,22 +3030,18 @@ _NON_ENGINE_CONFIG = {"targets.yaml", "economics.yaml", "analysis_defaults.yaml"
 
 
 def _config_fingerprint() -> str:
-    """Hash of config/ + scenario/ ENGINE-INPUT file names + mtimes — changes
+    """Hash of config/ + scenario/ ENGINE-INPUT file CONTENT — changes
     whenever any config that affects a run is saved, so cached templates,
-    board legs and sweep results invalidate. Analysis-overlay files are
-    excluded (see _NON_ENGINE_CONFIG)."""
-    import hashlib
-    h = hashlib.md5()
-    for d in (CONFIG_DIR, SCENARIO_DIR):
-        if d.exists():
-            # RECURSIVE: per-PR manual-event files live in a subdir
-            # (scenario/manual_events/<closing>.yaml) and are engine inputs —
-            # a flat scan would let their edits dodge staleness detection.
-            for p in sorted(d.rglob("*"), key=lambda x: str(x)):
-                if p.is_file() and p.name not in _NON_ENGINE_CONFIG:
-                    h.update(str(p.relative_to(d)).encode())
-                    h.update(str(p.stat().st_mtime_ns).encode())
-    return h.hexdigest()
+    board legs and sweep results invalidate. Content, not name+mtime: the
+    2026-08-10 stale-board incident was a scenario edit (a W33 manual
+    harvest) the mtime proxy did not register, so every disk-cached stock
+    engine leg replayed the pre-edit scenario and poisoned the stock-vs-tuned
+    comparison. The scan stays RECURSIVE (per-PR manual-event files live in
+    scenario/manual_events/<closing>.yaml and are engine inputs);
+    analysis-overlay files are excluded (see _NON_ENGINE_CONFIG)."""
+    from forecast import analysis as _ana
+    return _ana.dirs_fingerprint((CONFIG_DIR, SCENARIO_DIR),
+                                 exclude=_NON_ENGINE_CONFIG)
 
 
 def _sweep_inputs_sig() -> str:
@@ -5295,8 +5291,11 @@ def _board_score(out_path):
             out_path, str(_cfg.get("sixn_production_start") or ""))
     except Exception:                                            # noqa: BLE001
         sixn_out = None
+    # The schema stamp versions the grading SEMANTICS (which weeks count,
+    # what a gate judges) independently of the engine inputs — see
+    # _ensure_board_score / analysis.drop_stale_grades.
     return {"metrics": m, "verdict": verdict, "harvest": harv, "gates": gates,
-            "sixn_outbound_purge": sixn_out}
+            "sixn_outbound_purge": sixn_out, "schema": _opt.METRICS_SCHEMA}
 
 
 def _board_badges(gates):
@@ -5320,13 +5319,20 @@ _BOARD_ORDER = tuple(_methods.DEFAULT_ROSTER)
 
 
 def _board_method_sig(mkey: str, pr_md5: str) -> str:
-    """Identity of one board leg's inputs, so a finished method can be reused
-    instead of re-run. "board2" is a schema tag — bump it when the stored
-    result shape or the method keys change (mirrors the "proj3" tag in
-    _mw_project). The CP-SAT knobs enter only the method they affect, so moving
-    the Computer power slider doesn't needlessly invalidate the fast methods."""
+    """Identity of one board leg's ENGINE inputs, so a finished method can be
+    reused instead of re-run. "board3" is a format tag — bump it when the
+    stored result shape or the key composition changes (board2→board3 = the
+    content-based _config_fingerprint; every mtime-keyed leg ages out once).
+    The CP-SAT knobs enter only the method they affect, so moving the Computer
+    power slider doesn't needlessly invalidate the fast methods.
+
+    Deliberately EXCLUDES METRICS_SCHEMA: this sig identifies what the ENGINE
+    produced (PR + config/scenario + method), while grading is stamped with
+    its own schema inside _score and self-invalidates (_ensure_board_score).
+    The two axes are independent — a metrics-code bump re-grades the cached
+    workbook, it must not force 30-minute engine re-runs."""
     import hashlib
-    parts = ["board2", pr_md5, _config_fingerprint(), mkey]
+    parts = ["board3", pr_md5, _config_fingerprint(), mkey]
     if (_METHODS.get(mkey) or _METHODS["controller"]).engine_kwargs.get("optimal"):
         parts += [f"cpsat{_cpsat_det_time()}", str(_cpu_workers())]
     return hashlib.md5("|".join(parts).encode()).hexdigest()
@@ -5437,9 +5443,17 @@ def _board_persist(mkey: str) -> None:
 
 
 def _ensure_board_score(res: dict, label: str) -> None:
-    """Grade a finished run, once. The grading is three full workbook reads, so
-    it lives inside the stored result — and a run whose grading failed
-    transiently can be re-graded on reuse without re-running the solve."""
+    """Grade a finished run, once per METRICS_SCHEMA. The grading is three full
+    workbook reads, so it lives inside the stored result — and a run whose
+    grading failed transiently can be re-graded on reuse without re-running the
+    solve. A grade computed under an OLDER schema (or before schema-stamping
+    existed) self-invalidates here: the engine output is reused, the judgement
+    is redone from the cached workbook — the 2026-08-10 stale board replayed
+    pre-fix zero_weeks verdicts precisely because a stored _score was trusted
+    forever."""
+    from forecast import analysis as _anacache
+    from forecast import optimize as _opt
+    _anacache.drop_stale_grades(res, _opt.METRICS_SCHEMA)
     if not (res.get("ok") and res.get("output_path")) or res.get("_score"):
         return
     with st.spinner(f"Grading {label}…"):
@@ -5517,6 +5531,7 @@ def _compare_and_choose():
     if run_all or rerun_all:
         import hashlib
         from datetime import datetime as _dtn
+        from forecast import analysis as _anacache
         store = _board_store()
         if rerun_all:
             store.clear()
@@ -5527,7 +5542,9 @@ def _compare_and_choose():
         for i, (mkey, mlabel) in enumerate(roster):
             msig = _board_method_sig(mkey, pr_md5)
             done = store.get(mkey)
-            if (done and done.get("sig") == msig and done["res"].get("ok")
+            # A leg whose stored sig doesn't match the CURRENT inputs (or an
+            # old-format leg with no sig at all) is absent — re-run, never replay.
+            if (_anacache.board_leg_current(done, msig) and done["res"].get("ok")
                     and done["res"].get("output_path")):
                 _ensure_board_score(done["res"], mlabel)
                 _board_persist(mkey)   # capture a freshly-added _score too
@@ -5563,6 +5580,24 @@ def _compare_and_choose():
 
     store = _board_store()
     results = {k: store[k]["res"] for k in _BOARD_ORDER if k in store}
+
+    # Results outlive the inputs that produced them: a config save, a scenario
+    # edit or a new PR doesn't clear the board. A leg whose stored sig doesn't
+    # match the CURRENT inputs is treated as ABSENT — never replayed onto the
+    # board (2026-08-10: stale stock legs shown next to fresh tuned runs
+    # poisoned the comparison). ▶ re-runs exactly those.
+    import hashlib as _hl
+    from forecast import analysis as _anacache
+    _now_pr = _hl.md5(uploaded.getvalue()).hexdigest()
+    _stale = {k for k in results
+              if not _anacache.board_leg_current(store[k],
+                                                 _board_method_sig(k, _now_pr))}
+    if _stale:
+        st.warning(f"Inputs changed since {len(_stale)} of these result(s) were "
+                   f"computed ({', '.join(results[k].get('_label', k) for k in _stale)}"
+                   f") — treating them as not run. **▶ Run all methods & "
+                   f"compare** re-runs just those.")
+        results = {k: v for k, v in results.items() if k not in _stale}
     if not results:
         return
 
@@ -5573,19 +5608,15 @@ def _compare_and_choose():
                    f"finished. Missing: {', '.join(_missing)}. Click **▶ Run all "
                    f"methods & compare** to run only those.")
 
-    # Results outlive the inputs that produced them: a config save or a new PR
-    # doesn't clear the board, so say which cards no longer match. (The run loop
-    # re-runs a stale method, but only once the operator presses ▶ — until then
-    # they could otherwise pick a plan built under different knobs.)
-    import hashlib as _hl
-    _now_pr = _hl.md5(uploaded.getvalue()).hexdigest()
-    _stale = {k for k in results
-              if store[k].get("sig") != _board_method_sig(k, _now_pr)}
-    if _stale:
-        st.warning(f"Inputs changed since {len(_stale)} of these result(s) were "
-                   f"computed ({', '.join(results[k].get('_label', k) for k in _stale)}"
-                   f") — they are shown as-is. **▶ Run all methods & compare** "
-                   f"refreshes just those.")
+    # Grades must match the CURRENT metrics semantics even when nothing re-ran:
+    # a valid leg hydrated from disk may carry a _score computed under an older
+    # METRICS_SCHEMA — re-grade it from the cached workbook (engine reused) and
+    # write the refreshed grade back through to disk.
+    for k, v in results.items():
+        _sc0 = v.get("_score")
+        _ensure_board_score(v, v.get("_label", k))
+        if v.get("_score") is not _sc0:
+            _board_persist(k)
 
     scored = {k: v for k, v in results.items() if v.get("ok") and v.get("_score")}
     for k, v in results.items():
@@ -5661,8 +5692,7 @@ def _compare_and_choose():
         with st.container(border=True):
             c1, c2 = st.columns([3, 1])
             with c1:
-                st.markdown(f"**{v['_label']}**  ·  {v.get('elapsed', 0):.0f}s"
-                            + ("  ·  ⚠️ stale" if k in _stale else ""))
+                st.markdown(f"**{v['_label']}**  ·  {v.get('elapsed', 0):.0f}s")
                 st.caption(_board_badges(v["_score"]["gates"]))
                 st.caption(
                     f"peak {m.overall_peak_biomass / (m.biomass_cap or 1) * 100:.0f}% cap"
@@ -5699,15 +5729,21 @@ def _ana_grade(res, targets, econ):
     workbook — the overlay files are deliberately outside the config
     fingerprint for the same reason."""
     from forecast import analysis as _ana
+    from forecast import optimize as _opt
+    _schema = _opt.METRICS_SCHEMA
+    # Re-validate the stored grade first: a _score/_ana_rows computed under an
+    # older METRICS_SCHEMA is dropped and re-derived from the cached workbook
+    # (engine output reused, judgement redone) — see analysis.drop_stale_grades.
+    _ensure_board_score(res, res.get("_label") or "this run")
     rid = _result_rid(res)
     cached = res.get("_ana_rows")
-    if not cached or cached.get("rid") != rid:
+    if not cached or cached.get("rid") != rid or cached.get("schema") != _schema:
         try:
             rows = (_ana.harvest_rows(res["output_path"])
                     if res.get("output_path") else [])
         except Exception:  # noqa: BLE001 — grading must not kill the board
             rows = []
-        cached = {"rid": rid, "rows": rows}
+        cached = {"rid": rid, "schema": _schema, "rows": rows}
         res["_ana_rows"] = cached
     rows = cached["rows"]
     tr = None
@@ -5717,8 +5753,8 @@ def _ana_grade(res, targets, econ):
         tr = _ana.review_targets(monthly, yearly, targets)
     rev = _ana.revenue_for(rows, econ) if (econ and rows) else None
     dcached = res.get("_ana_density")
-    if not dcached or dcached.get("rid") != rid:
-        dcached = {"rid": rid,
+    if not dcached or dcached.get("rid") != rid or dcached.get("schema") != _schema:
+        dcached = {"rid": rid, "schema": _schema,
                    "review": (_ana.density_review(res["output_path"])
                               if res.get("output_path") else None)}
         res["_ana_density"] = dcached
@@ -5922,7 +5958,8 @@ def _analyze():
         for i, (mkey, mlabel) in enumerate(roster):
             msig = _board_method_sig(mkey, pr_md5)
             done = store.get(mkey)
-            if (done and done.get("sig") == msig and done["res"].get("ok")
+            # Sig mismatch / old-format leg = absent: re-run, never replay.
+            if (_ana.board_leg_current(done, msig) and done["res"].get("ok")
                     and done["res"].get("output_path")):
                 _ensure_board_score(done["res"], mlabel)
                 _board_persist(mkey)   # capture a freshly-added _score too
@@ -6138,11 +6175,30 @@ def _analyze():
     # ---- Build + grade candidates (targets/prices re-judged live) ----
     store = _board_store()
     cands = []
+    # Engine legs join the board ONLY if their stored sig matches the current
+    # inputs — a leg run on a pre-edit scenario next to fresh tuned runs is
+    # exactly the 2026-08-10 stale-cache poisoning. Mismatched legs are
+    # treated as absent (▶ re-runs them), and a reused leg's grade is
+    # re-validated against the current METRICS_SCHEMA before it's trusted.
+    _pr_now = hashlib.md5(uploaded.getvalue()).hexdigest()
+    _skipped_stale = []
     for k in ana["engine_keys"]:
         done = store.get(k)
-        if done and done["res"].get("ok") and done["res"].get("_score"):
+        if not _ana.board_leg_current(done, _board_method_sig(k, _pr_now)):
+            if done:
+                _lbl = (done["res"].get("_label", k)
+                        if isinstance(done.get("res"), dict) else k)
+                _skipped_stale.append(_lbl)
+            continue
+        _ensure_board_score(done["res"], done["res"].get("_label", k))
+        if done["res"].get("ok") and done["res"].get("_score"):
             cands.append({"key": k, "label": done["res"].get("_label", k),
                           "overrides": {}, "res": done["res"]})
+    if _skipped_stale:
+        st.warning(f"{len(_skipped_stale)} stock engine leg(s) were computed on "
+                   f"different inputs (PR/config/scenario) and are left OFF the "
+                   f"board: {', '.join(_skipped_stale)}. Press ▶ above to re-run "
+                   f"just those.")
     if ana.get("tuned") and ana["tuned"]["res"].get("ok"):
         cands.append({"key": "_tuned",
                       "label": ana["tuned"]["res"].get("_label", "Tuned config"),
@@ -6153,6 +6209,10 @@ def _analyze():
     # store a replayable method + overrides pair (Quick run replays BOTH).
     for _tk, _te in (ana.get("tuned_methods") or {}).items():
         _tr = _te.get("res")
+        if _tr and _tr.get("ok"):
+            # Re-grades from the cached workbook when the stored _score
+            # predates the current METRICS_SCHEMA (or didn't survive disk).
+            _ensure_board_score(_tr, _tr.get("_label", f"{_tk} (tuned)"))
         if _tr and _tr.get("ok") and _tr.get("_score"):
             cands.append({"key": _tk,
                           "label": _tr.get("_label", f"{_tk} (tuned)"),
