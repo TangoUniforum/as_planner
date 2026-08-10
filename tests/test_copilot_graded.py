@@ -86,6 +86,11 @@ def test_grade_to_6n_approves_into_a_graded_harvest_event():
     assert ev.type == TYPE_GRADED_HARVEST
     assert ev.from_tank == 31 and ev.count == 4000.0 and ev.week == 3
     assert [d.tank for d in ev.destinations] == [61, 32]
+    # An approved planner Grade leg is a 6N purge STAGING (harvested after the
+    # hold) — it must carry the explicit stage mode, or the window's default
+    # graded_harvest semantics would harvest it in-week.
+    from forecast.manual_events import is_staged_graded
+    assert is_staged_graded(ev)
 
     # Remainder stays in the source -> destinations carry only the 6N pickup
     # (_apply_graded_harvest defaults retention to the source tank).
@@ -96,6 +101,7 @@ def test_grade_to_6n_approves_into_a_graded_harvest_event():
     ev2, = copilot.to_manual_events([m2], window_week=3)
     assert ev2.type == TYPE_GRADED_HARVEST
     assert [d.tank for d in ev2.destinations] == [61]
+    assert is_staged_graded(ev2)
 
     # Plain staging still approves as og_to_6n with the count on the DEST.
     m3 = copilot.Move(kind="to_6n", engine="controller", priority=2,

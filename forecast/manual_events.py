@@ -46,6 +46,30 @@ TYPE_FW_TO_OG = "fw_to_og"
 TYPE_OG_TO_6N = "og_to_6n"
 TYPE_GRADED_HARVEST = "graded_harvest"
 
+# graded_harvest timing (ManualEvent.mode) — which WEEK the graded fish are
+# harvested. With a 6N pickup the DEFAULT (any mode but MODE_HARVEST, incl. the
+# legacy "transfer") is DEPURATION STAGING: the biggest N purge in the 6N
+# pickup, frozen off-feed, and are harvested LATER (a later scripted harvest of
+# that tank, or the planner after the ~2-week hold). That is the realistic
+# OG->6N->harvest flow the operator's purge-rotation scripts rely on, and what
+# the copilot approves from a planner Grade leg (it stamps MODE_STAGE
+# explicitly). MODE_HARVEST is the explicit opt-in for an IN-WEEK harvest: the
+# pickup (6N staging tank or OG tank) is drained to processing in the scripted
+# week. An OG pickup always harvests in-week (there is nothing to purge in);
+# MODE_STAGE with an OG pickup is refused.
+MODE_STAGE = "stage"
+MODE_HARVEST = "harvest"
+
+
+def is_staged_graded(ev) -> bool:
+    """True when this graded_harvest defers its harvest (6N purge staging):
+    the pickup (destinations[0]) is a 6N tank and the event does not carry the
+    explicit in-week MODE_HARVEST."""
+    from .sixn import SIXN_ALL_TANKS
+    if not ev.destinations or ev.destinations[0].tank not in SIXN_ALL_TANKS:
+        return False
+    return (ev.mode or "").strip().lower() != MODE_HARVEST
+
 
 @dataclass
 class ManualDest:
@@ -76,7 +100,7 @@ class ManualEvent:
     destinations: list[ManualDest] = field(default_factory=list)
     count: Optional[float] = None            # harvest amount; None = harvest the whole tank
     batch: Optional[str] = None              # optional cross-check; inferred from source if absent
-    mode: str = "transfer"                    # "transfer" | "graded" | "harvest_grade" (later phases)
+    mode: str = "transfer"                    # graded_harvest timing: 6N pickup defaults to MODE_STAGE semantics (purge, harvest later); MODE_HARVEST = drain the pickup in the scripted week
     notes: str = ""
 
 
@@ -505,12 +529,23 @@ def _apply_graded_harvest(state, ev: ManualEvent, idx: int, event_date=None,
     destinations[0]; retain the smaller remainder growing (in the source, or
     destinations[1]).
 
-    The destination TYPE picks the mode (both reconcile identically in the audits):
-      * destinations[0] is a 6N tank  -> DEPURATION: the graded fish go to 6N to
-        purge (frozen off-feed), harvested LATER by a plain harvest from 6N. This
-        is the operator's "Graded -> 6N" (the realistic OG->6N->harvest flow).
-      * destinations[0] is an OG tank -> DIRECT HARVEST: chain a plain Harvest that
-        drains the pickup to processing (kept for the raw grid / power users).
+    TIMING — pickup type + `mode` pick it (both reconcile identically in the
+    audits; see is_staged_graded):
+      * 6N pickup, default (any mode but MODE_HARVEST) -> DEPURATION STAGING:
+        the graded fish go to the 6N tank to purge (frozen off-feed) and are
+        harvested LATER (a later scripted harvest from that tank, or the
+        planner after the depuration hold). The realistic OG->6N->harvest flow
+        — a purge-rotation script ("harvest 65, refill 65") depends on it —
+        and what the copilot emits (with an explicit MODE_STAGE) when a
+        planner Grade leg is approved.
+      * 6N pickup + MODE_HARVEST, or an OG pickup -> IN-WEEK HARVEST: the
+        pickup receives the biggest N fish and a chained plain Harvest drains
+        it to processing THIS week (the 6N tank is just the staging route and
+        ends the week empty).
+    Either way the window now reports LOUDLY what happened (MANUAL EVENT
+    OK/REFUSED in the ValidationLog) — the operator-hit 2026-08 failure was a
+    staging that executed correctly but SILENTLY, leaving a zero-harvest window
+    week and an unexplained planner harvest weeks later.
 
     Size-sorts the source at the count-implied cutoff so BOTH count and biomass
     conserve EXACTLY: with p = count/N the graded fraction, the cutoff is
@@ -545,6 +580,27 @@ def _apply_graded_harvest(state, ev: ManualEvent, idx: int, event_date=None,
     pickup = state.tanks_by_id.get(pickup_id)
     if pickup is None:
         return [f"{tag}: unknown pickup tank #{pickup_id}"]
+    staged = is_staged_graded(ev)
+    if (ev.mode or "").strip().lower() == MODE_STAGE \
+            and pickup_id not in SIXN_ALL_TANKS:
+        return [f"{tag}: mode '{MODE_STAGE}' stages the graded fish for 6N "
+                f"depuration, but pickup tank #{pickup_id} is not a 6N tank "
+                f"({sorted(SIXN_ALL_TANKS)})"]
+    # R7 (6N one-way): fish in a 6N depuration tank leave only by HARVEST.
+    # Grading FROM a 6N tank is allowed only when it drains the top-N to
+    # processing THIS week and the smaller remainder STAYS in the source.
+    if src.system_id == "OG6N":
+        if staged:
+            return [f"{tag}: R7 — {src.location_id} is a 6N depuration tank; "
+                    f"fish may leave 6N only by harvest, so a staged re-grade "
+                    f"out of 6N is not allowed. Use mode '{MODE_HARVEST}' (the "
+                    f"graded fish are harvested in the scripted week) or a "
+                    f"plain 'harvest' event."]
+        if retention_id != src.tank_id:
+            return [f"{tag}: R7 — {src.location_id} is a 6N depuration tank; "
+                    f"the smaller remainder may not transfer out of 6N. Omit "
+                    f"the retention destination (the remainder stays in "
+                    f"{src.location_id})."]
     if pickup_id == src.tank_id:
         return [f"{tag}: pickup tank must differ from the source {src.location_id}"]
     if not pickup.is_empty and pickup.batch_id != batch_id:
@@ -602,10 +658,11 @@ def _apply_graded_harvest(state, ev: ManualEvent, idx: int, event_date=None,
     if out_transfers is not None:
         out_transfers.append(gh)
     _ret = "source" if retention_id == src.tank_id else f"#{retention_id}"
-    if pickup_id in SIXN_ALL_TANKS:
-        # DEPURATION: the graded-out fish go to 6N to purge (off-feed) and are
-        # harvested LATER by a plain harvest from the 6N tank — NOT drained now.
-        # Freeze the 6N pickup to STARVE, exactly like the plain og_to_6n move.
+    if staged:
+        # DEPURATION STAGING (explicit mode): the graded-out fish go to 6N to
+        # purge (off-feed) and are harvested LATER by a plain harvest from the
+        # 6N tank — NOT drained now. Freeze the 6N pickup to STARVE, exactly
+        # like the plain og_to_6n move.
         if not pickup.is_empty:
             pickup.stage = STAGE_STARVE
         print(f"    {tag}: graded {n:,.0f} of {batch_id} in {src.location_id} -> "
@@ -613,7 +670,7 @@ def _apply_graded_harvest(state, ev: ManualEvent, idx: int, event_date=None,
               f"(depurating, off-feed), retained {small_count:,.0f}@"
               f"{small_avg / 1000:.2f}kg in {_ret}")
         return warns
-    # OG pickup -> direct harvest: drain the >= cutoff portion at the PICKUP weight
+    # Default -> in-week harvest: drain the >= cutoff portion at the PICKUP weight
     # (big_avg), NOT the source mean (would inject a biomass mismatch on the pickup
     # tank-week and can breach the continuity BIO tolerance).
     h = Harvest(batch_id=batch_id, event_date=(event_date or state.today),
@@ -648,42 +705,104 @@ def apply_events_for_week(state, events, week, week_start, week_label=None,
     tranogs: list = []
     warns: list[str] = []
     fw_balance: dict[str, list[float]] = {}
+    wk_name = week_label or f"week {week}"
     for i, ev in enumerate(events, 1):
         if (ev.week or 1) != week:
             continue
+        # SILENT NO-OPS ARE FORBIDDEN (operator-hit 2026-08): every scripted
+        # event either reports what it DID ("MANUAL EVENT OK") or why it could
+        # NOT run ("MANUAL EVENT REFUSED"), and both land in the ValidationLog.
+        n_before = len(transfers) + len(harvests) + len(tranogs)
+        h_before = len(harvests)
+        ew: list[str] = []
         if ev.type == TYPE_OG_TRANSFER:
-            warns.extend(_apply_og_transfer(
-                state, ev, i, event_date=week_start, out_events=transfers))
+            ew = _apply_og_transfer(
+                state, ev, i, event_date=week_start, out_events=transfers)
         elif ev.type == TYPE_HARVEST:
-            warns.extend(_apply_harvest(
-                state, ev, i, event_date=week_start, out_events=harvests))
+            ew = _apply_harvest(
+                state, ev, i, event_date=week_start, out_events=harvests)
         elif ev.type == TYPE_OG_TO_6N:
-            warns.extend(_apply_og_to_6n(
-                state, ev, i, event_date=week_start, out_events=transfers))
+            ew = _apply_og_to_6n(
+                state, ev, i, event_date=week_start, out_events=transfers)
         elif ev.type == TYPE_GRADED_HARVEST:
-            warns.extend(_apply_graded_harvest(
+            ew = _apply_graded_harvest(
                 state, ev, i, event_date=week_start,
-                out_transfers=transfers, out_harvests=harvests))
+                out_transfers=transfers, out_harvests=harvests)
         elif ev.type == TYPE_FW_TO_OG:
             fw = (fw_lookup or {}).get((ev.batch, week_label))
             if fw is None:
-                warns.append(f"MANUAL week {week} fw_to_og #{i}: no FW state for "
-                             f"batch {ev.batch!r} at this week (must be an in-flight "
-                             f"FW batch still in freshwater)")
+                ew = [f"MANUAL week {week} fw_to_og #{i}: no FW state for "
+                      f"batch {ev.batch!r} at this week (must be an in-flight "
+                      f"FW batch still in freshwater)"]
             else:
-                w, _culled = _apply_fw_to_og(
+                ew, _culled = _apply_fw_to_og(
                     state, ev, i, fw[0], fw[1], fw[2], handling_frac,
                     event_date=week_start, out_tranog=tranogs)
-                warns.extend(w)
                 # Record the FW-phase conservation leg for the audit gate:
                 # fw_count entering the transfer must equal placed + culled.
                 rec = fw_balance.setdefault(ev.batch, [0.0, 0.0])
                 rec[0] += fw[0]       # fw_count at the transfer week
                 rec[1] += _culled     # handling mortality + reconcile-to-target cull
         else:
-            warns.append(f"MANUAL week {week} event #{i}: unknown type "
-                         f"'{ev.type}' — skipped")
+            ew = [f"MANUAL week {week} event #{i}: unknown type "
+                  f"'{ev.type}' — skipped"]
+        warns.extend(ew)
+        executed = (len(transfers) + len(harvests) + len(tranogs)) > n_before
+        if executed:
+            warns.append(_describe_applied_event(
+                ev, i, wk_name, transfers, harvests, tranogs,
+                harvested_now=(len(harvests) > h_before)))
+        else:
+            _why = "; ".join(ew) if ew else "no reason reported (tool bug)"
+            warns.append(
+                f"MANUAL EVENT REFUSED — {wk_name}: {ev.type} #{i}"
+                + (f" from tank #{ev.from_tank}" if ev.from_tank else "")
+                + f" did NOT execute; the fish stay where they were. "
+                  f"Reason(s): {_why}")
     return transfers, harvests, tranogs, warns, fw_balance
+
+
+def _describe_applied_event(ev, idx, wk_name, transfers, harvests, tranogs,
+                            harvested_now=False):
+    """One loud 'MANUAL EVENT OK' ValidationLog line saying exactly what a
+    scripted event DID, built from the events.* objects it emitted (the
+    last-appended ones — the applier just ran)."""
+    head = f"MANUAL EVENT OK — {wk_name}: {ev.type} #{idx}"
+    if ev.type == TYPE_HARVEST and harvests:
+        h = harvests[-1]
+        return (f"{head} harvested {h.count:,.0f} fish of {h.batch_id} "
+                f"from tank #{h.source_tank_id}")
+    if ev.type == TYPE_GRADED_HARVEST and transfers:
+        gh = transfers[-1]
+        _ret = ("the source" if gh.retention_tank_id == gh.source_tank_id
+                else f"tank #{gh.retention_tank_id}")
+        if harvested_now and harvests:
+            h = harvests[-1]
+            return (f"{head} graded the biggest {h.count:,.0f} fish of "
+                    f"{gh.batch_id} out of tank #{gh.source_tank_id} and "
+                    f"HARVESTED them this week via staging tank "
+                    f"#{gh.pickup_tank_id}; the smaller "
+                    f"{gh.retention_count:,.0f} stay growing in {_ret}")
+        return (f"{head} staged the biggest {gh.pickup_count:,.0f} fish of "
+                f"{gh.batch_id} from tank #{gh.source_tank_id} into 6N tank "
+                f"#{gh.pickup_tank_id} to purge (off-feed; NOT harvested this "
+                f"week — script a later harvest of #{gh.pickup_tank_id}, or "
+                f"the planner takes it after the depuration hold); the smaller "
+                f"{gh.retention_count:,.0f} stay growing in {_ret}")
+    if ev.type in (TYPE_OG_TRANSFER, TYPE_OG_TO_6N) and transfers:
+        tr = transfers[-1]
+        dests = [a.tank_id for a in getattr(tr, "destinations", []) or []]
+        _to6n = " into 6N depuration (off-feed)" if ev.type == TYPE_OG_TO_6N else ""
+        return (f"{head} moved {tr.count_transferred:,.0f} fish of "
+                f"{tr.batch_id} from tank #{tr.source_tank_id} -> "
+                f"{dests}{_to6n}")
+    if ev.type == TYPE_FW_TO_OG and tranogs:
+        e = tranogs[-1]
+        dests = [a.tank_id for a in e.destinations]
+        placed = sum(a.count for a in e.destinations)
+        return (f"{head} TranOG {e.batch_id}: placed {placed:,.0f} fish into "
+                f"OG tanks {dests}")
+    return f"{head} executed"
 
 
 def _validate_fw_to_og_structural(scratch, ev) -> list[str]:

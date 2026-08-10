@@ -53,3 +53,28 @@ def test_no_closing_keeps_legacy_behavior(tmp_path):
     assert load_manual_events(tmp_path) == []
     dump_manual_events(tmp_path, [_ev()])
     assert len(load_manual_events(tmp_path)) == 1
+
+
+def test_manual_lines_categorized_loudly_in_validation_log():
+    # HARD RULE (operator-hit 2026-08): manual-window outcomes must be
+    # impossible to miss in the ValidationLog — refusals as ERROR rows,
+    # executions as INFO rows, window lints as WARNING rows. Silent no-ops
+    # are forbidden.
+    from openpyxl import Workbook
+    from forecast.excel_io import write_validation_log
+    wb = Workbook()
+    write_validation_log(wb, invariant_warnings=[
+        "MANUAL EVENT REFUSED — 2026-W33: graded_harvest #5 from tank #32 "
+        "did NOT execute; the fish stay where they were. Reason(s): pickup "
+        "OG4N-45 not empty (holds B41)",
+        "MANUAL EVENT OK — 2026-W32: graded_harvest #4 staged the biggest "
+        "32,000 fish of B42 from tank #55 into 6N tank #65 to purge",
+        "MANUAL WINDOW — 2026-W33 schedules NO harvest: window weeks execute "
+        "only your scripted events",
+    ])
+    rows = [[c.value for c in r] for r in wb["ValidationLog"].iter_rows()]
+    cats = {str(r[2])[:20]: str(r[1]) for r in rows if r and len(r) >= 3
+            and isinstance(r[2], str) and r[2].startswith("MANUAL")}
+    assert cats["MANUAL EVENT REFUSED"] == "ERROR - Manual window (REFUSED)"
+    assert cats["MANUAL EVENT OK — 20"] == "INFO - Manual window (executed)"
+    assert cats["MANUAL WINDOW — 2026"] == "WARNING - Manual window"

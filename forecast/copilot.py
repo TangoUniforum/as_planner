@@ -381,8 +381,11 @@ def to_manual_events(moves, window_week):
     `grade_to_6n` becomes a `graded_harvest` event (count = the biggest-N pickup,
     destinations[0] = the 6N tank, destinations[1] = the retention tank when the
     remainder moves) — NOT a plain og_to_6n, which would move mean-weight fish
-    and lose the top-N-by-size selection."""
-    from forecast.manual_events import ManualEvent, ManualDest
+    and lose the top-N-by-size selection. It carries mode=MODE_STAGE explicitly
+    (the approved planner leg is a 6N purge STAGING, harvested after the hold —
+    never an in-week harvest), so the intent survives any later mode default
+    change or a round-trip through the raw grid."""
+    from forecast.manual_events import ManualEvent, ManualDest, MODE_STAGE
     evs = []
     for m in moves:
         if m.kind == "harvest":
@@ -394,7 +397,7 @@ def to_manual_events(moves, window_week):
                 dests.append(ManualDest(tank=m.retention_tank))
             evs.append(ManualEvent(type="graded_harvest", week=window_week,
                                    from_tank=m.from_tank, count=m.count,
-                                   destinations=dests))
+                                   destinations=dests, mode=MODE_STAGE))
         elif m.kind == "to_6n":
             evs.append(ManualEvent(type="og_to_6n", week=window_week,
                                    from_tank=m.from_tank, count=m.count,

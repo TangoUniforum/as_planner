@@ -221,17 +221,20 @@ def dark_handoff_weeks(sixn_start, events, window_weeks=None, hold_weeks=None):
       * PR-start 6N fish are releasable from the handoff (their hold is served
         by sitting frozen through the window).
       * A scripted harvest / graded_harvest FROM a 6N tank removes fish.
-      * A scripted og_to_6n / graded-to-6N staging at week k adds fish to the
-        destination, releasable from week k + hold. An unknown staged count
-        (count=None = "whole tank" — the source size isn't known here) counts
-        as a positive presence, which is all the zero-check needs.
+      * A scripted og_to_6n / staged graded (is_staged_graded — the 6N-pickup
+        default) at week k adds fish to the destination, releasable from week
+        k + hold. A mode-'harvest' graded_harvest drains its pickup in its own
+        week, so it stages nothing. An unknown staged count (count=None =
+        "whole tank" — the source size isn't known here) counts as a positive
+        presence, which is all the zero-check needs.
 
     Returns the list of 1-based ABSOLUTE week indices (window timeline, so the
     handoff is week N+1) among weeks N+1 .. N+hold with ZERO releasable 6N
     fish. Empty list = the handoff is covered.
     """
     from .manual_events import (
-        TYPE_GRADED_HARVEST, TYPE_HARVEST, TYPE_OG_TO_6N, TYPE_OG_TRANSFER)
+        TYPE_GRADED_HARVEST, TYPE_HARVEST, TYPE_OG_TO_6N, TYPE_OG_TRANSFER,
+        is_staged_graded)
     from .sixn import SIXN_ALL_TANKS
     if hold_weeks is None:
         from .global_planner_poc import _PURGE_HOLD_WEEKS as hold_weeks
@@ -263,9 +266,11 @@ def dark_handoff_weeks(sixn_start, events, window_weeks=None, hold_weeks=None):
                 if take <= 0:
                     break
         staged_to = []
-        if ev.type == TYPE_GRADED_HARVEST and ev.destinations \
-                and ev.destinations[0].tank in SIXN_ALL_TANKS:
-            # Graded->6N: the biggest `count` fish go to the 6N pickup tank.
+        if ev.type == TYPE_GRADED_HARVEST and is_staged_graded(ev):
+            # STAGED graded->6N (the 6N-pickup default): the biggest `count`
+            # fish purge in the 6N pickup tank. (A mode-'harvest' graded event
+            # drains its pickup in its own week — nothing staged for the
+            # handoff.)
             staged_to = [(ev.destinations[0].tank, ev.count)]
         elif ev.type in (TYPE_OG_TO_6N, TYPE_OG_TRANSFER):
             staged_to = [(d.tank, d.count) for d in (ev.destinations or [])
@@ -353,6 +358,34 @@ def advance_facility_window(state, batch_by_id, tables, forecast_start,
                 rec = manual_fw_balance.setdefault(b, [0.0, 0.0])
                 rec[0] += cnt
                 rec[1] += culled
+            # Steady-harvest contract lint: window weeks run ONLY scripted
+            # events, so a window week without a scripted harvest is a
+            # ZERO-harvest week in the plan. Say so loudly — never let the
+            # operator discover an empty week in the output (operator-hit
+            # 2026-08: a graded staging silently replaced the expected
+            # harvest and W33 shipped nothing).
+            if not hv:
+                warnings.append(
+                    f"MANUAL WINDOW — {labels[i]} schedules NO harvest: window "
+                    f"weeks execute only your scripted events, so this is a "
+                    f"zero-harvest week (steady-harvest contract). Script a "
+                    f"harvest or graded_harvest in this week if that is not "
+                    f"intended.")
+            else:
+                # The mirror lint: the window executes the script even past the
+                # plant's weekly processing ceiling (operator law), but an
+                # over-ceiling week is physically suspect — say so.
+                _tot = sum(h.count for h in hv)
+                _cap = float(getattr(control, "max_harvest_per_week", 0) or 0)
+                _rel = float(getattr(control, "harvest_relief_pct", 0) or 0)
+                _ceil = _cap * (1.0 + _rel)
+                if _ceil > 0 and _tot > _ceil + 0.5:
+                    warnings.append(
+                        f"MANUAL WINDOW — {labels[i]} scripts "
+                        f"{_tot:,.0f} fish of harvest, above the plant ceiling "
+                        f"{_ceil:,.0f} (max_harvest_per_week + relief). The "
+                        f"window executed your script anyway — check the week "
+                        f"is actually processable.")
         wk_realized = advance_facility_one_week(
             state, batch_by_id, tables, week_start, labels[i])
         realized.update(wk_realized)

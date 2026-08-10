@@ -221,7 +221,8 @@ class TestGradedHarvest:
         assert not ok and any("not empty" in m for m in msgs)
 
     def test_graded_to_6n_depurates_conserves_no_harvest(self, hydrated):
-        # "Graded -> 6N" (the UI form): grade the tank, biggest N -> a 6N tank to
+        # STAGED "Graded -> 6N" (mode='stage' — the explicit purge-first choice
+        # / what the copilot emits): grade the tank, biggest N -> a 6N tank to
         # DEPURATE (frozen off-feed, NO immediate harvest), smaller remainder ->
         # a separate OG tank, and the SOURCE EMPTIES. Realistic OG->6N->harvest
         # flow; still conserves count + biomass exactly.
@@ -229,7 +230,7 @@ class TestGradedHarvest:
         from forecast.sixn import SIXN_ALL_TANKS
         from forecast.state import STAGE_STARVE
         from forecast.manual_events import (
-            ManualEvent, ManualDest, validate_manual_events)
+            ManualEvent, ManualDest, MODE_STAGE, validate_manual_events)
         from forecast.manual_window import advance_facility_window
         state, ctx, _fw = hydrated
         src, _ = self._source_pickup(state)
@@ -241,8 +242,9 @@ class TestGradedHarvest:
         K = round(src.count * 0.4)
         open_n, open_bio = src.count, src.count * src.avg_wt_g
         ev = ManualEvent(type="graded_harvest", week=1, from_tank=src.tank_id,
-                         count=K, destinations=[ManualDest(tank=sixn),
-                                                ManualDest(tank=og_ret)])
+                         count=K, mode=MODE_STAGE,
+                         destinations=[ManualDest(tank=sixn),
+                                       ManualDest(tank=og_ret)])
         (_i, ok, msgs), = validate_manual_events(state, [ev], **ctx)
         assert ok, msgs
         sc = copy.deepcopy(state)
@@ -263,6 +265,142 @@ class TestGradedHarvest:
         assert pk.stage == STAGE_STARVE and not pk.is_empty  # 6N frozen, big fish
         rt = sc.tanks_by_id[og_ret]
         assert not rt.is_empty and rt.batch_id == src.batch_id  # smaller -> OG
+
+    def test_graded_default_6n_pickup_stages_loudly(self, hydrated):
+        # OPERATOR-HIT 2026-08 regression (visibility half): the 6N-pickup
+        # DEFAULT (no mode) stays the depuration staging — but it must be LOUD:
+        # a MANUAL EVENT OK line that says the fish were staged and NOT
+        # harvested this week, plus the zero-harvest-week lint when the script
+        # leaves the week with no harvest. The original failure was this exact
+        # staging executing silently.
+        import copy
+        from forecast.sixn import SIXN_ALL_TANKS
+        from forecast.manual_events import ManualEvent, ManualDest
+        from forecast.manual_window import advance_facility_window
+        state, ctx, _fw = hydrated
+        src, _ = self._source_pickup(state)
+        sixn = next(t for t in sorted(SIXN_ALL_TANKS)
+                    if state.tanks_by_id[t].is_empty)
+        ev = ManualEvent(type="graded_harvest", week=1, from_tank=src.tank_id,
+                         count=round(src.count * 0.4),
+                         destinations=[ManualDest(tank=sixn)])
+        sc = copy.deepcopy(state)
+        win = advance_facility_window(
+            sc, ctx["batch_by_id"], ctx["tables"], ctx["forecast_start"], 1,
+            events=[ev], control=ctx["control"], pr_closing=ctx["pr_closing"],
+            fw_records=ctx["fw_records"])
+        assert win["harvest_events"] == []                     # staged, deferred
+        assert not sc.tanks_by_id[sixn].is_empty               # purging in 6N
+        oks = [w for w in win["warnings"] if w.startswith("MANUAL EVENT OK")]
+        assert oks and "NOT harvested this week" in oks[0], win["warnings"]
+        assert any(w.startswith("MANUAL WINDOW") and "NO harvest" in w
+                   for w in win["warnings"]), win["warnings"]
+
+    def test_graded_mode_harvest_drains_in_scripted_week(self, hydrated):
+        # OPERATOR-HIT 2026-08 regression (execution half): mode='harvest' on a
+        # 6N pickup is an IN-WEEK graded harvest — the biggest N are drained to
+        # processing IN THE SCRIPTED WEEK (via the 6N staging tank, which ends
+        # the week empty), the remainder keeps growing, and the window reports
+        # a loud MANUAL EVENT OK line.
+        import copy
+        from forecast.sixn import SIXN_ALL_TANKS
+        from forecast.manual_events import (
+            ManualEvent, ManualDest, MODE_HARVEST, validate_manual_events)
+        from forecast.manual_window import advance_facility_window
+        state, ctx, _fw = hydrated
+        src, _ = self._source_pickup(state)
+        sixn = next(t for t in sorted(SIXN_ALL_TANKS)
+                    if state.tanks_by_id[t].is_empty)
+        og_ret = next(t.tank_id for t in state.tanks_by_id.values()
+                      if t.type == "OG" and t.tank_id not in SIXN_ALL_TANKS
+                      and t.is_empty and t.tank_id != src.tank_id)
+        K = round(src.count * 0.4)
+        open_n, open_bio = src.count, src.count * src.avg_wt_g
+        ev = ManualEvent(type="graded_harvest", week=1, from_tank=src.tank_id,
+                         count=K, mode=MODE_HARVEST,
+                         destinations=[ManualDest(tank=sixn),
+                                       ManualDest(tank=og_ret)])
+        (_i, ok, msgs), = validate_manual_events(state, [ev], **ctx)
+        assert ok, msgs
+        sc = copy.deepcopy(state)
+        win = advance_facility_window(
+            sc, ctx["batch_by_id"], ctx["tables"], ctx["forecast_start"], 2,
+            events=[ev], control=ctx["control"], pr_closing=ctx["pr_closing"],
+            fw_records=ctx["fw_records"])
+        ghs = [e for e in win["transfer_events"] if hasattr(e, "pickup_tank_id")]
+        assert len(ghs) == 1
+        gh = ghs[0]
+        hv = [h for h in win["harvest_events"] if h.source_tank_id == sixn]
+        assert hv, "graded fish must be HARVESTED in the scripted week"
+        assert abs(hv[0].count - K) < 1.0
+        assert abs(hv[0].avg_wt_g - gh.pickup_avg_wt_g) < 1e-6  # big-class weight
+        # conservation: pickup(harvested) + retention == the opened tank
+        assert abs((gh.pickup_count + gh.retention_count) - open_n) < 1.0
+        bio = (gh.pickup_count * gh.pickup_avg_wt_g
+               + gh.retention_count * gh.retention_avg_wt_g)
+        assert abs(bio - open_bio) / open_bio < 1e-6
+        assert sc.tanks_by_id[src.tank_id].is_empty     # source graded OUT
+        assert sc.tanks_by_id[sixn].is_empty            # staging tank drained
+        rt = sc.tanks_by_id[og_ret]
+        assert not rt.is_empty and rt.batch_id == src.batch_id
+        # LOUD: the window says exactly what the event did.
+        assert any(w.startswith("MANUAL EVENT OK") and "HARVESTED" in w
+                   for w in win["warnings"]), win["warnings"]
+
+    def test_impossible_event_refuses_loudly(self, hydrated):
+        # HARD RULE: a scripted event that cannot execute must FAIL LOUDLY —
+        # a MANUAL EVENT REFUSED line (which run.py routes into the
+        # ValidationLog), never a silent no-op — and must leave the source
+        # untouched (no fish lost).
+        import copy
+        from forecast.sixn import SIXN_ALL_TANKS
+        from forecast.manual_events import ManualEvent, ManualDest
+        from forecast.manual_window import advance_facility_window
+        state, ctx, _fw = hydrated
+        src, _ = self._source_pickup(state)
+        occ = next(t for t in state.tanks_by_id.values()
+                   if t.type == "OG" and t.tank_id not in SIXN_ALL_TANKS
+                   and not t.is_empty and t.batch_id != src.batch_id
+                   and t.tank_id != src.tank_id)
+        open_n = src.count
+        ev = ManualEvent(type="graded_harvest", week=1, from_tank=src.tank_id,
+                         count=round(src.count * 0.3),
+                         destinations=[ManualDest(tank=occ.tank_id)])
+        sc = copy.deepcopy(state)
+        win = advance_facility_window(
+            sc, ctx["batch_by_id"], ctx["tables"], ctx["forecast_start"], 1,
+            events=[ev], control=ctx["control"], pr_closing=ctx["pr_closing"],
+            fw_records=ctx["fw_records"])
+        assert win["transfer_events"] == [] and win["harvest_events"] == []
+        refusals = [w for w in win["warnings"]
+                    if w.startswith("MANUAL EVENT REFUSED")]
+        assert refusals, win["warnings"]
+        assert "not empty" in refusals[0]           # says WHY
+        # nothing executed, nothing lost: the source still opened whole
+        # (advance_facility_window ran a week of biology afterwards, so compare
+        # against the fresh state's tank, allowing only that week's mortality).
+        assert sc.tanks_by_id[src.tank_id].count <= open_n
+        assert sc.tanks_by_id[src.tank_id].count > open_n * 0.98
+
+    def test_window_week_without_harvest_warns(self, hydrated):
+        # Steady-harvest contract lint: a window week whose script includes NO
+        # harvest is a zero-harvest week (window weeks run only scripted
+        # events) — the window must say so, loudly, at run time.
+        import copy
+        from forecast.sixn import SIXN_ALL_TANKS
+        from forecast.manual_events import ManualEvent, ManualDest
+        from forecast.manual_window import advance_facility_window
+        state, ctx, _fw = hydrated
+        src, pickup = self._source_pickup(state)
+        ev = ManualEvent(type="og_transfer", week=1, from_tank=src.tank_id,
+                         destinations=[ManualDest(tank=pickup.tank_id)])
+        sc = copy.deepcopy(state)
+        win = advance_facility_window(
+            sc, ctx["batch_by_id"], ctx["tables"], ctx["forecast_start"], 1,
+            events=[ev], control=ctx["control"], pr_closing=ctx["pr_closing"],
+            fw_records=ctx["fw_records"])
+        assert any(w.startswith("MANUAL WINDOW") and "NO harvest" in w
+                   for w in win["warnings"]), win["warnings"]
 
     def test_full_pipeline_audits_clean(self, hydrated, tmp_path):
         import shutil

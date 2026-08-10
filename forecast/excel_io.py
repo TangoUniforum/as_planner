@@ -2644,7 +2644,17 @@ def write_validation_log(
     for w in scheduler_warnings or ():
         entries.append(("WARNING - Harvest Scheduler", w))
     for w in invariant_warnings or ():
-        if "INV-1" in w:
+        if w.startswith("MANUAL EVENT REFUSED"):
+            # A scripted manual event that could not run must be IMPOSSIBLE to
+            # miss — silent no-ops are forbidden (operator-hit 2026-08).
+            cat = "ERROR - Manual window (REFUSED)"
+        elif w.startswith("MANUAL EVENT OK"):
+            cat = "INFO - Manual window (executed)"
+        elif w.startswith("MANUAL WINDOW"):
+            cat = "WARNING - Manual window"
+        elif w.startswith("MANUAL"):
+            cat = "WARNING - Manual window"
+        elif "INV-1" in w:
             cat = "WARNING - INV-1 (one-batch-per-tank)"
         elif "INV-5" in w:
             cat = "WARNING - INV-5 (min_tank_control)"
