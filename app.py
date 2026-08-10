@@ -3317,6 +3317,356 @@ def _config_editor():
 
 
 # ============================================================
+# How it works — the plain-language rulebook (operator request)
+# ============================================================
+
+def _hiw_knobs():
+    """Live Control values for the How-it-works page, with dataclass fallbacks
+    — so the page shows the numbers THIS install actually runs with and never
+    goes stale when a knob is retuned. Never raises (page must render with no
+    config seeded)."""
+    vals = {"min_hv": 30_000.0, "max_hv": 55_000.0, "relief_pct": 0.10,
+            "min_wt": 3_500.0, "bio_cap": 3_800_000.0, "feed_cap": 34_000.0,
+            "moves": 15, "min_tank": 7_000.0, "band": 0.005,
+            "prod_start": "2028-01-01", "n_entry_tanks": 2}
+    try:
+        from forecast.config_io import load_control
+        c = load_control(CONFIG_DIR)
+        vals.update({
+            "min_hv": float(c.min_harvest_per_week or vals["min_hv"]),
+            "relief_pct": float(getattr(c, "harvest_relief_pct",
+                                        vals["relief_pct"]) or 0.0),
+            "max_hv": float(c.max_harvest_per_week or vals["max_hv"]),
+            "min_wt": float(c.min_harvest_weight_g or vals["min_wt"]),
+            "bio_cap": float(c.max_biomass_kg or vals["bio_cap"]),
+            "feed_cap": float(c.max_feed_per_day_kg or vals["feed_cap"]),
+            "moves": int(getattr(c, "max_transfers_per_week", 0)
+                         or vals["moves"]),
+            "min_tank": float(c.min_tank_control or vals["min_tank"]),
+            "band": float(c.facility_biomass_deviation_pct or vals["band"]),
+            "prod_start": (c.sixn_production_start.date().isoformat()
+                           if getattr(c, "sixn_production_start", None)
+                           else vals["prod_start"]),
+            "n_entry_tanks": int(c.tran_og_default_tanks
+                                 or vals["n_entry_tanks"]),
+        })
+    except Exception:  # noqa: BLE001 — static page must render regardless
+        pass
+    # The never-exceed ceiling is DERIVED, never stored: limit × (1 + relief).
+    vals["ceiling_hv"] = vals["max_hv"] * (1.0 + vals["relief_pct"])
+    return vals
+
+
+def _how_it_works():
+    """The plain-language rulebook: every pipeline layer — what it decides,
+    what it is forbidden to do, which checks bind it — plus the honest list of
+    known limits. Static text (no runs); the numbers are read live from the
+    current Control config so the page tracks retuning."""
+    k = _hiw_knobs()
+    st.header("📖 How it works — the rules, layer by layer")
+    st.caption(
+        "What the forecast actually does, in plain language. Each layer below "
+        "says **what it decides**, **what it may never do**, and **which "
+        "checks bind it** — plus an honest list of known limits at the end. "
+        "The numbers shown are read from your current Control config, so this "
+        "page stays true when a knob is retuned. Nothing here runs anything.")
+
+    with st.expander("🧭 The big picture — one paragraph", expanded=True):
+        st.markdown(f"""
+You upload a **ProductionReport** (the facility's true state today). The tool
+grows every cohort forward week by week — freshwater, seawater grow-out, then
+the **6N depuration station** — and decides each week's **transfers** and
+**harvests** so that: every week ships at least **{k['min_hv']:,.0f} fish**
+(the contract floor — never an empty week), the facility never exceeds
+**{k['bio_cap']:,.0f} kg** of standing fish or **{k['feed_cap']:,.0f} kg/day**
+of feed, fish move only along the physically legal routes (the tier rules
+R1-R7 below), and every fish is accounted for from stocking to harvest. Layers
+that *decide* are separated from checks that *audit* — a plan is never trusted
+because the planner says so, only because the independent audits reconcile it.""")
+
+    with st.expander("1 · Inputs & the starting state"):
+        st.markdown(f"""
+**What it decides.** The uploaded ProductionReport is hydrated into the week-0
+facility: which batch sits in which tank, at what count and weight. The
+forecast start date is **derived** from the PR's closing date (+1 day) — the
+config value is only a seed. Models and knobs come from Configure
+(`config/` + `scenario/` YAML): biology curves, the facility's tanks, the
+batch schedule, per-week cap overrides.
+
+**What it may never do.** The PR is *state only* — it carries no instructions.
+Nothing else is read from the workbook, and the source file is never written
+back. A batch in the PR can never be silently ignored: every in-horizon batch
+must reach the facility or the run fails its input-conservation gate.
+
+**What binds it.** Hydration validation (unknown tanks/batches are refused
+loudly), the derived-start contract, and the input-conservation audit
+(layer 9).""")
+
+    with st.expander("2 · The manual override window (optional operator prefix)"):
+        st.markdown("""
+**What it decides.** Nothing — *you* do. For weeks 1..N you script the exact
+operations (harvests, moves, sends to 6N, FW→OG) and the engine executes
+ONLY those, plus real biology (growth, mortality, feed). The planner takes
+over at week N+1 (the handoff) from exactly the state your scripted weeks
+produced.
+
+**What it may never do.** The window may not invent operations you didn't
+script — and neither may the planner *pretend* you did: no engine may assume
+fish were staged into depuration during your window weeks (that bug made
+engine comparisons dishonest and is fixed + pinned by tests). Scripted events
+that break the tier rules are hard-blocked in the editor; events conserve
+fish exactly (a refused move leaves the source untouched).
+
+**What binds it.** Per-event validation against the hydrated PR, the tier
+rules R1-R7, and the **dark-handoff lint**: if your window drains 6N without
+restaging, the editor warns you *which* handoff weeks will have nothing
+harvestable under the 2-week depuration hold — a warning, not a block,
+because you may intend a dark week.""")
+
+    with st.expander("3 · The freshwater phase (egg → smolt → transfer)"):
+        st.markdown("""
+**What it decides.** Each batch's growth from stocking to its seawater
+transfer date, on the freshwater growth/mortality/cull tables, calibrated
+per batch (auto-calibrated to land each batch on its planned entry weight
+when 'Auto-calibrate FW' is on — a planning assumption, not a guarantee).
+
+**What it may never do.** Freshwater fish are **never harvested** and never
+placed by the planner — their trajectory is a given. But they are never
+invisible either: FW biomass and feed **count against the facility caps**,
+so the seawater side must make room for a known FW peak (it pre-positions
+harvest up to 8 weeks ahead of one).
+
+**What binds it.** The closed FW mass-balance audit (first FW count ==
+seawater entry + FW mortality + FW culls, per batch) and the FW→SW
+reconciliation signal (realized entry vs plan, flagged over 5% — your cue to
+recalibrate a batch's correction).""")
+
+    with st.expander("4 · Seawater entry — TranOG arrivals (rule R1)"):
+        st.markdown(f"""
+**What it decides.** When a batch's transfer date arrives, its fish enter the
+**entry tier only** — systems OG1N/OG1S/OG2N/OG2S (rule **R1**) — spread
+across at least **{k['n_entry_tanks']}** tanks, split big/small by the batch's
+size spread. If no entry tank is free, the planner **makes room**: it frees a
+tank by moving its fish forward (or into 6N to purge), never by dropping the
+arrival. Room-making is *anticipatory*: empty tanks near an arrival (≤3 weeks
+out) are **reserved** so a rebalancing pass can't consume them first, with a
+6-week lookahead budgeting the rest.
+
+**What it may never do.** Arrivals may not enter grow-out or 6N directly; an
+arrival may never be silently dropped (a whole class of lost-fish bugs was
+closed by this gate); and freed remnant tanks may not strand an arrival —
+sub-minimum leftovers are folded forward first.
+
+**What binds it.** The input-conservation gate (0 dropped batches), the tier
+rules, and the remnant floor (layer 5).""")
+
+    with st.expander("5 · Grow-out placement, the tier rules R1-R7, and the "
+                     "handling budget"):
+        st.markdown(f"""
+**What it decides.** Week by week, which tank each group occupies: forward
+moves along the conveyor (entry tier → OG3-6 → 6N → harvest), plus
+quality passes that level crowding, feed and biomass across systems
+(splitting hot tanks, evening out load).
+
+**The movement rules — physical law for the planner:**
+
+| Rule | Plain meaning |
+|---|---|
+| **R1** | New seawater fish enter only the entry tier (OG1/2). |
+| **R2** | Entry-tier fish may move forward to any OG3-6 tank at any weight. |
+| **R3** | *Within* the entry tier, moves are legal only while the source tank averages **< 1 kg** (equipment limit). At/over 1 kg: forward only. |
+| **R4** | **Never backward** — a grow-out tank may never send fish to the entry tier. |
+| **R5** | **No harvest and no 6N staging from entry-tier tanks** — fish route forward first. |
+| **R6** | Fish ≥ 1 kg *may stay* in an entry tank (stuck-in-place is legal and measured-necessary — never force-evicted). |
+| **R7** | **6N is one-way**: fish moved into depuration leave only by harvest, never by transfer. |
+
+**What it may never do.** Exceed **{k['moves']} transfer moves per week** —
+the handling budget. Deferrable quality passes simply stop and wait for a
+calmer week; *essential* moves (6N rotation fills, arrival make-room) are
+never blocked, but a week they alone push past the budget is **reported on
+the handling gate**, never hidden. It may never mix two batches in one tank,
+never leave a "remnant" — every partial draw takes everything or leaves at
+least **{k['min_tank']:,.0f} fish** (a tank below that isn't worth
+operating), and never plan a move the tier rules refuse.
+
+**What binds it.** The tier rules above (enforced in the event layer — an
+illegal move is refused, not patched), the per-tank continuity audit (every
+tank-week must balance to zero drift), the per-system limits audit, and the
+handling gate.""")
+
+    with st.expander("6 · The harvest controller — floor, limit, relief"):
+        st.markdown(f"""
+**What it decides.** How many fish to harvest each week, aiming to ride just
+under the facility's **effective ceiling** — the lower of the biomass cap
+({k['bio_cap']:,.0f} kg) and the biomass at which feed hits its cap
+({k['feed_cap']:,.0f} kg/day) — with one soft margin
+(±{k['band'] * 100:.1f}%). Below the band it harvests only the floor and lets
+the facility **fill up**; at the band it ramps harvest to hold the line.
+Harvest is **demand-driven**: the week takes what holding the caps requires,
+never a quota.
+
+**The three harvest numbers:**
+* **Floor {k['min_hv']:,.0f} fish/week** — the sales contract. Every week
+  must ship at least this; a totally empty week is a hard business-rule
+  breach, ranked above every other quality measure.
+* **Limit {k['max_hv']:,.0f} fish/week** — the processing plant's weekly
+  capacity. A **constraint, not a level**: no pass ever sizes harvest *up*
+  to reach it — demand-driven harvest is simply capped here, and the
+  long-horizon guide ramps harvests **earlier** rather than let demand pile
+  into one week.
+* **Relief ceiling {k['ceiling_hv']:,.0f} fish/week** — derived, never
+  stored: limit × (1 + {k['relief_pct'] * 100:.0f}% relief). A **pressure
+  valve for exceptional weeks only** — a whole 6N tank that must drain, a
+  make-room dump that saves an arrival. Nothing may ever exceed it.
+
+Relief is *allowed, but not routine*: the checklist gate reads **PASS** at 0
+relief weeks, **WARN** at 1-3 ("pressure relief used — acceptable if
+exceptional"), **FAIL** beyond 3 or on any week above the relief ceiling —
+and the failure message says what to do about it: **ramp harvests up
+earlier**. A plan that pins to relief every week isn't using a buffer, it's
+hiding a restructuring problem.
+
+A whole-horizon harvest envelope (the Global engine's long view) is computed
+first and fed to the weekly controller as a **target band** (±5%): it tells
+the controller to harvest *less* in fat weeks so those fish still exist for
+lean ones — the one thing a week-by-week planner cannot see. The smoother
+additionally spreads harvest early so weeks are flat, not dump-then-nothing.
+
+**What it may never do.** Harvest a fish under **{k['min_wt']:,.0f} g** (the
+sales gate); harvest from entry-tier tanks (R5); harvest a production tank
+directly while 6N is in depuration mode — *all* harvest flows through 6N
+(layer 7); plan a week above the {k['max_hv']:,.0f} limit except as
+exceptional relief; or breach the {k['ceiling_hv']:,.0f} relief ceiling,
+ever.
+
+**What binds it.** The steady-harvest gate (no near-empty week past the
+startup handoff), the floor gate, the **relief gate** (PASS 0 / WARN 1-3 /
+FAIL >3 relief weeks or any ceiling breach), the biomass/feed cap checks,
+and — when trial corrections are evaluated — a **lexicographic rule**: a
+candidate that adds an empty harvest week never wins, whatever else it
+improves.""")
+
+    with st.expander("7 · 6N depuration — the two-week hold and the rotation"):
+        st.markdown(f"""
+**What it decides.** Before harvest, fish sit **off-feed for 2 weeks** in the
+6N station to purge (a product requirement, not a scheduling nicety). 6N runs
+a **3-pair fallow rotation** (pairs 61/67, 63/69, 65/71, fixed order
+61→63→65): two pairs purge while one rests; each week the front pair is
+harvested and the resting pair refills from the oldest mature fish.
+
+**The 6N-specific rules:**
+* **Sister-first fills** — no 6N tank is stocked past **95 kg/m³**; a fill
+  splits main-first across the pair and overflows into the idle sister. When
+  the whole pair is at cap, the surplus *waits in grow-out* for the next thin
+  pair (level-drains: no pair accumulates a monster dump).
+* **The hold is real** — a tank may **not** be drained on the rotation right
+  after its fill (that leak shipped fish with 1 week of purge instead of 2;
+  fixed and audited). Fish hydrated from the PR already mid-purge are the one
+  exemption — their residency clock predates the forecast.
+* **R7 one-way** — once in depuration, fish leave only by harvest.
+* Make-room routes through 6N too: a tank freed for an arrival sends its
+  fish to purge, staging them for harvest — never harvested in place.
+
+After **{k['prod_start']}** the station switches to production mode: the main
+tanks become ordinary grow-out, and harvest-bound fish instead go off-feed
+*in place* for the starvation period before removal.
+
+**What it may never do.** Skip or shorten the hold, stock a 6N tank past 95
+kg/m³, mix batches within one tank, or transfer fish back out of depuration.
+
+**What binds it.** The depuration-hold audit (every run reports what fraction
+of harvest left 6N early — must be the PR-hydrated exemptions only), the
+sister-fill density cap, R7 enforcement in the event layer, and the pair
+rotation's own continuity in the tank audit.""")
+
+    with st.expander("8 · The engines — one rulebook, several planners"):
+        st.markdown("""
+**What it decides.** Which planning *method* produced your plan. All methods
+consume the same inputs and obey the same rules above; only the planning
+brain differs:
+
+* **Controller — hybrid** (the default): the validated week-by-week
+  controller guided by the long-horizon harvest envelope. Meets the
+  never-an-empty-week rule; the plain reactive controller does not.
+* **Controller — plain / + LNS**: reactive only; LNS adds an audited
+  relocation pass that helps when free tanks exist.
+* **Global — LP / CP-SAT**: plan the whole horizon up front (harvest envelope
+  → per-batch share → tank placement), realized as a continuity-proven tank
+  plan.
+
+**What they may never do.** Diverge on the starting state: the manual window,
+the PR hydration and the rulebook are shared — after a scripted window, *no*
+engine may assume unscripted pre-start staging, so comparisons are honest
+(a dark handoff week is dark in every engine, and the editor warned you
+about it first).
+
+**What binds them.** Every method's output passes the same audits, and
+Compare & Choose grades them with hard-rule badges — a low-transfer plan
+cannot hide a contract breach.""")
+
+    with st.expander("9 · The checks that bind everything (the audit net)"):
+        st.markdown("""
+Independent invariants, each catching a *different* failure (the hard lesson:
+"all tests green" once coexisted with a silent 17% production loss):
+
+1. **In-facility continuity (0 drift)** — every tank-week balances exactly.
+2. **Input conservation, both ends** — every batch reaches the facility (0
+   dropped) and none harvests more than it stocked (0 over-produced).
+3. **Facility-level distributed loss** — catches many small same-sign leaks
+   that per-row tolerances would each forgive.
+4. **FW → seawater reconciliation** — realized entry vs plan per batch (a
+   calibration signal, not a lost-fish gate).
+5. **Graded-harvest + HOG consistency** — every event type accounted; sold
+   tonnage consistent across sheets.
+6. **Closed freshwater mass-balance** — the FW phase can't leak fish either.
+7. **Steady-harvest contract** — no near-empty week past the startup handoff.
+
+Plus the operational gates: handling budget, harvest floor/target/ceiling,
+per-system caps, per-tank density, and the depuration-hold audit. In Analyze,
+these are the **hard rules ranked first** — no emphasis or weighting can
+promote a plan past a failed gate.""")
+
+    with st.expander("⚠ 10 · Known limits — the honest list"):
+        st.markdown(f"""
+* **"0 drift" proves bookkeeping, not biology.** The audits reconcile the
+  plan against the *same* growth/feed curves that produced it — an internally
+  consistent but biologically wrong model reconciles to itself. The check
+  against reality is field data (the FW reconciliation signal is your first
+  hint a correction needs retuning).
+* **The hybrid's biomass peak is the price of steady harvest.** Holding fish
+  back for lean weeks means they're still in the water: peak biomass runs a
+  few percent over the cap (measured ~102.6 → ~107.1% switching the guide
+  on). Every knob that shaves that peak was measured to put empty harvest
+  weeks back — the spike *is* the reserve.
+* **Pre-{k['prod_start'][:4]} weekly harvest is lumpy by design.** The 6N
+  pair rotation quantizes weekly drains; leveling fills troughs but the pair
+  granularity remains until production mode.
+* **Fish ≥ 1 kg standing in entry tanks is necessary, not a bug (R6).**
+  OG3-6 feed capacity binds before space does, so some overflow stays behind
+  — measured on real PRs; forcing it forward breaks feed caps.
+* **A week can exceed the {k['moves']}-move handling budget.** Essential
+  moves (rotation fills, arrival make-room) are never blocked; such a week
+  is flagged on the handling gate rather than silently truncated.
+* **Severe per-batch density clusters are a stocking problem.** When a
+  cohort's tanks collide mid-grow-out, no planner knob fixes it — the remedy
+  is stocking fewer fish (the stocking frontier in Analyze quantifies the
+  trade).
+* **6N off-feed mortality is slightly under-counted per tank** — a
+  few-fish-per-week approximation that nets out facility-wide and is
+  deliberately left (correcting it destabilizes the facility-level balance
+  it currently cancels against).
+* **PR-hydrated purge fish can show short residency at horizon start** — a
+  measurement artifact (their clock predates the forecast), exempted from
+  the hold audit on purpose.""")
+
+    st.caption(
+        "Sources: the tier rulebook (forecast/tiers.py), the Control config "
+        "and its tooltips (Configure → Control), and docs/USER_GUIDE.md — "
+        "which adds the full tuning guidance this page deliberately leaves "
+        "out.")
+
+
+# ============================================================
 # Page setup
 # ============================================================
 
@@ -3372,10 +3722,13 @@ with st.sidebar:
         "Mode",
         ["Run forecast", "Configure (models & control)",
          "Analyze (find my best plan)",
-         "Optimize (multi-objective)", "Compare & Choose (all methods)"],
+         "Optimize (multi-objective)", "Compare & Choose (all methods)",
+         "How it works (the rules)"],
         help="Run forecast: upload a PR and run. Configure: edit the app's "
              "biology models, facility, control, batches, limits, targets and "
-             "prices. Analyze: ONE flow that runs "
+             "prices. How it works: the plain-language rulebook — every "
+             "pipeline layer, what it decides, what it's forbidden to do, and "
+             "which checks bind it. Analyze: ONE flow that runs "
              "the engines, tunes the knobs, grades everything on the hard-rule "
              "checklist (incl. your harvest targets, revenue, and the "
              "per-batch density lens), and recommends a single "
@@ -3415,7 +3768,12 @@ with st.sidebar:
             "pick which whole plan becomes the report. Unlike Optimize (same "
             "engine, different knobs), this compares *engines*.\n"
             "- **Configure** — hand-edit the models, control knobs, facility, batches, "
-            "limits, targets and prices (every knob has a tooltip).\n\n"
+            "limits, targets and prices (every knob has a tooltip).\n"
+            "- **How it works** — the plain-language rulebook: every pipeline "
+            "layer (inputs → manual window → freshwater → entry → placement → "
+            "harvest → depuration → audits), what each decides, what it may "
+            "never do, which checks bind it, and the honest known-limits "
+            "list. Read it once before trusting or challenging a plan.\n\n"
             "*(The old Tune mode retired — its density distribution + severe-batch "
             "readout is now a checklist gate + drill-in on the Analyze board, and "
             "the stocking frontier moved there with it. The headless density sweep "
@@ -5714,6 +6072,10 @@ if app_mode.startswith("Compare"):
 
 if app_mode.startswith("Configure"):
     _config_editor()
+    st.stop()
+
+if app_mode.startswith("How it works"):
+    _how_it_works()
     st.stop()
 
 
