@@ -39,6 +39,63 @@ from typing import Optional
 
 import yaml
 
+from .optimize import CD_KNOB_SPACE, OPT_FULL_GRID
+
+
+# --------------------------------------------------------------------------- #
+# Tunable knob spaces — what the TUNED tournament may search, per method
+# --------------------------------------------------------------------------- #
+# Knobs that are NEVER tunable, by ANY method's search (operator ruling):
+#   * min_harvest_weight_g — a BUSINESS constant (the sellable size), not a
+#     planner preference. (Stocking count/size are business inputs too, but
+#     they live in scenario/batches.yaml, so a control-knob space cannot
+#     reach them by construction.)
+#   * the wave-3 operational RULES — max_harvest_per_week (hard processing
+#     ceiling), harvest_target_per_week (planning target), min_harvest_per_week
+#     (contract floor), max_transfers_per_week (handling budget). These are
+#     CONSTRAINTS the plan must respect at their configured values; a search
+#     that "tunes" a rule is just relaxing the rule.
+# register() enforces this structurally — an illegal space cannot register.
+UNTUNABLE_KNOBS = frozenset({
+    "min_harvest_weight_g",
+    "max_harvest_per_week",
+    "harvest_target_per_week",
+    "min_harvest_per_week",
+    "max_transfers_per_week",
+})
+
+# Controller-family space: the existing full optimizer space — the broad grid
+# (optimize.OPT_FULL_GRID) + the coordinate-descent axes (optimize.CD_KNOB_SPACE).
+# Every knob in it is read by the controller engine (forecast/placement.py +
+# forecast/run.py), which is what all Controller-family methods run.
+CONTROLLER_KNOB_GRID = tuple((lbl, dict(ov)) for lbl, ov in OPT_FULL_GRID)
+CONTROLLER_KNOB_SPACE = tuple((k, tuple(vs)) for k, vs in CD_KNOB_SPACE)
+
+# Global-family space: EMPTY — verified 2026-08-09 by grepping the whole global
+# path (global_planner_poc / _l2 / _l3 / _loop / global_tank_pick_poc /
+# global_placement_milp_poc / global_forecast / tools.run_global_forecast) for
+# control-knob reads:
+#   * The only TUNABLE knobs the global path reads are
+#     facility_biomass_deviation_pct (L1) and density_target_pct (L3) — and
+#     overriding exactly those (plus tran_og) was experimentally shown to BREAK
+#     Global's conservation proof (2026-08-07). Excluded.
+#   * The proposed safe candidates are NOT consumed by the global path:
+#     global_buffer_pct is read only by caps.system_cap_with_buffer, whose sole
+#     caller is the CONTROLLER's placement.py; hybrid_guide_smooth_weeks is read
+#     only by hybrid_guide.py, which only forecast/run.py (controller) calls.
+#     A knob a method doesn't read must not be in its space.
+#   * Everything else it reads is a fixed rule/constant (max_biomass_kg,
+#     max_harvest_per_week, min_harvest_weight_g, horizon, 6N dates).
+# So the honest Global space is empty: the Globals compete at stock config, and
+# a hard-gate failure there is 'gate-bound' (no knob can fix it), not tunable.
+GLOBAL_KNOB_GRID: tuple = ()
+GLOBAL_KNOB_SPACE: tuple = ()
+
+# Knobs a GLOBAL method's space may ever contain. Currently empty (see above);
+# if a conservation-safe, actually-consumed global knob is found later, add it
+# here WITH the grep + conservation evidence, and the registry check relaxes.
+GLOBAL_CONSERVATION_SAFE_KNOBS = frozenset()
+
 
 # --------------------------------------------------------------------------- #
 # Method definition
@@ -57,6 +114,12 @@ class Method:
                 (e.g. {"placement_method": "lns"}); does NOT touch the user file
     engine_kwargs   extra keyword args passed to the engine callable
                     (e.g. {"optimal": True} to select CP-SAT placement)
+    knob_grid   broad-sweep rows ((label, {knob: value}), ...) the tuned
+                tournament may run for THIS method — every row is layered ON TOP
+                of `overrides` (the method's pins stay pinned)
+    knob_space  coordinate-descent axes ((knob, (values...)), ...) for the same
+                search; also the single-pass probe used when the method fails a
+                hard gate at stock config
     """
     key: str
     label: str
@@ -65,6 +128,8 @@ class Method:
     engine: str
     overrides: dict = field(default_factory=dict)
     engine_kwargs: dict = field(default_factory=dict)
+    knob_grid: tuple = ()
+    knob_space: tuple = ()
 
 
 # --------------------------------------------------------------------------- #
@@ -122,7 +187,39 @@ def run_method(method: Method, input_path, out_path,
 REGISTRY: "dict[str, Method]" = {}
 
 
+def _space_knobs(method: Method) -> set:
+    """Every knob name the method's search space can touch."""
+    knobs = {k for k, _ in method.knob_space}
+    for _, ov in method.knob_grid:
+        knobs.update(ov)
+    return knobs
+
+
+def _validate_knob_space(method: Method) -> None:
+    """Structural guarantees on a method's tunable space (fail at register time,
+    not mid-tournament): business constants / operational rules are untunable by
+    ANYONE, and a Global method may only carry knobs proven conservation-safe
+    AND consumed by the global path (currently: none)."""
+    knobs = _space_knobs(method)
+    illegal = knobs & UNTUNABLE_KNOBS
+    if illegal:
+        raise ValueError(
+            f"method {method.key!r}: knob space contains untunable business/"
+            f"rule knob(s) {sorted(illegal)} — these are fixed constraints "
+            f"(see UNTUNABLE_KNOBS)")
+    if method.engine == "global":
+        unsafe = knobs - GLOBAL_CONSERVATION_SAFE_KNOBS
+        if unsafe:
+            raise ValueError(
+                f"method {method.key!r}: global-engine knob space contains "
+                f"{sorted(unsafe)} — not in GLOBAL_CONSERVATION_SAFE_KNOBS "
+                f"(placement-side overrides broke Global conservation, "
+                f"2026-08-07; a knob the global path doesn't read must not "
+                f"be in its space)")
+
+
 def register(method: Method) -> None:
+    _validate_knob_space(method)
     REGISTRY[method.key] = method
 
 
@@ -138,6 +235,8 @@ register(Method(
     # not hypothetical: an A/B whose override equalled the live config value is
     # exactly how grade-to-min was wrongly recorded as inert (2026-08-03).
     overrides={"hybrid_follow": "off"},
+    knob_grid=CONTROLLER_KNOB_GRID,
+    knob_space=CONTROLLER_KNOB_SPACE,
     blurb="Reactive week-by-week planner: greedy placement + multi-objective "
           "rebalancer. The long-standing production engine and the greedy "
           "baseline — but it leaves a totally empty harvest week on 5 of 6 real "
@@ -150,6 +249,8 @@ register(Method(
     engine="controller",
     # Same reason as `controller` above: isolate the LNS variable from the hybrid.
     overrides={"placement_method": "lns", "hybrid_follow": "off"},
+    knob_grid=CONTROLLER_KNOB_GRID,
+    knob_space=CONTROLLER_KNOB_SPACE,
     blurb="Controller with a large-neighborhood-search pass that relocates / "
           "swaps grow-out occupancy off the hottest systems (audit-gated).",
 ))
@@ -159,6 +260,10 @@ register(Method(
     family="Global",
     engine="global",
     engine_kwargs={"optimal": False},
+    # Knob space EMPTY (GLOBAL_KNOB_*): no conservation-safe knob the global
+    # path actually reads exists — see the evidence block above GLOBAL_KNOB_GRID.
+    knob_grid=GLOBAL_KNOB_GRID,
+    knob_space=GLOBAL_KNOB_SPACE,
     blurb="Precalculated cascade: tankless harvest (L1) -> per-batch facility "
           "share -> lexicographic LP placement (L3) -> continuity tank pick.",
 ))
@@ -168,6 +273,9 @@ register(Method(
     family="Global",
     engine="global",
     engine_kwargs={"optimal": True},
+    # Same empty space as global-lp (same L1/L3 knob consumption).
+    knob_grid=GLOBAL_KNOB_GRID,
+    knob_space=GLOBAL_KNOB_SPACE,
     blurb="Same L1 cascade + facility share, but the whole-horizon grow-out "
           "layout is placed by a CP-SAT optimal (0-swap) solver, not the LP.",
 ))
@@ -180,6 +288,8 @@ register(Method(
     # matters (see blurb). The band is the CEILING half — a narrower band clamps
     # harvest less in the fat weeks, so fewer fish are held back for later.
     overrides={"hybrid_follow": "full", "hybrid_follow_band": 0.05},
+    knob_grid=CONTROLLER_KNOB_GRID,
+    knob_space=CONTROLLER_KNOB_SPACE,
     blurb="The validated controller with the Global engine's L1 harvest "
           "envelope fed in as a per-week target band. Meets the never-an-empty-"
           "week contract rule; the plain controller does NOT. Measured across "
