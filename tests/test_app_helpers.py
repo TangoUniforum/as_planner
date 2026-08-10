@@ -197,6 +197,79 @@ def test_res_disk_roundtrip_is_pickle_safe_and_rebuilds_metrics():
 
 
 # --------------------------------------------------------------------------- #
+# Provenance labels — a replayed cached result must SAY it's a replay
+# --------------------------------------------------------------------------- #
+# DEFECT CLASS (2026-08-10 stale-cache incident): the board replayed old
+# engine legs and only pickle-spelunking revealed it. Every displayed result
+# now carries a compact provenance caption; these lock its formatting.
+def test_fmt_ts_minutes_shortens_iso_and_survives_junk():
+    assert app._fmt_ts_minutes("2026-08-10T11:08:03") == "2026-08-10 11:08"
+    assert app._fmt_ts_minutes("2026-08-10 11:08:03") == "2026-08-10 11:08"
+    assert app._fmt_ts_minutes(None) == ""
+    assert app._fmt_ts_minutes("") == ""
+    assert app._fmt_ts_minutes("junk") == ""
+    assert app._fmt_ts_minutes(12345) == ""
+
+
+def test_provenance_fresh_run_names_time_schema_and_inputs():
+    res = {"run_ts": "2026-08-10T11:08:03",
+           "_score": {"schema": "metrics-v2-window-weeks-excluded"}}
+    line = app._provenance_line(res, sig="1a2b3c4d5e6f", fresh=True)
+    assert "● fresh run 2026-08-10 11:08" in line
+    assert "graded metrics-v2-window-weeks-excluded" in line
+    assert "inputs 1a2b3c4d" in line          # 8-char prefix, not the full md5
+    assert "1a2b3c4d5e6f" not in line
+
+
+def test_provenance_cache_replay_is_labelled_as_a_replay():
+    res = {"run_ts": "2026-08-10T11:08:03", "_score": {"schema": "s"}}
+    line = app._provenance_line(res, sig="feedbeef00", fresh=False)
+    assert line.startswith("⟲ cached run of 2026-08-10 11:08")
+    # A pre-provenance cached leg (no run_ts) must admit it, not invent a time.
+    old = app._provenance_line({}, fresh=False)
+    assert "time not recorded" in old
+
+
+def test_provenance_regrade_says_engine_reused_judgement_redone():
+    """The drop_stale_grades path: engine run reused, verdict recomputed under
+    the CURRENT rules — the label must say both times, per the operator's
+    'engine run 11:08, re-graded under current rules' requirement."""
+    res = {"run_ts": "2026-08-10T11:08:00",
+           "_graded_ts": "2026-08-10T13:42:00",
+           "_regraded": True,
+           "_score": {"schema": "metrics-v2-window-weeks-excluded"}}
+    line = app._provenance_line(res, sig="abc", fresh=False)
+    assert "cached run of 2026-08-10 11:08" in line
+    assert "re-graded under current rules 2026-08-10 13:42" in line
+    assert "(metrics-v2-window-weeks-excluded)" in line
+    # No duplicate plain "graded <schema>" claim next to the re-grade note.
+    assert "graded metrics" not in line.replace("re-graded", "")
+
+
+def test_provenance_unknown_origin_claims_nothing():
+    """fresh=None (no session runtime / legacy result) must not claim either
+    'fresh' or 'cached' — an honest label beats a guessed one."""
+    line = app._provenance_line({"run_ts": "2026-08-10T09:00:00"}, fresh=None)
+    assert "fresh" not in line and "cached" not in line
+    assert line.startswith("run 2026-08-10 09:00")
+    assert app._provenance_line({}, fresh=None).startswith(
+        "run time not recorded")
+
+
+def test_ensure_board_score_regrade_flag_round_trips_disk():
+    """_regraded/_graded_ts/run_ts are plain keys — they must survive the
+    _res_for_disk/_res_from_disk pickle round-trip with the score."""
+    import pickle
+    from forecast import optimize as O
+    res = {"ok": True, "run_ts": "2026-08-10T11:08:00",
+           "_graded_ts": "2026-08-10T13:42:00", "_regraded": True,
+           "_score": {"metrics": O._infeasible_metrics(), "schema": "s"}}
+    back = app._res_from_disk(pickle.loads(pickle.dumps(app._res_for_disk(res))))
+    assert back["run_ts"] == "2026-08-10T11:08:00"
+    assert back["_regraded"] is True and back["_graded_ts"]
+
+
+# --------------------------------------------------------------------------- #
 # Compare board: a PARTIAL (fish-dropping) plan could win a grading lens
 # --------------------------------------------------------------------------- #
 def test_board_lens_pool_excludes_partial_plans():

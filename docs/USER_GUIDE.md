@@ -1074,6 +1074,18 @@ you choose a *whole* plan — never a splice.
   empty harvest week the current scenario had already scripted away). Changing only
   the harvest **targets or prices** re-judges the existing board instantly — those are
   scoring overlays, not run inputs, so nothing re-runs.
+- **Provenance on every result.** Every method card (and every Analyze candidate,
+  and the header of any run on the report tabs) carries a small caption saying where
+  that result came from: **●&nbsp;fresh run** (the engine ran in *this* browser
+  session) vs **⟲&nbsp;cached run of `<date time>`** (replayed from the result cache
+  — an earlier session, a reload), the grading-rules version it was judged under
+  (`graded metrics-v2-…`), and an 8-character **inputs** signature prefix — the same
+  prefix on two cards means they saw the same PR + config + scenario. When a cached
+  engine run is kept but its *verdict* is recomputed after a grading-rules update, the
+  caption says so explicitly: *"⟲ cached run of 2026-08-10 11:08 · re-graded under
+  current rules 13:42"*. Nothing on a board is ever silently a replay — if a caption
+  doesn't say what you expect, re-run before trusting it. (Legs cached before this
+  label existed show "time not recorded" until they next re-run.)
 - **Reading the progress bar.** It advances when a method *finishes*, not while one is
   running: the engine call blocks the app, so nothing can animate during it. The text
   tells you which method is in flight, its typical duration, and the wall-clock time it
@@ -1407,7 +1419,10 @@ that whole composition in one flow and ends in a single recommendation card:
 4. **The card** — one recommended plan (pick order: hard rules → soft rules →
    target shortfall → emphasis score), with **✅ Adopt this plan** (saves the
    knobs, sets the ▶ Run forecast method, loads the run) and **⭐ Promote as
-   Quick-run default**.
+   Quick-run default**. The card and the *All candidates* table carry the same
+   **provenance caption** as the Compare board (§7.4): fresh vs cached, engine
+   run time, grading-rules version, inputs-signature prefix — so a candidate
+   replayed from cache or re-graded under newer rules always says so.
 
 **Targets & prices** (Configure → Targets & prices): monthly/yearly harvest
 targets in kg (HOG or gross) judged with a tolerance — *penalized, never

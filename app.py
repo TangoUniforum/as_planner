@@ -19,6 +19,7 @@ import time
 import traceback
 from collections import defaultdict
 from contextlib import redirect_stdout
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -4123,7 +4124,17 @@ def _run_with_workbook_bytes(
         # Identity of this run, so the results view can memoize its derived
         # frames and only rebuild them when a DIFFERENT run is displayed.
         "_rid": uuid.uuid4().hex,
+        # Provenance: WHEN the engine actually ran — travels with the result
+        # through the board store / disk cache so a replayed leg can say
+        # "cached run of <this time>" instead of passing as current.
+        "run_ts": datetime.now().isoformat(timespec="seconds"),
     })
+    # Session-scoped freshness: anything in this set ran in THIS session;
+    # everything else on screen is a cache replay (see _res_is_fresh).
+    try:
+        st.session_state.setdefault("_fresh_rids", set()).add(parsed["_rid"])
+    except Exception:  # noqa: BLE001 — headless callers have no session
+        pass
     return parsed
 
 
@@ -5302,6 +5313,70 @@ def _board_badges(gates):
     return "  ".join(f"{'✅' if ok else '⚠️'} {name}" for name, ok in gates.items())
 
 
+# --------------------------------------------------------------------------- #
+# Provenance — every displayed result says where it came from
+# --------------------------------------------------------------------------- #
+def _fmt_ts_minutes(iso_ts) -> str:
+    """'2026-08-10T11:08:03' -> '2026-08-10 11:08'. Junk/None -> ''. Pure."""
+    s = str(iso_ts or "")
+    if len(s) >= 16 and s[4:5] == "-" and s[7:8] == "-":
+        return s[:16].replace("T", " ")
+    return ""
+
+
+def _provenance_line(res, sig: str = "", fresh=None) -> str:
+    """One compact caption line saying WHERE a displayed result came from —
+    the label that would have made the 2026-08-10 stale-board replay operator-
+    visible without pickle-spelunking. Covers the four provenance axes:
+
+      * fresh-run vs cache-replay (`fresh` True/False; None = origin unknown,
+        claim nothing rather than guess),
+      * the engine-run wall time (res['run_ts'], stamped by
+        _run_with_workbook_bytes; older cached legs predate the stamp),
+      * the grading-rules version (_score['schema'] = METRICS_SCHEMA) — and,
+        when the grade was REDONE from the cached workbook after a rules bump
+        (the drop_stale_grades path), it says so with the re-grade time,
+      * a short inputs-signature prefix, enough to eyeball "same inputs?"
+        across cards.
+
+    Pure (dict in -> str out) so it's testable headlessly."""
+    res = res or {}
+    ts = _fmt_ts_minutes(res.get("run_ts"))
+    if fresh is True:
+        head = "● fresh run" + (f" {ts}" if ts else " this session")
+    elif fresh is False:
+        head = "⟲ cached run" + (f" of {ts}" if ts else " (time not recorded)")
+    else:
+        head = (f"run {ts}" if ts else "run time not recorded")
+    parts = [head]
+    schema = (res.get("_score") or {}).get("schema")
+    if res.get("_regraded"):
+        gts = _fmt_ts_minutes(res.get("_graded_ts"))
+        parts.append("re-graded under current rules"
+                     + (f" {gts}" if gts else "")
+                     + (f" ({schema})" if schema else ""))
+    elif schema:
+        parts.append(f"graded {schema}")
+    if sig:
+        parts.append(f"inputs {str(sig)[:8]}")
+    return " · ".join(parts)
+
+
+def _res_is_fresh(res):
+    """True = this result's engine ran in THIS browser session; False = it was
+    replayed from the cache (disk hydration / an earlier session); None =
+    unknown (no rid, or no session runtime). Session-scoped on purpose: the
+    operator's question is "did anything just run, or am I looking at a
+    replay?"."""
+    try:
+        rid = (res or {}).get("_rid")
+        if not rid:
+            return None
+        return rid in st.session_state.get("_fresh_rids", set())
+    except Exception:  # noqa: BLE001 — headless import has no session
+        return None
+
+
 def _board_lens_pool(scored: dict) -> dict:
     """The methods allowed to WIN a grading lens: must conserve AND be fully
     placed. A PARTIAL plan (fish dropped for lack of space) would otherwise win
@@ -5453,12 +5528,19 @@ def _ensure_board_score(res: dict, label: str) -> None:
     forever."""
     from forecast import analysis as _anacache
     from forecast import optimize as _opt
-    _anacache.drop_stale_grades(res, _opt.METRICS_SCHEMA)
+    _was_stale = _anacache.drop_stale_grades(res, _opt.METRICS_SCHEMA)
     if not (res.get("ok") and res.get("output_path")) or res.get("_score"):
         return
     with st.spinner(f"Grading {label}…"):
         try:
             res["_score"] = _board_score(res["output_path"])
+            # Provenance: when this judgement was made, and whether it REPLACED
+            # a grade computed under older rules (the drop_stale_grades path) —
+            # the card then says "re-graded under current rules", so a reused
+            # engine run never passes its verdict off as contemporaneous.
+            res["_graded_ts"] = datetime.now().isoformat(timespec="seconds")
+            if _was_stale:
+                res["_regraded"] = True
             res.pop("_score_err", None)
         except Exception as e:  # noqa: BLE001
             res["_score"] = None
@@ -5548,7 +5630,10 @@ def _compare_and_choose():
                     and done["res"].get("output_path")):
                 _ensure_board_score(done["res"], mlabel)
                 _board_persist(mkey)   # capture a freshly-added _score too
-                bar.progress((i + 1) / n, text=f"{mlabel}: reusing finished result")
+                _rts = _fmt_ts_minutes(done["res"].get("run_ts"))
+                bar.progress((i + 1) / n,
+                             text=f"{mlabel}: reusing finished result"
+                                  + (f" from {_rts}" if _rts else ""))
                 continue
             # The bar can only move between methods — the engine call below
             # blocks the script — so say so, and give a clock to judge against.
@@ -5684,6 +5769,9 @@ def _compare_and_choose():
             st.markdown(f"**{label}** — *{blurb}*")
             st.markdown(f"→ **{win['_label']}**  ·  `{vals[win_k]:,.3f}`")
             st.caption(_board_badges(win["_score"]["gates"]))
+            st.caption(_provenance_line(
+                win, sig=(store.get(win_k) or {}).get("sig", ""),
+                fresh=_res_is_fresh(win)))
 
     # ---- Per-method summary + pick ----
     st.subheader("Pick the plan for your report")
@@ -5694,6 +5782,9 @@ def _compare_and_choose():
             with c1:
                 st.markdown(f"**{v['_label']}**  ·  {v.get('elapsed', 0):.0f}s")
                 st.caption(_board_badges(v["_score"]["gates"]))
+                st.caption(_provenance_line(
+                    v, sig=(store.get(k) or {}).get("sig", ""),
+                    fresh=_res_is_fresh(v)))
                 st.caption(
                     f"peak {m.overall_peak_biomass / (m.biomass_cap or 1) * 100:.0f}% cap"
                     f"  ·  {m.transfers_per_fish:.2f} moves/fish"
@@ -5872,6 +5963,8 @@ def _analyze():
                     st.warning("This quick run predates a PR/config change — "
                                "re-run it.")
                 _qg = _ana_grade(qr["res"], targets, econ)
+                st.caption(_provenance_line(qr["res"], sig=qr.get("sig", ""),
+                                            fresh=_res_is_fresh(qr["res"])))
                 _ana_checklist(_qg["gates"])
                 if _qg["revenue"]:
                     _rv = _qg["revenue"]
@@ -5963,7 +6056,10 @@ def _analyze():
                     and done["res"].get("output_path")):
                 _ensure_board_score(done["res"], mlabel)
                 _board_persist(mkey)   # capture a freshly-added _score too
-                bar.progress((i + 1) / n_phases, text=f"{mlabel} — reused ✓")
+                _rts = _fmt_ts_minutes(done["res"].get("run_ts"))
+                bar.progress((i + 1) / n_phases,
+                             text=f"{mlabel} — reused ✓"
+                                  + (f" (run of {_rts})" if _rts else ""))
                 continue
             bar.progress(i / n_phases, text=f"Phase 1/3 — running {mlabel} "
                          f"(typically {_TYPICAL.get(mkey, '?')})…")
@@ -6193,7 +6289,10 @@ def _analyze():
         _ensure_board_score(done["res"], done["res"].get("_label", k))
         if done["res"].get("ok") and done["res"].get("_score"):
             cands.append({"key": k, "label": done["res"].get("_label", k),
-                          "overrides": {}, "res": done["res"]})
+                          "overrides": {}, "res": done["res"],
+                          "prov": _provenance_line(
+                              done["res"], sig=done.get("sig", ""),
+                              fresh=_res_is_fresh(done["res"]))})
     if _skipped_stale:
         st.warning(f"{len(_skipped_stale)} stock engine leg(s) were computed on "
                    f"different inputs (PR/config/scenario) and are left OFF the "
@@ -6203,7 +6302,10 @@ def _analyze():
         cands.append({"key": "_tuned",
                       "label": ana["tuned"]["res"].get("_label", "Tuned config"),
                       "overrides": ana["tuned"]["overrides"],
-                      "res": ana["tuned"]["res"]})
+                      "res": ana["tuned"]["res"],
+                      "prov": _provenance_line(
+                          ana["tuned"]["res"], sig=ana.get("sig", ""),
+                          fresh=_res_is_fresh(ana["tuned"]["res"]))})
     # Tuned-tournament candidates: each method's tuned winner joins the board
     # as "METHOD (tuned: knobs)". key = the real method key, so Adopt/Promote
     # store a replayable method + overrides pair (Quick run replays BOTH).
@@ -6217,7 +6319,10 @@ def _analyze():
             cands.append({"key": _tk,
                           "label": _tr.get("_label", f"{_tk} (tuned)"),
                           "overrides": _te.get("overrides") or {},
-                          "res": _tr})
+                          "res": _tr,
+                          "prov": _provenance_line(
+                              _tr, sig=ana.get("sig", ""),
+                              fresh=_res_is_fresh(_tr))})
     if not cands:
         st.error("No graded candidates survived — check the engine round above.")
         return
@@ -6248,6 +6353,8 @@ def _analyze():
                "pick order: hard rules → soft rules → target shortfall → score.")
     with st.container(border=True):
         st.markdown(f"### {winner['label']}")
+        if winner.get("prov"):
+            st.caption(winner["prov"])
         if winner["overrides"]:
             st.code(optimize.overrides_yaml(winner["overrides"]), language="yaml")
         _ana_checklist(winner["gates"])
@@ -6357,12 +6464,17 @@ def _analyze():
                         else "—"),
             "Score": (round(c["score"], 3) if c.get("score") is not None
                       else None),
+            "Provenance": c.get("prov", ""),
         })
     st.dataframe(pd.DataFrame(_rows), hide_index=True, use_container_width=True)
     st.caption("Gate icons in checklist order: " +
                " · ".join(g["label"] for g in ranked[0]["gates"]) +
                ". Scores are the emphasis-weighted objective (lower is "
-               "better), comparable across candidates.")
+               "better), comparable across candidates. Provenance: ● = engine "
+               "ran this session, ⟲ = replayed from the result cache; "
+               "'re-graded under current rules' = the engine output was reused "
+               "but its verdict was recomputed after a grading-rules update; "
+               "'inputs' = signature prefix of the PR + config the run saw.")
     # Promote ANY candidate, not only the card's winner — the first real
     # analysis promoted the runner-up (the tuned winner was refuted cross-PR),
     # which needed a by-hand YAML write. Now it's a picker.
@@ -6501,8 +6613,10 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
     # Cache key for every derived frame below.
     _rid = _result_rid(r)
 
-    # Provenance — always show WHICH run is on screen (keep the correct data).
-    st.caption(f"📋 Showing: **{r.get('_run_label', 'forecast run')}**")
+    # Provenance — always show WHICH run is on screen (keep the correct data),
+    # and WHERE it came from (fresh vs cache-replay, run time, grading rules).
+    st.caption(f"📋 Showing: **{r.get('_run_label', 'forecast run')}** · "
+               + _provenance_line(r, fresh=_res_is_fresh(r)))
     if r.get("config_used"):
         _render_active_config(r["config_used"],
                               "ℹ️ Configuration this run used")
