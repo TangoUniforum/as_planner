@@ -221,6 +221,13 @@ class Metrics:
     crowded_biomass_fraction: float = 0.0
     mean_rearing_density: float = 0.0
     crowded_fish_weeks: float = 0.0
+    # --- the "never an empty harvest week" HARD rule, per variant ---
+    # Zero-harvest weeks + the emptiest week over the FULL horizon (the
+    # 34ecbaf series, zero weeks included). Display/gate-only, never scored.
+    # None = measured before these fields existed (an old cache entry): the
+    # tournament's probe treats None as UNKNOWN, never as a pass.
+    harvest_zero_weeks: "int | None" = None
+    harvest_min_week: "float | None" = None
 
     def component(self, name):
         return getattr(self, name)
@@ -775,6 +782,8 @@ def metrics_from_workbook(out_path, harvest_cap,
         crowded_biomass_fraction=crowded_frac,
         mean_rearing_density=mean_rear_d,
         crowded_fish_weeks=crowded_fw,
+        harvest_zero_weeks=sum(1 for x in fish if x < 1.0),
+        harvest_min_week=(min(fish) if fish else 0.0),
     )
     dropped, overprod = tuning._conservation(out_path)
     return metrics, dropped, overprod
@@ -913,6 +922,8 @@ def _infeasible_metrics() -> "Metrics":
                         "weeks_moves_over_cap", "weeks_moves_warn",
                         "moves_week_max"):
             kw[f.name] = 0
+        elif f.name in ("harvest_zero_weeks", "harvest_min_week"):
+            kw[f.name] = None      # unknown, NOT "passes the empty-week rule"
         else:
             kw[f.name] = 0.0
     return Metrics(**kw)
@@ -1338,14 +1349,18 @@ def coordinate_descent(input_path, config_dir, scenario_dir, emphasis=DEFAULT_EM
 def deep_search_combined(input_path, config_dir, scenario_dir, emphasis=DEFAULT_EMPHASIS,
                          weights=None, grid=None, max_rounds=3,
                          progress=None, max_workers=None,
-                         variant_cache=None) -> list[OptVariant]:
+                         variant_cache=None, knob_space=None) -> list[OptVariant]:
     """Best-of-both for ANY emphasis: run the full GRID (broad, diverse coverage —
     incl. the off-by-default controls), then coordinate descent SEEDED FROM the
     grid's best (local refinement that finds combinations around the broadly-best
     point). Pool every evaluated variant, dedup by overrides, and return the lot —
     recommend() then picks the GLOBAL best across both methods. Grid explores,
     descent exploits; the winner is whichever wins. Same OptVariant list shape, so
-    the app/score-table/Pareto/apply-verify consume it unchanged."""
+    the app/score-table/Pareto/apply-verify consume it unchanged.
+
+    `knob_space` restricts BOTH halves to a caller-chosen search space (the
+    tuned tournament passes a Method's own axes); None keeps the defaults
+    (CD_KNOB_SPACE for the descent, OPT_FULL_GRID for the grid)."""
     w = weights or weights_for(emphasis)
     gvars = sweep(input_path, config_dir, scenario_dir,
                   grid=grid or OPT_FULL_GRID, progress=progress,
@@ -1355,7 +1370,8 @@ def deep_search_combined(input_path, config_dir, scenario_dir, emphasis=DEFAULT_
     seed = dict((min(ok, key=lambda v: v.score) if ok else gvars[0]).overrides)
     dvars = coordinate_descent(input_path, config_dir, scenario_dir, emphasis=emphasis,
                                weights=w, seed=seed, max_rounds=max_rounds, progress=progress,
-                               max_workers=max_workers, variant_cache=variant_cache)
+                               max_workers=max_workers, variant_cache=variant_cache,
+                               knob_space=knob_space)
     pool = {}
     for v in gvars + dvars:        # dedup by overrides; identical configs collapse
         pool[tuple(sorted(v.overrides.items()))] = v
