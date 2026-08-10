@@ -1349,9 +1349,30 @@ that whole composition in one flow and ends in a single recommendation card:
 1. **Engine round** — every planning method once on your current config (the
    same runs as Compare & Choose; finished legs are shared both ways, nothing
    runs twice). Global CP-SAT is an opt-in checkbox (slow).
-2. **Knob round** — the Grid + Deep search (what Auto-optimize uses) on the
-   live-config engine, then a verification run of the winner on that SAME
-   engine.
+2. **Knob round** — depends on the **Analysis depth** you pick:
+   - **Quick tournament** (default, today's flow): the Grid + Deep search
+     (what Auto-optimize uses) on the live-config engine, then a verification
+     run of the winner on that SAME engine.
+   - **Tuned tournament**: EVERY method gets its own knob search on its own
+     tunable space (`knob_grid`/`knob_space` on the method registry,
+     `forecast/methods.py`), so the board compares the methods **at their
+     best**, not one tuned engine against the rest stock. Per method: a stock
+     hard-gate check first — gate-passers get the full Grid + Deep search
+     restricted to their space; a gate-failer gets a cheap **one-knob probe**
+     (single pass over its space) and is marked **gate-bound** if no knob
+     fixes the failure (the full search is skipped honestly). Each tuned
+     winner is verified on its **own engine** and joins the board as
+     *"METHOD (tuned: knobs)"*. The Global methods have **no
+     conservation-safe knobs** (the only tunable knobs their path reads broke
+     the Global conservation proof when overridden — evidence in
+     `forecast/methods.py`), so they compete at stock in both depths.
+     Business constants (`min_harvest_weight_g`, stocking) and the
+     operational rules (`max_harvest_per_week`, `harvest_target_per_week`,
+     `max_transfers_per_week`) are **untunable by anyone** — the registry
+     rejects a space that touches them. A **run budget** expander shows the
+     estimated engine runs per method (and how much the variant cache already
+     paid for) before you press go; the headless twin is
+     `python -m tools.run_tuned_tournament --workbook <PR>`.
 3. **The checklist** — every candidate is judged on the hard-rule checklist:
    conservation and never-an-empty-week are **hard** (a fail disqualifies);
    the biomass cap, the 55k processing cap, and your **harvest targets** are
