@@ -82,11 +82,14 @@ def probe_grid(method) -> list:
     method's knob_space, the method's pinned overrides merged under every
     candidate. Skips candidates identical to the stock config (a pin already
     at that value) — they would just re-measure the failing stock run."""
-    rows, seen = [], {tuple(sorted(method.overrides.items()))}
+    def _key(ov):
+        return tuple(sorted((str(k), str(x)) for k, x in ov.items()))
+
+    rows, seen = [], {_key(method.overrides)}
     for knob, values in method.knob_space:
         for v in values:
             ov = {**method.overrides, knob: v}
-            key = tuple(sorted((str(k), str(x)) for k, x in ov.items()))
+            key = _key(ov)
             if key in seen:
                 continue
             seen.add(key)
