@@ -754,6 +754,22 @@ mode (see `tests/test_coordinator_regression.py`):
 > because it cancels a small opposite approximation elsewhere in the pipeline.
 > Not a leak, and harmless to plans — flagged here only for full honesty.
 
+### The negative-control policy — every alarm ships with a proof it can fire
+
+A check exists to **detect** defects, never to coerce results — and a check that
+cannot physically fire is itself a defect. Twice this project a gate could not
+report the failure it existed to catch (the zero-week counter dropped empty
+weeks by construction; the over-production alarm was structurally blind to the
+audit's own headline). The standing fix is `tests/test_negative_controls.py`:
+**every detection surface** — the analysis gate registry, the workbook audits
+above, the compare-harness verdicts, the manual-window lints, the tournament
+hard-gate predicates, the board cache-staleness checks — ships with a minimal
+synthetic input containing exactly the defect it exists to catch, asserting the
+alarm **fires**, plus a clean-input control asserting it stays **quiet**. A
+meta-guard enumerates the gate registry and fails CI when a gate is registered
+without an alarm proof. When a control does not trip its check, that is a
+finding: fix the *check* so it can detect, never the control.
+
 ### The one standing limitation (be honest about it)
 **"0 drift" proves *bookkeeping* consistency, not *model* correctness.** The audits
 derive "expected" from the same growth/FCR/FW curves the engine used, so a
