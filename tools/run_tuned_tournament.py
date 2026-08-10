@@ -70,13 +70,16 @@ def _grade(out_path, cfg: dict, targets) -> dict:
     method's OWN conservation proof + harvest extras -> the analysis gate
     checklist. Returns {metrics, verdict, harvest, gates, ctx}."""
     hv_cap = float(cfg.get("max_harvest_per_week", 55000) or 55000)
-    hv_tgt = float(cfg.get("harvest_target_per_week", 0) or 0) or None
+    # Relief semantics (2026-08-09): the limit is a constraint; the derived
+    # ceiling = limit * (1 + harvest_relief_pct), never stored in config.
+    relief_pct = float(cfg.get("harvest_relief_pct", 0.10) or 0.0)
+    relief_ceiling = hv_cap * (1.0 + relief_pct)
     min_hv = float(cfg.get("min_harvest_per_week", 0) or 0)
     welfare = float(cfg.get("density_welfare_threshold_kg_m3", 80) or 80)
     mv_cap = int(float(cfg.get("max_transfers_per_week", 15) or 0)) or None
     m, _d, _o = _opt.metrics_from_workbook(str(out_path), hv_cap,
                                            welfare_density=welfare,
-                                           harvest_target=hv_tgt,
+                                           relief_ceiling=relief_ceiling,
                                            move_cap=mv_cap)
     verdict = _conservation_verdict(str(out_path))
     harv = _harvest_extras(str(out_path), min_hv)
@@ -97,7 +100,7 @@ def _grade(out_path, cfg: dict, targets) -> dict:
         "dropped": verdict["dropped"], "overprod": verdict["overprod"],
         "zero_weeks": harv.get("zero_weeks"),
         "weeks_over_harvest_cap": m.weeks_over_harvest_cap,
-        "weeks_over_harvest_target": m.weeks_over_harvest_target,
+        "weeks_over_relief_ceiling": m.weeks_over_relief_ceiling,
         "sixn_outbound_purge": sixn_out,
         "weeks_moves_over_cap": m.weeks_moves_over_cap,
         "weeks_moves_warn": m.weeks_moves_warn,
@@ -142,7 +145,17 @@ def main(argv=None) -> int:
     weights = _opt.weights_for(args.emphasis)
     roster = _methods.get_roster(
         [k.strip() for k in args.methods.split(",")] if args.methods else None)
-    inputs_sig = hashlib.md5(wb.read_bytes()).hexdigest()[:12]
+    # Cache identity = PR CONTENT + config/scenario CONTENT — a knob edit
+    # (e.g. the 2026-08-09 limit move 60000 -> 55000) must invalidate cached
+    # measurements, not silently reuse metrics graded under the old rules
+    # (same lesson as the app's _sweep_inputs_sig).
+    h = hashlib.md5(wb.read_bytes())
+    for d in (Path(args.config_dir), Path(args.scenario_dir)):
+        for p in sorted(d.rglob("*")):
+            if p.is_file():
+                h.update(str(p.relative_to(d)).encode())
+                h.update(p.read_bytes())
+    inputs_sig = h.hexdigest()[:12]
 
     print(f"TUNED TOURNAMENT — {len(roster)} method(s) on {wb.name} "
           f"(emphasis: {args.emphasis})")

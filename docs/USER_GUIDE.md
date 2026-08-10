@@ -1367,9 +1367,9 @@ that whole composition in one flow and ends in a single recommendation card:
      the Global conservation proof when overridden — evidence in
      `forecast/methods.py`), so they compete at stock in both depths.
      Business constants (`min_harvest_weight_g`, stocking) and the
-     operational rules (`max_harvest_per_week`, `harvest_target_per_week`,
-     `max_transfers_per_week`) are **untunable by anyone** — the registry
-     rejects a space that touches them. A **run budget** expander shows the
+     operational rules (`max_harvest_per_week`, `harvest_relief_pct`,
+     `min_harvest_per_week`, `max_transfers_per_week`) are **untunable by
+     anyone** — the registry rejects a space that touches them. A **run budget** expander shows the
      estimated engine runs per method (and how much the variant cache already
      paid for) before you press go; the headless twin is
      `python -m tools.run_tuned_tournament --workbook <PR>`.

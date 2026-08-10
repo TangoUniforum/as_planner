@@ -50,16 +50,19 @@ from .optimize import CD_KNOB_SPACE, OPT_FULL_GRID
 #     planner preference. (Stocking count/size are business inputs too, but
 #     they live in scenario/batches.yaml, so a control-knob space cannot
 #     reach them by construction.)
-#   * the wave-3 operational RULES — max_harvest_per_week (hard processing
-#     ceiling), harvest_target_per_week (planning target), min_harvest_per_week
-#     (contract floor), max_transfers_per_week (handling budget). These are
-#     CONSTRAINTS the plan must respect at their configured values; a search
-#     that "tunes" a rule is just relaxing the rule.
+#   * the operational RULES — max_harvest_per_week (THE weekly processing
+#     limit), harvest_relief_pct (the exceptional-weeks relief band above it,
+#     2026-08-09 semantics), min_harvest_per_week (contract floor),
+#     max_transfers_per_week (handling budget). These are CONSTRAINTS the plan
+#     must respect at their configured values; a search that "tunes" a rule is
+#     just relaxing the rule. (harvest_target_per_week is DELETED from config
+#     but stays listed so no space can ever resurrect it.)
 # register() enforces this structurally — an illegal space cannot register.
 UNTUNABLE_KNOBS = frozenset({
     "min_harvest_weight_g",
     "max_harvest_per_week",
-    "harvest_target_per_week",
+    "harvest_relief_pct",
+    "harvest_target_per_week",     # deleted knob — kept unresurrectable
     "min_harvest_per_week",
     "max_transfers_per_week",
 })
