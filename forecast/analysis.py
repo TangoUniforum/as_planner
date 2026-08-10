@@ -289,6 +289,58 @@ def biomass_band_fraction(mean_kg: float, cv: float,
     return max(0.0, _F(hi_kg) - _F(lo_kg))
 
 
+def sixn_outbound_transfers(out_path, production_start_iso: str = ""
+                            ) -> Optional[int]:
+    """R7 lens: TransferPlan rows moving fish OUT of a 6N tank
+    (61/63/65/67/69/71) during the DEPURATION era (weeks before the 6N
+    production start). In production mode the mains are ordinary grow-out,
+    so later outbound moves are legal rebalancing, not violations.
+
+    Returns the violation count, or None when the sheet is absent (the gate
+    reports N/A, never a false verdict)."""
+    import openpyxl
+    sixn = {"61", "63", "65", "67", "69", "71"}
+    cutoff = ""
+    if production_start_iso:
+        try:
+            d = _dt.date.fromisoformat(str(production_start_iso)[:10])
+            iso = d.isocalendar()
+            cutoff = f"{iso[0]}-W{iso[1]:02d}"
+        except (ValueError, TypeError):
+            cutoff = ""
+    wb = openpyxl.load_workbook(out_path, read_only=True, data_only=True)
+    try:
+        if "TransferPlan" not in wb.sheetnames:
+            return None
+        ws = wb["TransferPlan"]
+        header = None
+        n = 0
+        for r in ws.iter_rows(values_only=True):
+            if header is None:
+                if r and str(r[0]).strip() == "Week" and any(
+                        str(c).strip() == "From_Tank" for c in r if c):
+                    header = {str(c).strip(): i for i, c in enumerate(r) if c}
+                continue
+            if not r or not str(r[0]).startswith("20"):
+                continue
+            week = str(r[0]).strip()
+            if cutoff and week >= cutoff:
+                continue                      # production era — legal moves
+            typ = str(r[header.get("Type", -1)] or "") if "Type" in header else ""
+            if typ != "Transfer":
+                continue
+            ft = r[header["From_Tank"]] if "From_Tank" in header else None
+            try:
+                ft_s = str(int(float(ft)))
+            except (TypeError, ValueError):
+                continue
+            if ft_s in sixn:
+                n += 1
+        return n
+    finally:
+        wb.close()
+
+
 def density_review(out_path) -> Optional[dict]:
     """Per-batch peak-density distribution for one plan — the diagnostic that
     was Tune mode's reason to exist, now a per-candidate lens. Reuses Tune's
@@ -468,12 +520,33 @@ def _gate_biomass_cap(ctx):
 
 
 def _gate_harvest_cap(ctx):
-    w = ctx.get("weeks_over_harvest_cap")
-    if w is None:
+    """Weekly harvest target/ceiling gate (operator ruling: 50/60 split).
+
+    FAIL — any week above the HARD processing ceiling (max_harvest_per_week,
+           60k): the plan asks the plant for more than it can take.
+    WARN — week(s) in the stretch band between the planning target
+           (harvest_target_per_week, 50k) and the ceiling: legal, but the
+           plan leans on the stretch allowance.
+    PASS — every week at/below the target.
+    Legacy contexts that only provide `weeks_over_harvest_cap` (no target
+    count) keep the historical WARN-only reading of that single number."""
+    wc = ctx.get("weeks_over_harvest_cap")
+    wt = ctx.get("weeks_over_harvest_target")
+    if wc is None and wt is None:
         return "N/A", "weekly harvest series unavailable"
-    w = int(w)
-    return (("PASS", "no week over the 55k processing cap") if w == 0
-            else ("WARN", f"{w} week(s) over the 55k processing cap"))
+    wc = int(wc or 0)
+    if wt is None:                              # legacy single-number context
+        return (("PASS", "no week over the processing cap") if wc == 0
+                else ("WARN", f"{wc} week(s) over the processing cap"))
+    wt = int(wt)
+    if wc > 0:
+        return "FAIL", (f"{wc} week(s) over the HARD processing ceiling "
+                        f"(60k) — must be replanned, the plant cannot take it")
+    if wt > 0:
+        return "WARN", (f"{wt} week(s) in the 50-60k stretch band (over the "
+                        f"weekly target, under the hard ceiling) — legal "
+                        f"when biomass demands it")
+    return "PASS", "every week at/below the 50k weekly harvest target"
 
 
 def _gate_targets(ctx):
@@ -497,8 +570,8 @@ register_gate("no_empty_week", "Never an empty harvest week", hard=True,
               fn=_gate_no_empty_week)
 register_gate("biomass_cap", "Facility biomass cap", hard=False,
               fn=_gate_biomass_cap)
-register_gate("harvest_cap", "Weekly processing cap (55k)", hard=False,
-              fn=_gate_harvest_cap)
+register_gate("harvest_cap", "Weekly harvest target/ceiling (50k/60k)",
+              hard=False, fn=_gate_harvest_cap)
 register_gate("targets", "Harvest targets (monthly/yearly)", hard=False,
               fn=_gate_targets)
 
@@ -519,6 +592,50 @@ def _gate_density_quality(ctx):
 
 register_gate("density_quality", "Per-batch density quality", hard=False,
               fn=_gate_density_quality)
+
+
+def _gate_sixn_one_way(ctx):
+    """R7 — 6N one-way commitment: fish moved into 6N depuration may never
+    transfer out (only harvest). Counts depuration-era outbound 6N moves."""
+    n = ctx.get("sixn_outbound_purge")
+    if n is None:
+        return "N/A", "TransferPlan unavailable for this plan"
+    n = int(n)
+    if n == 0:
+        return "PASS", "no fish left a 6N depuration tank except by harvest"
+    return "FAIL", (f"{n} transfer(s) moved fish OUT of a 6N depuration tank "
+                    f"— the one-way commitment (R7) forbids this; those fish "
+                    f"may only be harvested")
+
+
+register_gate("sixn_one_way", "6N one-way commitment (R7)", hard=False,
+              fn=_gate_sixn_one_way)
+
+
+def _gate_handling_budget(ctx):
+    """Operator rule 4 — weekly handling budget (15 transfer moves/week).
+    FAIL: any week over the cap; WARN: any week over ~80% of it (>12);
+    PASS: every week within. The engine defers its quality passes to hold
+    the cap, so an overrun means ESSENTIAL moves alone (arrival make-room,
+    rotation fills, the plan-diff) exceeded it that week."""
+    over = ctx.get("weeks_moves_over_cap")
+    warn = ctx.get("weeks_moves_warn")
+    if over is None and warn is None:
+        return "N/A", "weekly transfer counts unavailable"
+    over, warn = int(over or 0), int(warn or 0)
+    mx = ctx.get("moves_week_max")
+    mx_s = f" (worst week {int(mx)} moves)" if mx else ""
+    if over > 0:
+        return "FAIL", (f"{over} week(s) over the 15-move handling budget"
+                        f"{mx_s} — essential moves alone exceeded it")
+    if warn > 0:
+        return "WARN", (f"{warn} week(s) above ~80% of the handling budget "
+                        f"(>12 moves){mx_s}")
+    return "PASS", f"every week within the 15-move handling budget{mx_s}"
+
+
+register_gate("handling_budget", "Weekly handling budget (15 moves)",
+              hard=False, fn=_gate_handling_budget)
 
 
 # --------------------------------------------------------------------------- #

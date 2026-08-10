@@ -60,7 +60,7 @@ from .biology import (
     sgr_pct_per_day, upper_truncated_split,
 )
 from .events import Grade, GradedHarvest, Harvest, OG12_SYSTEMS, OG12_MOVE_LOCK_WT_G, TankAllocation, Transfer, TranOGEntry
-from .tiers import move_allowed
+from .tiers import move_allowed, sixn_exit_allowed
 from .harvest_scheduler import HarvestDemand
 from .models import (
     BatchInput,
@@ -115,6 +115,42 @@ PURGE_TRANSFER_GROWTH_DAYS = 4
 # rotation's drain HOLDS any tank filled after the PREVIOUS rotation step
 # (fail-safe; a held tank drains on the pair's next rotation).
 SIXN_MIN_RESIDENCY_DAYS = 14
+# Rule-2 stage (operator ruling): per-tank 6N FILL density cap. Never STOCK a
+# purge tank past the structural 95 kg/m3 — overflow goes to the pair's other
+# tank (the idle sister: 67/69/71 sat empty 80-90% of purge weeks while mains
+# rode 128-141). This caps what fills PLACE; the reporting/quality line stays
+# 85 (density gate). The no-drop make-room may still overflow the LAST slot
+# when total free 6N capacity is short — losing an arrival is worse.
+SIXN_FILL_DENSITY_CAP_KG_M3 = 95.0
+
+
+def _sixn_fill_capacity_fish(state: FacilityState, tank_id: int,
+                             avg_wt_g: float) -> float:
+    """Fish this 6N tank can still take before exceeding the structural
+    95 kg/m3 fill cap, judged at the given (transfer) weight."""
+    t = state.tanks_by_id.get(tank_id)
+    if t is None or avg_wt_g <= 0:
+        return 0.0
+    cap_kg = t.volume_m3 * SIXN_FILL_DENSITY_CAP_KG_M3
+    held_kg = (t.count * t.avg_wt_g / 1000.0) if not t.is_empty else 0.0
+    return max(0.0, (cap_kg - held_kg) * 1000.0 / avg_wt_g)
+
+
+def _harvest_target_fish(control) -> float:
+    """Weekly harvest planning TARGET (fish/week) — the operator's 50/60 split.
+
+    The level the planner SIZES to (6N fills, level-drains headroom, L1
+    envelope); `max_harvest_per_week` stays the hard processing ceiling.
+    Clamped to the ceiling; 0/unset falls back to the ceiling, which restores
+    the historical single-number behaviour for pre-split configs.
+    """
+    cap = float(getattr(control, "max_harvest_per_week", 0) or 0)
+    tgt = float(getattr(control, "harvest_target_per_week", 0) or 0)
+    if tgt <= 0:
+        return cap
+    return min(tgt, cap) if cap > 0 else tgt
+
+
 # Drain-guard threshold in EVENT-DATE days: a next-rotation drain is at most 7
 # calendar days after its fill (week_starts are 7 apart; the ragged partial
 # FIRST forecast week makes it shorter, never longer), while the legal
@@ -135,7 +171,7 @@ def _grow_weight_days(avg_wt_g: float, batch: Optional[BatchInput],
     lookup × the batch's sgr_correction, compounded per day); NO mortality. Used
     to land the 6N move-in weight at the mid-week (Friday) transfer point.
     """
-    if avg_wt_g <= 0 or batch is None or days <= 0:
+    if avg_wt_g <= 0 or batch is None or tables is None or days <= 0:
         return avg_wt_g
     w = float(avg_wt_g)
     for _ in range(days):
@@ -1418,6 +1454,26 @@ def _run_sixn_purge_week(
                 f"after its fill — a 1-week purge); drain held until the "
                 f"pair's next rotation")
             continue
+        # HARVEST CEILING (target/ceiling split): never drain a tank past the
+        # hard processing ceiling — HOLD it for the pair's next rotation
+        # instead (its fill date is old, so the depuration guard won't block
+        # that later drain, and sixn_level_drains shrinks the pair's next fill
+        # so the combined drain stays level). Fills are sized to the TARGET,
+        # so this fires only when an out-of-rotation make-room dump stacked a
+        # pair past the ceiling — the audited 86,956-fish weeks. Deferral
+        # requires something already harvested this week: a whole-week
+        # deferral would make an EMPTY week, and the steady-harvest contract
+        # outranks the ceiling (the harvest gate reports the overage loudly).
+        if (budget is not None and math.isfinite(budget.cap)
+                and (budget.used > 0 or pair_drain_count > 0)
+                and tank.count > budget.remaining()):
+            warnings.append(
+                f"{week_label}: HARVEST CEILING — holding 6N "
+                f"{tank.location_id} (batch {tank.batch_id}, "
+                f"{tank.count:.0f} fish): draining it would exceed the "
+                f"weekly processing ceiling ({budget.remaining():.0f} fish "
+                f"left of {budget.cap:.0f}); drains next rotation")
+            continue
         pair_drain_count += tank.count
         ev = Harvest(
             batch_id=tank.batch_id,
@@ -1457,7 +1513,10 @@ def _run_sixn_purge_week(
     #    source-batch pick so the entry forward-transit below knows the goal
     #    even when the grow-out pool is empty.)
     min_h = control.min_harvest_per_week or 0
-    max_h = control.max_harvest_per_week or min_h
+    # TARGET/CEILING split: fills are SIZED to the planning target (50k) so
+    # ordinary pair drains land at/below it; max_harvest_per_week remains the
+    # hard processing ceiling and gates the DRAIN (below), not the fill.
+    max_h = _harvest_target_fish(control) or min_h
     # NOTE (measured 2026-08-01, DO NOT RETRY without re-measuring): the floor
     # is judged at the DRAIN but sized HERE, and the fish carry ~lead weeks of
     # mortality between the two — so 12 of 19 sub-floor weeks land at exactly
@@ -1533,62 +1592,76 @@ def _run_sixn_purge_week(
         for src in src_tanks:
             if count_moved >= target:
                 break
-            # REMNANT FLOOR: never leave 0 < residue < min_tank_control behind.
-            # A partial draw is reduced so the floor stays growing in the source
-            # (a later tank/batch covers the difference); a source that can't
-            # retain the floor is taken WHOLE (it lands in 6N and is harvested
-            # at the pair drain — never a stranded grow-out remnant).
-            take = _floored_take(src.count, min(target - count_moved, src.count),
-                                 control.min_tank_control or 0.0)
-            if take <= 0:
-                continue
-            # First contributor goes to main tank; later contributors
-            # would need a sister tank, but we keep the move into a
-            # single physical tank (main) since INV-1 (one batch per
-            # tank) forbids mixing batches. So if there are multiple
-            # contributing batches, the LATER ones can't share main tank
-            # (already taken by first batch). Use sister tank for the
-            # second batch's contribution.
-            if moved_this_batch == 0 and contributing_batches:
-                dest_tank_id = fill_pair[1]  # sister tank for second+ batch
-            else:
-                dest_tank_id = main_tank_id
-            # A pair tank can now be OCCUPIED by a foreign batch at fill time
-            # (a depuration-held tank riding through the resting slot). The
-            # Transfer below would refuse it (INV-1) but the loop would still
-            # count the take as moved — so verify the destination accepts
-            # (empty or same batch), try the other pair tank, else stop.
-            def _dest_ok(tid, _b=move_in_batch):
-                tk = state.tanks_by_id.get(tid)
-                return tk is not None and (tk.is_empty or tk.batch_id == _b)
-            if not _dest_ok(dest_tank_id):
-                _alt = fill_pair[1] if dest_tank_id == fill_pair[0] else fill_pair[0]
-                if _dest_ok(_alt):
-                    dest_tank_id = _alt
-                else:
-                    break  # no usable pair tank (hold in effect) — stop filling
-            # PURGE move-in: land the cohort at the mid-week (Friday) transfer
-            # weight = source week-open avg grown 4 SW days, then FREEZE the 6N
-            # destination (STARVE) so the daily loop neither grows nor feeds it
-            # for the rest of the purge. The 4 pre-transfer feed-days are booked
-            # separately into the move-in feed accumulator below.
+            # PURGE move-in weight first — the per-tank fill cap is judged at
+            # the mid-week (Friday) transfer weight the fish actually land at.
             _bm = batch_meta.get(move_in_batch)
             _xfer_wt = _grow_weight_days(src.avg_wt_g, _bm, tables,
                                          PURGE_TRANSFER_GROWTH_DAYS)
+            # SISTER-FIRST FILL (rule-2 stage): allocate MAIN-first but never
+            # STOCK a pair tank past the structural 95 kg/m3 fill cap —
+            # overflow continues into the pair's other tank (the idle sister)
+            # instead of overloading the main (audit: mains rode 128-141
+            # while sisters sat empty 80-90% of purge weeks). A tank held by
+            # a FOREIGN batch (depuration-held rider) contributes 0 capacity
+            # (INV-1). Later contributor batches keep the historical
+            # sister-first order so they never collide with the first batch's
+            # main.
+            def _dest_ok(tid, _b=move_in_batch):
+                tk = state.tanks_by_id.get(tid)
+                return tk is not None and (tk.is_empty or tk.batch_id == _b)
+            _order = ((fill_pair[1], main_tank_id)
+                      if (moved_this_batch == 0 and contributing_batches)
+                      else (main_tank_id, fill_pair[1]))
+            _caps = [(tid, _sixn_fill_capacity_fish(state, tid, _xfer_wt))
+                     for tid in _order if _dest_ok(tid)]
+            _caps = [(tid, c) for tid, c in _caps if c > 0]
+            _cap_total = sum(c for _, c in _caps)
+            if _cap_total <= 0:
+                break   # pair at the 95 fill cap — surplus waits in grow-out
+            # REMNANT FLOOR: never leave 0 < residue < min_tank_control behind.
+            # A partial draw is reduced so the floor stays growing in the source
+            # (a later tank/batch covers the difference); a source that can't
+            # retain the floor is taken WHOLE — but a whole-tank escalation must
+            # not blow the pair's 95-capacity, so it degrades to the
+            # never-escalating partial form when it would.
+            _want = min(target - count_moved, src.count, _cap_total)
+            take = _floored_take(src.count, _want,
+                                 control.min_tank_control or 0.0)
+            if take > _cap_total + 0.5:
+                take = _floored_partial(src.count, _want,
+                                        control.min_tank_control or 0.0)
+            if take <= 0:
+                continue
+            # Split the take across the pair, capped per tank; FREEZE each
+            # destination (STARVE, no feed/growth for the rest of the purge)
+            # and book the 4 pre-transfer feed-days once for the whole take.
+            _allocs = []
+            _rem = take
+            for _tid, _c in _caps:
+                _a = min(_rem, _c)
+                if _a <= 0:
+                    continue
+                _allocs.append(TankAllocation(
+                    tank_id=_tid, count=_a, avg_wt_g=_xfer_wt,
+                    cv_pct=src.cv_pct))
+                _rem -= _a
+                if _rem <= 0:
+                    break
+            take = sum(a.count for a in _allocs)
+            if take <= 0:
+                continue
             ev = Transfer(
                 batch_id=move_in_batch,
                 event_date=week_start_date,
                 source_tank_id=src.tank_id,
-                destinations=[TankAllocation(
-                    tank_id=dest_tank_id, count=take,
-                    avg_wt_g=_xfer_wt, cv_pct=src.cv_pct,
-                )],
+                destinations=_allocs,
                 source_avg_wt_g=src.avg_wt_g,  # debit source at week-open weight
             )
             warns = ev.apply(state)
             warnings.extend(warns)
             transfer_events.append(ev)
-            _freeze_6n_dest(state, dest_tank_id, fill_date=week_start_date)
+            for _a in _allocs:
+                _freeze_6n_dest(state, _a.tank_id, fill_date=week_start_date)
             _book_move_in_feed(sixn_move_in_feed, move_in_batch, week_label,
                                _xfer_wt, take, tables, _bm)
             count_moved += take
@@ -1904,6 +1977,7 @@ def _even_out_density(
     event_date: date,
     transfer_events: list,
     warnings: list[str],
+    max_moves: Optional[int] = None,
 ) -> None:
     """Even fish across a batch's tanks when any tank is over density cap.
 
@@ -1927,6 +2001,11 @@ def _even_out_density(
              if t.batch_id == batch_id and not t.is_empty
              and t.stage != STAGE_STARVE]   # STARVE tanks are purge-pipeline-owned
     if len(tanks) < 2:
+        return
+    # HANDLING BUDGET (rule 4): this is a deferrable quality pass — stop
+    # emitting once the week's move budget is spent (None = unlimited).
+    _mv_left = [max_moves if max_moves is not None else 10 ** 9]
+    if _mv_left[0] <= 0:
         return
 
     og12_sub = [t for t in tanks
@@ -1954,7 +2033,7 @@ def _even_out_density(
                          for t in group if t.count < target - 0.5],
                         key=lambda x: -x[1])
         i = j = 0
-        while i < len(overs) and j < len(unders):
+        while i < len(overs) and j < len(unders) and _mv_left[0] > 0:
             if overs[i][1] <= 0.5:
                 i += 1; continue
             if unders[j][1] <= 0.5:
@@ -1973,6 +2052,8 @@ def _even_out_density(
             )
             warnings.extend(ev.apply(state))
             transfer_events.append(ev)
+            if ev.count_transferred > 0:
+                _mv_left[0] -= 1
             overs[i][1] -= take
             unders[j][1] -= take
             if overs[i][1] < 0.5:
@@ -2018,6 +2099,8 @@ def _even_out_density(
             take = min(shed, room)
             if take <= 0.5:
                 continue
+            if _mv_left[0] <= 0:
+                return                    # handling budget spent
             ev = Transfer(
                 batch_id=batch_id, event_date=event_date,
                 source_tank_id=src.tank_id,
@@ -2029,6 +2112,8 @@ def _even_out_density(
             )
             warnings.extend(ev.apply(state))
             transfer_events.append(ev)
+            if ev.count_transferred > 0:
+                _mv_left[0] -= 1
             if src.count <= src_cap_fish + 0.5:
                 break
 
@@ -2692,6 +2777,7 @@ def _consolidate_remnants(
     transfer_events: list,
     warnings: list[str],
     min_keep: float,
+    max_moves: Optional[int] = None,
 ) -> int:
     """Weekly remnant sweep (INV-5 repair): fold any occupied grow-out/entry
     tank holding 0 < count < min_keep into its OWN batch's other tanks.
@@ -2720,6 +2806,9 @@ def _consolidate_remnants(
     """
     if min_keep <= 0:
         return 0
+    # HANDLING BUDGET (rule 4): deferrable pass — a remnant left unswept this
+    # week is swept on a calmer one (the emitters stop new ones forming).
+    _mv_left = max_moves if max_moves is not None else 10 ** 9
     folds = 0
     remnants = sorted(
         [t for t in state.tanks_by_id.values()
@@ -2732,6 +2821,8 @@ def _consolidate_remnants(
     for src in remnants:
         if src.is_empty:
             continue
+        if _mv_left <= 0:
+            break                        # handling budget spent — defer
         cands = []
         for d in state.tanks_by_id.values():
             if (d.tank_id == src.tank_id or d.is_empty
@@ -2768,6 +2859,8 @@ def _consolidate_remnants(
             leaves_source_empty=True)
         warnings.extend(mv.apply(state))
         transfer_events.append(mv)
+        if mv.count_transferred > 0:
+            _mv_left -= 1
         if state.tanks_by_id[src.tank_id].is_empty:
             folds += 1
             warnings.append(
@@ -2888,49 +2981,76 @@ def _make_room_into_6n(
     LAST-RESORT destination (when no other slot is free), in which case the
     rotation's drain guard holds the tank through its full purge.
     """
+    _usable = []
     for _tid in _free_6n_slots(state, resting_pair, avoid):
         _tk = state.tanks_by_id.get(_tid)
         # Empty slot, OR a 6N tank already holding this same batch (top-up,
         # INV-1-safe). Empty is the common case here.
         if _tk is not None and (_tk.is_empty or _tk.batch_id == src.batch_id):
-            # PURGE move-in: land at the mid-week (Friday) transfer weight
-            # (week-open avg grown 4 SW days) and FREEZE the 6N destination so
-            # it neither grows nor feeds for the rest of the purge. Book the 4
-            # pre-transfer feed-days. In production mode (is_purge False) keep
-            # the legacy week-open weight and SW stage — unchanged behaviour.
-            _bm = (batch_meta or {}).get(src.batch_id)
-            _xfer_wt = (_grow_weight_days(src.avg_wt_g, _bm, tables,
-                                          PURGE_TRANSFER_GROWTH_DAYS)
-                        if (is_purge and tables is not None) else src.avg_wt_g)
-            # Capture BEFORE apply: leaves_source_empty drains src, so reading
-            # src.batch_id/count afterwards logs "batch None, 0 fish".
-            _src_batch, _src_loc, _src_count = src.batch_id, src.location_id, src.count
-            _mv = Transfer(
-                batch_id=_src_batch, event_date=event_date,
-                source_tank_id=src.tank_id,
-                destinations=[TankAllocation(
-                    tank_id=_tk.tank_id, count=_src_count,
-                    avg_wt_g=_xfer_wt, cv_pct=src.cv_pct)],
-                leaves_source_empty=True,
-                # In purge mode debit the source at its week-open weight (the
-                # dest carries the grown transfer weight); in production mode
-                # both are week-open so this is the same value (no-op).
-                source_avg_wt_g=(src.avg_wt_g if is_purge else None),
-            )
-            warnings.extend(_mv.apply(state))
-            transfer_events.append(_mv)
-            if is_purge:
-                _freeze_6n_dest(state, _tk.tank_id, fill_date=event_date)
-                if sixn_move_in_feed is not None and tables is not None:
-                    _book_move_in_feed(sixn_move_in_feed, _src_batch,
-                                       week_label, _xfer_wt, _src_count,
-                                       tables, _bm)
-            warnings.append(
-                f"{week_label}: {reason} — MOVED {_src_loc} "
-                f"(batch {_src_batch}, {_src_count:.0f} fish) into 6N "
-                f"{_tk.location_id} to purge (no direct harvest in purge mode)")
-            return True
-    return False
+            _usable.append(_tk)
+    if not _usable:
+        return False
+    # PURGE move-in: land at the mid-week (Friday) transfer weight (week-open
+    # avg grown 4 SW days) and FREEZE each 6N destination so it neither grows
+    # nor feeds for the rest of the purge. Book the 4 pre-transfer feed-days.
+    # In production mode (is_purge False) keep the legacy week-open weight and
+    # SW stage — unchanged behaviour.
+    _bm = (batch_meta or {}).get(src.batch_id)
+    _xfer_wt = (_grow_weight_days(src.avg_wt_g, _bm, tables,
+                                  PURGE_TRANSFER_GROWTH_DAYS)
+                if (is_purge and tables is not None) else src.avg_wt_g)
+    # Capture BEFORE apply: leaves_source_empty drains src, so reading
+    # src.batch_id/count afterwards logs "batch None, 0 fish".
+    _src_batch, _src_loc, _src_count = src.batch_id, src.location_id, src.count
+    # SISTER-FIRST FILL (rule-2 stage): a whole-tank dump is SPLIT across the
+    # usable slots so no 6N tank is stocked past the structural 95 kg/m3 fill
+    # cap — the overflow lands in the next slot (the pair's idle sister)
+    # instead of riding one main to 128-141. The move must fully vacate the
+    # source (no-drop), so when total capacity is short the LAST slot takes
+    # the remainder anyway — an overloaded purge tank beats a dropped arrival.
+    _allocs = []
+    _rem = _src_count
+    for _i, _tk in enumerate(_usable):
+        if _rem <= 0:
+            break
+        _cap = _sixn_fill_capacity_fish(state, _tk.tank_id, _xfer_wt)
+        _a = _rem if _i == len(_usable) - 1 else min(_rem, _cap)
+        if _a <= 0:
+            continue
+        _allocs.append(TankAllocation(tank_id=_tk.tank_id, count=_a,
+                                      avg_wt_g=_xfer_wt, cv_pct=src.cv_pct))
+        _rem -= _a
+    if _rem > 0:                    # every slot at 0 capacity and none last?
+        _allocs.append(TankAllocation(tank_id=_usable[-1].tank_id, count=_rem,
+                                      avg_wt_g=_xfer_wt, cv_pct=src.cv_pct))
+        _rem = 0
+    _mv = Transfer(
+        batch_id=_src_batch, event_date=event_date,
+        source_tank_id=src.tank_id,
+        destinations=_allocs,
+        leaves_source_empty=True,
+        # In purge mode debit the source at its week-open weight (the
+        # dest carries the grown transfer weight); in production mode
+        # both are week-open so this is the same value (no-op).
+        source_avg_wt_g=(src.avg_wt_g if is_purge else None),
+    )
+    warnings.extend(_mv.apply(state))
+    transfer_events.append(_mv)
+    if is_purge:
+        for _a in _allocs:
+            _freeze_6n_dest(state, _a.tank_id, fill_date=event_date)
+        if sixn_move_in_feed is not None and tables is not None:
+            _book_move_in_feed(sixn_move_in_feed, _src_batch,
+                               week_label, _xfer_wt, _src_count,
+                               tables, _bm)
+    _dest_desc = " + ".join(
+        f"{state.tanks_by_id[_a.tank_id].location_id} ({_a.count:.0f})"
+        for _a in _allocs)
+    warnings.append(
+        f"{week_label}: {reason} — MOVED {_src_loc} "
+        f"(batch {_src_batch}, {_src_count:.0f} fish) into 6N "
+        f"{_dest_desc} to purge (no direct harvest in purge mode)")
+    return True
 
 
 def phase_d_emit_events(
@@ -3167,7 +3287,26 @@ def phase_d_emit_events(
     _reserved_for: dict[int, str] = {}
     _reserved_og: set[int] = set()
 
+    # HANDLING BUDGET (operator rule 4): weekly cap on transfer MOVES. The
+    # deferrable quality passes check remaining budget before emitting;
+    # essential moves never do (see ControlParams.max_transfers_per_week).
+    _move_cap = int(getattr(control, "max_transfers_per_week", 0) or 0)
+
     for week_label in sorted_weeks:
+        # Moves emitted so far THIS week = applied Transfers appended since the
+        # week opened (refused events have count_transferred 0 and don't count).
+        _wk_ev0 = len(transfer_events)
+
+        def _moves_left() -> int:
+            """Remaining weekly move budget. Counts APPLIED Transfer events —
+            the same thing the handling gate counts (TransferPlan 'Transfer'
+            rows); TranOG/Grade rows are not moves."""
+            if _move_cap <= 0:
+                return 10 ** 9
+            used = sum(1 for e in transfer_events[_wk_ev0:]
+                       if isinstance(e, Transfer) and e.count_transferred > 0)
+            return max(0, _move_cap - used)
+
         # Release reservations whose arrival week has arrived/passed (the arrival
         # itself consumes the tank below; anything still held past its week is
         # stale and freed back to the rebalancer). Also drop any reservation
@@ -3651,6 +3790,21 @@ def phase_d_emit_events(
                     if _budget.remaining() <= 0:
                         break              # HARD weekly ceiling reached
                     take = _budget.take(take)
+                    # INV-5-aware sizing: a take leaving 0 < residue < floor
+                    # would force-empty the tank — up to min_tank_control fish
+                    # PAST the hard ceiling (the measured 66,907 week = 60,000
+                    # + a 6,907 force-empty). Take the whole tank only when it
+                    # fits the budget; otherwise take LESS, leaving the floor
+                    # (the frozen remnant fronts next week's drain).
+                    _resid = t.count - take
+                    _floor_ = control.min_tank_control or 0.0
+                    if 0 < _resid < _floor_:
+                        if _budget.take(t.count) >= t.count - 0.5:
+                            take = t.count
+                        else:
+                            take = _budget.take(max(0.0, t.count - _floor_))
+                    if take <= 0:
+                        continue
                     ev = Harvest(
                         batch_id=t.batch_id, event_date=week_start_date,
                         source_tank_id=t.tank_id, count=take,
@@ -3849,6 +4003,16 @@ def phase_d_emit_events(
                         if _budget.remaining() <= 0:
                             break          # HARD weekly ceiling reached
                         take = _budget.take(take)
+                        # INV-5-aware sizing (see the STARVE loop above): never
+                        # let a force-empty escalate past the hard ceiling.
+                        _resid = src.count - take
+                        _floor_ = control.min_tank_control or 0.0
+                        if 0 < _resid < _floor_:
+                            if _budget.take(src.count) >= src.count - 0.5:
+                                take = src.count
+                            else:
+                                take = _budget.take(
+                                    max(0.0, src.count - _floor_))
                         if take <= 0:
                             continue
                         ev = Harvest(
@@ -3914,8 +4078,11 @@ def phase_d_emit_events(
             # over density cap and the moves are legal. Runs for ALL
             # active batches (including unchanged sets the diff skipped).
             for b in sorted(set(prev_by_batch) | set(this_by_batch)):
+                if _moves_left() <= 0:
+                    break             # handling budget spent — deferrable pass
                 _even_out_density(
                     state, b, transfer_date, transfer_events, warnings,
+                    max_moves=_moves_left(),
                 )
 
             # Multi-objective balancer: relieve any tank still over density cap
@@ -3923,7 +4090,9 @@ def phase_d_emit_events(
             # feed + system biomass — cutting out-of-bounds on all three at once
             # without trading one for another. Continuity-safe (conserved
             # Transfers; new tanks forward-persisted).
-            _bal_budget = int(getattr(control, "rebalance_balance_budget", 0) or 0)
+            _bal_budget = min(
+                int(getattr(control, "rebalance_balance_budget", 0) or 0),
+                _moves_left())            # handling budget: deferrable pass
             if _rebal_on and _bal_budget > 0:
                 _balance_loads(
                     state, week_label, transfer_date, transfer_events, warnings,
@@ -3940,8 +4109,10 @@ def phase_d_emit_events(
             # any system still over its biomass/feed cap by moving a PRECISE
             # count of fish between a batch's existing tanks into a system with
             # headroom — exactly enough, no overshoot. Continuity-safe.
-            _vq_budget = int(getattr(control, "rebalance_varqty_budget",
-                                     _REBALANCE_VARQTY_BUDGET) or 0)
+            _vq_budget = min(
+                int(getattr(control, "rebalance_varqty_budget",
+                            _REBALANCE_VARQTY_BUDGET) or 0),
+                _moves_left())            # handling budget: deferrable pass
             if _rebal_on and _vq_budget > 0:
                 _variable_quantity_rebalance(
                     state, week_label, transfer_date, transfer_events, warnings,
@@ -3960,6 +4131,7 @@ def phase_d_emit_events(
             _consolidate_remnants(
                 state, transfer_date, week_label, transfer_events, warnings,
                 control.min_tank_control or 0.0,
+                max_moves=_moves_left(),  # handling budget: deferrable pass
             )
 
         # ANTICIPATORY PURGE PACING (purge mode only). The TranOG arrival
@@ -4049,6 +4221,101 @@ def phase_d_emit_events(
                     # HOLD the just-freed growout slot for this arrival week.
                     _reserved_for[_src_tid] = _wk
                     _reserved_og.add(_src_tid)
+                    _deficit_wk -= 1
+
+        # ANTICIPATORY ARRIVAL FREEING — PRODUCTION mode (the ceiling's last
+        # gap). The purge-era pass above pre-frees tanks by purging into 6N;
+        # in production the only escape is a DIRECT harvest, so the reactive
+        # make-room below had to whole-tank-dump PAST the hard ceiling in the
+        # arrival week itself (conservation > cap — the measured 81,460-fish
+        # week: two whole tanks at once). Pre-free here instead, WITHIN this
+        # week's remaining ceiling budget only (budget.take — never a
+        # borrow): the same fish are harvested a few weeks earlier across the
+        # 50-60k stretch band, and the freed tank is RESERVED for the arrival
+        # exactly like the purge-era pass. Purge-complete STARVE tanks first
+        # (harvest-ready anyway — gentler than the reactive pass, which
+        # prefers un-starved SW), then the smallest dump.
+        if (not purge_this_week) and ws_we is not None:
+            _aw_start = ws_we[0]
+            _cur_i = sorted_weeks.index(week_label)
+            _min_hv_wt = control.min_harvest_weight_g or 0
+            for _j in range(1, 6 + 1):
+                _wi = _cur_i + _j
+                if _wi >= len(sorted_weeks):
+                    break
+                _wk = sorted_weeks[_wi]
+                _need_wk = arrival_tank_need.get(_wk, 0)
+                if _need_wk <= 0:
+                    continue
+                # Availability is PESSIMISTIC for NEAR arrivals: an unreserved
+                # empty tank counted today is routinely consumed by the
+                # rebalancer/diff before the arrival (measured: a 79,288-fish
+                # borrow fired although empties existed 4 weeks earlier). For
+                # arrivals <= 3 weeks out, RESERVE the empties we count —
+                # locking them costs nothing (no harvest) and the consumption
+                # window is short. Reserving for DISTANT arrivals was measured
+                # to over-hoard: it starved a production week into a
+                # 7,062-fish crater on the regression fixture, so far weeks
+                # keep the optimistic count + the budgeted pre-free below.
+                _held = sum(1 for t, w in _reserved_for.items() if w == _wk)
+                if _j <= 3:
+                    for t in sorted(state.tanks_by_id.values(),
+                                    key=lambda x: x.tank_id):
+                        if _held >= _need_wk:
+                            break
+                        if (t.is_empty and t.type == "OG"
+                                and t.system_id not in _SIXN_SYSTEMS
+                                and t.tank_id not in _reserved_for):
+                            _persist_tank_reserve(
+                                t.tank_id, week_label, _wk,
+                                sorted_weeks, week_index_r, ta_index,
+                                week_tank_owner, tank_assignments)
+                            _reserved_for[t.tank_id] = _wk
+                            _reserved_og.add(t.tank_id)
+                            _held += 1
+                else:
+                    _held += sum(
+                        1 for t in state.tanks_by_id.values()
+                        if t.is_empty and t.type == "OG"
+                        and t.system_id not in _SIXN_SYSTEMS
+                        and t.tank_id not in _reserved_for)
+                _deficit_wk = _need_wk - _held
+                while _deficit_wk > 0:
+                    _cands = [t for t in state.tanks_by_id.values()
+                              if not t.is_empty and t.type == "OG"
+                              and t.system_id not in _SIXN_SYSTEMS
+                              and t.system_id not in OG12_SYSTEMS
+                              and t.avg_wt_g >= _min_hv_wt
+                              and (t.stage != STAGE_STARVE
+                                   or t.starvation_days_remaining <= 0)
+                              # affordable inside THIS week's ceiling budget
+                              and _budget.take(t.count) >= t.count - 0.5]
+                    if not _cands:
+                        break        # no headroom this week — later weeks retry
+                    _cands.sort(key=lambda t: (
+                        0 if t.stage == STAGE_STARVE else 1, t.count, t.tank_id))
+                    _src = _cands[0]
+                    _src_tid, _src_batch = _src.tank_id, _src.batch_id
+                    _src_cnt, _src_loc = _src.count, _src.location_id
+                    _ev = Harvest(
+                        batch_id=_src_batch, event_date=_aw_start,
+                        source_tank_id=_src_tid, count=_src_cnt,
+                        avg_wt_g=_src.avg_wt_g, min_tank_control=0)
+                    warnings.extend(_ev.apply(state))
+                    harvest_events.append(_ev)
+                    _budget.record(_ev.count)
+                    _persist_tank_reserve(
+                        _src_tid, week_label, _wk,
+                        sorted_weeks, week_index_r, ta_index, week_tank_owner,
+                        tank_assignments)
+                    _reserved_for[_src_tid] = _wk
+                    _reserved_og.add(_src_tid)
+                    warnings.append(
+                        f"{week_label}: anticipatory arrival freeing — "
+                        f"harvested {_src_loc} (batch {_src_batch}, "
+                        f"{_src_cnt:.0f} fish) within the weekly ceiling and "
+                        f"RESERVED it for the TranOG arrival in {_wk} "
+                        f"(needs {_need_wk})")
                     _deficit_wk -= 1
 
         # Day-by-day biology + TranOG entries within this week.
@@ -4519,6 +4786,16 @@ def phase_d_emit_events(
         for tank in sorted(state.tanks_by_id.values(),
                            key=lambda t: t.density_kg_m3, reverse=True):
             if tank.is_empty:
+                continue
+            # R7: never grade-split a 6N DEPURATION tank (STARVE) — fish
+            # committed to 6N may only be harvested. Pre-R7 this pass would
+            # quietly pull half of an over-dense purge tank back into
+            # grow-out (STARVE stage leaking with it — frozen, unfed fish in
+            # a production tank); its density is governed by the sister-first
+            # fill cap, with the no-drop make-room overflow as the one
+            # documented exception (reported by the density gate, not
+            # "relieved" by breaking the commitment).
+            if not sixn_exit_allowed(tank.system_id, tank.stage):
                 continue
             cap = tank.max_density_kg_m3
             if cap <= 0:

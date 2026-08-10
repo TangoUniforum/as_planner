@@ -23,7 +23,8 @@ from datetime import date
 from typing import Optional
 
 from .state import FacilityState, STAGE_FW, STAGE_SW, STAGE_STARVE
-from .tiers import ENTRY_SPLIT_MAX_WT_G, ENTRY_SYSTEMS, harvest_allowed
+from .tiers import (ENTRY_SPLIT_MAX_WT_G, ENTRY_SYSTEMS, harvest_allowed,
+                    sixn_exit_allowed)
 
 # Backward-compatible aliases — the tier constants now live in tiers.py
 # (single source of truth for the operator transfer rules R1-R6).
@@ -139,6 +140,19 @@ class Transfer:
             warns.append(
                 f"Transfer {self.batch_id}: source {src.location_id} holds "
                 f"batch {src.batch_id} (count={src.count:.0f}); expected {self.batch_id}"
+            )
+            return warns
+
+        # R7: 6N one-way commitment — fish in a 6N DEPURATION tank (stage
+        # STARVE) may never transfer out; only harvest empties the tank.
+        # Non-destructive refusal of the whole event (state unchanged,
+        # count_transferred stays 0 so callers see "did not apply"). 6N
+        # production-mode grow-out (stage SW) moves freely.
+        if not sixn_exit_allowed(src.system_id, src.stage):
+            warns.append(
+                f"R7: refused transfer of batch {self.batch_id} out of 6N "
+                f"depuration tank {src.location_id} — fish moved into 6N "
+                f"may never transfer out, only harvest empties the tank"
             )
             return warns
 
@@ -271,6 +285,19 @@ class Grade:
                 )
                 continue
             dests_resolved.append((t, dest))
+
+        # R7: a grade whose SOURCE is a 6N depuration tank (STARVE) would move
+        # committed fish out by the side door — refuse the whole event
+        # (atomic, state unchanged). Only harvest empties a depuration tank.
+        _r7_srcs = [s for s in srcs
+                    if not sixn_exit_allowed(s.system_id, s.stage)]
+        if _r7_srcs:
+            warns.append(
+                f"Grade {self.batch_id}: R7 — refused; sources "
+                f"{[s.location_id for s in _r7_srcs]} are 6N depuration tanks "
+                f"(fish moved into 6N may only be harvested)"
+            )
+            return warns
 
         # INV-4: a grade that MOVES fish between OG1/2 tanks is illegal
         # once any participant is at >= 1 kg (equipment limit). A "move"

@@ -218,6 +218,14 @@ def _apply_og_transfer(state, ev: ManualEvent, idx: int,
         return [f"{tag}: unknown source tank #{ev.from_tank}"]
     if src.is_empty:
         return [f"{tag}: source tank {src.location_id} is empty (nothing to move)"]
+    # R7 HARD-BLOCK (operator ruling): fish in a 6N tank may never TRANSFER
+    # out — only harvest. Blocked here for ANY 6N source regardless of stage
+    # (the manual window edits the pre-forecast start state, where 6N always
+    # means depuration): use a manual `harvest` event instead.
+    if src.system_id == "OG6N":
+        return [f"{tag}: R7 — {src.location_id} is a 6N depuration tank; "
+                f"fish moved into 6N may never transfer out (only harvest). "
+                f"Use a 'harvest' event for this tank instead."]
     if not ev.destinations:
         return [f"{tag}: no destinations specified"]
     if ev.batch and src.batch_id != ev.batch:

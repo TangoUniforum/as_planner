@@ -15,6 +15,10 @@ judged on the SOURCE TANK'S AVERAGE weight:
       forward first.
   R6. Fish >= 1000 g MAY remain in entry-tier tanks (stuck-in-place is legal;
       the >=1 kg overflow in OG1/2 is measured-necessary — never force-evict).
+  R7. 6N ONE-WAY COMMITMENT: fish moved into a 6N depuration tank (stage
+      STARVE) may NEVER transfer out — only harvest empties the tank. In 6N
+      production mode (post-2028) the mains are ordinary grow-out (stage SW)
+      and move freely; the commitment binds exactly while depurating.
 
 Every other module imports these names (events.py keeps its historical
 OG12_* aliases for backward compatibility). This module must stay
@@ -67,3 +71,21 @@ def move_allowed(src_system: str, dst_system: str,
 def harvest_allowed(system_id: str) -> bool:
     """R5: harvest (and 6N staging) is forbidden FROM entry-tier tanks."""
     return system_id not in ENTRY_SYSTEMS
+
+
+# The 6N depuration system (FacilityConfig identifier). Kept here (not
+# imported from state/sixn) so this module stays dependency-free.
+SIXN_SYSTEM = "OG6N"
+
+# state.STAGE_STARVE literal — tiers.py may not import state (dependency-free).
+_STAGE_STARVE = "STARVE"
+
+
+def sixn_exit_allowed(src_system: str, src_stage: str) -> bool:
+    """R7: may fish LEAVE this tank by transfer?
+
+    False exactly when the tank is a 6N depuration tank mid-commitment
+    (stage STARVE): those fish may only be harvested. 6N production-mode
+    grow-out (stage SW) and every non-6N tank move freely.
+    """
+    return not (src_system == SIXN_SYSTEM and src_stage == _STAGE_STARVE)

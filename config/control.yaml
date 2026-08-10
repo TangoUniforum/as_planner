@@ -6,10 +6,20 @@ horizon_weeks: 130
 scenario_name: Forecast
 max_feed_per_day_kg: 34000.0
 max_biomass_kg: 3800000.0
-max_harvest_per_week: 55000.0
+# HARD processing ceiling (operator ruling 2026-08: target/ceiling split).
+# Was 55000 when it served as both the planning level and the cap; the
+# planning level now lives in harvest_target_per_week below.
+max_harvest_per_week: 60000
+# Weekly harvest planning TARGET: fills/leveling size to 50k; weeks may
+# stretch to the 60k ceiling when biomass demands, never past it.
+harvest_target_per_week: 50000
 min_harvest_weight_g: 3500.0
 min_harvest_per_week: 30000.0
 min_tank_control: 7000.0
+# HANDLING BUDGET: max transfer moves/week. Deferrable quality passes stop
+# at the cap; essential moves (rotation fills, arrival make-room, plan-diff)
+# never blocked — overruns show on the handling gate instead. 0 = off.
+max_transfers_per_week: 15
 default_hog_yield: 0.81
 facility_biomass_deviation_pct: 0.005
 handling_mortality_pct: 0.01

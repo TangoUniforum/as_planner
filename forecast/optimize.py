@@ -185,6 +185,15 @@ class Metrics:
     feed_peak: float
     density_peak: float
     weeks_over_harvest_cap: int
+    # Weeks in/above the 50-60k STRETCH BAND: harvested more than the planning
+    # target (harvest_target_per_week). Superset of weeks_over_harvest_cap
+    # (which counts ceiling breaches). 0 when no target is configured.
+    weeks_over_harvest_target: int = 0
+    # HANDLING BUDGET (rule 4): weeks whose TransferPlan 'Transfer' row count
+    # exceeds the weekly move cap / the ~80% warn line, + the worst week.
+    weeks_moves_over_cap: int = 0
+    weeks_moves_warn: int = 0
+    moves_week_max: int = 0
     transfers_by_type: dict = field(default_factory=dict)
     per_system: dict = field(default_factory=dict)
     # --- additive comparison metrics: tank usage + inter/intra-system balance ---
@@ -397,6 +406,20 @@ def _transfers_per_fish(wb):
                 total_in += ic
     tpf = (sum(by_type.values()) / total_in) if total_in else 0.0
     return tpf, by_type
+
+
+def _weekly_move_counts(wb):
+    """Per-week count of TransferPlan 'Transfer' rows — the operator's
+    handling-budget unit (TranOG/Grade rows are not moves)."""
+    counts: dict[str, int] = {}
+    for d in _table(
+            wb["TransferPlan"],
+            lambda r: r and r[0] == "Week" and len(r) > 2 and r[2] == "Type",
+            lambda r: _is_week(r[0])):
+        if d.get("Type") == "Transfer":
+            wk = str(d.get("Week"))
+            counts[wk] = counts.get(wk, 0) + 1
+    return list(counts.values())
 
 
 def _system_overshoot(wb):
@@ -670,11 +693,19 @@ def _within_system_variation(wb):
 
 
 def metrics_from_workbook(out_path, harvest_cap,
-                          welfare_density=WELFARE_DENSITY_KG_M3) -> tuple["Metrics", int, int]:
+                          welfare_density=WELFARE_DENSITY_KG_M3,
+                          harvest_target=None,
+                          move_cap=None) -> tuple["Metrics", int, int]:
+    """`harvest_cap` = the HARD processing ceiling (60k post target/ceiling
+    split); `harvest_target` = the planning target (50k) for the stretch-band
+    count. None (legacy callers) counts the band against the ceiling only.
+    `move_cap` = the weekly handling budget (15) for the move-count fields;
+    None leaves them 0 (legacy callers)."""
     wb = openpyxl.load_workbook(out_path, data_only=True)
     bio, feed, bcap, fcap, per = _biomass_and_feed(wb)
     fish = _harvest_weekly_fish(wb)
     tpf, by_type = _transfers_per_fish(wb)
+    _mv_counts = _weekly_move_counts(wb)
 
     peak_b = max(bio) if bio else 0.0
     mean_b = statistics.mean(bio) if bio else 0.0
@@ -725,6 +756,14 @@ def metrics_from_workbook(out_path, harvest_cap,
         feed_peak=max(feed) if feed else 0.0,
         density_peak=_density_peak(wb),
         weeks_over_harvest_cap=sum(1 for x in fish if x > harvest_cap),
+        weeks_over_harvest_target=sum(
+            1 for x in fish if x > (harvest_target or harvest_cap)),
+        weeks_moves_over_cap=(
+            sum(1 for n in _mv_counts if n > move_cap) if move_cap else 0),
+        weeks_moves_warn=(
+            sum(1 for n in _mv_counts if n > int(0.8 * move_cap))
+            if move_cap else 0),
+        moves_week_max=(max(_mv_counts) if _mv_counts else 0),
         transfers_by_type=by_type,
         per_system=per_out,
         tank_footprint_peak=fp_peak,
@@ -806,6 +845,41 @@ def _harvest_cap(config_dir, overrides):
     return cap
 
 
+def _move_cap(config_dir, overrides):
+    """Effective max_transfers_per_week (moves/week) for a variant — the
+    handling budget. None when 0/unset (off)."""
+    cap = 15.0
+    try:
+        with open(os.path.join(config_dir, "control.yaml")) as f:
+            cap = float(yaml.safe_load(f).get("max_transfers_per_week", cap) or 0)
+    except (OSError, ValueError, TypeError):
+        pass
+    if "max_transfers_per_week" in overrides:
+        try:
+            cap = float(overrides["max_transfers_per_week"])
+        except (ValueError, TypeError):
+            pass
+    return int(cap) if cap > 0 else None
+
+
+def _harvest_target(config_dir, overrides):
+    """Effective harvest_target_per_week (fish/week) for a variant — the
+    planning target of the 50/60 split. None when unconfigured (legacy)."""
+    tgt = None
+    try:
+        with open(os.path.join(config_dir, "control.yaml")) as f:
+            v = yaml.safe_load(f).get("harvest_target_per_week")
+            tgt = float(v) if v else None
+    except (OSError, ValueError, TypeError):
+        pass
+    if "harvest_target_per_week" in overrides:
+        try:
+            tgt = float(overrides["harvest_target_per_week"]) or None
+        except (ValueError, TypeError):
+            pass
+    return tgt
+
+
 def _welfare_density(config_dir, overrides):
     """Effective welfare density line (kg/m3) for a variant — the quality metric's
     soft threshold, from control.yaml (or a sweep override), default 80."""
@@ -835,7 +909,9 @@ def _infeasible_metrics() -> "Metrics":
         elif f.name in ("transfers_by_type", "per_system",
                         "between_system", "within_system"):
             continue                     # use the default_factory (empty dict)
-        elif f.name == "weeks_over_harvest_cap":
+        elif f.name in ("weeks_over_harvest_cap", "weeks_over_harvest_target",
+                        "weeks_moves_over_cap", "weeks_moves_warn",
+                        "moves_week_max"):
             kw[f.name] = 0
         else:
             kw[f.name] = 0.0
@@ -852,7 +928,9 @@ def run_variant(label, overrides, config_dir, scenario_dir, input_path) -> OptVa
         out = tuning._run_in_tempdir(label, overrides, config_dir, scenario_dir, input_path)
         metrics, dropped, overprod = metrics_from_workbook(
             out, _harvest_cap(config_dir, overrides),
-            welfare_density=_welfare_density(config_dir, overrides))
+            welfare_density=_welfare_density(config_dir, overrides),
+            harvest_target=_harvest_target(config_dir, overrides),
+            move_cap=_move_cap(config_dir, overrides))
         return OptVariant(label=label, overrides=dict(overrides),
                           metrics=metrics, dropped=dropped, overprod=overprod)
     except Exception as e:  # noqa: BLE001 — reject-and-continue, don't crash the sweep
