@@ -1063,8 +1063,10 @@ you choose a *whole* plan — never a splice.
 - **Grading lenses** (each card shows the winning method + its value): fewest fish
   moves, steadiest harvest, most balanced *across* systems, most even *within* systems,
   tightest density, **best welfare / product quality**, smallest tank footprint, fastest
-  run. A lens only ranks methods that pass the *Conserves* gate; the other three badges
-  are advisory flags, not filters.
+  run. A lens only ranks methods that pass the *Conserves* **and** *Fully placed* gates
+  (a plan that dropped batches would win quality lenses on the fish it never reared —
+  unplaced fish can't be crowded or moved); the other two badges are advisory flags,
+  not filters.
 - **Product-quality (welfare) view of density.** Beyond the pass/fail-vs-cap numbers,
   every method now reports the density your fish were actually **reared at** — the
   biomass-weighted average density over grow-out — and the share of biomass that spent
@@ -1083,8 +1085,8 @@ you choose a *whole* plan — never a splice.
   harvest* — you choose where on the curve to sit.
 - **Hard-gate badges** show on *every* method so a soft win can't hide a hard breach:
   **Conserves** · **Fully placed** · **No empty week** · **Under cap**. A plan that
-  fails *Conserves* can't win a lens; the rest are flags you weigh. **Use this plan**
-  loads that method's plan into the report tabs + download.
+  fails *Conserves* or *Fully placed* can't win a lens; the rest are flags you weigh.
+  **Use this plan** loads that method's plan into the report tabs + download.
 - **New comparison metrics** (also rows in the `RunComparison` sheet): **tank footprint**
   (occupied grow-out tanks/week), **tanks per batch** (distinct tanks a batch passes
   through FW→OG — a count view of transfers), **between-system** biomass/feed spread
