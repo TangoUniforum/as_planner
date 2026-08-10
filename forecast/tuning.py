@@ -26,6 +26,7 @@ from __future__ import annotations
 import contextlib
 import io
 import os
+import re
 import shutil
 import statistics
 import tempfile
@@ -149,8 +150,20 @@ def _peaks_and_detail(out_path):
     return peaks, detail
 
 
+_RE_OVERPROD_HEADLINE = re.compile(r"(\d[\d,]*)\s+BATCH\(ES\)\s+OVER-PRODUCED")
+
+
 def _conservation(out_path):
-    """Scan the audit sheets for dropped / over-produced fish (both must be 0)."""
+    """Scan the audit sheets for dropped / over-produced fish (both must be 0).
+
+    `dropped` comes from the per-batch DROPPED rows (numeric cells beside the
+    status text). `overprod` CANNOT: the writer's over-production verdict is a
+    single TEXT headline cell ("*** N batch(es) OVER-PRODUCED (...): B49 ***")
+    with no numeric cell in the row, so the numeric-cell scan below is
+    structurally blind to it — the over-production alarm could never ring
+    (found by the negative-control suite 2026-08-10). Parse the batch count
+    out of the headline text itself; the gate only needs nonzero-means-FAIL,
+    and the batch count is the number the sheet actually states."""
     wb = openpyxl.load_workbook(out_path, data_only=True)
     dropped = overprod = 0
     for sh in ("TankContinuityAudit", "InputConservationAudit"):
@@ -159,6 +172,9 @@ def _conservation(out_path):
         for row in wb[sh].iter_rows(values_only=True):
             cells = [str(c) for c in row if c is not None]
             line = " ".join(cells).upper()
+            m = _RE_OVERPROD_HEADLINE.search(line)
+            if m:
+                overprod = max(overprod, int(m.group(1).replace(",", "")))
             for c in cells:
                 try:
                     v = int(float(c))
