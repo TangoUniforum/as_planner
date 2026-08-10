@@ -242,6 +242,14 @@ def write_transfer_plan_output(
     is comma-separated. Rejected transfer attempts (count_transferred == 0) are
     omitted — this is the actionable plan, not the attempt log (the audit sheets
     carry rejected attempts).
+
+    HANDLING-UNIT honesty (the weekly handling budget counts these rows):
+    a Transfer row = one real src->dst tank move. Two same-week legs of the
+    same (batch, src, dst) pair are ONE physical pumping event — merged into
+    one row (counts summed, avg weight fish-weighted). A sub-half-fish leg
+    (float accounting residue that displays as 0 fish) is not a move at all —
+    dropped. Both were inflating the handling gate with moves no operator
+    would perform.
     """
     if sheet_name in wb.sheetnames:
         del wb[sheet_name]
@@ -301,6 +309,30 @@ def write_transfer_plan_output(
                 dest.count, dest.avg_wt_g / 1000.0,
                 _grade(dest), dest.cv_pct, "Grade",
             ))
+    # Merge same-week duplicate Transfer legs + drop sub-half-fish legs (see
+    # docstring). Keyed on (date, week, batch, src, dst, grade); first row of
+    # a merged pair keeps its CV. Only Type == "Transfer" rows participate —
+    # TranOG/Grade rows are not handling-budget moves and keep their shape.
+    _merged: dict[tuple, list] = {}
+    _out: list = []
+    for r in rows:
+        if r[9] != "Transfer":
+            _out.append(r)
+            continue
+        if (r[5] or 0) < 0.5:
+            continue                      # 0-fish artifact, not a move
+        key = (r[0], r[1], r[2], r[3], r[4], r[7])
+        m = _merged.get(key)
+        if m is None:
+            m = list(r)
+            _merged[key] = m
+            _out.append(m)
+        else:
+            tot = m[5] + r[5]
+            if tot > 0:
+                m[6] = (m[5] * m[6] + r[5] * r[6]) / tot
+            m[5] = tot
+    rows = [tuple(r) for r in _out]
     rows.sort(key=lambda r: (r[0], r[2]))
 
     for r in rows:

@@ -420,15 +420,21 @@ def _transfers_per_fish(wb):
 
 def _weekly_move_counts(wb):
     """Per-week count of TransferPlan 'Transfer' rows — the operator's
-    handling-budget unit (TranOG/Grade rows are not moves)."""
+    handling-budget unit (TranOG/Grade rows are not moves). A 0-fish row
+    (float-residue leg on a workbook written before the writer merged/
+    dropped them) is not a move and is skipped."""
     counts: dict[str, int] = {}
     for d in _table(
             wb["TransferPlan"],
             lambda r: r and r[0] == "Week" and len(r) > 2 and r[2] == "Type",
             lambda r: _is_week(r[0])):
-        if d.get("Type") == "Transfer":
-            wk = str(d.get("Week"))
-            counts[wk] = counts.get(wk, 0) + 1
+        if d.get("Type") != "Transfer":
+            continue
+        n = d.get("Count (fish)")
+        if isinstance(n, (int, float)) and n < 0.5:
+            continue
+        wk = str(d.get("Week"))
+        counts[wk] = counts.get(wk, 0) + 1
     return list(counts.values())
 
 
