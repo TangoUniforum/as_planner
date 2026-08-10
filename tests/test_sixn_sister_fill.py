@@ -43,7 +43,6 @@ def _mk_control(**over):
         min_harvest_per_week=30000.0, min_tank_control=7000.0,
         default_hog_yield=0.81, facility_biomass_deviation_pct=0.005,
         handling_mortality_pct=0.01, sixn_growth=False,
-        harvest_target_per_week=50000.0,
     )
     kw.update(over)
     return ControlParams(**kw)

@@ -520,33 +520,38 @@ def _gate_biomass_cap(ctx):
 
 
 def _gate_harvest_cap(ctx):
-    """Weekly harvest target/ceiling gate (operator ruling: 50/60 split).
+    """Weekly processing limit + pressure relief (operator semantics
+    2026-08-09). `max_harvest_per_week` is THE processing limit; the relief
+    band above it (up to limit * (1 + harvest_relief_pct)) is for
+    EXCEPTIONAL weeks only — "allowed more, but not every time".
 
-    FAIL — any week above the HARD processing ceiling (max_harvest_per_week,
-           60k): the plan asks the plant for more than it can take.
-    WARN — week(s) in the stretch band between the planning target
-           (harvest_target_per_week, 50k) and the ceiling: legal, but the
-           plan leans on the stretch allowance.
-    PASS — every week at/below the target.
-    Legacy contexts that only provide `weeks_over_harvest_cap` (no target
-    count) keep the historical WARN-only reading of that single number."""
+    PASS — no week over the limit.
+    WARN — 1..3 relief weeks (over the limit, within the derived ceiling):
+           acceptable if exceptional.
+    FAIL — any week above the derived relief ceiling, OR more than 3 relief
+           weeks: the plan leans on relief as capacity — harvests must ramp
+           up earlier instead.
+    ctx keys: `weeks_over_harvest_cap` = weeks over the LIMIT (relief usage);
+    `weeks_over_relief_ceiling` = weeks over the derived ceiling (0/absent
+    when the workbook never breaches it)."""
     wc = ctx.get("weeks_over_harvest_cap")
-    wt = ctx.get("weeks_over_harvest_target")
-    if wc is None and wt is None:
+    if wc is None:
         return "N/A", "weekly harvest series unavailable"
-    wc = int(wc or 0)
-    if wt is None:                              # legacy single-number context
-        return (("PASS", "no week over the processing cap") if wc == 0
-                else ("WARN", f"{wc} week(s) over the processing cap"))
-    wt = int(wt)
-    if wc > 0:
-        return "FAIL", (f"{wc} week(s) over the HARD processing ceiling "
-                        f"(60k) — must be replanned, the plant cannot take it")
-    if wt > 0:
-        return "WARN", (f"{wt} week(s) in the 50-60k stretch band (over the "
-                        f"weekly target, under the hard ceiling) — legal "
-                        f"when biomass demands it")
-    return "PASS", "every week at/below the 50k weekly harvest target"
+    wc = int(wc)
+    wr = int(ctx.get("weeks_over_relief_ceiling") or 0)
+    if wr > 0:
+        return "FAIL", (f"{wr} week(s) above the relief ceiling "
+                        f"(limit + harvest_relief_pct) — the plant cannot "
+                        f"take it; the plan must ramp harvests up earlier")
+    if wc == 0:
+        return "PASS", "no week over the weekly processing limit"
+    if wc <= 3:
+        return "WARN", (f"pressure relief used {wc}x (weeks over the "
+                        f"processing limit, within the relief ceiling) — "
+                        f"acceptable if exceptional")
+    return "FAIL", (f"{wc} relief week(s) — the plan leans on the relief "
+                    f"band as everyday capacity; relief must stay "
+                    f"exceptional: ramp harvests up earlier instead")
 
 
 def _gate_targets(ctx):
@@ -570,7 +575,7 @@ register_gate("no_empty_week", "Never an empty harvest week", hard=True,
               fn=_gate_no_empty_week)
 register_gate("biomass_cap", "Facility biomass cap", hard=False,
               fn=_gate_biomass_cap)
-register_gate("harvest_cap", "Weekly harvest target/ceiling (50k/60k)",
+register_gate("harvest_cap", "Weekly processing limit + relief",
               hard=False, fn=_gate_harvest_cap)
 register_gate("targets", "Harvest targets (monthly/yearly)", hard=False,
               fn=_gate_targets)

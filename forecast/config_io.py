@@ -109,6 +109,16 @@ def control_from_dict(d: dict) -> ControlParams:
     d["sixn_production_start"] = _from_iso(d.get("sixn_production_start"))
     # Only pass keys ControlParams accepts (tolerate extra/missing YAML keys).
     fields = ControlParams.__dataclass_fields__
+    # MIGRATION (2026-08-09): harvest_target_per_week was removed — the weekly
+    # harvest is demand-driven and CAPPED at max_harvest_per_week; the stretch
+    # allowance is now the relief band (harvest_relief_pct). Old YAMLs that
+    # still carry the key load fine; the value is ignored, loudly.
+    if "harvest_target_per_week" in d:
+        # ASCII only: this prints to Windows consoles (cp1252) too.
+        print("NOTE: control config carries the removed knob "
+              "'harvest_target_per_week' - ignored. The weekly harvest plans "
+              "to demand capped at max_harvest_per_week; the relief band is "
+              "harvest_relief_pct (ceiling = max * (1 + relief)).")
     kwargs = {k: v for k, v in d.items() if k in fields}
     # Coerce to declared types. models.py uses `from __future__ import
     # annotations`, so field.type is the annotation SOURCE TEXT, not a type
