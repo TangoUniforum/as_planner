@@ -3028,12 +3028,20 @@ class _WriteThroughCache(dict):
             pass
 
 
-def _variant_cache() -> "_WriteThroughCache":
+def _variant_cache(method_key: str = "") -> "_WriteThroughCache":
     """The knob-search variant cache for the CURRENT inputs (PR + config) —
     keyed by the sweep input signature, so a config/PR change simply starts
-    an empty cache while the old one ages out of the store."""
+    an empty cache while the old one ages out of the store.
+
+    `method_key` further keys the cache per METHOD for the tuned tournament:
+    the same knob dict means a DIFFERENT run under a different method's pins
+    only when the pins differ (they always do today), but per-method names
+    also keep each method's search reuse legible and independently evictable.
+    Empty = the live-config search (Optimize / quick Analyze), unchanged."""
     from forecast import analysis as _ana
     name = f"optvar_{_sweep_inputs_sig()[:20]}"
+    if method_key:
+        name += f"_{method_key}"
     data = _ana.cache_load_all(prefix=name).get(name) or {}
     return _WriteThroughCache(name, data)
 
@@ -5407,16 +5415,63 @@ def _analyze():
     include_milp = st.checkbox(
         "Include Global — CP-SAT optimal (adds ~30 min; finished legs are reused)",
         value=False, key="ana_milp")
+    depth = st.radio(
+        "Analysis depth",
+        ["Quick tournament — engines at stock + knob search on the live config",
+         "Tuned tournament — find each method's best knobs, then compare the "
+         "TUNED methods"],
+        key="ana_depth",
+        help="Quick = today's flow: every engine once as-configured, then one "
+             "knob search on the live config. Tuned = the symmetric tournament: "
+             "each method that passes the hard rules at stock config gets a full "
+             "knob search restricted to ITS OWN tunable space; a method that "
+             "fails a hard rule gets a cheap one-knob probe first (no knob fixes "
+             "it → marked gate-bound, full search skipped). The Global methods "
+             "have no conservation-safe knobs (see forecast/methods.py), so they "
+             "compete at stock either way.")
+    tuned_mode = depth.startswith("Tuned")
     _n_eng = len([k for k in _BOARD_ORDER if k not in _BOARD_OPTIONAL or include_milp])
-    go = st.button(f"▶ Run full analysis ({_n_eng} engines + knob search "
-                   f"+ checklist)", type="primary", key="ana_go")
+    if tuned_mode:
+        # ---- Honest budget: what pressing go can cost, and what's already paid ----
+        from forecast import tournament as _tour
+        _brows = []
+        for _bk in _BOARD_ORDER:
+            if _bk in _BOARD_OPTIONAL and not include_milp:
+                continue
+            _bm = _METHODS[_bk]
+            _bb = _tour.estimate_budget(_bm)
+            _bvc = _variant_cache(_bk)
+            _bcached = _tour.cached_count(_bvc, _tour.search_grid(_bm))
+            _brows.append({
+                "Method": _bm.label,
+                "Engine run": 1,
+                "Probe (only if a hard gate fails)": _bb["probe_if_gate_fails"],
+                "Grid": _bb["grid"],
+                "Descent (≤)": _bb["descent_max"],
+                "Verify": _bb["verify"],
+                "Already cached": _bcached,
+                "Worst case": _bb["max_total"],
+            })
+        with st.expander("💰 Run budget — engine runs per method (before you "
+                         "press go)", expanded=False):
+            st.dataframe(pd.DataFrame(_brows), hide_index=True,
+                         use_container_width=True)
+            st.caption("Counts are FULL forecast runs (~30–40 s each for the "
+                       "controller family, parallelized). 'Already cached' = "
+                       "grid rows this PR+config already measured — the variant "
+                       "cache makes re-runs cheap. Methods with 0 grid/descent "
+                       "have no conservation-safe knobs and compete at stock.")
+    go = st.button(
+        f"▶ Run {'TUNED tournament' if tuned_mode else 'full analysis'} "
+        f"({_n_eng} engines + knob search + checklist)",
+        type="primary", key="ana_go")
 
     if go:
         pr_md5 = hashlib.md5(uploaded.getvalue()).hexdigest()
         roster = [(k, _METHODS[k].label) for k in _BOARD_ORDER
                   if k not in _BOARD_OPTIONAL or include_milp]
         store = _board_store()
-        n_phases = len(roster) + 2
+        n_phases = (2 * len(roster) + 1) if tuned_mode else (len(roster) + 2)
         bar = st.progress(0.0, text="Phase 1/3 — engine round…")
         # Phase 1: every engine once on the CURRENT config (board legs reused
         # both ways — a leg run here shows up finished on Compare & Choose).
@@ -5445,64 +5500,167 @@ def _analyze():
             _ensure_board_score(res, mlabel)
             store[mkey] = {"sig": msig, "res": res}
             _board_persist(mkey)
-        # Phase 2: knob search on the live-config engine (Grid + Deep — what
-        # Auto-optimize uses), then verify the winner on the SAME engine.
-        bar.progress(len(roster) / n_phases,
-                     text="Phase 2/3 — knob search (Grid + Deep)…")
         work = Path(tempfile.mkdtemp(prefix="as_ana_"))
         in_path = work / (uploaded.name or "input.xlsm")
         in_path.write_bytes(uploaded.getvalue())
         _w = optimize.weights_for(emphasis)
-        try:
-            opt_results = optimize.deep_search_combined(
-                str(in_path), str(CONFIG_DIR), str(SCENARIO_DIR),
-                emphasis=emphasis, weights=_w,
-                progress=lambda i, m, label: bar.progress(
-                    min((len(roster) + 0.9) / n_phases,
-                        (len(roster) + (i / m if m else 0.9)) / n_phases),
-                    text=f"Phase 2/3 — knob search [{i}"
-                         f"{'/' + str(m) if m else ''}] {label}…"),
-                max_workers=_cpu_workers(), variant_cache=_variant_cache())
-            _rec = optimize.recommend(opt_results, emphasis=emphasis, weights=_w)
-            _best = _opt_winner(opt_results, _rec)
-        except Exception as e:  # noqa: BLE001
-            st.error(f"Knob search failed: {e}")
-            st.code(traceback.format_exc())
-            return
-        bar.progress((n_phases - 1) / n_phases,
-                     text="Phase 3/3 — verifying the tuned winner…")
-        tuned_res = None
-        _knob_str = ", ".join(f"{k}={v}" for k, v in
-                              (_best.overrides or {}).items())
-        if _best.overrides:
-            _tcfg = optimize.config_dir_with_overrides(str(CONFIG_DIR),
-                                                       _best.overrides)
-            tuned_res = _run_with_workbook_bytes(
-                uploaded.getvalue(), uploaded.name, config_dir=_tcfg,
-                scenario_dir=str(SCENARIO_DIR), method="as-configured")
-            if tuned_res.get("ok"):
-                tuned_res["_label"] = f"Tuned config — {_knob_str}"
-                _ensure_board_score(tuned_res, tuned_res["_label"])
-            else:
-                st.warning("The tuned winner's verification run failed — "
-                           "recommending among the engine round only. "
-                           f"({tuned_res.get('error', 'unknown')})")
-                tuned_res = None
-        bar.progress(1.0, text="Analysis complete")
-        st.session_state["_ana"] = {
-            "sig": _sweep_inputs_sig(), "emphasis": emphasis,
-            "made": _dtn.now().isoformat(timespec="seconds"),
-            "engine_keys": [k for k, _ in roster],
-            "tuned": ({"overrides": dict(_best.overrides), "res": tuned_res}
-                      if tuned_res else None),
-        }
+
+        if tuned_mode:
+            # Phase 2 (tuned): EVERY method gets its own knob search on its
+            # own space — gate-passers the full search, gate-failers the cheap
+            # probe (gate-bound when no knob fixes them), knobless methods
+            # compete at stock. Phase 3: verify each winner on ITS OWN engine.
+            from forecast import tournament as _tour
+            tuned_methods = {}
+            for j, (mkey, mlabel) in enumerate(roster):
+                done = store.get(mkey)
+                if not (done and done["res"].get("ok")):
+                    tuned_methods[mkey] = {"status": "run-failed",
+                                           "overrides": None}
+                    continue
+                _g = _ana_grade(done["res"], targets, econ)
+                _fails = _tour.hard_gate_fails(_g["gates"])
+                m = _METHODS[mkey]
+                _vc = _variant_cache(mkey)
+                _pre = set(_vc.keys())
+                bar.progress((len(roster) + j) / n_phases,
+                             text=f"Phase 2/3 — tuning {mlabel}…")
+                try:
+                    tr = _tour.tune_method(
+                        m, str(in_path), str(CONFIG_DIR), str(SCENARIO_DIR),
+                        emphasis=emphasis, weights=_w,
+                        stock_hard_fails=_fails,
+                        progress=lambda i, n, label, _j=j, _l=mlabel:
+                            bar.progress(
+                                min((len(roster) + _j + 0.95) / n_phases,
+                                    (len(roster) + _j
+                                     + (i / n if n else 0.9)) / n_phases),
+                                text=f"Phase 2/3 — tuning {_l} "
+                                     f"[{i}{'/' + str(n) if n else ''}] "
+                                     f"{label}…"),
+                        max_workers=_cpu_workers(), variant_cache=_vc)
+                except Exception as e:  # noqa: BLE001 — one method must not kill the board
+                    st.error(f"Knob search for {mlabel} failed: {e}")
+                    st.code(traceback.format_exc())
+                    tuned_methods[mkey] = {"status": "search-error",
+                                           "overrides": None}
+                    continue
+                entry = {
+                    "status": tr["status"],
+                    "overrides": (dict(tr["winner_overrides"])
+                                  if tr["winner_overrides"] else None),
+                    "stock_hard_fails": list(_fails),
+                    "n_variants": len(tr["variants"]),
+                    "n_cache_reused": sum(
+                        1 for v in tr["variants"]
+                        if optimize._overrides_key(v.overrides) in _pre),
+                    "res": None,
+                }
+                if tr["status"] == "tuned":
+                    winner = dict(tr["winner_overrides"])
+                    if winner == dict(m.overrides):
+                        # The search's best IS the stock config — the engine
+                        # leg already on the board is the tuned candidate.
+                        entry["status"] = "stock-best"
+                    else:
+                        bar.progress((len(roster) + j + 0.95) / n_phases,
+                                     text=f"Phase 3/3 — verifying {mlabel} "
+                                          f"(tuned)…")
+                        _tcfg = optimize.config_dir_with_overrides(
+                            str(CONFIG_DIR), winner)
+                        vres = _run_with_workbook_bytes(
+                            uploaded.getvalue(), uploaded.name,
+                            config_dir=_tcfg,
+                            scenario_dir=str(SCENARIO_DIR), method=mkey,
+                            cpsat_time=300.0,
+                            cpsat_det_time=_cpsat_det_time(),
+                            cpsat_workers=_cpu_workers())
+                        if vres.get("ok"):
+                            vres["_label"] = _tour.tuned_label(
+                                mlabel, winner, m.overrides)
+                            _ensure_board_score(vres, vres["_label"])
+                            entry["res"] = vres
+                        else:
+                            entry["status"] = "verify-failed"
+                            st.warning(
+                                f"{mlabel}: the tuned winner's verification "
+                                f"run failed — competing at stock only. "
+                                f"({vres.get('error', 'unknown')})")
+                tuned_methods[mkey] = entry
+            bar.progress(1.0, text="Tuned tournament complete")
+            st.session_state["_ana"] = {
+                "sig": _sweep_inputs_sig(), "emphasis": emphasis,
+                "made": _dtn.now().isoformat(timespec="seconds"),
+                "engine_keys": [k for k, _ in roster],
+                "mode": "tuned", "tuned": None,
+                "tuned_methods": tuned_methods,
+            }
+        else:
+            # Phase 2 (quick): knob search on the live-config engine (Grid +
+            # Deep — what Auto-optimize uses), then verify the winner on the
+            # SAME engine.
+            bar.progress(len(roster) / n_phases,
+                         text="Phase 2/3 — knob search (Grid + Deep)…")
+            try:
+                opt_results = optimize.deep_search_combined(
+                    str(in_path), str(CONFIG_DIR), str(SCENARIO_DIR),
+                    emphasis=emphasis, weights=_w,
+                    progress=lambda i, m, label: bar.progress(
+                        min((len(roster) + 0.9) / n_phases,
+                            (len(roster) + (i / m if m else 0.9)) / n_phases),
+                        text=f"Phase 2/3 — knob search [{i}"
+                             f"{'/' + str(m) if m else ''}] {label}…"),
+                    max_workers=_cpu_workers(), variant_cache=_variant_cache())
+                _rec = optimize.recommend(opt_results, emphasis=emphasis,
+                                          weights=_w)
+                _best = _opt_winner(opt_results, _rec)
+            except Exception as e:  # noqa: BLE001
+                st.error(f"Knob search failed: {e}")
+                st.code(traceback.format_exc())
+                return
+            bar.progress((n_phases - 1) / n_phases,
+                         text="Phase 3/3 — verifying the tuned winner…")
+            tuned_res = None
+            _knob_str = ", ".join(f"{k}={v}" for k, v in
+                                  (_best.overrides or {}).items())
+            if _best.overrides:
+                _tcfg = optimize.config_dir_with_overrides(str(CONFIG_DIR),
+                                                           _best.overrides)
+                tuned_res = _run_with_workbook_bytes(
+                    uploaded.getvalue(), uploaded.name, config_dir=_tcfg,
+                    scenario_dir=str(SCENARIO_DIR), method="as-configured")
+                if tuned_res.get("ok"):
+                    tuned_res["_label"] = f"Tuned config — {_knob_str}"
+                    _ensure_board_score(tuned_res, tuned_res["_label"])
+                else:
+                    st.warning("The tuned winner's verification run failed — "
+                               "recommending among the engine round only. "
+                               f"({tuned_res.get('error', 'unknown')})")
+                    tuned_res = None
+            bar.progress(1.0, text="Analysis complete")
+            st.session_state["_ana"] = {
+                "sig": _sweep_inputs_sig(), "emphasis": emphasis,
+                "made": _dtn.now().isoformat(timespec="seconds"),
+                "engine_keys": [k for k, _ in roster],
+                "mode": "quick",
+                "tuned": ({"overrides": dict(_best.overrides), "res": tuned_res}
+                          if tuned_res else None),
+                "tuned_methods": None,
+            }
         # The card survives reloads/frozen tabs too — same disk cache as the
         # engine legs (the 2026-08-06 tab freeze made this non-optional).
+        # Both depths persist here: quick's "tuned" res and the tuned
+        # tournament's per-method verification runs become plain data.
         try:
             _payload = dict(st.session_state["_ana"])
             if _payload.get("tuned") and _payload["tuned"].get("res"):
                 _payload["tuned"] = {**_payload["tuned"],
                                      "res": _res_for_disk(_payload["tuned"]["res"])}
+            if _payload.get("tuned_methods"):
+                _payload["tuned_methods"] = {
+                    k: ({**e, "res": _res_for_disk(e["res"])}
+                        if e.get("res") else dict(e))
+                    for k, e in _payload["tuned_methods"].items()}
             _ana.cache_save("ana_summary", _payload)
         except Exception as e:  # noqa: BLE001
             st.caption(f"⚠ couldn't disk-cache the analysis: {e}")
@@ -5517,6 +5675,10 @@ def _analyze():
                 ana["tuned"] = {**ana["tuned"],
                                 "res": _res_from_disk(ana["tuned"]["res"])}
                 _restore_output_path(ana["tuned"]["res"], "tuned")
+            for _tk, _te in (ana.get("tuned_methods") or {}).items():
+                if _te.get("res"):
+                    _te["res"] = _res_from_disk(_te["res"])
+                    _restore_output_path(_te["res"], f"tuned_{_tk}")
             st.session_state["_ana"] = ana
     if not ana:
         st.caption("No analysis yet — click ▶ above. Roughly "
@@ -5542,6 +5704,16 @@ def _analyze():
                       "label": ana["tuned"]["res"].get("_label", "Tuned config"),
                       "overrides": ana["tuned"]["overrides"],
                       "res": ana["tuned"]["res"]})
+    # Tuned-tournament candidates: each method's tuned winner joins the board
+    # as "METHOD (tuned: knobs)". key = the real method key, so Adopt/Promote
+    # store a replayable method + overrides pair (Quick run replays BOTH).
+    for _tk, _te in (ana.get("tuned_methods") or {}).items():
+        _tr = _te.get("res")
+        if _tr and _tr.get("ok") and _tr.get("_score"):
+            cands.append({"key": _tk,
+                          "label": _tr.get("_label", f"{_tk} (tuned)"),
+                          "overrides": _te.get("overrides") or {},
+                          "res": _tr})
     if not cands:
         st.error("No graded candidates survived — check the engine round above.")
         return
@@ -5619,6 +5791,48 @@ def _analyze():
                           "cannot be lost to an output file). Manual by design: "
                           "the tool never changes its own defaults."):
             _promote(winner, "won analysis")
+
+    # ---- Tuned-tournament summary: what each method's search concluded ----
+    if ana.get("tuned_methods"):
+        _TM_STATUS = {
+            "tuned": "✅ tuned — winner verified on its own engine",
+            "stock-best": "✅ stock config already best — the engine leg IS "
+                          "the tuned candidate",
+            "stock-only": "◽ no conservation-safe knobs — competes at stock",
+            "gate-bound": "⛔ gate-bound — fails a hard rule and NO probed "
+                          "knob fixes it (full search skipped)",
+            "search-failed": "❌ no search variant conserved",
+            "verify-failed": "❌ tuned winner's verification run failed",
+            "run-failed": "❌ engine run failed",
+            "search-error": "❌ knob search crashed",
+        }
+        with st.expander("🔬 Tuned tournament — per-method search summary",
+                         expanded=True):
+            _tmrows = []
+            for _tk in ana["engine_keys"]:
+                _te = (ana.get("tuned_methods") or {}).get(_tk)
+                if not _te:
+                    continue
+                _pins = (_METHODS[_tk].overrides if _tk in _METHODS else {})
+                _chosen = {k: v for k, v in (_te.get("overrides") or {}).items()
+                           if _pins.get(k) != v}
+                _tmrows.append({
+                    "Method": (_METHODS[_tk].label if _tk in _METHODS else _tk),
+                    "Outcome": _TM_STATUS.get(_te["status"], _te["status"]),
+                    "Winning knobs": (", ".join(f"{k}={v}" for k, v in
+                                                sorted(_chosen.items()))
+                                      or "—"),
+                    "Hard fails at stock": ", ".join(
+                        _te.get("stock_hard_fails") or []) or "none",
+                    "Variants run": _te.get("n_variants", 0),
+                    "From cache": _te.get("n_cache_reused", 0),
+                })
+            st.dataframe(pd.DataFrame(_tmrows), hide_index=True,
+                         use_container_width=True)
+            st.caption("Winning knobs exclude the method's own pinned "
+                       "overrides (its identity). 'From cache' = search runs "
+                       "reused from earlier searches on the same PR + config — "
+                       "re-running the tournament is cheap.")
 
     # ---- Full candidate table ----
     st.subheader("All candidates")
