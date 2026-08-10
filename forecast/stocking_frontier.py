@@ -6,10 +6,12 @@ stocking-reduction fraction over the FUTURE batch schedule and, for each, runs
 the full forecast and measures the quality-vs-volume trade: fewer fish are reared
 gentler (lower experienced density) but yield less harvest tonnage.
 
-Only batches whose TranOG (seawater-entry) date is AFTER forecast_start are
-scaled — you can only choose to stock less in the FUTURE; fish already in the
-facility (from the PR) are fixed. The caller's config / scenario / PR are never
-touched: every point runs in a throwaway temp copy.
+Only batches whose INPUT (stocking) date is AFTER forecast_start are scaled —
+you can only choose to stock less in the FUTURE; fish already in the facility
+(from the PR) are fixed, and that includes FW-in-flight batches that merely
+haven't reached seawater yet (their TranOG date is future but the fish are
+already swimming). The caller's config / scenario / PR are never touched: every
+point runs in a throwaway temp copy.
 
 Decoupled from any UI (mirrors forecast.copilot / forecast.optimize) — the app is
 a thin shell over `stocking_frontier()`.
@@ -45,7 +47,32 @@ def _forecast_start(input_path):
     wb = load_workbook(str(input_path), data_only=True)
     pc, _og, _fw = read_production_report(wb)
     wb.close()
+    if pc is None:                      # tolerant PR parse — fail with WHY, not .year
+        raise ValueError(
+            "ProductionReport has no readable 'Closing Month' date — the frontier "
+            "cannot derive forecast_start (fix the PR's closing-date cell)")
     return date(pc.year, pc.month, pc.day) + timedelta(days=1)
+
+
+def scale_future_batches(batches, fs, keep: float) -> int:
+    """Scale the stocking of every batch NOT YET STOCKED at forecast start `fs`
+    by `keep` (in place); return how many batches were scaled.
+
+    Keys on the INPUT (stocking) date, not the TranOG (seawater-entry) date: a
+    batch whose input_date <= fs is already swimming (possibly still in FW,
+    awaiting seawater entry) — 'fish in the facility are fixed', so scaling or
+    culling it is not a stocking decision. Only input_date > fs is a future
+    stocking the operator can still reduce."""
+    scaled = 0
+    for b in batches:
+        ind = b.input_date
+        indd = ind.date() if hasattr(ind, "date") else ind
+        if indd and indd > fs:                  # future stocking only
+            b.input_count = int(round((b.input_count or 0) * keep))
+            if b.tran_og_count:
+                b.tran_og_count = int(round(b.tran_og_count * keep))
+            scaled += 1
+    return scaled
 
 
 def _harvest_and_worst(wb):
@@ -90,15 +117,7 @@ def _run_scaled(input_path, config_dir, scenario_dir, reduction, fs, welfare):
         scaled = 0
         if reduction > 0:
             batches = load_batches(sdir)
-            keep = 1.0 - reduction
-            for b in batches:
-                tog = b.tran_og_date
-                togd = tog.date() if hasattr(tog, "date") else tog
-                if togd and togd > fs:              # future seawater entry only
-                    b.input_count = int(round((b.input_count or 0) * keep))
-                    if b.tran_og_count:
-                        b.tran_og_count = int(round(b.tran_og_count * keep))
-                    scaled += 1
+            scaled = scale_future_batches(batches, fs, 1.0 - reduction)
             (Path(sdir) / BATCHES_FILE).write_text(
                 yaml.safe_dump({"batches": batches_to_list(batches)},
                                sort_keys=False, allow_unicode=True),
