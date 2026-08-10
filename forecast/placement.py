@@ -4239,7 +4239,7 @@ def phase_d_emit_events(
             _aw_start = ws_we[0]
             _cur_i = sorted_weeks.index(week_label)
             _min_hv_wt = control.min_harvest_weight_g or 0
-            for _j in range(1, 4 + 1):
+            for _j in range(1, 6 + 1):
                 _wi = _cur_i + _j
                 if _wi >= len(sorted_weeks):
                     break
@@ -4247,13 +4247,39 @@ def phase_d_emit_events(
                 _need_wk = arrival_tank_need.get(_wk, 0)
                 if _need_wk <= 0:
                     continue
-                _avail = sum(
-                    1 for t in state.tanks_by_id.values()
-                    if t.is_empty and t.type == "OG"
-                    and t.system_id not in _SIXN_SYSTEMS
-                    and _reserved_for.get(t.tank_id, _wk) == _wk
-                )
-                _deficit_wk = _need_wk - _avail
+                # Availability is PESSIMISTIC for NEAR arrivals: an unreserved
+                # empty tank counted today is routinely consumed by the
+                # rebalancer/diff before the arrival (measured: a 79,288-fish
+                # borrow fired although empties existed 4 weeks earlier). For
+                # arrivals <= 3 weeks out, RESERVE the empties we count —
+                # locking them costs nothing (no harvest) and the consumption
+                # window is short. Reserving for DISTANT arrivals was measured
+                # to over-hoard: it starved a production week into a
+                # 7,062-fish crater on the regression fixture, so far weeks
+                # keep the optimistic count + the budgeted pre-free below.
+                _held = sum(1 for t, w in _reserved_for.items() if w == _wk)
+                if _j <= 3:
+                    for t in sorted(state.tanks_by_id.values(),
+                                    key=lambda x: x.tank_id):
+                        if _held >= _need_wk:
+                            break
+                        if (t.is_empty and t.type == "OG"
+                                and t.system_id not in _SIXN_SYSTEMS
+                                and t.tank_id not in _reserved_for):
+                            _persist_tank_reserve(
+                                t.tank_id, week_label, _wk,
+                                sorted_weeks, week_index_r, ta_index,
+                                week_tank_owner, tank_assignments)
+                            _reserved_for[t.tank_id] = _wk
+                            _reserved_og.add(t.tank_id)
+                            _held += 1
+                else:
+                    _held += sum(
+                        1 for t in state.tanks_by_id.values()
+                        if t.is_empty and t.type == "OG"
+                        and t.system_id not in _SIXN_SYSTEMS
+                        and t.tank_id not in _reserved_for)
+                _deficit_wk = _need_wk - _held
                 while _deficit_wk > 0:
                     _cands = [t for t in state.tanks_by_id.values()
                               if not t.is_empty and t.type == "OG"
