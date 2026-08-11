@@ -1407,6 +1407,25 @@ def _run_sixn_purge_week(
                            None)
     else:
         harvest_pair = pair_queue.pop(0)
+        # RE-ENTRY to the 3-pair fallow rotation. When the forecast opens with
+        # every pair stocked (no fallow slot) `resting_pair` is None and the
+        # handler degrades to refill-in-place — and, without this, that None was
+        # STICKY: `new_resting` below only re-arms when resting_pair is already
+        # non-None, so the degrade outlived the condition that caused it for the
+        # whole run. The startup warning promises "until a pair empties"; this is
+        # what makes that true. Refill weeks only — in winddown there is no fill
+        # to place, so adopting a fallow pair there would only reshuffle the
+        # drain order.
+        if resting_pair is None and refill:
+            resting_pair = next(
+                (p for p in SIXN_PAIRS
+                 if p != harvest_pair and pair_combined_count(state, p) == 0),
+                None)
+            if resting_pair is not None:
+                warnings.append(
+                    f"{week_label}: 6N rotation RE-ENTERED the 3-pair fallow "
+                    f"cycle — pair {resting_pair} is empty, so the Wed-fill/"
+                    f"Fri-harvest split resumes (was refill-in-place)")
         # Wed-fill / Fri-harvest: the move-in fills the RESTING pair, never the pair
         # harvested this week. Degenerate fallback (no resting pair — e.g. all pairs
         # stocked at start, no fallow slot) refills the harvested pair as before.
