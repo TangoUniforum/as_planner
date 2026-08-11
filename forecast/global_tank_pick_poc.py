@@ -86,6 +86,7 @@ from .global_planner_l3_poc import L3Result, smallest_og_tank_kg
 from .global_planner_poc import PlannerResult
 from .models import ControlParams, FacilityConfig
 from .sixn import SIXN_PAIRS, is_purge_mode
+from .tiers import SIXN_SYSTEM
 from .time_grid import parse_iso_label
 
 
@@ -181,6 +182,7 @@ class TankPickResult:
     n_oversub_rows: int                      # double-stacked rows (over-sub weeks)
     oversub_weeks: list                      # [week_label] genuinely over-subscribed
     n_tank_weeks: int
+    unplaced_warnings: list = field(default_factory=list)   # LOUD never-drop misses
 
 
 # ---------------------------------------------------------------------------
@@ -367,6 +369,8 @@ def pick_tanks(
     mort_states: list[_MortState] = []
     n_oversub_rows = 0
     oversub_weeks: list[str] = []
+    # Batches L1 seeded that the pick could not give ANY legal tank (Pass 1c).
+    unplaced_warnings: list[str] = []
 
     sixn_cap = smallest_og_tank_kg(facility) * 1.25  # 6N staged density
 
@@ -374,9 +378,31 @@ def pick_tanks(
     tank_vol_m3 = {t.tank_id: t.volume_m3 for t in facility.tanks}
     tank_maxd = {t.tank_id: t.max_density_kg_m3 for t in facility.tanks}
 
+    from .sixn import SIXN_MAIN_TANKS, SIXN_SISTER_TANKS
+
     for w in weeks:
         wl = week_label[w]
         ws = _label_to_week_start(wl, fs_date)
+        # 6N tanks that may NOT hold grow-out production fish this week.
+        # PURGE mode: all six (mains are depuration staging, sisters are harvest
+        # housing). PRODUCTION mode: only the 3 sisters — the 3 MAINS become
+        # ordinary grow-out tanks (the facility's 33 -> 36). Previously this was
+        # the unconditional `sixn_set` in both modes, so the pick could never use
+        # the mains L3 had just been taught to allocate.
+        _blocked6n = (set(SIXN_MAIN_TANKS) | set(SIXN_SISTER_TANKS)
+                      if is_purge_mode(control, ws) else set(SIXN_SISTER_TANKS))
+
+        def _growout_ids(system, _b=_blocked6n):
+            """Tanks in `system` that may take grow-out fish this week."""
+            return [t for t in sys_tank_ids.get(system, []) if t not in _b]
+
+        # 6N tanks actually holding OFF-FEED DEPURATION fish this week (filled by
+        # the purge round-robin below). STARVE is a STATE, not a tank id: in 6N
+        # production mode the mains rear ordinary grow-out fish and must not be
+        # stamped STARVE — that would hide them from every density/welfare metric
+        # (which excludes purge rows) and misreport the depuration hold.
+        _depurating: set[int] = set()
+
         prev_state = state
         # Tanks each batch held last week (for continuity + transfer sourcing).
         prev_by_batch: dict[str, list[int]] = {}
@@ -411,7 +437,7 @@ def pick_tanks(
         # Track, per batch, which of its prev tanks are still unconsumed (so a
         # batch relocating systems can move FROM a vacated tank).
         prev_avail: dict[str, list[int]] = {
-            b: [t for t in ids if t not in sixn_set]
+            b: [t for t in ids if t not in _blocked6n]
             for b, ids in prev_by_batch.items()
         }
 
@@ -451,7 +477,7 @@ def pick_tanks(
         for p in plist:
             batch_id = p.batch_id
             system = p.system_id
-            sys_ids = sys_tank_ids.get(system, [])
+            sys_ids = _growout_ids(system)
             if not sys_ids or p.tanks <= 0:
                 continue
             need = want_by_batch.get(batch_id, p.tanks) - actual_total.get(batch_id, 0)
@@ -493,6 +519,8 @@ def pick_tanks(
         for p in plist:
             batch_feed[p.batch_id] = batch_feed.get(p.batch_id, 0.0) + p.feed_kg_day
         grow_sys = [s for s in GROWOUT_SYSTEMS if s in sys_tank_ids]
+        if _growout_ids(SIXN_SYSTEM):
+            grow_sys = grow_sys + [SIXN_SYSTEM]
         nurs_sys = [s for s in NURSERY_SYSTEMS if s in sys_tank_ids]
         # Per-system load AFTER the base placement (approx; conservative for the
         # headroom check — a spreading batch re-thins its other tanks, lowering
@@ -526,7 +554,7 @@ def pick_tanks(
                 for _ in range(extra):
                     placed = False
                     for sysm in order:
-                        free = sorted(t for t in sys_tank_ids.get(sysm, [])
+                        free = sorted(t for t in _growout_ids(sysm)
                                       if t not in used_tanks and t not in prev_state)
                         if not free:
                             continue
@@ -545,6 +573,55 @@ def pick_tanks(
                         break
                     if not placed:
                         break
+
+        # ---- PASS 1c: NEVER-DROP. A batch L1 seeded and L3 placed, but which
+        # came out of Passes 0/1/1b with ZERO tanks, has no physical home: it
+        # simply vanishes from BatchLocations while L1's batch-level
+        # ReconciliationReport still reports it as standing and "conserving".
+        # That is the dropped-batch class this project has hit before —
+        # continuity audits are blind to a batch that was NEVER placed. Measured
+        # here: B66 (570,000 fish) vanished at 2028-W49 while 13 of 39 tanks sat
+        # empty and the facility had 400,000 kg of headroom.
+        #
+        # Claim ONE legal free tank per such batch, honouring the tier rules
+        # (R1/R4: a <1 kg batch may only sit in the entry tier; a grow-out batch
+        # may never move backward into it) and never taking a tank another batch
+        # held last week (a same-week swap cannot reconcile in the per-tank
+        # audit). If no legal tank exists the batch stays unplaced and we say so
+        # LOUDLY — a genuine facility infeasibility is a finding to report, never
+        # something to hide by over-stacking a tank past its density cap.
+        for p in sorted(plist, key=lambda p: p.batch_id):
+            bid = p.batch_id
+            if actual_total.get(bid, 0) > 0:
+                continue
+            _, bio_u, avg_u = standing.get((bid, w), (0.0, 0.0, 0.0))
+            if bio_u <= 1e-9:
+                continue
+            elig = (nurs_sys if avg_u < 1000.0 else grow_sys)
+            # Claim as many tanks as the DENSITY CAP requires, not just one — a
+            # 118-tonne batch on a single 1720 m3 tank is 69 kg/m3 of honest
+            # rescue turning into a cap breach the moment it grows.
+            need_u = max(1, math.ceil(bio_u / op_per_tank)) if op_per_tank > 0 else 1
+            free_u = [t for s in elig for t in _growout_ids(s)
+                      if t not in used_tanks and t not in prev_state][:need_u]
+            if not free_u:
+                unplaced_warnings.append(
+                    f"UNPLACED BATCH - {wl}: batch {bid} ({bio_u:,.0f} kg) has "
+                    f"L1 standing but NO legal free tank in its tier "
+                    f"({'nursery' if avg_u < 1000.0 else 'grow-out'}); it is "
+                    f"absent from BatchLocations. This is a real placement "
+                    f"infeasibility, not a rounding artifact.")
+                continue
+            if len(free_u) < need_u:
+                unplaced_warnings.append(
+                    f"UNPLACED BATCH - {wl}: batch {bid} ({bio_u:,.0f} kg) needed "
+                    f"{need_u} tank(s) to stay under the density cap but only "
+                    f"{len(free_u)} were legally free; it is placed DENSER than "
+                    f"the cap rather than dropped.")
+            for tid in free_u:
+                used_tanks.add(tid)
+                chosen_by_ps.setdefault((bid, tank_sys.get(tid)), []).append(tid)
+            actual_total[bid] = len(free_u)
 
         # ---- PASS 2: even-split each batch's standing over its ACTUAL tanks. ----
         # Splitting over the actually-placed tank count (not L3's planned count)
@@ -622,10 +699,10 @@ def pick_tanks(
                 # prior occupant's whole count against (the B48->B42 drift). If no
                 # swap-free tank exists, skip: this is the <1-fish near-harvest tail.
                 pri = [t for t in prev_by_batch.get(b2, [])
-                       if t not in used_tanks and t not in sixn_set]
+                       if t not in used_tanks and t not in _blocked6n]
                 tid = (pri[0] if pri else
                        next((t for t in sorted(tank_sys)
-                             if t not in used_tanks and t not in sixn_set
+                             if t not in used_tanks and t not in _blocked6n
                              and prev_state.get(t) is None), None))
                 if tid is not None:
                     new_state[tid] = _Occ(batch_id=b2, count=cnt2, biomass_kg=bio2,
@@ -688,6 +765,7 @@ def pick_tanks(
             tanks = sixn_assigned.get(r.batch_id, [])
             if not tanks:
                 continue
+            _depurating.update(tanks)
             per_bio = r.biomass_kg / len(tanks)
             per_cnt = r.count / len(tanks)
             for tid in tanks:
@@ -705,7 +783,7 @@ def pick_tanks(
             vol = tank_vol.get(tid, 0.0)
             dens = (occ.biomass_kg / vol) if vol > 0 else 0.0
             system = tank_sys.get(tid, "OG6N")
-            stage = "STARVE" if tid in sixn_set else ""
+            stage = "STARVE" if tid in _depurating else ""
             batch_locations.append(TankLocRow(
                 week_label=wl, week_start=ws, batch_id=occ.batch_id,
                 tank_id=tid, location_id=f"{system}-{tid}", system_id=system,
@@ -913,6 +991,12 @@ def pick_tanks(
               f"this tank pick does NOT stage fish into 6N ahead of the draw, so "
               f"it harvests from tanks it filled the same week. Any harvest-"
               f"smoothness advantage over the controller is inflated by that.")
+    if unplaced_warnings:
+        print(f"  !! UNPLACED BATCHES: {len(unplaced_warnings)} batch-week(s) "
+              f"had L1 standing but no legal free tank - fish are ABSENT from "
+              f"BatchLocations (see ValidationLog).")
+        for _u in unplaced_warnings[:5]:
+            print(f"     {_u}")
     if _purge_h_demand > 0:
         print(f"  [6N-RULE PROBE] purge-mode harvest: {_purge_h_demand:,.0f} fish "
               f"demanded; {_purge_h_from6n:,.0f} from 6N ({100*_purge_h_from6n/_purge_h_demand:.0f}%); "
@@ -931,4 +1015,5 @@ def pick_tanks(
         n_oversub_rows=n_oversub_rows,
         oversub_weeks=oversub_weeks,
         n_tank_weeks=len(batch_locations),
+        unplaced_warnings=unplaced_warnings,
     )

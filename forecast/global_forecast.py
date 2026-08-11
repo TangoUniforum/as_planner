@@ -47,7 +47,7 @@ SPECIFIC-TANK PICK (step #2, NOW REAL — `forecast.global_tank_pick_poc`):
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from typing import Optional
 
@@ -86,6 +86,7 @@ class GlobalForecastTables:
     oversub_weeks: list             # [week_label] genuinely over-subscribed
     realized_biology: dict          # {(tank, wk, batch): (net_kg, mort)} for audit
     mort_states: list               # _MortState for the audit COUNT balance
+    unplaced_warnings: list = field(default_factory=list)  # LOUD never-drop misses
 
 
 def build_tables(
@@ -139,6 +140,7 @@ def build_tables(
         oversub_weeks=pick.oversub_weeks,
         realized_biology=pick.realized_biology,
         mort_states=pick.mort_states,
+        unplaced_warnings=list(getattr(pick, 'unplaced_warnings', []) or []),
     )
 
 

@@ -106,12 +106,14 @@ from .global_planner_l2_poc import (
     NURSERY_SYSTEMS,
     ONE_KG_LOCK_G,
     PURGE_SYSTEMS,
+    TIER_NURSERY,
     _tier_for_weight,
     _tier_systems,
     og_systems_from_facility,
 )
 from .global_planner_poc import BatchStandingRow, PlannerResult
 from .models import ControlParams, FacilityConfig
+from .tiers import SIXN_SYSTEM
 
 # Default per-system caps when the SystemLimits sheet has no cap for a
 # (week, system) — matches the uniform 400,000 kg / 3,000 kg-feed sheet.
@@ -548,15 +550,44 @@ def plan_l3(
     except Exception:  # noqa: BLE001 — caller falls back to greedy
         raise RuntimeError("scipy unavailable")
 
+    # OG6N is a PLACEMENT system too, but only in 6N production mode, where its
+    # 3 MAIN tanks stop being depuration staging and become ordinary grow-out
+    # (33 production tanks -> 36). Its 3 sisters are never production. Before
+    # this was wired, `systems` was a fixed 11-system / 33-tank list for the
+    # WHOLE horizon, so production-era weeks were placed into a facility 3 tanks
+    # smaller than the real one: the LP over-subscribed the remaining systems and
+    # the two production-era arrivals (B65/B66, 1.14M fish) were dropped outright
+    # for want of anywhere to go. `production_tanks_per_system` /
+    # `production_systems_for_week` existed and were correct, but had ZERO call
+    # sites — this is that wiring.
     systems = [s for s in og_systems_from_facility(facility)
-               if s in (set(NURSERY_SYSTEMS) | set(GROWOUT_SYSTEMS))]
+               if s in (set(NURSERY_SYSTEMS) | set(GROWOUT_SYSTEMS) | {SIXN_SYSTEM})]
     sys_idx = {s: i for i, s in enumerate(systems)}
-    n_tanks = n_tanks_per_system(facility)
 
     demand = build_tank_demand(l1, facility, control)
     # Index demand by (batch, week) and collect weeks / batches.
     weeks = sorted({d.week for d in demand})
     week_label = {d.week: d.week_label for d in demand}
+
+    # Per-WEEK production tank counts (mode-aware): {week: {system: n_tanks}}.
+    # OG6N contributes 3 in production weeks and is absent in purge weeks, so the
+    # tank-capacity row below is the real facility that week, not a horizon-wide
+    # approximation.
+    n_tanks_w: dict[int, dict[str, int]] = {
+        w: production_tanks_per_system(facility, control, week_label[w])
+        for w in weeks}
+
+    def _elig(d) -> list[str]:
+        """Systems demand row `d` may occupy, mode-aware.
+
+        Tier rules first (R1/R4: nursery batches stay in the entry tier, grow-out
+        batches never move backward), then OG6N is appended for grow-out batches
+        in weeks where its mains are production tanks."""
+        base = _eligible_systems(d.tier, sys_set, allow_growout_spill)
+        if (d.tier != TIER_NURSERY
+                and n_tanks_w.get(d.week, {}).get(SIXN_SYSTEM, 0) > 0):
+            return base + [SIXN_SYSTEM]
+        return base
     by_bw: dict[tuple[str, int], TankDemandRow] = {
         (d.batch_id, d.week): d for d in demand}
 
@@ -566,7 +597,7 @@ def plan_l3(
     y_index: dict[tuple[str, str, int], int] = {}
     y_meta: list[tuple[str, str, int]] = []  # parallel: (batch, system, week)
     for d in demand:
-        elig = _eligible_systems(d.tier, sys_set, allow_growout_spill)
+        elig = _elig(d)
         for s in elig:
             key = (d.batch_id, s, d.week)
             if key not in y_index:
@@ -605,7 +636,7 @@ def plan_l3(
     b_eq: list[float] = []
     eqr = 0
     for d in demand:
-        elig = _eligible_systems(d.tier, sys_set, allow_growout_spill)
+        elig = _elig(d)
         for s in elig:
             A_eq_rows.append(eqr)
             A_eq_cols.append(OFF_Y + y_index[(d.batch_id, s, d.week)])
@@ -633,7 +664,7 @@ def plan_l3(
         A_ub_rows.append(ubr)
         A_ub_cols.append(OFF_ST + sw_idx[(s, w)])
         A_ub_val.append(-1.0)
-        b_ub.append(float(n_tanks.get(s, 0)))
+        b_ub.append(float(n_tanks_w.get(w, {}).get(s, 0)))
         ubr += 1
 
     # (2) Soft biomass cap:
@@ -749,7 +780,7 @@ def plan_l3(
     sb_floor: dict[int, tuple] = {}   # per-week (bio_slack, feed_slack) floor
     if integer:
         passA_tank_slack, passA_slack, xA = _solve_passA_per_week(
-            weeks, systems, sw_idx, vars_by_sw, y_meta, by_bw, n_tanks,
+            weeks, systems, sw_idx, vars_by_sw, y_meta, by_bw, n_tanks_w,
             week_label, system_limits, sb_floor, np, linprog,
             mip_rel_gap, verbose)
         passA_status = "per-week-exact"
@@ -786,7 +817,7 @@ def plan_l3(
     # global LP-relaxation Pass B is used instead (the spec's relaxation path).
     if integer:
         xB = _solve_passB_per_week(
-            weeks, systems, sw_idx, vars_by_sw, y_meta, by_bw, n_tanks,
+            weeks, systems, sw_idx, vars_by_sw, y_meta, by_bw, n_tanks_w,
             week_label, system_limits, sb_floor, xA, slack_epsilon,
             np, linprog, mip_rel_gap, verbose)
         passB_transfers = float("nan")  # measured exactly on the rounded layout
@@ -819,10 +850,10 @@ def plan_l3(
     # Round, then per-(batch,week) repair so sum_s y == tanks[b,w] exactly.
     y_round = [int(round(v)) for v in y_lp]
     rounding_fixups = _repair_tank_counts(
-        y_round, y_meta, y_index, by_bw, demand, systems, n_tanks)
+        y_round, y_meta, y_index, by_bw, demand, systems, n_tanks_w)
 
     return _assemble_result(
-        y_round, y_meta, by_bw, demand, systems, n_tanks, week_label,
+        y_round, y_meta, by_bw, demand, systems, n_tanks_w, week_label,
         system_limits, solver="scipy-highs",
         passA_slack=passA_slack, passA_tank_slack=passA_tank_slack,
         passA_status=passA_status,
@@ -834,7 +865,7 @@ def plan_l3(
 
 
 def _solve_passA_per_week(
-    weeks, systems, sw_idx, vars_by_sw, y_meta, by_bw, n_tanks,
+    weeks, systems, sw_idx, vars_by_sw, y_meta, by_bw, n_tanks_w,
     week_label, system_limits, sb_floor, np, linprog, mip_rel_gap, verbose,
 ):
     """Solve Pass A exactly, one small MILP per week (separable).
@@ -902,7 +933,7 @@ def _solve_passA_per_week(
             for gvi in vis:
                 Aub_r.append(ur); Aub_c.append(locy_pos[gvi]); Aub_v.append(1.0)
             Aub_r.append(ur); Aub_c.append(st0 + sys_pos[s]); Aub_v.append(-1.0)
-            bub.append(float(n_tanks.get(s, 0))); ur += 1
+            bub.append(float(n_tanks_w.get(w, {}).get(s, 0))); ur += 1
             # bio + feed
             wl = week_label[w]
             bio_cap = _system_cap(METRIC_BIOMASS, wl, s, system_limits,
@@ -973,7 +1004,7 @@ def _solve_passA_per_week(
 
 
 def _solve_passB_per_week(
-    weeks, systems, sw_idx, vars_by_sw, y_meta, by_bw, n_tanks,
+    weeks, systems, sw_idx, vars_by_sw, y_meta, by_bw, n_tanks_w,
     week_label, system_limits, sb_floor, xA, slack_epsilon,
     np, linprog, mip_rel_gap, verbose,
 ):
@@ -1029,7 +1060,7 @@ def _solve_passB_per_week(
             for gvi in vis:
                 Aub_r.append(ur); Aub_c.append(locy_pos[gvi]); Aub_v.append(1.0)
             Aub_r.append(ur); Aub_c.append(st0 + sys_pos[s]); Aub_v.append(-1.0)
-            bub.append(float(n_tanks.get(s, 0))); ur += 1
+            bub.append(float(n_tanks_w.get(w, {}).get(s, 0))); ur += 1
             wl = week_label[w]
             bio_cap = _system_cap(METRIC_BIOMASS, wl, s, system_limits,
                                   _DEFAULT_BIO_CAP)
@@ -1117,7 +1148,7 @@ def _repair_tank_counts(
     by_bw: dict[tuple[str, int], TankDemandRow],
     demand: list[TankDemandRow],
     systems: list[str],
-    n_tanks: dict[str, int],
+    n_tanks_w: dict[int, dict[str, int]],
 ) -> int:
     """Repair integer rounding so sum_s y[b,s,w] == tanks[b,w] for every (b,w).
 
@@ -1149,7 +1180,8 @@ def _repair_tank_counts(
                 cand = sorted(
                     members,
                     key=lambda sv: (occ.get((sv[0], d.week), 0)
-                                    - n_tanks.get(sv[0], 0), sv[0]))
+                                    - n_tanks_w.get(d.week, {}).get(sv[0], 0),
+                                    sv[0]))
                 s, vi = cand[0]
                 y_round[vi] += 1
                 occ[(s, d.week)] = occ.get((s, d.week), 0) + 1
@@ -1170,7 +1202,7 @@ def _repair_tank_counts(
 
 
 def _assemble_result(
-    y_round, y_meta, by_bw, demand, systems, n_tanks, week_label,
+    y_round, y_meta, by_bw, demand, systems, n_tanks_w, week_label,
     system_limits, *, solver, passA_slack, passA_tank_slack, passA_status,
     passB_transfers, passB_status, integrality_gap, rounding_fixups,
     n_y, n_constraints, weeks,
@@ -1233,7 +1265,7 @@ def _assemble_result(
                 loads.append(L3SystemLoadRow(
                     week=w, week_label=wl, system_id=s,
                     tier=("nursery" if s in NURSERY_SYSTEMS else "growout"),
-                    n_tanks=nt, n_tanks_cap=n_tanks.get(s, 0),
+                    n_tanks=nt, n_tanks_cap=n_tanks_w.get(w, {}).get(s, 0),
                     biomass_kg=bio, feed_kg_day=feed,
                     biomass_cap=bio_cap, feed_cap=feed_cap,
                     over_biomass_kg=ob, over_feed_kg=of,

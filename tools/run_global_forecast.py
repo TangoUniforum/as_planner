@@ -384,6 +384,10 @@ def run_global(input_path, output_path, config_dir, scenario_dir, *,
                   f"{len(_mw_stitch['batch_locations'])} BatchLocations rows, "
                   f"{len(_mw_stitch['transfer_events'])} transfer + "
                   f"{len(_mw_stitch['harvest_events'])} harvest event(s).")
+        # A batch the pick could not give ANY legal tank is ABSENT from the
+        # plan even though L1's batch-level reconciliation still calls it
+        # standing. Surface it as an ERROR row, never a silent gap.
+        _engine_warns.extend(getattr(gft, "unplaced_warnings", []) or [])
         cons = gf.conservation_summary(gft)
         _mw_states = (_build_manual_week_states(
             _mw_stitch.get("opening_locations", []),

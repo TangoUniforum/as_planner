@@ -2660,6 +2660,10 @@ def write_validation_log(
             cat = "WARNING - Manual window"
         elif w.startswith("MANUAL"):
             cat = "WARNING - Manual window"
+        elif w.startswith("UNPLACED BATCH"):
+            # Fish with L1 standing but no physical tank: they are missing from
+            # the plan while batch-level conservation still reports them.
+            cat = "ERROR - Unplaced batch (no legal tank)"
         elif w.startswith("PLACEMENT DEGRADED"):
             # The placement solver gave up on part of the horizon and a fallback
             # laid those weeks out WITHOUT the per-tank density cap. The plan is
