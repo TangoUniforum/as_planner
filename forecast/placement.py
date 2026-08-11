@@ -2921,6 +2921,34 @@ def _consolidate_remnants(
     return folds
 
 
+def _free_production_stage_tank(state: FacilityState, reserved=frozenset()):
+    """Lowest-id empty OG tank a PRODUCTION-mode pass may stage for in-place
+    purge (the forward-promotion and graded-stage destinations).
+
+    Three exclusions, all of which the sibling destination filters in the
+    weekly walk already apply — this helper exists so the two production
+    staging sites cannot drift apart again:
+
+      * R5 — never the ENTRY tier (OG1/2): entry fish route forward first.
+      * DESIGN §5 / sixn.py — never a 6N SISTER (67/69/71). In production
+        mode ONLY the mains 61/63/65 become ordinary grow-out; the sisters
+        are harvest-staging tanks that are not production capacity. Staging
+        into one silently gave the production facility a tank that does not
+        exist (measured on the 7.29.26 PR: OG6N-67 took a promoted entry
+        tank at 2028-W13 and graded-stage tails at 2028-W20/W27).
+      * A tank RESERVED for an imminent TranOG arrival.
+
+    Returns the TankState, or None when nothing is free.
+    """
+    return next(
+        (t for t in sorted(state.tanks_by_id.values(), key=lambda x: x.tank_id)
+         if t.is_empty and t.type == "OG"
+         and t.system_id not in OG12_SYSTEMS
+         and t.tank_id not in SIXN_SISTER_TANKS
+         and t.tank_id not in reserved),
+        None)
+
+
 def _free_6n_slots(state: FacilityState, resting_pair,
                    avoid=frozenset()) -> list[int]:
     """6N tank ids that can ACCEPT a make-room move-in right now.
@@ -3928,13 +3956,8 @@ def phase_d_emit_events(
                         for _esrc in _entry_mature:
                             if _entered >= _entry_target:
                                 break
-                            _fg = next(
-                                (t for t in sorted(state.tanks_by_id.values(),
-                                                   key=lambda x: x.tank_id)
-                                 if t.is_empty and t.type == "OG"
-                                 and t.system_id not in OG12_SYSTEMS
-                                 and t.tank_id not in _reserved_og),
-                                None)
+                            _fg = _free_production_stage_tank(
+                                state, _reserved_og)
                             if _fg is None:
                                 break  # no grow-out slot to promote into
                             _e_batch, _e_loc = _esrc.batch_id, _esrc.location_id
@@ -3997,14 +4020,8 @@ def phase_d_emit_events(
                             _near.sort(key=lambda t: (-t.avg_wt_g, t.tank_id))
                             _staged_one = False
                             for _gs in _near:
-                                _dst = next(
-                                    (t for t in sorted(
-                                        state.tanks_by_id.values(),
-                                        key=lambda x: x.tank_id)
-                                     if t.is_empty and t.type == "OG"
-                                     and t.system_id not in OG12_SYSTEMS
-                                     and t.tank_id not in _reserved_og),
-                                    None)
+                                _dst = _free_production_stage_tank(
+                                    state, _reserved_og)
                                 if _dst is None:
                                     break
                                 _cvg = _gs.cv_pct or 16.0
