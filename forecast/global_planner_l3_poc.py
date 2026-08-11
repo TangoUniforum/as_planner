@@ -113,7 +113,7 @@ from .global_planner_l2_poc import (
 )
 from .global_planner_poc import BatchStandingRow, PlannerResult
 from .models import ControlParams, FacilityConfig
-from .tiers import SIXN_SYSTEM
+from .tiers import SIXN_SYSTEM, is_entry
 
 # Default per-system caps when the SystemLimits sheet has no cap for a
 # (week, system) — matches the uniform 400,000 kg / 3,000 kg-feed sheet.
@@ -1039,6 +1039,17 @@ def _solve_passB_per_week(
 
     # last_sys[batch] = set of systems the batch occupied the previous week.
     last_sys: dict[str, set[str]] = {}
+    # last_entry[batch] = how many ENTRY-tier (OG1/OG2) tanks it held last week.
+    # TIER MONOTONICITY (rule R4, in-model): a batch's entry-tier footprint may
+    # never GROW. Fish may always move forward (R2, any weight) but never back
+    # (R4), so a plan that increases a batch's entry tank count between weeks is
+    # asking for a backward move that cannot be realized legally. Constraining
+    # the PLAN here makes the emitted transfer stream legal by construction,
+    # instead of the tank pick vetoing L3 after the fact. Pass B is the only
+    # place this is expressible: Pass A decomposes into INDEPENDENT per-week
+    # MILPs with no cross-week term, whereas Pass B walks the weeks in order
+    # with the previous week's solution in hand.
+    last_entry: dict[str, float] = {}
 
     for w in weeks:
         sys_here = [s for s in systems if (s, w) in vars_by_sw]
@@ -1069,6 +1080,16 @@ def _solve_passB_per_week(
 
         Aub_r, Aub_c, Aub_v, bub = [], [], [], []
         ur = 0
+        # TIER MONOTONICITY: sum_{s in ENTRY} y[b,s,w] <= entry tanks held at w-1.
+        for bid, idxs in batches_here.items():
+            if bid not in last_entry:
+                continue                     # first week seen: nothing to hold to
+            ent = [i for i in idxs if is_entry(loc_y[i][1])]
+            if not ent:
+                continue
+            for i in ent:
+                Aub_r.append(ur); Aub_c.append(i); Aub_v.append(1.0)
+            bub.append(float(last_entry[bid])); ur += 1
         for s in sys_here:
             vis = vars_by_sw[(s, w)]
             for gvi in vis:
@@ -1134,20 +1155,28 @@ def _solve_passB_per_week(
         if x is None:
             # Fall back to Pass A's layout for this week.
             new_last: dict[str, set[str]] = {}
+            new_entry: dict[str, float] = {}
             for gvi in [g for (g, _, _) in loc_y]:
                 bid, s, ww = y_meta[gvi]
                 xB[OFF_Y + gvi] = xA[OFF_Y + gvi]
                 if xA[OFF_Y + gvi] > 0.5:
                     new_last.setdefault(bid, set()).add(s)
+                if is_entry(s):
+                    new_entry[bid] = new_entry.get(bid, 0.0) + xA[OFF_Y + gvi]
             last_sys = new_last
+            last_entry = new_entry
             continue
 
         new_last = {}
+        new_entry = {}
         for i, (gvi, s, bid) in enumerate(loc_y):
             xB[OFF_Y + gvi] = x[i]
             if x[i] > 0.5:
                 new_last.setdefault(bid, set()).add(s)
+            if is_entry(s):
+                new_entry[bid] = new_entry.get(bid, 0.0) + x[i]
         last_sys = new_last
+        last_entry = new_entry
 
     if verbose:
         print(f"  [L3] Pass B (sequential per-week): {len(weeks)} weekly "

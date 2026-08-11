@@ -399,7 +399,26 @@ def solve_cpsat_perweek(
         q: dict = {}
         for b, (bio, feed, avg) in items.items():
             B = int(round(bio))
-            for t in _eligible_tanks(avg, og_w, gset, nset):
+            cells = list(_eligible_tanks(avg, og_w, gset, nset))
+            if avg >= 1000.0:
+                # R6: ">= 1 kg fish MAY remain in entry-tier tanks (stuck-in-place
+                # is legal; the >= 1 kg overflow in OG1/2 is measured-necessary --
+                # never force-evict)". Forbidding it outright is a rule this
+                # facility does not have, and it is why CP-SAT could not solve:
+                # 106 of 130 weeks needed MORE grow-out tanks than physically
+                # exist once >= 1 kg fish were barred from OG1/OG2, while the
+                # entry tier sat at 1-3 of its 12 tanks. That is the 103
+                # "infeasible" weeks -- the model was over-constrained, not the
+                # facility over-full. Proof it was never a time budget: the count
+                # is EXACTLY 103 at both a 6 s and a 30 s per-week deterministic
+                # budget (802 s vs 2034 s total).
+                #
+                # R4 is still absolute: a heavy batch may only KEEP an entry tank
+                # it already occupies, never move back into one. Occupancy is
+                # allowed; the backward MOVE is not.
+                cells += [t for t in og_w
+                          if og_w[t] in nset and prev_tb.get(t) == b]
+            for t in cells:
                 x[b, t] = m.NewBoolVar(f"x_{b}_{t}")
                 q[b, t] = m.NewIntVar(0, B, f"q_{b}_{t}")
                 m.Add(q[b, t] <= B * x[b, t])

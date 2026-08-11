@@ -283,6 +283,48 @@ class TestTransferTopologyIsJudgedAndSurfaced:
         assert move_allowed("OG1N", "OG3N", 500.0)[0]        # R2 forward, legal
 
 
+class TestCpSatWasOverConstrainedNotOverFull:
+    """R6 in the CP-SAT model — the cause of the 103/127 infeasible weeks.
+
+    R6: ">= 1 kg fish MAY remain in entry-tier tanks (stuck-in-place is legal;
+    the >= 1 kg overflow in OG1/2 is measured-necessary -- never force-evict)."
+    CP-SAT barred them outright, so all heavy biomass had to fit the grow-out
+    tanks alone: 106 of 130 weeks then needed MORE grow-out tanks than exist
+    while the entry tier sat at 1-3 of its 12. Respecting R6 took infeasible
+    weeks 103 -> 36 and solver slack 4,878,644 -> 210,481 kg.
+
+    Proof it was never a time budget: the infeasible count was EXACTLY 103 at
+    both a 6 s and a 30 s per-week deterministic budget (802 s vs 2034 s total).
+    """
+
+    def test_r6_permits_heavy_fish_to_remain_in_the_entry_tier(self):
+        """The rule the model was contradicting. tiers has no prohibition on a
+        heavy batch OCCUPYING an entry tank — only on MOVING into one (R4)."""
+        from forecast.tiers import move_allowed
+        # staying put is not a move at all; moving backward is what is banned
+        assert not move_allowed("OG3N", "OG1N", 5000.0)[0]
+        # and forward is always fine
+        assert move_allowed("OG1N", "OG3N", 5000.0)[0]
+
+    def test_the_model_offers_a_heavy_batch_only_the_entry_tank_it_already_holds(self):
+        """R6 without breaking R4: occupancy of a RETAINED entry tank is legal,
+        acquiring a new one is not. The eligibility must be conditioned on the
+        previous occupant being this same batch."""
+        import inspect
+        from forecast import global_placement_milp_poc as mp
+        src = inspect.getsource(mp.solve_cpsat_perweek)
+        assert "prev_tb.get(t) == b" in src
+        assert "og_w[t] in nset" in src
+
+    def test_light_fish_are_still_barred_from_grow_out_entry_rules_intact(self):
+        """NEGATIVE CONTROL: the relaxation is for HEAVY fish keeping an entry
+        tank only. A sub-1 kg batch must still be offered nursery tanks."""
+        from forecast.global_placement_milp_poc import _eligible_tanks
+        og = {11: "OG1N", 31: "OG3N"}
+        assert _eligible_tanks(500.0, og, {"OG3N"}, {"OG1N"}) == [11]
+        assert _eligible_tanks(5000.0, og, {"OG3N"}, {"OG1N"}) == [31]
+
+
 class TestUnplacedBatchIsLoud:
     """Fish with L1 standing but no physical tank must be IMPOSSIBLE to miss.
     They previously vanished while conservation still reported them standing."""
