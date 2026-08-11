@@ -172,6 +172,58 @@ class TestPlanL3UsesTheModeAwareCount:
             pass          # any other failure is fine; we only assert the route
 
 
+class TestEntryTierIsNotAClosedBox:
+    """R2 forward relief — the whole of the remaining density breach.
+
+    Measured on the operator's 7.29 PR: 74 of 75 tank-weeks over the 95 kg/m3
+    cap were sub-1 kg fish crammed into OG1/OG2 (up to 187.4 kg/m3) while ~8
+    grow-out tanks sat free AND spread-eligible in every one of those weeks.
+    The cause was neither cap headroom nor tank availability (both hypotheses
+    were tested and refuted) but a tier lock in the Global code that is
+    STRICTER than the operator's own rule module: tiers.R2 allows an entry-tier
+    cohort to move forward to any OG3/4/5/6 tank AT ANY WEIGHT.
+    """
+
+    def test_the_rule_module_permits_forward_moves_at_any_weight(self):
+        """The authority. If this ever changes, the relief below is illegal and
+        must change with it — which is why it is asserted, not assumed."""
+        from forecast.tiers import move_allowed
+        for wt in (200.0, 500.0, 999.0, 1500.0):
+            ok, why = move_allowed("OG1N", "OG3N", wt)
+            assert ok, f"R2 forward move refused at {wt} g: {why}"
+
+    def test_backward_is_still_forbidden_at_every_weight(self):
+        """NEGATIVE CONTROL: R2 must not be read as "movement is free". R4 is
+        untouched — nothing may come back into the entry tier."""
+        from forecast.tiers import move_allowed
+        for wt in (200.0, 999.0, 5000.0):
+            ok, _ = move_allowed("OG3N", "OG1N", wt)
+            assert not ok, f"backward move wrongly allowed at {wt} g"
+
+    def test_intra_entry_move_still_locked_above_1kg(self):
+        """R3 likewise untouched."""
+        from forecast.tiers import move_allowed
+        assert move_allowed("OG1N", "OG2N", 500.0)[0]
+        assert not move_allowed("OG1N", "OG2N", 1500.0)[0]
+
+    def test_l3_offers_a_nursery_batch_the_forward_systems(self):
+        """WIRING: L3 and the tank pick must AGREE that a nursery batch may sit
+        in grow-out. When only the pick allowed it, L3 pulled the batch back the
+        next week and the relief was re-emitted as a BACKWARD move."""
+        import inspect
+        from forecast import global_planner_l3_poc as l3
+        src = inspect.getsource(l3.plan_l3)
+        assert "if d.tier == TIER_NURSERY:" in src
+        assert "fwd = [s for s in GROWOUT_SYSTEMS if s in sys_set]" in src
+
+    def test_the_pick_agrees_and_still_refuses_to_go_backward(self):
+        import inspect
+        from forecast import global_tank_pick_poc as tp
+        src = inspect.getsource(tp.pick_tanks)
+        assert "(nurs_sys + grow_sys)" in src          # forward relief exists
+        assert "not is_entry(tank_sys.get(t," in src           # R4 guard exists
+
+
 class TestUnplacedBatchIsLoud:
     """Fish with L1 standing but no physical tank must be IMPOSSIBLE to miss.
     They previously vanished while conservation still reported them standing."""

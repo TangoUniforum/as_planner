@@ -584,8 +584,22 @@ def plan_l3(
         batches never move backward), then OG6N is appended for grow-out batches
         in weeks where its mains are production tanks."""
         base = _eligible_systems(d.tier, sys_set, allow_growout_spill)
-        if (d.tier != TIER_NURSERY
-                and n_tanks_w.get(d.week, {}).get(SIXN_SYSTEM, 0) > 0):
+        if d.tier == TIER_NURSERY:
+            # R2: an entry-tier cohort may move FORWARD to any OG3/4/5/6 tank at
+            # ANY weight (tiers.move_allowed permits entry -> grow-out
+            # unconditionally). Locking sub-1 kg batches to the 4 entry systems
+            # made the entry tier a closed 12-tank box: 74 of 75 tank-weeks over
+            # the 95 density cap were sub-1 kg fish crammed into OG1/OG2 at up to
+            # 187 kg/m3 while grow-out tanks sat free. R1 (arrivals ENTER the
+            # entry tier) and R4 (never backward) are untouched — this only says
+            # where a placed nursery batch MAY go next, and L3 must agree with
+            # the tank pick about that or the pick's forward relief is undone the
+            # following week as a backward move.
+            fwd = [s for s in GROWOUT_SYSTEMS if s in sys_set]
+            if n_tanks_w.get(d.week, {}).get(SIXN_SYSTEM, 0) > 0:
+                fwd = fwd + [SIXN_SYSTEM]
+            return base + fwd
+        if n_tanks_w.get(d.week, {}).get(SIXN_SYSTEM, 0) > 0:
             return base + [SIXN_SYSTEM]
         return base
     by_bw: dict[tuple[str, int], TankDemandRow] = {

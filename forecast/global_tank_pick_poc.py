@@ -86,7 +86,7 @@ from .global_planner_l3_poc import L3Result, smallest_og_tank_kg
 from .global_planner_poc import PlannerResult
 from .models import ControlParams, FacilityConfig
 from .sixn import SIXN_PAIRS, is_purge_mode
-from .tiers import SIXN_SYSTEM
+from .tiers import SIXN_SYSTEM, is_entry
 from .time_grid import parse_iso_label
 
 
@@ -547,7 +547,25 @@ def pick_tanks(
                 feed = batch_feed.get(bid, 0.0)
                 # R4 (never backward): >=1 kg batches may spread to grow-out
                 # systems ONLY — no nursery (entry-tier) spill at any weight.
-                elig = grow_sys if avg >= 1000.0 else nurs_sys
+                # A <1 kg batch relieves into the entry tier first, then FORWARD
+                # into grow-out: rule R2 allows an entry-tier cohort to move to
+                # any OG3/4/5/6 tank "at ANY weight" (tiers.move_allowed returns
+                # True for entry->grow-out regardless of weight). This is a
+                # relief valve for an ALREADY-PLACED batch, not an entry rule:
+                # R1 (arrivals enter the entry tier) is untouched, and R4 still
+                # forbids ever coming back. Without the forward leg the entry
+                # tier is a closed 12-tank box, and measurement showed that is
+                # the whole density problem: 74 of 75 tank-weeks over the 95
+                # cap were sub-1 kg fish stuck in OG1/OG2 at up to 187 kg/m3
+                # while ~8 grow-out tanks sat free and eligible every one of
+                # those weeks.
+                elig = grow_sys if avg >= 1000.0 else (nurs_sys + grow_sys)
+                # R4 (never backward): if this batch already holds a non-entry
+                # tank, that tank can never send fish to an entry-tier tank, so
+                # entry destinations are illegal for it however light the fish.
+                if any(not is_entry(tank_sys.get(t, ""))
+                       for t in prev_by_batch.get(bid, [])):
+                    elig = [s2 for s2 in elig if not is_entry(s2)]
                 cur_sys = {s for (b2, s) in chosen_by_ps if b2 == bid}
                 order = ([s for s in elig if s in cur_sys]
                          + [s for s in elig if s not in cur_sys])
@@ -598,6 +616,14 @@ def pick_tanks(
             if bio_u <= 1e-9:
                 continue
             elig = (nurs_sys if avg_u < 1000.0 else grow_sys)
+            # R4 (never backward) — same guard as the relief spread: a batch
+            # with a non-entry tank last week may not be rescued INTO the entry
+            # tier. Without this the never-drop pass emitted backward moves.
+            if any(not is_entry(tank_sys.get(t, ""))
+                   for t in prev_by_batch.get(bid, [])):
+                elig = [s2 for s2 in elig if not is_entry(s2)]
+                if not elig:
+                    elig = grow_sys
             # Claim as many tanks as the DENSITY CAP requires, not just one — a
             # 118-tonne batch on a single 1720 m3 tank is 69 kg/m3 of honest
             # rescue turning into a cap breach the moment it grows.
