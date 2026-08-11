@@ -388,6 +388,7 @@ def run_global(input_path, output_path, config_dir, scenario_dir, *,
         # plan even though L1's batch-level reconciliation still calls it
         # standing. Surface it as an ERROR row, never a silent gap.
         _engine_warns.extend(getattr(gft, "unplaced_warnings", []) or [])
+        _engine_warns.extend(placement_gap_warnings(gft))
         cons = gf.conservation_summary(gft)
         _mw_states = (_build_manual_week_states(
             _mw_stitch.get("opening_locations", []),
@@ -400,6 +401,60 @@ def run_global(input_path, output_path, config_dir, scenario_dir, *,
     finally:
         _l3._OVERSTOCK_DENSITY_PCT, _l3._OVERSTOCK_MAX_WT_G = _prev
     return 0
+
+
+def placement_gap_warnings(gft, tol_kg: float = 1000.0) -> list:
+    """How much of L1's standing the tank pick could NOT put in a physical tank.
+
+    THE CROSS-CHECK THAT WAS MISSING. Advisory / SystemLimitsAudit are both
+    written FROM `batch_locations`, so comparing them to BatchLocations is
+    circular: it proves the arithmetic of what WAS placed and says nothing about
+    what was left out. `StandingTrace` is L1's own facility standing, computed
+    before any tank exists, so L1(OG + 6N purge) - sum(BatchLocations) is the
+    first non-circular measure of placement COMPLETENESS.
+
+    It is not a rounding check. Measured on the operator's 7.29 PR, global-lp
+    carried 18,900,608 kg-weeks of standing that never reached a tank — fish
+    that L1 planned, that the batch-level ReconciliationReport reported as
+    standing and conserving, and that the per-tank TankContinuityAudit could not
+    see (a batch with no tank has nothing to reconcile). Every existing gate was
+    blind to it. Reported per week and in total; `tol_kg` ignores per-week
+    rounding dust.
+    """
+    trace = list(getattr(gft, "trace", None) or [])
+    locs = list(getattr(gft, "batch_locations", None) or [])
+    if not trace or not locs:
+        return []
+    placed: dict = {}
+    for r in locs:
+        wl = getattr(r, "week_label", None)
+        placed[wl] = placed.get(wl, 0.0) + (getattr(r, "biomass_kg", 0.0) or 0.0)
+    gaps = []
+    total = 0.0
+    for t in trace:
+        wl = getattr(t, "week_label", None)
+        want = ((getattr(t, "og_biomass_kg", 0.0) or 0.0)
+                + (getattr(t, "purge_biomass_kg", 0.0) or 0.0))
+        if want <= 0:
+            continue
+        gap = want - placed.get(wl, 0.0)
+        if gap > tol_kg:
+            gaps.append((wl, gap, want))
+            total += gap
+    if not gaps:
+        return []
+    worst = sorted(gaps, key=lambda g: -g[1])[:3]
+    return [(
+        f"PLACEMENT GAP - {len(gaps)} week(s) carry L1 standing that reached NO "
+        f"physical tank: {total:,.0f} kg-weeks in total, worst "
+        + ", ".join(f"{w} {g:,.0f} kg ({100.0 * g / v:.0f}% of that week)"
+                    for w, g, v in worst)
+        + ". These fish are in L1's plan and in the batch-level reconciliation "
+        "but are absent from BatchLocations, so they load no tank, eat no feed "
+        "and appear in no density or per-system metric. Advisory and "
+        "SystemLimitsAudit are written FROM BatchLocations and therefore cannot "
+        "show this."
+    )]
 
 
 def cpsat_degrade_warning(info) -> str:

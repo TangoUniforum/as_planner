@@ -295,6 +295,81 @@ class TestPurgeReleaseRespectsTheWeeklyLimit:
         assert capped <= 60_500.0
 
 
+class TestPlacementGapIsVisibleAtAll:
+    """L1 standing that never reached a tank.
+
+    THE BLIND SPOT: Advisory and SystemLimitsAudit are both WRITTEN FROM
+    batch_locations, so checking them against BatchLocations is circular — it
+    validates the arithmetic of what was placed and is silent about what was
+    left out. (This audit made exactly that mistake first: "Advisory ==
+    BatchLocations == SystemLimitsAudit to +/-9 kg" is true and proves nothing
+    here.) StandingTrace is L1's own facility standing, so it is the first
+    independent witness. On the operator's PR it exposed 18,900,608 kg-weeks of
+    unplaced standing that every existing gate reported as clean.
+    """
+
+    class _Loc:
+        def __init__(self, wl, kg):
+            self.week_label, self.biomass_kg = wl, kg
+
+    class _Trace:
+        def __init__(self, wl, og, purge=0.0):
+            self.week_label = wl
+            self.og_biomass_kg, self.purge_biomass_kg = og, purge
+
+    class _Gft:
+        def __init__(self, trace, locs):
+            self.trace, self.batch_locations = trace, locs
+
+    def test_the_alarm_rings_when_standing_never_reaches_a_tank(self):
+        from tools.run_global_forecast import placement_gap_warnings
+        gft = self._Gft(
+            [self._Trace("2026-W50", 500_000.0)],
+            [self._Loc("2026-W50", 165_229.0)])          # 334,771 kg unplaced
+        w = placement_gap_warnings(gft)
+        assert len(w) == 1 and w[0].startswith("PLACEMENT GAP")
+        assert "334,771 kg" in w[0]
+
+    def test_a_fully_placed_plan_is_silent(self):
+        """POSITIVE CONTROL — the alarm must not cry wolf on a clean plan."""
+        from tools.run_global_forecast import placement_gap_warnings
+        gft = self._Gft(
+            [self._Trace("2026-W50", 400_000.0, 100_000.0)],
+            [self._Loc("2026-W50", 500_000.0)])
+        assert placement_gap_warnings(gft) == []
+
+    def test_rounding_dust_is_not_an_alarm(self):
+        from tools.run_global_forecast import placement_gap_warnings
+        gft = self._Gft([self._Trace("2026-W50", 500_000.0)],
+                        [self._Loc("2026-W50", 499_991.0)])   # 9 kg
+        assert placement_gap_warnings(gft) == []
+
+    def test_the_purge_pool_counts_as_placeable_standing(self):
+        """6N depuration fish occupy real tanks, so they belong on the L1 side
+        of the comparison; omitting them would invent a permanent false gap."""
+        from tools.run_global_forecast import placement_gap_warnings
+        gft = self._Gft([self._Trace("2026-W50", 300_000.0, 200_000.0)],
+                        [self._Loc("2026-W50", 500_000.0)])
+        assert placement_gap_warnings(gft) == []
+
+    def test_it_files_as_an_error_row(self):
+        from tools.run_global_forecast import placement_gap_warnings
+        gft = self._Gft([self._Trace("2026-W50", 500_000.0)],
+                        [self._Loc("2026-W50", 100_000.0)])
+        wb = openpyxl.Workbook()
+        excel_io.write_validation_log(
+            wb, invariant_warnings=placement_gap_warnings(gft))
+        cats = [r[1] for r in wb["ValidationLog"].iter_rows(values_only=True)
+                if r and isinstance(r[0], int)]
+        assert cats == ["ERROR - Placement gap (L1 standing unplaced)"]
+
+    def test_missing_inputs_do_not_fake_a_clean_result(self):
+        """A workbook without StandingTrace must yield NO claim either way —
+        absence of the witness is not evidence of a full placement."""
+        from tools.run_global_forecast import placement_gap_warnings
+        assert placement_gap_warnings(self._Gft([], [])) == []
+
+
 class TestStarveIsAStateNotATankId:
     """Once the 6N mains carry production grow-out, stamping them STARVE would
     hide those fish from every density/welfare metric (they all exclude purge

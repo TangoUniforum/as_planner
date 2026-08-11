@@ -2660,6 +2660,10 @@ def write_validation_log(
             cat = "WARNING - Manual window"
         elif w.startswith("MANUAL"):
             cat = "WARNING - Manual window"
+        elif w.startswith("PLACEMENT GAP"):
+            # L1 standing that never reached a tank. Not rounding: the only
+            # non-circular measure of placement completeness this pipeline has.
+            cat = "ERROR - Placement gap (L1 standing unplaced)"
         elif w.startswith("UNPLACED BATCH"):
             # Fish with L1 standing but no physical tank: they are missing from
             # the plan while batch-level conservation still reports them.
