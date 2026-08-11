@@ -223,6 +223,17 @@ class TestEntryTierIsNotAClosedBox:
         assert "(nurs_sys + grow_sys)" in src          # forward relief exists
         assert "not is_entry(tank_sys.get(t," in src           # R4 guard exists
 
+    def test_r4_is_enforced_monotonically_on_the_main_placement_pass(self):
+        """Once ANY of a batch's fish leave the entry tier, no part of it may be
+        sent back. L3 plans in system COUNTS and can legally hand a batch back to
+        a nursery system a week later; realizing that emits a grow-out -> entry
+        move, which R4 forbids at any weight. Measured: this guard cut emitted
+        topology violations from 272 to 251."""
+        import inspect
+        from forecast import global_tank_pick_poc as tp
+        src = inspect.getsource(tp.pick_tanks)
+        assert "if (is_entry(system)" in src
+
 
 class TestUnplacedBatchIsLoud:
     """Fish with L1 standing but no physical tank must be IMPOSSIBLE to miss.

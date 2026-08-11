@@ -480,6 +480,16 @@ def pick_tanks(
             sys_ids = _growout_ids(system)
             if not sys_ids or p.tanks <= 0:
                 continue
+            # R4 (never backward), MONOTONE: once any of this batch's fish sit
+            # outside the entry tier, no part of it may be sent back into OG1/2.
+            # L3 plans in system COUNTS and can legally hand a batch back to a
+            # nursery system in a later week; realizing that would emit a
+            # grow-out -> entry move, which rule R4 forbids at any weight. Skip
+            # the entry destination and let Pass 1b/1c find it a forward home.
+            if (is_entry(system)
+                    and any(not is_entry(tank_sys.get(t, ""))
+                            for t in prev_by_batch.get(batch_id, []))):
+                continue
             need = want_by_batch.get(batch_id, p.tanks) - actual_total.get(batch_id, 0)
             if need <= 0:
                 continue
@@ -615,7 +625,11 @@ def pick_tanks(
             _, bio_u, avg_u = standing.get((bid, w), (0.0, 0.0, 0.0))
             if bio_u <= 1e-9:
                 continue
-            elig = (nurs_sys if avg_u < 1000.0 else grow_sys)
+            # Same tier model as L3 and the relief spread (R2 forward): a <1 kg
+            # batch prefers the entry tier but may go FORWARD rather than have
+            # nowhere to live. Leaving this one path nursery-only stranded B50
+            # for 5 straight weeks while grow-out tanks stood empty.
+            elig = (grow_sys if avg_u >= 1000.0 else (nurs_sys + grow_sys))
             # R4 (never backward) — same guard as the relief spread: a batch
             # with a non-entry tank last week may not be rescued INTO the entry
             # tier. Without this the never-drop pass emitted backward moves.
