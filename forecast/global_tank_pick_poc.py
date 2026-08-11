@@ -86,7 +86,7 @@ from .global_planner_l3_poc import L3Result, smallest_og_tank_kg
 from .global_planner_poc import PlannerResult
 from .models import ControlParams, FacilityConfig
 from .sixn import SIXN_PAIRS, is_purge_mode
-from .tiers import SIXN_SYSTEM, is_entry
+from .tiers import SIXN_SYSTEM, is_entry, move_allowed
 from .time_grid import parse_iso_label
 
 
@@ -183,6 +183,7 @@ class TankPickResult:
     oversub_weeks: list                      # [week_label] genuinely over-subscribed
     n_tank_weeks: int
     unplaced_warnings: list = field(default_factory=list)   # LOUD never-drop misses
+    topology_warnings: list = field(default_factory=list)   # R1-R7 breaches emitted
 
 
 # ---------------------------------------------------------------------------
@@ -371,6 +372,8 @@ def pick_tanks(
     oversub_weeks: list[str] = []
     # Batches L1 seeded that the pick could not give ANY legal tank (Pass 1c).
     unplaced_warnings: list[str] = []
+    # Emitted transfers that break the R1-R7 conveyor topology.
+    topology_warnings: list[str] = []
 
     sixn_cap = smallest_og_tank_kg(facility) * 1.25  # 6N staged density
 
@@ -458,7 +461,17 @@ def pick_tanks(
             sc, _, _ = standing.get((bid, w), (0.0, 0.0, 0.0))
             if sc <= 1e-9:
                 continue
-            mine = sorted(t for t in prev_avail.get(bid, []) if t not in used_tanks)
+            # Keep the FORWARD-most tanks first. A batch that straddles tiers
+            # (common straight out of the operator's manual window, e.g. B45 held
+            # OG1N/OG1S/OG2S and OG3S/OG6S at the W33 handoff) has to shrink its
+            # footprint somewhere; retaining by bare tank id kept the low-numbered
+            # ENTRY tanks and drained the grow-out ones, so the consolidation had
+            # to run grow-out -> entry, which R4 forbids at any weight. Keeping
+            # the non-entry tanks instead makes the same consolidation run
+            # entry -> grow-out, which R2 allows at any weight. Same tank COUNT,
+            # same biomass, legal direction.
+            mine = sorted((t for t in prev_avail.get(bid, []) if t not in used_tanks),
+                          key=lambda t: (is_entry(tank_sys.get(t, "")), t))
             keep = mine[:max(1, want_by_batch.get(bid, 1))]
             for tid in keep:
                 used_tanks.add(tid)
@@ -936,14 +949,42 @@ def pick_tanks(
                     m = min(s[1], d[1])
                     s[1] -= m
                     d[1] -= m
-            si = 0
+            # The pairing itself must obey the conveyor topology. Choosing the
+            # next supply tank by a bare running index emitted whatever pair fell
+            # out of the ordering: 228 R4 backward moves (grow-out -> entry) and
+            # 23 R3 intra-entry moves of >=1 kg fish on the operator's PR, while
+            # the controller family emits ZERO. The tank SETS were legal — a
+            # batch may legitimately hold a retained entry tank and a new
+            # grow-out tank at once — but the SOURCE->DEST pairing between them
+            # was not. Prefer a legal source for every destination, judged by the
+            # SAME forecast.tiers module the controller uses so both families are
+            # held to identical code.
+            def _legal_src(s_entry, dest_tank):
+                ok, _ = move_allowed(tank_sys.get(s_entry[0], ""),
+                                     tank_sys.get(dest_tank, ""), s_entry[2])
+                return ok
+
             for d in demand:
                 dest = d[0]
-                while d[1] > 1e-9 and si < len(supply):
-                    s = supply[si]
-                    if s[1] <= 1e-9:
-                        si += 1
-                        continue
+                while d[1] > 1e-9:
+                    avail_s = [s for s in supply if s[1] > 1e-9]
+                    if not avail_s:
+                        break
+                    legal = [s for s in avail_s if _legal_src(s, dest)]
+                    if legal:
+                        s = legal[0]
+                    else:
+                        # No legal source for this destination. Conservation wins
+                        # (fish must physically come from somewhere), so the move
+                        # is still emitted — but it is a REAL topology breach and
+                        # must be impossible to miss.
+                        s = avail_s[0]
+                        _ok, _why = move_allowed(tank_sys.get(s[0], ""),
+                                                 tank_sys.get(dest, ""), s[2])
+                        topology_warnings.append(
+                            f"TOPOLOGY VIOLATION - {wl}: batch {batch_id} "
+                            f"{tank_sys.get(s[0])}-{s[0]} -> "
+                            f"{tank_sys.get(dest)}-{dest} at {s[2]:.0f} g. {_why}")
                     m = min(s[1], d[1])
                     src, src_wt = s[0], s[2]
                     dest_wt = new_state[dest].avg_wt_g
@@ -1037,6 +1078,11 @@ def pick_tanks(
               f"BatchLocations (see ValidationLog).")
         for _u in unplaced_warnings[:5]:
             print(f"     {_u}")
+    if topology_warnings:
+        print(f"  !! TOPOLOGY VIOLATIONS: {len(topology_warnings)} emitted "
+              f"transfer(s) break the R1-R7 conveyor rules (see ValidationLog).")
+        for _t in topology_warnings[:3]:
+            print(f"     {_t}")
     if _purge_h_demand > 0:
         print(f"  [6N-RULE PROBE] purge-mode harvest: {_purge_h_demand:,.0f} fish "
               f"demanded; {_purge_h_from6n:,.0f} from 6N ({100*_purge_h_from6n/_purge_h_demand:.0f}%); "
@@ -1056,4 +1102,5 @@ def pick_tanks(
         oversub_weeks=oversub_weeks,
         n_tank_weeks=len(batch_locations),
         unplaced_warnings=unplaced_warnings,
+        topology_warnings=topology_warnings,
     )

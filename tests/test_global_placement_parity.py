@@ -235,6 +235,54 @@ class TestEntryTierIsNotAClosedBox:
         assert "if (is_entry(system)" in src
 
 
+class TestTransferTopologyIsJudgedAndSurfaced:
+    """R1-R7 conformance of the EMITTED transfer stream.
+
+    The controller family emits ZERO topology violations; Global emitted 208
+    even before this repair series and no gate had ever measured it. A plan that
+    plays by different movement rules is not comparable to one that does not,
+    which is the whole point of the compare board.
+    """
+
+    def test_the_pick_judges_pairings_with_the_shared_rule_module(self):
+        """Both families must be held to identical code — forecast.tiers — so a
+        violation means the same thing on either side of the board."""
+        import inspect
+        from forecast import global_tank_pick_poc as tp
+        assert "move_allowed" in inspect.getsource(tp.pick_tanks)
+
+    def test_retention_prefers_the_forward_tier(self):
+        """A batch that straddles tiers must keep its FORWARD tanks and release
+        entry ones, so any consolidation runs entry -> grow-out (R2, legal at
+        any weight) rather than grow-out -> entry (R4, never legal). Measured:
+        251 -> 53 emitted violations."""
+        import inspect
+        from forecast import global_tank_pick_poc as tp
+        src = inspect.getsource(tp.pick_tanks)
+        assert 'key=lambda t: (is_entry(tank_sys.get(t, "")), t)' in src
+
+    def test_a_breach_that_cannot_be_avoided_is_reported_not_hidden(self):
+        """Conservation wins when no legal source exists (the fish must come
+        from somewhere), so the move is emitted — but it must be recorded as an
+        ERROR, never dropped silently."""
+        from forecast.excel_io import write_validation_log
+        wb = openpyxl.Workbook()
+        write_validation_log(wb, invariant_warnings=[
+            "TOPOLOGY VIOLATION - 2026-W34: batch B45 OG6S-64 -> OG1N-11 at "
+            "1958 g. R4: backward move OG6S->OG1N"])
+        rows = [r for r in wb["ValidationLog"].iter_rows(values_only=True)
+                if r and isinstance(r[0], int)]
+        assert rows[0][1] == "ERROR - Topology violation (R1-R7)"
+
+    def test_the_rule_module_is_the_authority_for_both_families(self):
+        """NEGATIVE CONTROL: the checker must actually reject the two shapes we
+        measured, or 'zero violations' would be meaningless."""
+        from forecast.tiers import move_allowed
+        assert not move_allowed("OG6S", "OG1N", 1958.0)[0]   # R4 backward
+        assert not move_allowed("OG1N", "OG1S", 1500.0)[0]   # R3 intra-entry
+        assert move_allowed("OG1N", "OG3N", 500.0)[0]        # R2 forward, legal
+
+
 class TestUnplacedBatchIsLoud:
     """Fish with L1 standing but no physical tank must be IMPOSSIBLE to miss.
     They previously vanished while conservation still reported them standing."""

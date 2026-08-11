@@ -2660,6 +2660,11 @@ def write_validation_log(
             cat = "WARNING - Manual window"
         elif w.startswith("MANUAL"):
             cat = "WARNING - Manual window"
+        elif w.startswith("TOPOLOGY VIOLATION"):
+            # A move the conveyor rules (R1-R7) forbid. The controller
+            # family emits none; a Global plan that does is not
+            # comparable to it.
+            cat = "ERROR - Topology violation (R1-R7)"
         elif w.startswith("PLACEMENT GAP"):
             # L1 standing that never reached a tank. Not rounding: the only
             # non-circular measure of placement completeness this pipeline has.

@@ -87,6 +87,7 @@ class GlobalForecastTables:
     realized_biology: dict          # {(tank, wk, batch): (net_kg, mort)} for audit
     mort_states: list               # _MortState for the audit COUNT balance
     unplaced_warnings: list = field(default_factory=list)  # LOUD never-drop misses
+    topology_warnings: list = field(default_factory=list)  # R1-R7 breaches
 
 
 def build_tables(
@@ -141,6 +142,7 @@ def build_tables(
         realized_biology=pick.realized_biology,
         mort_states=pick.mort_states,
         unplaced_warnings=list(getattr(pick, 'unplaced_warnings', []) or []),
+        topology_warnings=list(getattr(pick, 'topology_warnings', []) or []),
     )
 
 
