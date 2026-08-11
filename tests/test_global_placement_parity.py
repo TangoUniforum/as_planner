@@ -217,6 +217,84 @@ class TestUnplacedBatchIsLoud:
         assert r2.unplaced_warnings
 
 
+class TestPurgeReleaseRespectsTheWeeklyLimit:
+    """The weekly processing LIMIT must bind the 6N RELEASE, not only the draw.
+
+    The hold length changes at sixn_production_start (2 purge weeks -> 1 in
+    production), so two weeks' draws mature on the same week. Measured on the
+    operator's PR: the 2027-W52 draw (hold 2) and the 2028-W01 draw (hold 1)
+    both landed on 2028-W02 and released 72,040 fish -- 31% over the 55,000
+    limit, 19% over the 60,500 relief ceiling.
+    """
+    LIMIT = 55_000.0
+
+    def _buf(self):
+        # the real collision: two matured cohorts on one week
+        return {2: [{"batch_id": "B53", "count": 44_101.0, "biomass_kg": 182_578.0},
+                    {"batch_id": "B54", "count": 27_939.0, "biomass_kg": 111_478.0}]}
+
+    def test_the_collision_week_is_capped_at_the_limit(self):
+        from forecast.global_planner_poc import release_due_capped
+        buf = self._buf()
+        out = release_due_capped(buf, 2, self.LIMIT)
+        assert sum(c for _, c, _ in out) <= self.LIMIT + 1e-6
+
+    def test_the_excess_is_deferred_not_dropped(self):
+        """Conservation is non-negotiable: every fish held back must still be
+        in the buffer, and biomass must follow the count on a split cohort."""
+        from forecast.global_planner_poc import release_due_capped
+        buf = self._buf()
+        before_c = sum(e["count"] for v in buf.values() for e in v)
+        before_kg = sum(e["biomass_kg"] for v in buf.values() for e in v)
+        out = release_due_capped(buf, 2, self.LIMIT)
+        after_c = sum(e["count"] for v in buf.values() for e in v)
+        after_kg = sum(e["biomass_kg"] for v in buf.values() for e in v)
+        assert sum(c for _, c, _ in out) + after_c == pytest.approx(before_c)
+        assert sum(k for _, _, k in out) + after_kg == pytest.approx(before_kg)
+        assert 3 in buf, "the remainder must wait for the FOLLOWING week"
+
+    def test_a_split_cohort_keeps_its_frozen_mean_weight(self):
+        """Held fish are off-feed and frozen at move-in weight; a deferral must
+        not silently re-price them."""
+        from forecast.global_planner_poc import release_due_capped
+        buf = self._buf()
+        src = dict(buf[2][1])
+        out = release_due_capped(buf, 2, self.LIMIT)
+        rel = next((c, k) for b, c, k in out if b == "B54")
+        defer = next(e for e in buf[3] if e["batch_id"] == "B54")
+        assert rel[1] / rel[0] == pytest.approx(src["biomass_kg"] / src["count"])
+        assert (defer["biomass_kg"] / defer["count"]
+                == pytest.approx(src["biomass_kg"] / src["count"]))
+
+    def test_an_under_limit_week_is_untouched(self):
+        """POSITIVE CONTROL: the cap must not perturb an ordinary week."""
+        from forecast.global_planner_poc import release_due_capped
+        buf = {2: [{"batch_id": "B1", "count": 30_000.0, "biomass_kg": 120_000.0}]}
+        out = release_due_capped(buf, 2, self.LIMIT)
+        assert out == [("B1", 30_000.0, 120_000.0)]
+        assert 3 not in buf
+
+    def test_no_cap_configured_releases_everything(self):
+        """Byte-identical to the pre-fix behaviour when the limit is unset, so
+        no existing caller changes."""
+        from forecast.global_planner_poc import release_due_capped
+        buf = self._buf()
+        out = release_due_capped(buf, 2, 0)
+        assert sum(c for _, c, _ in out) == pytest.approx(72_040.0)
+        assert 3 not in buf
+
+    def test_the_defect_reproduces_without_the_cap(self):
+        """NEGATIVE CONTROL: prove the fixture really contains the defect --
+        uncapped, this exact week emits the 72,040 the operator saw, 19% over
+        the 60,500 relief ceiling. Without this, the cap test proves nothing."""
+        from forecast.global_planner_poc import release_due_capped
+        uncapped = sum(c for _, c, _ in release_due_capped(self._buf(), 2, 0))
+        assert uncapped == pytest.approx(72_040.0)
+        assert uncapped > 60_500.0
+        capped = sum(c for _, c, _ in release_due_capped(self._buf(), 2, self.LIMIT))
+        assert capped <= 60_500.0
+
+
 class TestStarveIsAStateNotATankId:
     """Once the 6N mains carry production grow-out, stamping them STARVE would
     hide those fish from every density/welfare metric (they all exclude purge

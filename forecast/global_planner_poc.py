@@ -126,6 +126,54 @@ from .time_grid import iso_week_label, week_range
 # The default `model_purge_hold=False` keeps every existing caller byte-identical
 # (instant removal, no buffer); the L1<->L3 loop turns it ON.
 _PURGE_HOLD_WEEKS = 2
+
+
+def release_due_capped(purge_buffer: dict, w: int, max_fish: float) -> list:
+    """Cohorts leaving the 6N hold in week `w`, capped at the weekly processing
+    LIMIT. Returns [(batch_id, count, biomass_kg)]; mutates `purge_buffer` —
+    week `w` is consumed and any excess is DEFERRED to `w + 1`.
+
+    Why the release needs its own ceiling check: the hold length changes at
+    `sixn_production_start` (2 purge weeks -> `starvation_period_days`, i.e. 1),
+    so the last purge week's draw and the first production week's draw MATURE ON
+    THE SAME WEEK. On the operator's 7.29 PR the 2027-W52 draw (hold 2) and the
+    2028-W01 draw (hold 1) both landed on 2028-W02 and this step emitted the lot:
+    72,040 fish, 31% over the 55,000 limit and 19% over the 60,500 relief
+    ceiling. The draw was capped; the RELEASE was not.
+
+    Deferring is free for the fish — they are already off-feed and frozen at
+    their move-in weight, so a week's wait neither grows nor starves them and the
+    depuration hold is still satisfied (it has only been exceeded). Nothing is
+    dropped: the remainder stays in the buffer, keeps counting as held standing,
+    and conserves. `max_fish` falsy = no cap (every pre-existing caller).
+    """
+    due = sorted(purge_buffer.pop(w, []), key=lambda e: e["batch_id"])
+    if not max_fish:
+        return [(e["batch_id"], e["count"], e["biomass_kg"]) for e in due]
+    out, room = [], float(max_fish)
+    for entry in due:
+        cnt = entry["count"]
+        if room < 1.0:
+            purge_buffer.setdefault(w + 1, []).append(entry)   # whole cohort waits
+            continue
+        if cnt > room:
+            # Split: release what fits, defer the rest at the same frozen mean
+            # weight so biomass follows the count exactly.
+            frac = room / cnt if cnt > 1e-9 else 0.0
+            take_c, take_kg = cnt * frac, entry["biomass_kg"] * frac
+            purge_buffer.setdefault(w + 1, []).append({
+                **entry,
+                "count": cnt - take_c,
+                "biomass_kg": entry["biomass_kg"] - take_kg,
+            })
+            cnt, kg = take_c, take_kg
+        else:
+            kg = entry["biomass_kg"]
+        if cnt <= 1e-9:
+            continue
+        out.append((entry["batch_id"], cnt, kg))
+        room -= cnt
+    return out
 _N_SIXN_PAIRS = len(SIXN_PAIRS)          # 3 depuration pairs (61/67, 63/69, 65/71)
 
 
@@ -980,14 +1028,27 @@ def plan(
         released_rows: dict[str, list[float]] = {}  # batch -> [count, kg]
         released_kg = 0.0
         if model_purge_hold:
-            for entry in purge_buffer.pop(w, []):
-                bid = entry["batch_id"]
+            # The weekly processing LIMIT binds the RELEASE, not just the draw.
+            # The hold length changes at sixn_production_start (2 purge weeks ->
+            # `starvation_period_days` in production, here 1), so the last purge
+            # week's draw and the first production week's draw BOTH mature on the
+            # same week: the 2027-W52 draw (hold 2) and the 2028-W01 draw (hold 1)
+            # both landed on 2028-W02, which released 72,040 fish in one week --
+            # 31% over the 55,000 limit and 19% over the 60,500 relief ceiling --
+            # because this loop emitted whatever had matured with no ceiling
+            # re-check. Fish over the limit are DEFERRED to the following week
+            # (they are already off-feed and frozen at move-in weight, so waiting
+            # costs them nothing and the hold is still satisfied). Nothing is
+            # dropped: the deferred remainder stays in purge_buffer, counts as
+            # held standing, and conserves.
+            for bid, cnt, kg in release_due_capped(purge_buffer, w,
+                                                   max_harvest_fish):
                 acc = released_rows.setdefault(bid, [0.0, 0.0])
-                acc[0] += entry["count"]
-                acc[1] += entry["biomass_kg"]
-                released_kg += entry["biomass_kg"]
-                cons[bid]["harvested_count"] += entry["count"]
-                cons[bid]["harvested_kg"] += entry["biomass_kg"]
+                acc[0] += cnt
+                acc[1] += kg
+                released_kg += kg
+                cons[bid]["harvested_count"] += cnt
+                cons[bid]["harvested_kg"] += kg
             for bid, (c, kg) in released_rows.items():
                 envelope.append(HarvestEnvelopeRow(
                     week=w, week_label=label, batch_id=bid,
