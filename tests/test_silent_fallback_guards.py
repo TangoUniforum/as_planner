@@ -74,3 +74,110 @@ def test_scan_audit_drift_parseable_row_unchanged():
     _, _, fac_signed, fac_abs = _scan_audit_drift(ws)
     assert fac_signed == 0.4 and fac_abs == 12.0
     assert abs(fac_signed) < 1.0            # genuinely clean still passes
+
+
+# --------------------------------------------------------------------------- #
+# global-milp: CP-SAT infeasible weeks must not be a silent degrade
+#
+# DEFECT (2026-08-11 global audit): solve_cpsat_perweek emits `q_by_w[w] = {}`
+# for a week it cannot place; those weeks fall through to the tank pick's
+# fallback, which applies NO per-tank density cap. On the operator's board leg
+# CP-SAT failed 103 of 127 weeks (81%) and the resulting fallback layout —
+# peak density 689.9 kg/m3 against a 95 cap — still reached the compare board
+# labelled "Global - CP-SAT optimal" with a PASS gate. The failure was printed
+# to stdout and recorded NOWHERE the graders or the workbook could see it.
+# --------------------------------------------------------------------------- #
+def test_cpsat_perweek_info_reports_the_horizon_denominator():
+    """n_infeasible is meaningless without its denominator: "103" reads very
+    differently from "103 of 127". The solver must self-report both."""
+    from forecast.global_placement_milp_poc import solve_cpsat_perweek
+    import inspect
+    src = inspect.getsource(solve_cpsat_perweek)
+    assert '"n_weeks": len(weeks)' in src
+    assert '"n_infeasible": n_infeasible' in src
+
+
+def test_degraded_placement_is_recorded_as_an_error_not_a_note():
+    """A fallback-laid-out horizon must read as an ERROR in the ValidationLog.
+    Previously any unrecognised warning fell to "WARNING - Hydration", which
+    would have filed a total placement failure under a hydration note."""
+    from forecast.excel_io import write_validation_log
+    wb = openpyxl.Workbook()
+    msg = ("PLACEMENT DEGRADED - CP-SAT could not place 103 of 127 week(s) "
+           "(81% of the horizon). Those weeks were laid out by the tank-pick "
+           "FALLBACK, which enforces no per-tank density cap.")
+    write_validation_log(wb, invariant_warnings=[msg])
+    rows = [r for r in wb["ValidationLog"].iter_rows(values_only=True)
+            if r and r[0] == 1]
+    assert len(rows) == 1
+    cat, detail = rows[0][1], rows[0][2]
+    assert cat.startswith("ERROR"), f"degrade filed as {cat!r}, not an ERROR"
+    assert "Placement degraded" in cat
+    assert "103 of 127" in detail
+
+
+def test_degrade_warning_cannot_be_mistaken_for_a_manual_window_week():
+    """window_weeks.manual_window_weeks() recovers operator-scripted weeks by
+    scanning ValidationLog text. The degrade line must not poison that read —
+    a planner week wrongly marked "window" would be EXCLUDED from the harvest
+    compliance gates, hiding breaches in the very run that degraded."""
+    from forecast import window_weeks
+    from forecast.excel_io import write_validation_log
+    wb = openpyxl.Workbook()
+    write_validation_log(wb, invariant_warnings=[
+        "PLACEMENT DEGRADED - CP-SAT could not place 103 of 127 week(s) "
+        "(81% of the horizon).",
+        "MANUAL EVENT OK - 2026-W31: harvested 21,812 fish",
+    ])
+    # Only the genuine manual row is recognised; the degrade line adds nothing.
+    assert window_weeks.manual_window_weeks(wb) == {"2026-W31"}
+
+
+def test_a_fully_solved_placement_raises_no_degrade_warning():
+    """The clean case must stay silent — a warning on every optimal run would
+    train the operator to ignore the one that matters."""
+    from tools.run_global_forecast import cpsat_degrade_warning
+    assert cpsat_degrade_warning({"n_weeks": 127, "n_infeasible": 0}) == ""
+    assert cpsat_degrade_warning({}) == ""
+    assert cpsat_degrade_warning(None) == ""
+
+
+def test_infeasible_weeks_produce_a_degrade_warning_with_both_numbers():
+    """The operator's actual board leg: 103 of 127 weeks unplaced."""
+    from tools.run_global_forecast import cpsat_degrade_warning
+    w = cpsat_degrade_warning({"n_weeks": 127, "n_infeasible": 103})
+    assert w.startswith("PLACEMENT DEGRADED")
+    assert "103 of 127" in w and "81%" in w
+    assert "NOT an optimal placement" in w
+    # never mistakable for an operator-scripted window row
+    assert "MANUAL EVENT" not in w and "MANUAL WINDOW" not in w
+    import re
+    assert not re.search(r"\b\d{4}-W\d{2}\b", w)
+
+
+def test_degrade_warning_survives_a_missing_denominator():
+    """An older/partial info dict must still raise the alarm rather than crash
+    or silently return "" (absence must not read as success)."""
+    from tools.run_global_forecast import cpsat_degrade_warning
+    w = cpsat_degrade_warning({"n_infeasible": 5})
+    assert w.startswith("PLACEMENT DEGRADED") and "5 of 0" in w
+
+
+def test_run_global_routes_the_degrade_warning_into_the_validation_log():
+    """End-to-end wiring, without paying for a real 40-minute CP-SAT solve:
+    the warning the helper produces must reach write_validation_log and land
+    as an ERROR row."""
+    import inspect
+    from tools import run_global_forecast as rgf
+    src = inspect.getsource(rgf.run_global)
+    assert "cpsat_degrade_warning(_cpsat_info)" in src
+    assert "manual_warnings=list(_mw_warns) + _engine_warns" in src
+    assert "return q, info" in inspect.getsource(rgf._solve_cpsat_q)
+
+    from forecast.excel_io import write_validation_log
+    wb = openpyxl.Workbook()
+    write_validation_log(wb, invariant_warnings=[
+        rgf.cpsat_degrade_warning({"n_weeks": 127, "n_infeasible": 103})])
+    cats = [r[1] for r in wb["ValidationLog"].iter_rows(values_only=True)
+            if r and isinstance(r[0], int)]
+    assert cats == ["ERROR - Placement degraded (fallback)"]

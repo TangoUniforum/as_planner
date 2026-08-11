@@ -2660,6 +2660,12 @@ def write_validation_log(
             cat = "WARNING - Manual window"
         elif w.startswith("MANUAL"):
             cat = "WARNING - Manual window"
+        elif w.startswith("PLACEMENT DEGRADED"):
+            # The placement solver gave up on part of the horizon and a fallback
+            # laid those weeks out WITHOUT the per-tank density cap. The plan is
+            # then not solver-verified, so this must read as an ERROR, not a
+            # note — a degraded run reached the compare board graded "optimal".
+            cat = "ERROR - Placement degraded (fallback)"
         elif "INV-1" in w:
             cat = "WARNING - INV-1 (one-batch-per-tank)"
         elif "INV-5" in w:

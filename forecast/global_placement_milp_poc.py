@@ -480,7 +480,11 @@ def solve_cpsat_perweek(
         else:
             n_infeasible += 1
             q_by_w[w] = {}
+    # `n_weeks` is the DENOMINATOR for n_infeasible: callers must be able to say
+    # "103 of 127 weeks" without re-deriving the horizon (a run that fails most
+    # of its weeks is a fallback layout, not an optimal one).
     info = {"status": "per-week", "worst_gap": worst_gap,
+            "n_weeks": len(weeks),
             "n_infeasible": n_infeasible, "slack_kg": total_slack,
             "solve_s": t_solve, "over_kg": 0}
     if verbose:

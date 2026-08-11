@@ -306,6 +306,7 @@ def run_global(input_path, output_path, config_dir, scenario_dir, *,
     inflight_og, fw_inflight, purge_inflight = {}, {}, {}
     _mw_stitch = None   # manual-window rows/events to prepend into the output
     _mw_weeks = 0       # manual-window length (0 = no window)
+    _mw_warns = []      # manual-window lints (stays empty on the no_pr path)
     if not no_pr:
         inflight_og, fw_inflight, derived_start, purge_inflight = _hydrate_pr(
             Path(input_path), batches)
@@ -346,10 +347,15 @@ def run_global(input_path, output_path, config_dir, scenario_dir, *,
             manual_window_weeks=_mw_weeks,
             verbose=False)
         grow_q = None
+        _engine_warns = []
         if optimal:
-            grow_q = _solve_cpsat_q(result, facility, system_limits, control,
-                                    cpsat_time, workers=cpsat_workers,
-                                    det_time=cpsat_det_time)
+            grow_q, _cpsat_info = _solve_cpsat_q(
+                result, facility, system_limits, control,
+                cpsat_time, workers=cpsat_workers, det_time=cpsat_det_time)
+            _w = cpsat_degrade_warning(_cpsat_info)
+            if _w:
+                _engine_warns.append(_w)
+                print(f"  !! {_w}")
         gft = gf.build_tables(result, batches, tables, control, facility,
                               fw_inflight=fw_inflight, grow_q_by_week=grow_q,
                               initial_tank_state=(_mw_stitch or {}).get(
@@ -386,16 +392,53 @@ def run_global(input_path, output_path, config_dir, scenario_dir, *,
                        _facility_limits, cons, Path(output_path),
                        initial_state=(_mw_stitch or {}).get("initial_state"),
                        manual_week_states=_mw_states, system_limits=system_limits,
-                       manual_warnings=_mw_warns)
+                       manual_warnings=list(_mw_warns) + _engine_warns)
     finally:
         _l3._OVERSTOCK_DENSITY_PCT, _l3._OVERSTOCK_MAX_WT_G = _prev
     return 0
 
 
+def cpsat_degrade_warning(info) -> str:
+    """The ValidationLog line for a CP-SAT placement that gave up on part of the
+    horizon, or "" when every week solved.
+
+    A week CP-SAT cannot place comes back EMPTY (`q_by_w[w] = {}`) and is then
+    laid out by the tank pick's FALLBACK, which enforces no per-tank density
+    cap. Until 2026-08-11 that degrade existed only as a stdout line, so a run
+    whose placement failed on 103 of 127 weeks still reached the compare board
+    labelled "Global - CP-SAT optimal" with a PASS gate and a peak density of
+    689.9 kg/m3 against a 95 cap. It must be recorded where the graders and the
+    operator look.
+
+    The text deliberately carries NO ISO week label and neither "MANUAL EVENT"
+    nor "MANUAL WINDOW", so `forecast.window_weeks.manual_window_weeks` can
+    never mistake it for an operator-scripted window row — that would EXCLUDE
+    planner weeks from the harvest-compliance gates, hiding breaches in exactly
+    the run that degraded."""
+    n_inf = int((info or {}).get("n_infeasible", 0) or 0)
+    if n_inf <= 0:
+        return ""
+    n_wk = int((info or {}).get("n_weeks", 0) or 0)
+    pct = (100.0 * n_inf / n_wk) if n_wk else 0.0
+    return (f"PLACEMENT DEGRADED - CP-SAT could not place {n_inf} of {n_wk} "
+            f"week(s) ({pct:.0f}% of the horizon). Those weeks were laid out by "
+            f"the tank-pick FALLBACK, which enforces no per-tank density cap - "
+            f"their per-tank densities and per-system loads are NOT "
+            f"solver-verified and may exceed the cap. This run is NOT an "
+            f"optimal placement.")
+
+
 def _solve_cpsat_q(result, facility, system_limits, control, time_limit,
                    workers: int = 8, det_time: float = 30.0):
     """Run the CP-SAT full-horizon optimal placement on L1's standing and return
-    {week: {(batch, tank): kg}} for the optimal grow-out layout (0-swap)."""
+    ({week: {(batch, tank): kg}}, info) for the optimal grow-out layout (0-swap).
+
+    `info` carries the solver's own self-report — crucially `n_infeasible`, the
+    number of weeks CP-SAT could NOT place. Those weeks come back EMPTY
+    (global_placement_milp_poc: `q_by_w[w] = {}`) and silently fall through to
+    the tank pick's uncapped fallback, so the caller MUST surface them: a run
+    with infeasible weeks is not an optimal placement and must never be graded
+    as one (see run_global)."""
     from collections import defaultdict
     from forecast.global_placement_milp_poc import solve_cpsat_perweek
     from forecast.sixn import SIXN_MAIN_TANKS
@@ -441,7 +484,7 @@ def _solve_cpsat_q(result, facility, system_limits, control, time_limit,
     print(f"  [CP-SAT per-week placement] worst_gap={info['worst_gap']*100:.2f}% "
           f"infeasible={info['n_infeasible']} slack={info.get('slack_kg'):,.0f} kg "
           f"solve={info.get('solve_s'):.0f}s")
-    return q
+    return q, info
 
 
 def _emit_workbook(gft, result, batches, tables, control, facility,
