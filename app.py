@@ -116,16 +116,35 @@ def _active_config_summary(cd: dict) -> list[tuple]:
          if bool(g("auto_calibrate_fw"))
          else "FW growth uses each batch's configured FW_Correction (residuals shown in "
               "Diagnostics)"),
+        ("Harvest guide (hybrid)", str(g("hybrid_follow", "off")).upper(),
+         f"a whole-horizon harvest plan is computed first and the weekly "
+         f"controller must track it within ±"
+         f"{(g('hybrid_follow_band') or 0) * 100:.0f}% — it harvests LESS in "
+         f"fat weeks so those fish still exist for lean ones (the fix for "
+         f"empty harvest weeks; costs a higher biomass peak)"
+         if str(g("hybrid_follow", "off")) == "full" else
+         "reactive week-by-week harvest only — no long-horizon guide "
+         "(measured to leave empty harvest weeks)"),
         ("Caps", f"biomass {g('max_biomass_kg', 0):,.0f} kg · "
-                 f"feed {g('max_feed_per_day_kg', 0):,.0f} kg/day · "
-                 f"harvest {g('max_harvest_per_week', 0):,.0f} fish/wk",
-         "the hard limits the plan must respect"),
+                 f"feed {g('max_feed_per_day_kg', 0):,.0f} kg/day",
+         "the facility limits the plan must hold under (both counted "
+         "FW-inclusive)"),
+        ("Harvest floor / limit",
+         f"{g('min_harvest_per_week', 0):,.0f} – "
+         f"{g('max_harvest_per_week', 0):,.0f} fish/wk"
+         + (f" (relief ceiling {g('max_harvest_per_week', 0) * (1 + (g('harvest_relief_pct') or 0)):,.0f})"
+            if (g("harvest_relief_pct") or 0) > 0 else ""),
+         "every week must ship at least the floor (contract); the limit is "
+         "the plant's weekly capacity — a cap, never a target"),
+        ("Handling budget", f"{g('max_transfers_per_week', 0):,.0f} moves/wk",
+         "deferrable quality moves stop here; essential moves are never "
+         "blocked (Controller engines only — Global ignores this)"),
     ]
     # Surface the opt-in knobs only when they're engaged (off by default).
     if g("harvest_grade_to_min"):
-        rows.append(("Grade-to-min harvest", "ON",
-            "weeks short of the floor grade near-market tails into 6N to hold the min "
-            "(small stays in source); net production-positive"))
+        rows.append(("Grade-to-min harvest", "ON (no effect)",
+            "this switch is historical — the floor-filling grade now runs "
+            "unconditionally, so turning it on changes nothing"))
     if (g("min_transfer_count") or 0) > 0:
         rows.append(("Min transfer size", f"{g('min_transfer_count'):,.0f} fish",
             "rebalancer won't split a smaller sub-group out of a tank"))
@@ -391,231 +410,285 @@ def _frames_to_biology(growth_df, mort_df, feed_df, cull_df, models):
 _VALIDATED = (" Validated setting — chosen by measurement; prefer tuning it "
               "via Analyze rather than editing by hand.")
 _CONTROL_HELP = {
-    "forecast_start": "The forecast's week 1. Computed automatically from the "
-        "uploaded ProductionReport (its closing date + 1 day) every run — the "
-        "value stored here is only a placeholder and is ignored.",
-    "horizon_weeks": "How far into the future the forecast plans. Longer shows "
-        "more of the plan but every run takes longer. Unit: weeks. Current "
-        "setting: 130 (about 2.5 years).",
-    "scenario_name": "A free-text name for this planning scenario. It appears "
-        "in report headers and the run's settings snapshot. Changes nothing in "
-        "the plan itself.",
-    "max_feed_per_day_kg": "The most feed the whole facility may deliver in one "
-        "day. The planner keeps every week under this; when feed (not space) is "
-        "the bottleneck it harvests or moves fish earlier to make feed room. "
-        "Unit: kg/day. Current setting: 34,000. Per-week overrides live on the "
-        "Limits tab.",
-    "max_biomass_kg": "The most fish, by total weight, the whole facility may "
-        "hold at once — freshwater, seawater grow-out AND fish waiting in "
-        "depuration all count. The harvest controller rides just under this "
-        "line: raising it lets fish grow bigger before harvest; lowering it "
-        "forces earlier harvests. Unit: kg. Current setting: 3,800,000. "
+    "forecast_start":
+        "The forecast's week 1. Computed automatically from the uploaded "
+        "ProductionReport (its closing date + 1 day) every run — the value "
+        "stored here is only a placeholder and is ignored.",
+    "horizon_weeks":
+        "How far into the future the forecast plans. Longer shows more of the "
+        "plan but every run takes longer. Unit: weeks (130 is about 2.5 "
+        "years).",
+    "scenario_name":
+        "A free-text name for this planning scenario. It appears in report "
+        "headers and the run's settings snapshot. Changes nothing in the plan "
+        "itself.",
+    "max_feed_per_day_kg":
+        "The most feed the whole facility may deliver in one day. The planner "
+        "keeps every week under this; when feed (not space) is the bottleneck "
+        "it harvests or moves fish earlier to make feed room. Unit: kg/day. "
         "Per-week overrides live on the Limits tab.",
-    "max_harvest_per_week": "THE weekly processing limit: the most fish the "
-        "plant takes in a normal week. It is a CONSTRAINT, not a goal — the "
-        "harvest is decided by what the fish need (biomass, density, the "
-        "weekly floor, contracts) and then capped here; the planner never "
-        "harvests extra just to reach this number (the 6N drain even holds a "
-        "purge tank back a rotation rather than exceed it). The relief "
-        "setting below allows rare weeks slightly over. Unit: fish/week. "
-        "Current setting: 55,000.",
-    "harvest_relief_pct": "The pressure-relief band: how far past the weekly "
-        "processing limit an EXCEPTIONAL week may go, as a fraction of the "
-        "limit (0.10 = +10%, i.e. a 60,500-fish absolute ceiling at the "
-        "55,000 limit). Relief is for the odd week a whole depuration tank "
-        "must drain or a make-room dump saves an arrival — allowed more, but "
-        "not every time: the checklist flags 1-3 relief weeks amber and more "
-        "than 3 (or any week past the ceiling) red, meaning the plan should "
-        "ramp its harvests up earlier instead. Unit: fraction. Current "
-        "setting: 0.10.",
-    "min_harvest_weight_g": "The 3.5 kg sales gate: a fish must weigh at least "
-        "this (live weight) before it may be harvested. A business constant, "
-        "not a tuning knob. Unit: grams. Setting: 3,500.",
-    "min_harvest_per_week": "The weekly harvest floor from the sales contracts: "
-        "EVERY week must ship at least this many fish — never an empty week. "
-        "The planner holds fish back in fat weeks to cover lean ones. Unit: "
-        "fish/week. Current setting: 30,000.",
-    "min_tank_control": "The 'no dribbles' rule: if a harvest or transfer would "
-        "leave a tank holding fewer fish than this, the tank is emptied "
-        "completely instead — tiny leftover groups waste a whole tank. Unit: "
-        "fish. Current setting: 7,000.",
-    "min_transfer_count": "The smallest partial group the rebalancer may move "
-        "OUT of a tank — moves smaller than this cost handling for little "
-        "relief. Raising it = fewer, larger transfers but slightly more "
-        "crowding left unrelieved; 0 = no floor. Whole-tank moves are "
-        "unaffected. Unit: fish. Current setting: 7,000.",
-    "max_transfers_per_week": "The weekly HANDLING BUDGET: the most tank-to-"
-        "tank transfer moves the crew should perform in one week. When a "
-        "week's essential moves (6N purge fills, making room for an arriving "
-        "batch, following the plan) have used the budget, the optional "
-        "quality passes (density leveling, load balancing, remnant clean-up) "
-        "wait for a calmer week. Essential moves are never blocked — a week "
-        "they alone exceed the budget shows amber/red on the checklist "
-        "instead. 0 switches the budget off. Unit: moves/week. Current "
-        "setting: 15.",
-    "default_hog_yield": "Converts live (gross) weight to sold weight — HOG "
-        "means head-off, gutted. Sold kg = live kg × this. Used wherever "
-        "harvest tonnage or revenue is reported. Unit: ratio. Current setting: "
-        "0.81. Per-week overrides live on the Limits tab.",
-    "facility_biomass_deviation_pct": "The comfort band under the facility "
-        "biomass cap — how close to the cap the harvest controller aims to "
-        "ride. UNIT TRAP: this is a RAW FRACTION — 0.005 = 0.5% (the OPPOSITE "
-        "convention from Handling mortality below, which is a percent). "
-        "Smaller = closer to the cap (more production, more over-cap risk); "
-        "larger = harvest earlier, leaving more slack. Current setting: 0.005."
+    "max_biomass_kg":
+        "The most fish, by total weight, the whole facility may hold at once "
+        "— freshwater, seawater grow-out AND fish waiting in depuration all "
+        "count. The harvest controller rides just under this line: raising it "
+        "lets fish grow bigger before harvest; lowering it forces earlier "
+        "harvests. Unit: kg. Per-week overrides live on the Limits tab.",
+    "max_harvest_per_week":
+        "THE weekly processing limit: the most fish the plant takes in a "
+        "normal week. It is a CONSTRAINT, not a goal — the harvest is decided "
+        "by what the fish need (biomass, density, the weekly floor, "
+        "contracts) and then capped here; no pass ever sizes harvest UP to "
+        "reach it. With the harvest smoother on (the shipped default) this is "
+        "a hard weekly ceiling and the 6N drain will hold a purge tank back a "
+        "rotation rather than exceed it; with the smoother OFF it only clamps "
+        "the 6N fill and the weekly target, so weeks can run over. Unit: "
+        "fish/week.",
+    "harvest_relief_pct":
+        "The pressure-relief band used to JUDGE a plan: how far past the "
+        "weekly processing limit an exceptional week may go, as a fraction of "
+        "the limit. It derives an absolute ceiling = limit x (1 + this). "
+        "IMPORTANT: this is a grading threshold, not an allowance handed to "
+        "the planner — no engine reads it. The planner's own weekly ceiling "
+        "is the processing limit itself; weeks land in the relief band when a "
+        "whole 6N pair had to drain or a force-empty overdrew, and that "
+        "overage is borrowed back from the following week. What this knob "
+        "decides is how such weeks are SCORED: the checklist flags 1-3 relief "
+        "weeks amber, and more than 3 — or any week past the derived ceiling "
+        "— red, meaning the plan should ramp its harvests up earlier. Unit: "
+        "fraction of the limit.",
+    "min_harvest_weight_g":
+        "The 3.5 kg sales gate: a fish must weigh at least this (live weight) "
+        "before it may be harvested. A business constant, not a tuning knob. "
+        "Unit: grams.",
+    "min_harvest_per_week":
+        "The weekly harvest floor from the sales contracts: EVERY week must "
+        "ship at least this many fish — never an empty week. This knob is a "
+        "floor only; the holding-back-for-lean-weeks behaviour comes from the "
+        "harvest guide (hybrid_follow) further down. Unit: fish/week.",
+    "min_tank_control":
+        "The 'no dribbles' rule: if a harvest or transfer would leave a tank "
+        "holding fewer fish than this, the tank is emptied completely instead "
+        "— tiny leftover groups waste a whole tank. Unit: fish.",
+    "min_transfer_count":
+        "The smallest partial group the rebalancer may move OUT of a tank — "
+        "moves smaller than this cost handling for little relief. Raising it "
+        "= fewer, larger transfers but slightly more crowding left "
+        "unrelieved; 0 = no floor. Whole-tank moves are unaffected. Unit: "
+        "fish.",
+    "max_transfers_per_week":
+        "The weekly HANDLING BUDGET: the most tank-to-tank transfer moves the "
+        "crew should perform in one week. When a week's essential moves (6N "
+        "purge fills, making room for an arriving batch, following the plan) "
+        "have used the budget, the deferrable quality passes (even-out, load "
+        "balancing, variable-quantity trims, remnant clean-up) wait for a "
+        "calmer week — the split pass is NOT budget-gated. Essential moves "
+        "are never blocked; a week they alone exceed the budget shows "
+        "amber/red on the checklist instead. 0 switches the budget off. NOTE: "
+        "only the Controller engines read this — the Global engines ignore it "
+        "entirely. Unit: moves/week.",
+    "default_hog_yield":
+        "Converts live (gross) weight to sold weight — HOG means head-off, "
+        "gutted. Sold kg = live kg × this. Used wherever harvest tonnage or "
+        "revenue is reported. Unit: ratio. Per-week overrides live on the "
+        "Limits tab.",
+    "facility_biomass_deviation_pct":
+        "The comfort band under the facility's EFFECTIVE ceiling — how close "
+        "to the line the harvest controller aims to ride. The ceiling is the "
+        "LOWER of the biomass cap and the biomass at which feed hits its cap, "
+        "so on a feed-bound week this is a band under the feed limit. It is "
+        "also the tolerance both caps are judged against. UNIT TRAP: this is "
+        "a RAW FRACTION — 0.005 = 0.5% (the OPPOSITE convention from Handling "
+        "mortality below, which is a percent). Smaller = closer to the cap "
+        "(more production, more over-cap risk); larger = harvest earlier, "
+        "leaving more slack."
         + _VALIDATED,
-    "handling_mortality_pct": "Fish lost to handling every time a group is "
-        "transferred between tanks. UNIT TRAP: this value is a PERCENT that is "
-        "divided by 100 before use — 0.01 means 0.01% (1 fish in 10,000) and "
-        "1 means 1%. That is the OPPOSITE convention from the biomass band "
-        "above, which is a raw fraction. Current setting: 0.01 (= 0.01% per "
-        "transfer).",
-    "sixn_growth": "MASTER SWITCH for the 6N system. Off (unchecked) = normal "
-        "operation: 6N is the depuration station (fish sit off-feed there "
-        "before harvest) until the production start date below, then becomes "
-        "grow-out. On = 6N is an ordinary grow-out system for the WHOLE "
-        "forecast and there is NO depuration model at all (the date below is "
-        "ignored). Leave off unless you truly mean to remove depuration — "
-        "switching it on by accident has produced misleading harvest craters "
-        "before. Current setting: off.",
-    "sixn_production_start": "The date the 6N system stops being the "
-        "depuration station and becomes ordinary grow-out (the facility's "
-        "planned mode change). Ignored when 'Run 6N as grow-out' is on. "
-        "Format: YYYY-MM-DD. Current setting: 2028-01-01.",
-    "sixn_transition_weeks": "Rest/empty weeks for the 6N tanks at the "
-        "switchover date above, before grow-out fish move in. Unit: weeks. "
-        "Current setting: 0 (no gap).",
-    "tran_og_default_tanks": "How many tanks a new seawater arrival is spread "
-        "across on entry — the strongest feed-vs-harvest lever. More tanks = "
-        "feed spread thinner (fewer feed-cap problems) but more of the "
-        "facility occupied (bigger make-room harvests); fewer tanks = the "
-        "reverse. Unit: tanks. Current setting: 2.",
-    "global_buffer_pct": "Safety margin used when judging plans against the "
-        "per-system caps: a system reading within ±this fraction of its cap "
-        "still counts as in-bounds. UNIT: raw fraction — 0.05 = 5%. Current "
-        "setting: 0.05.",
-    "starvation_period_days": "Only for 6N grow-out mode (after the production "
-        "start date): harvest-bound fish stop being fed IN PLACE for this many "
-        "days before harvest, since there is no separate depuration tank "
-        "anymore. Unit: days. Current setting: 7 (= one weekly planning step).",
-    "harvest_grade_to_min": "On a lean depuration week that would miss the "
-        "weekly harvest floor: size-sort a near-market tank and send just "
-        "enough of its BIGGEST fish to 6N to reach the floor. OFF because a "
-        "6-PR A/B measured it worse (0 wins, 3 losses, 3 ties on "
-        "weeks-below-floor; weeks-over-cap 3 → 5)." + _VALIDATED,
-    "sixn_level_drains": "Levels the flow through depuration: caps how full "
-        "one 6N pair may get (at the weekly harvest max) so weekly fills don't "
-        "pile into a single pair and starve the following weeks. On = steadier "
-        "weekly harvests (measured: biggest weekly drain 110k → 68k fish, more "
-        "weeks meeting the floor). Only affects depuration mode. Current "
-        "setting: on." + _VALIDATED,
-    "density_target_pct": "How full to pack each tank when placing fish, as a "
-        "fraction of the tank's density cap. 0.85 = fill to 85%, leaving 15% "
-        "headroom for growth between weekly checks. Higher = fewer tanks used "
-        "but more crowding risk; lower = gentler but needs more tanks. UNIT: "
-        "raw fraction. Current setting: 0.85." + _VALIDATED,
-    "density_welfare_threshold_kg_m3": "The fish-welfare crowding line, BELOW "
-        "the hard density cap (~95): fish reared above it count as 'crowded' "
-        "in the quality reports (Run KPI, Compare 'Best welfare', Optimize "
-        "'Product quality'). Reporting/scoring only — it never changes the "
-        "plan. Unit: kg/m³. Setting: 80, the accepted salmon welfare line.",
-    "rebalance_varqty_budget": "Fine-trim moves per week: shave a precise "
-        "number of fish off an over-full system into one with room. More "
-        "moves = slightly less over-crowding at the cost of extra handling; "
-        "0 = off. Unit: moves/week. Current setting: 20.",
-    "rebalance_split_budget": "Fan-out moves per week: split one over-crowded "
-        "tank's fish across several free tanks. Unit: moves/week. Current "
-        "setting: 8.",
-    "rebalance_balance_budget": "The main rebalancer's weekly move budget: "
-        "relieve tanks and systems over their caps into destinations with "
-        "room, weighing crowding, feed and biomass together. Load leveling "
-        "(below) shares this budget. Unit: moves/week. Current setting: 30.",
-    "rebalance_level": "Load leveling. On = each week, spread load off the "
-        "hottest grow-out system onto the coolest, leveling feed, biomass and "
-        "crowding together — the fix for per-system feed spikes (measured: "
-        "feed-over-cap system-weeks 312 → 25). Off = the old crowding-only "
-        "behavior. Uses the main rebalancer's move budget. Current setting: "
-        "on." + _VALIDATED,
-    "harvest_setpoint_lookahead_weeks": "DOES NOTHING (inactive). Superseded "
-        "by the newer harvest logic — no part of the plan reads this value "
-        "anymore; it remains only so older saved configs still load. Editing "
-        "it has no effect.",
-    "harvest_level_load": "The harvest smoother. On = the weekly processing "
-        "max is held as a hard ceiling and fish are pre-harvested a little "
-        "early, so weekly harvest is flat instead of dump-then-nothing "
-        "(measured: weeks over the 55k cap 15 → 10, steadier weekly totals). "
-        "Off = the old reactive behavior. Travels together with Load leveling "
-        "above, which otherwise makes harvest spikier. Current setting: on."
+    "handling_mortality_pct":
+        "Fish lost to handling every time a group is transferred between "
+        "tanks. UNIT TRAP: this value is a PERCENT that is divided by 100 "
+        "before use — 0.01 means 0.01% (1 fish in 10,000) and 1 means 1%. "
+        "That is the OPPOSITE convention from the biomass band above, which "
+        "is a raw fraction, so a value of 0.01 here means 0.01% lost per "
+        "transfer.",
+    "sixn_growth":
+        "MASTER SWITCH for the 6N system. Off (unchecked) = normal operation: "
+        "6N is the depuration station (fish sit off-feed there before "
+        "harvest) until the production start date below, then becomes grow- "
+        "out. On = 6N is an ordinary grow-out system for the WHOLE forecast "
+        "and there is NO depuration model at all (the date below is ignored). "
+        "Leave off unless you truly mean to remove depuration — switching it "
+        "on by accident has produced misleading harvest craters before.",
+    "sixn_production_start":
+        "The date the 6N system stops being the depuration station and "
+        "becomes ordinary grow-out (the facility's planned mode change). "
+        "Ignored when 'Run 6N as grow-out' is on. Format: YYYY-MM-DD.",
+    "sixn_transition_weeks":
+        "Rest/empty weeks for the 6N tanks at the switchover date above, "
+        "before grow-out fish move in. Unit: weeks.",
+    "tran_og_default_tanks":
+        "How many tanks a new seawater arrival is spread across on entry — "
+        "the strongest feed-vs-harvest lever. More tanks = feed spread "
+        "thinner (fewer feed-cap problems) but more of the facility occupied "
+        "(bigger make-room harvests); fewer tanks = the reverse. Values below "
+        "2 are raised to 2. Unit: tanks.",
+    "global_buffer_pct":
+        "Headroom above each per-system feed/biomass cap before the planner "
+        "treats that system as over-loaded — it is both the rebalancer's "
+        "trigger and the audit's tolerance, so it changes the plan, not just "
+        "the report. ONE-SIDED: it only allows a system to read over its cap; "
+        "being under a cap is never a problem. UNIT: raw fraction — 0.05 = "
+        "5%. Separate from the facility biomass band above.",
+    "starvation_period_days":
+        "Only for 6N grow-out mode (after the production start date): "
+        "harvest-bound fish stop being fed IN PLACE for this many days before "
+        "harvest, since there is no separate depuration tank anymore. Unit: "
+        "days.",
+    "harvest_grade_to_min":
+        "HISTORICAL — this switch no longer controls anything. The behaviour "
+        "it used to gate (on a lean depuration week that would miss the "
+        "weekly harvest floor, size-sort a near-market tank and send just "
+        "enough of its BIGGEST fish to 6N to reach the floor) now runs "
+        "UNCONDITIONALLY, because leaving it off produced empty harvest weeks "
+        "and that breaks the steady-harvest contract. Flipping this box "
+        "changes only a line in the run summary. Kept so older configs still "
+        "load."
         + _VALIDATED,
-    "harvest_smooth_lookahead_weeks": "The harvest smoother's look-ahead: how "
-        "many weeks of soon-to-be-ready fish it spreads early harvesting over. "
-        "Bigger = flatter and earlier; smaller = closer to reactive. Only used "
-        "when the harvest smoother is on. Unit: weeks. Current setting: 12.",
-    "harvest_level_target": "Optional flat weekly harvest target for the "
-        "smoother. Blank = computed automatically from how fast the fish are "
-        "actually growing (recommended). Only used when the harvest smoother "
-        "is on. Unit: fish/week. Current setting: blank (auto).",
-    "placement_method": "Which engine assigns fish to physical tanks. "
-        "'greedy' (the production engine) places week by week. 'lns' runs "
-        "greedy first, then a refinement pass moves groups off the most "
-        "crowded systems onto cooler ones; every move is audit-checked (no "
-        "fish lost, strictly less crowding) with greedy as the fallback, so it "
-        "can't make a run worse — it just takes longer, and only helps when "
-        "free tanks exist. Current setting: greedy.",
-    "lns_max_moves": "How many refinement moves the 'lns' placement engine may "
-        "make per run. Only used when the placement engine is 'lns'. Higher = "
-        "chases more crowding but runs slower. Unit: moves. Current setting: "
-        "30.",
-    "auto_calibrate_fw": "Auto-tune freshwater growth so each batch lands "
-        "exactly on its planned seawater-entry weight. On = the forecast "
-        "ASSUMES the growth needed to hit target (a planning assumption, not "
-        "a guarantee the fish grow that fast); each batch's tuned value is "
-        "clamped to the min/max below and flagged if it hits a clamp. Off = "
-        "use each batch's hand-set FW correction. Current setting: on.",
-    "auto_calibrate_fw_min": "Lower clamp on the auto-tuned freshwater growth "
-        "multiplier. A batch that would need LESS growth than this allows is "
-        "capped here and flagged in the log. Only used when auto-calibrate is "
-        "on. Unit: multiplier. Current setting: 0.5.",
-    "auto_calibrate_fw_max": "Upper clamp on the auto-tuned freshwater growth "
-        "multiplier. A batch that would need MORE growth than this allows is "
-        "capped here and flagged as likely unreachable. Only used when "
-        "auto-calibrate is on. Unit: multiplier. Current setting: 1.5.",
-    "hybrid_follow": "The long-horizon harvest guide (the 'hybrid'). 'full' "
-        "(current setting): before planning, the app computes a whole-horizon "
-        "harvest plan and the weekly controller must follow it as a target "
-        "band — it is told to harvest LESS in fat weeks so those fish are "
-        "still there for the lean ones, the one thing a week-by-week planner "
-        "cannot see for itself. Measured on 6 real PRs: totally empty harvest "
-        "weeks 6 → 0; the cost is a higher biomass peak (the held-back fish "
-        "are still in the water). 'off' = old reactive-only planning (leaves "
-        "empty weeks). 'floor' = only lifts short weeks (a no-op in practice)."
+    "sixn_level_drains":
+        "Levels the flow through depuration: caps how full one 6N pair may "
+        "get (at the weekly harvest limit) so weekly fills don't pile into a "
+        "single pair and starve the following weeks. On = steadier weekly "
+        "harvests (measured: biggest weekly drain 110k -> 68k fish, more "
+        "weeks meeting the floor). Only affects depuration mode — but note "
+        "that turning it OFF also disables the harvest guide's 6N staging "
+        "lever, whatever that checkbox says."
         + _VALIDATED,
-    "hybrid_follow_band": "How tightly the weekly controller must follow the "
-        "long-horizon harvest guide, as ± a fraction of the guide's weekly "
-        "number. Tighter (smaller) = steadier harvest and better-protected "
-        "lean weeks; looser = more freedom to chase the current week. UNIT: "
-        "raw fraction — 0.05 = ±5%. Current setting: 0.05, which beat 0.10 in "
-        "a 90-cell paired sweep." + _VALIDATED,
-    "hybrid_guide_min_frac": "Housekeeping for the harvest guide: a guide week "
-        "below this fraction of the weekly harvest floor is ignored rather "
-        "than followed down to nothing — such weeks are structural gaps in the "
-        "long-horizon plan (its start-up and tail weeks), not real advice. "
-        "UNIT: raw fraction of the harvest floor. Default: 0.25. Ask before "
-        "changing.",
-    "hybrid_guide_smooth_weeks": "Optional averaging of the harvest guide's "
-        "weekly numbers over this many weeks before the controller follows "
-        "them. 0 or 1 = follow the raw curve — recommended; smoothing "
-        "measured worse (it blunts exactly the fat-week/lean-week signal the "
-        "guide exists to carry). Unit: weeks. Default: 0.",
-    "hybrid_purge_lever": "Diagnostic kill switch: allows the harvest guide to "
-        "steer how much is staged into 6N depuration each week. On by default; "
-        "turn off only to isolate a suspected guide misbehavior to one "
-        "mechanism (this one or the production lever) without a code change.",
-    "hybrid_production_lever": "Diagnostic kill switch: allows the harvest "
-        "guide to steer the weekly harvest ceiling and off-feed entry once 6N "
-        "is in grow-out mode. On by default; turn off only to isolate a "
-        "suspected guide misbehavior to one mechanism (this one or the purge "
-        "lever) without a code change.",
+    "density_target_pct":
+        "How full to pack each tank when placing fish, as a fraction of that "
+        "tank's density cap. 0.90 = fill to 90%, leaving 10% headroom for "
+        "growth between weekly checks. Higher = fewer tanks used but more "
+        "crowding risk; lower = gentler but needs more tanks. UNIT: raw "
+        "fraction."
+        + _VALIDATED,
+    "density_welfare_threshold_kg_m3":
+        "The fish-welfare crowding line, BELOW the hard density cap (95): "
+        "fish reared above it count as 'crowded' in the quality reports (Run "
+        "KPI, Compare 'Best welfare', Optimize 'Product quality'). "
+        "Reporting/scoring only — it never changes the plan. Unit: kg/m3.",
+    "rebalance_varqty_budget":
+        "Fine-trim moves per week: shave a precise number of fish off an "
+        "over-full system into one with room. More moves = slightly less "
+        "over-crowding at the cost of extra handling; 0 = off. Unit: "
+        "moves/week.",
+    "rebalance_split_budget":
+        "Fan-out moves per week: split one over-crowded tank's fish across "
+        "several free tanks. Unit: moves/week.",
+    "rebalance_balance_budget":
+        "The main rebalancer's weekly move budget: relieve tanks and systems "
+        "over their caps into destinations with room, weighing crowding, feed "
+        "and biomass together. Load leveling (below) shares this budget. "
+        "Unit: moves/week.",
+    "rebalance_level":
+        "Load leveling. On = each week, spread load off the hottest grow-out "
+        "system onto the coolest, leveling feed, biomass and crowding "
+        "together — the fix for per-system feed spikes (measured: feed-over- "
+        "cap system-weeks 312 → 25). Off = the old crowding-only behavior. "
+        "Uses the main rebalancer's move budget."
+        + _VALIDATED,
+    "harvest_setpoint_lookahead_weeks":
+        "DOES NOTHING (inactive). Superseded by the newer harvest logic — no "
+        "part of the plan reads this value anymore; it remains only so older "
+        "saved configs still load. Editing it has no effect. (It is still "
+        "written into the run's config snapshot, so ignore it there too.)",
+    "harvest_level_load":
+        "The harvest smoother. On = the weekly processing max is held as a "
+        "hard ceiling and fish are pre-harvested a little early, so weekly "
+        "harvest is flat instead of dump-then-nothing (measured: weeks over "
+        "the 55k cap 15 → 10, steadier weekly totals). Off = the old reactive "
+        "behavior. Travels together with Load leveling above, which otherwise "
+        "makes harvest spikier."
+        + _VALIDATED,
+    "harvest_smooth_lookahead_weeks":
+        "The harvest smoother's look-ahead: how many weeks of soon-to-be- "
+        "ready fish it spreads early harvesting over. Bigger = flatter and "
+        "earlier; smaller = closer to reactive. Only used when the harvest "
+        "smoother is on. Unit: weeks.",
+    "harvest_level_target":
+        "Optional FLOOR on how much the harvest smoother pre-harvests each "
+        "week — it can only push harvest up, never pin it to a flat number, "
+        "and it is still capped by the weekly processing limit. Blank = "
+        "computed automatically from how fast the fish are actually growing "
+        "(recommended). Only used when the harvest smoother is on. Unit: "
+        "fish/week.",
+    "placement_method":
+        "Which engine assigns fish to physical tanks. 'greedy' (the "
+        "production engine) places week by week. 'lns' runs greedy first, "
+        "then a refinement pass moves groups off the most crowded systems "
+        "onto cooler ones; every move is audit-checked (no fish lost, "
+        "strictly less crowding) with greedy as the fallback, so it can't "
+        "make a run worse — it just takes longer, and only helps when free "
+        "tanks exist.",
+    "lns_max_moves":
+        "How many refinement moves the 'lns' placement engine may make per "
+        "run. Only used when the placement engine is 'lns'. Higher = chases "
+        "more crowding but runs slower. Unit: moves.",
+    "auto_calibrate_fw":
+        "Auto-tune freshwater growth so each batch lands exactly on its "
+        "planned seawater-entry weight. On = the forecast ASSUMES the growth "
+        "needed to hit target (a planning assumption, not a guarantee the "
+        "fish grow that fast); each batch's tuned value is clamped to the "
+        "min/max below and flagged if it hits a clamp. Off = use each batch's "
+        "hand-set FW correction.",
+    "auto_calibrate_fw_min":
+        "Lower clamp on the auto-tuned freshwater growth multiplier. A batch "
+        "that would need LESS growth than this allows is capped here and "
+        "flagged in the log. Only used when auto-calibrate is on. Unit: "
+        "multiplier.",
+    "auto_calibrate_fw_max":
+        "Upper clamp on the auto-tuned freshwater growth multiplier. A batch "
+        "that would need MORE growth than this allows is capped here and "
+        "flagged as likely unreachable. Only used when auto-calibrate is on. "
+        "Unit: multiplier.",
+    "hybrid_follow":
+        "The long-horizon harvest guide (the 'hybrid'). 'full': before "
+        "planning, the app computes a whole-horizon harvest "
+        "plan and the weekly controller must follow it as a target band — it "
+        "is told to harvest LESS in fat weeks so those fish are still there "
+        "for the lean ones, the one thing a week-by-week planner cannot see "
+        "for itself. Measured on 6 real PRs: totally empty harvest weeks 6 → "
+        "0; the cost is a higher biomass peak (the held-back fish are still "
+        "in the water). 'off' = old reactive-only planning (leaves empty "
+        "weeks). 'floor' = only lifts short weeks (a no-op in practice)."
+        + _VALIDATED,
+    "hybrid_follow_band":
+        "How tightly the weekly controller must follow the long-horizon "
+        "harvest guide, as ± a fraction of the guide's weekly number. Tighter "
+        "(smaller) = steadier harvest and better-protected lean weeks; looser "
+        "= more freedom to chase the current week. UNIT: raw fraction — 0.05 "
+        "= ±5%. The shipped 0.05 beat 0.10 in a 90-cell paired sweep."
+        + _VALIDATED,
+    "hybrid_guide_min_frac":
+        "Housekeeping for the harvest guide: a guide week below this fraction "
+        "of the weekly harvest floor is ignored rather than followed down to "
+        "nothing — such weeks are structural gaps in the long-horizon plan "
+        "(its start-up and tail weeks), not real advice. UNIT: raw fraction "
+        "of the harvest floor. Default: 0.25. Ask before changing.",
+    "hybrid_guide_smooth_weeks":
+        "Optional averaging of the harvest guide's weekly numbers over this "
+        "many weeks before the controller follows them. 0 or 1 = follow the "
+        "raw curve — recommended; smoothing measured worse (it blunts exactly "
+        "the fat-week/lean-week signal the guide exists to carry). Unit: "
+        "weeks. Default: 0.",
+    "hybrid_purge_lever":
+        "Diagnostic kill switch: allows the harvest guide to steer how much "
+        "is staged into 6N depuration each week. On by default; turn off only "
+        "to isolate a suspected guide misbehaviour to one mechanism (this one "
+        "or the production lever) without a code change. Forced off whenever "
+        "'Level 6N purge drains' is off, regardless of this box.",
+    "hybrid_production_lever":
+        "Diagnostic kill switch: allows the harvest guide to steer the weekly "
+        "harvest ceiling and off-feed entry once 6N is in grow-out mode. On "
+        "by default; turn off only to isolate a suspected guide misbehavior "
+        "to one mechanism (this one or the purge lever) without a code "
+        "change.",
 }
 
 # Friendly display labels for the Control editor (the raw field name stays the key).
@@ -652,7 +725,7 @@ _CONTROL_LABEL = {
     "harvest_level_load": "Harvest smoother (on/off)",
     "harvest_smooth_lookahead_weeks": "Harvest smoother window K",
     "harvest_level_target": "Harvest level target (fish/wk)",
-    "harvest_grade_to_min": "Grade-harvest to the floor",
+    "harvest_grade_to_min": "Grade-harvest to the floor (INACTIVE)",
     "placement_method": "Placement engine",
     "lns_max_moves": "LNS move budget",
     "auto_calibrate_fw": "Auto-calibrate FW to transfer target",
@@ -665,6 +738,40 @@ _CONTROL_LABEL = {
     "hybrid_purge_lever": "  ↳ guide lever: 6N staging (purge)",
     "hybrid_production_lever": "  ↳ guide lever: harvest cap (production)",
 }
+
+
+def _ctl_fmt(v) -> str:
+    """One knob value, rendered the way an operator reads it. Pure."""
+    if v is None or v == "":
+        return "blank (auto)"
+    if isinstance(v, bool):
+        return "on" if v else "off"
+    if isinstance(v, float):
+        # 3,800,000 not 3800000.0; 0.005 not 0.00500
+        return f"{v:,.0f}" if abs(v) >= 1000 and float(v).is_integer() else f"{v:g}"
+    if isinstance(v, int):
+        return f"{v:,}"
+    return str(v)
+
+
+_NO_VALUE = object()
+
+
+def _ctl_help(k: str, v=_NO_VALUE) -> str:
+    """Tooltip for one Control knob: the static explanation PLUS this install's
+    live value.
+
+    The value is appended at RENDER time on purpose. The prose used to assert
+    it ("Current setting: 0.85") and silently rotted on every retune — the
+    2026-08-12 sweep caught density_target_pct claiming 0.85 against a config
+    holding 0.9, and the welfare line claiming 80 against 85. A tooltip may
+    describe what a knob DOES; only the config may say what it is SET to.
+
+    Pure (no Streamlit, no disk) so the contract is testable headlessly."""
+    base = _CONTROL_HELP.get(k) or ""
+    if v is _NO_VALUE:
+        return base
+    return f"{base}\n\nCurrently set to: {_ctl_fmt(v)}."
 
 
 def _ctl_label(k: str) -> str:
@@ -776,16 +883,18 @@ def _edit_control():
                             "value is an ignored seed.")
                 new[k] = v
             elif isinstance(v, bool):
-                new[k] = st.checkbox(_ctl_label(k), value=v, help=_CONTROL_HELP.get(k))
+                new[k] = st.checkbox(_ctl_label(k), value=v,
+                                     help=_ctl_help(k, v))
             elif isinstance(v, int):
                 new[k] = int(st.number_input(_ctl_label(k), value=int(v), step=1,
-                                             help=_CONTROL_HELP.get(k)))
+                                             help=_ctl_help(k, v)))
             elif isinstance(v, float):
                 new[k] = float(st.number_input(_ctl_label(k), value=float(v),
-                                               format="%.5f", help=_CONTROL_HELP.get(k)))
+                                               format="%.5f",
+                                               help=_ctl_help(k, v)))
             else:
                 new[k] = st.text_input(_ctl_label(k), value="" if v is None else str(v),
-                                       help=_CONTROL_HELP.get(k)) or None
+                                       help=_ctl_help(k, v)) or None
         if st.form_submit_button("💾 Save Control"):
             # control_from_dict coerces to the declared types and raises on a
             # value that cannot be one (e.g. text typed into a knob that is
