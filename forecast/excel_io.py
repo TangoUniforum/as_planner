@@ -1078,10 +1078,27 @@ def write_feed_forecast_monthly(
 
 
 # Open/Close ledger column headers (shared by Weekly + Monthly reports).
+#
+# Peak_Density LEGEND (stated in the sheet too): a ledger row is one BATCH-WEEK
+# and a batch normally sits in several tanks, so there is no single density for
+# the row. The column reports the WORST tank the batch occupied that week (max
+# over its BatchLocations rows) — the only aggregate that can be compared to the
+# per-tank cap, since a mean would hide a single over-cap tank inside a roomy
+# average. Blank (not 0) when the batch held no tank that week, e.g. a
+# freshwater week carried by the biology projection: an empty cell says "not
+# applicable", a 0 would say "density is fine", which is what this column used
+# to say on EVERY row.
+_LEDGER_DENSITY_LEGEND = (
+    "Peak_Density (kg/m³) = the WORST tank this batch occupied in the period "
+    "(max over its tanks), not a mean — a mean would hide one over-cap tank "
+    "inside a roomy average. Blank = the batch held no tank that period "
+    "(e.g. a freshwater week)."
+)
+
 _LEDGER_COLS = [
     "Open_Count (fish)", "Open_AvgWt (g)", "Open_Bio (kg)",
     "Close_Count (fish)", "Close_AvgWt (g)", "Close_Bio (kg)",
-    "Density (kg/m³)", "SGR (%/day)", "Gross_Growth (kg)",
+    "Peak_Density (kg/m³)", "SGR (%/day)", "Gross_Growth (kg)",
     "Net_Production (kg)", "Feed (kg)", "SFR (%/day)",
     "Bio_FCR (ratio)", "Econ_FCR (ratio)",
     "Mort_Count (fish)", "Mort_Bio (kg)",
@@ -1117,7 +1134,8 @@ def _build_batch_week_ledger(
 
     # Realized close per (batch, week) from BatchLocations.
     rl: dict[tuple, dict] = defaultdict(
-        lambda: {"count": 0.0, "bio": 0.0, "wt_sum": 0.0, "week_start": None})
+        lambda: {"count": 0.0, "bio": 0.0, "wt_sum": 0.0, "week_start": None,
+                 "peak_density": None})
     feed: dict[tuple, float] = defaultdict(float)
     for r in batch_locations:
         key = (r.batch_id, r.week_label)
@@ -1126,6 +1144,14 @@ def _build_batch_week_ledger(
         e["bio"] += r.biomass_kg
         e["wt_sum"] += r.avg_wt_g * r.count
         e["week_start"] = r.week_start
+        # WORST tank this batch occupied this week — see the Peak_Density
+        # legend on _LEDGER_COLS. None stays None when the batch has no tank
+        # rows at all (FW weeks), so the cell reads blank, not "0 = fine".
+        _d = getattr(r, "density_kg_m3", None)
+        if _d is not None:
+            _d = float(_d)
+            e["peak_density"] = (_d if e["peak_density"] is None
+                                 else max(e["peak_density"], _d))
         # STARVE tank-weeks (6N depuration) eat nothing (helper returns 0).
         feed[key] += _row_feed_kg_day(r, batches, tables) * 7.0
     # 6N purge move-in fish ate 4 pre-transfer days in their source tank (now
@@ -1323,6 +1349,8 @@ def _build_batch_week_ledger(
                 "batch": b, "week": wk, "week_start": ws_date,
                 "open_count": oc, "open_wt": owt, "open_bio": obio,
                 "close_count": cc, "close_wt": cwt, "close_bio": cbio,
+                "peak_density": (rl[(b, wk)]["peak_density"]
+                                 if (b, wk) in rl else None),
                 "sgr": sgr, "gross_growth": gross_growth, "net_prod": net_prod,
                 "feed": f, "sfr": sfr, "bio_fcr": bio_fcr, "econ_fcr": econ_fcr,
                 "mort_count": mort_count, "mort_bio": mort_bio,
@@ -1337,10 +1365,12 @@ def _build_batch_week_ledger(
 
 def _ledger_value_cells(d: dict) -> list:
     """Format the 27 shared open/close ledger value columns from a row dict."""
+    _pk = d.get("peak_density")
     return [
         round(d["open_count"], 0), round(d["open_wt"], 1), round(d["open_bio"], 0),
         round(d["close_count"], 0), round(d["close_wt"], 1), round(d["close_bio"], 0),
-        0, round(d["sgr"], 4), round(d["gross_growth"], 0),
+        (round(_pk, 1) if _pk is not None else None),
+        round(d["sgr"], 4), round(d["gross_growth"], 0),
         round(d["net_prod"], 0), round(d["feed"], 0), round(d["sfr"], 4),
         round(d["bio_fcr"], 2), round(d["econ_fcr"], 2),
         round(d["mort_count"], 0), round(d["mort_bio"], 1),
@@ -1378,7 +1408,7 @@ def write_weekly_report(
         del wb[sheet_name]
     ws = wb.create_sheet(sheet_name)
     ws.append([f"{sheet_name} - populated by RunForecast"])
-    ws.append([])
+    ws.append([_LEDGER_DENSITY_LEGEND])
     ws.append([])
     ws.append(["Scenario", "Week", "Week_Start", "Batch"] + _LEDGER_COLS)
 
@@ -1422,7 +1452,8 @@ def write_monthly_report(
         del wb[sheet_name]
     ws = wb.create_sheet(sheet_name)
     ws.append([f"{sheet_name} - populated by RunForecast"])
-    ws.append([])
+    ws.append([_LEDGER_DENSITY_LEGEND + " Monthly = the max of the month's "
+               "weekly peaks (a boundary week counts in both months)."])
     ws.append([])
     ws.append(["Scenario", "Month", "Batch"] + _LEDGER_COLS)
 
@@ -1499,6 +1530,7 @@ def write_monthly_report(
                 if a is None:
                     a = {k: 0.0 for k in FLOW_KEYS}
                     a["days"] = 0.0
+                    a["peak_density"] = None
                     # state at month START: advance harvest + non-harvest deltas
                     # each by its own cumulative fraction
                     a["open_count"] = oc + cum_c * dc_n + cum_w * dc_h
@@ -1507,6 +1539,15 @@ def write_monthly_report(
                 a["close_count"] = oc + (cum_c + fc) * dc_n + (cum_w + fw) * dc_h
                 a["close_bio"] = ob + (cum_c + fc) * db_n + (cum_w + fw) * db_h
                 a["days"] += fc * 7.0
+                # Peak_Density is a MAX, never a prorated flow: the worst tank
+                # the batch held in the month is the worst tank it held in one
+                # of the month's weeks. A boundary week's peak counts for BOTH
+                # months it spans — a peak cannot be split without ceasing to
+                # be one.
+                _wpk = w.get("peak_density")
+                if _wpk is not None:
+                    a["peak_density"] = (_wpk if a.get("peak_density") is None
+                                         else max(a["peak_density"], _wpk))
                 for k in FLOW_KEYS:
                     a[k] += w[k] * (fw if k in HARVEST_KEYS else fc)
                 cum_c += fc
@@ -1529,6 +1570,7 @@ def write_monthly_report(
             "batch": b, "week": mo, "week_start": None,
             "open_count": open_count, "open_wt": open_wt, "open_bio": open_bio,
             "close_count": close_count, "close_wt": close_wt, "close_bio": close_bio,
+            "peak_density": a.get("peak_density"),
             "sgr": sgr, "gross_growth": gross_growth, "net_prod": net_prod,
             "feed": f, "sfr": sfr,
             "bio_fcr": (f / gross_growth) if gross_growth > 0 else 0.0,
