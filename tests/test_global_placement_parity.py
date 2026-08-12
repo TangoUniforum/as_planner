@@ -383,10 +383,11 @@ class TestSolvesAreReproducible:
         a = inspect.getsource(l3._solve_passA_per_week)
         b = inspect.getsource(l3._solve_passB_per_week)
         assert "SYMMETRY BREAKING" in a
-        assert "SYMMETRY BREAKING" not in b,             "Pass B knows occupancy — ordering there would force real moves"
+        assert "SYMMETRY BREAKING" not in b, (
+            "Pass B knows occupancy — ordering there would force real moves")
         # Pass A must remain stateless: no prior-occupancy inputs in its model.
-        code = "
-".join(l for l in a.splitlines() if not l.strip().startswith("#"))
+        code = "\n".join(ln for ln in a.splitlines()
+                         if not ln.strip().startswith("#"))
         for token in ("prev_state", "last_sys", "prev_by_batch", "initial_state"):
             assert token not in code, f"Pass A now sees {token}; symmetry class is unsound"
         # Pass B must still carry the stickiness term it permutes back with.
