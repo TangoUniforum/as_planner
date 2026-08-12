@@ -46,6 +46,7 @@ from forecast.config_io import load_config
 from forecast.scenario_io import load_batches, load_limits
 from forecast import global_forecast as gf
 from forecast import global_planner_loop_poc as loop
+from forecast import config_snapshot as _cs
 from tools.run_full_facility_poc import _hydrate_pr
 
 
@@ -633,8 +634,14 @@ def _emit_workbook(gft, result, batches, tables, control, facility,
     # ---- RunConfig: the METHOD STAMP + model flags + conservation. ----
     ws = wb.active
     ws.title = "RunConfig"
-    ws["A1"] = "RUN CONFIG — GLOBAL METHOD EXPORT"
+    # A1 is the sheet-KIND discriminator (forecast.config_snapshot.run_config_kind):
+    # this is a method STAMP — a record of what ran — not the controller's
+    # re-importable YAML snapshot that shares the sheet name. Keep the prefix in
+    # sync with config_snapshot.KIND_STAMP_MARK (a test pins the pair).
+    ws["A1"] = _cs.KIND_STAMP_MARK
     rows = [
+        ("(sheet kind)", "method stamp — a record of what ran; NOT an "
+                         "importable config snapshot"),
         ("planning_method", gf.METHOD_STAMP),
         ("model_purge_hold", "True (2-week off-feed 6N purge depuration flow)"),
         ("model_full_facility", "True (FW + OG + 6N purge counted vs the cap)"),

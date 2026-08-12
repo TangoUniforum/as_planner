@@ -3311,7 +3311,13 @@ def _config_io_section():
     with c2:
         st.markdown("**Import — load config from a file**")
         st.caption("A filled config template, or a saved forecast workbook "
-                   "(RunConfig snapshot). Overwrites current config/ + scenario/.")
+                   "(RunConfig snapshot). Overwrites current config/ + scenario/. "
+                   "The analysis overlays are deliberately NOT carried in a "
+                   "workbook and are never overwritten by an import: "
+                   "`analysis_defaults.yaml` (your promoted Quick-run default), "
+                   "`targets.yaml` and `economics.yaml` (the scoring yardstick). "
+                   "They steer how a run is judged, not what it computes — a "
+                   "workbook must not be able to move them.")
         imp = st.file_uploader("Config template or saved workbook",
                                type=["xlsx", "xlsm"], key="cfg_import")
         if st.button("📥 Import config", disabled=imp is None, key="do_import",
@@ -3322,11 +3328,13 @@ def _config_io_section():
                 )
                 from forecast.config_snapshot import (
                     import_config_snapshot, read_config_snapshot,
+                    describe_run_config_sheet,
                 )
                 wd = Path(tempfile.mkdtemp(prefix="as_import_"))
                 p = wd / imp.name
                 p.write_bytes(imp.getvalue())
                 wb = load_workbook(p, keep_vba=(p.suffix.lower() == ".xlsm"))
+                why = ""
                 if is_config_template(wb):
                     restored = import_config_template(wb, CONFIG_DIR, SCENARIO_DIR)
                     src = "config template"
@@ -3334,11 +3342,17 @@ def _config_io_section():
                     restored = import_config_snapshot(wb, CONFIG_DIR, SCENARIO_DIR)
                     src = "RunConfig snapshot"
                 else:
+                    # Say WHICH RunConfig sheet this is. A Global method-stamp
+                    # workbook has one — reporting a flat "not found" for it
+                    # sent the operator hunting a file-format problem that
+                    # never existed.
                     restored, src = [], None
+                    why = describe_run_config_sheet(wb)
                 wb.close()
                 if not restored:
-                    st.error("No config template or RunConfig snapshot found "
-                             "in that file.")
+                    st.error("Nothing to import from that file. "
+                             + (why or "It is neither a config template nor a "
+                                       "RunConfig snapshot."))
                 else:
                     _clear_all_editor_state()  # refresh open editors from disk
                     st.success(f"Imported {len(restored)} file(s) from {src}: "
