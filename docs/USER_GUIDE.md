@@ -36,14 +36,34 @@ cd "…/Forecasts/Tool/Python"
 streamlit run app.py
 ```
 Opens `localhost:8501`. Flow: **upload** a Production Report → **▶ Run forecast**
-→ review KPIs + tabs → **download** the output workbook. The sidebar **Mode**
-selector has five windows: **Run forecast**, **Configure** (edit Control
-parameters and per-batch models before running), **Tune (density knobs)** (sweep
-the controller knobs and read the per-batch density distribution — §7.1),
-**Optimize (multi-objective)** (rank knob variants on a selectable walk-the-line /
-feed / handling objective — §7.2), and **Compare & Choose (all methods)** (run
-every planning engine on one PR, grade them on several lenses, and pick which plan
-becomes the report — §7.4).
+→ review KPIs + tabs → **download** the output workbook.
+
+The sidebar **Mode** selector lists six windows, in the order you normally work
+in them. Each carries a one-line caption in the app itself; the same list, with
+pointers into this guide:
+
+| Mode | What it is for | Section |
+|---|---|---|
+| **Configure (models & control)** | Set up once — biology curves, tanks, batches, per-week limits, control knobs, harvest targets and prices | §3 |
+| **Run forecast** | The everyday step — run your chosen plan on today's PR and download the workbook | §5 |
+| **Analyze (find my best plan)** | "Which plan should I use?" — runs every engine, searches the knobs, grades them all, recommends ONE | §13 |
+| **Compare & Choose (all methods)** | Run the engines side by side and pick which whole plan becomes the report. **This is where the planning method is chosen** | §7.4 |
+| **Optimize (multi-objective)** | Sweep control knobs on ONE engine and rank the settings on an objective you choose | §7.2 |
+| **How it works (the rules)** | The plain-language rulebook — what each layer decides, what it may never do, the honest limits | — |
+
+The app still *lands* on **Run forecast**; the ordering above is reading order,
+not a change of entry point.
+
+> **Retired:** the old **Tune (density knobs)** mode is gone. Its density
+> distribution and severe-batch readout are now a checklist gate plus a
+> per-candidate drill-in on the **Analyze** board, and the stocking frontier
+> moved there with it (§13.1). The headless sweep remains: `python
+> tools/tune_sweep.py`.
+>
+> **Also gone:** the sidebar no longer has a **Planning method** selector. The
+> method is chosen on the **Compare & Choose** board, where you can see every
+> engine graded side by side first; ▶ Run forecast then re-runs whichever plan
+> you picked. The current pick is shown in the sidebar above the Run button.
 
 At the top of the sidebar, above the Mode selector, a **Computer power** slider
 (10–100%, default **40%**) sets how much of the machine the *heavy* runs may
@@ -63,12 +83,11 @@ solve will use everything you give it, but the per-week solves used by
 setting kept only about 3 cores busy. If a heavy run isn't using the share you
 set, that's usually the reason — not a broken setting.
 
-Lower in the sidebar (visible in every mode, but it governs **▶ Run forecast**) is a
-**Planning method** selector:
-**Controller (validated)** — the default closed-loop planner (§4) — or **Global
-(precalculated)** — an experimental alternative engine (§12). Same PR in, same
-workbook shape out, each stamped with the method that produced it, so you can run
-both and compare apples-to-apples.
+Lower in the sidebar (visible in every mode, but it governs **▶ Run forecast**)
+the app shows **which planning method is currently picked**, and — when it is
+the default — why. You change it on **Compare & Choose** (§7.4), not here. The
+shipped default is **Controller — hybrid (L1-guided harvest)**: the only method
+measured to harvest something every single week (§4.5).
 
 ### CLI
 ```
@@ -110,13 +129,13 @@ Facility-wide knobs read into `ControlParams`:
 | `max_biomass_kg` | facility biomass cap — checked against **TOTAL** facility biomass (FW + OG + 6N purge), per-week overrides in FacilityLimits | (config default; overridable per week) |
 | `max_feed_per_day_kg` | facility daily feed cap — checked against total **feeding** (SW + FW) feed/day; off-feed purge fish excluded (§4.1) | (config default) |
 | `max_harvest_per_week` | **THE** weekly processing limit (fish) — a **constraint** the demand-driven harvest respects, never a level to plan up to: harvest = what biomass/density/floor/contracts need, capped here (the 6N drain holds a purge tank back one rotation rather than exceed it). The removed `harvest_target_per_week` knob is ignored with a console note if an old config still carries it | 55,000 |
-| `harvest_relief_pct` | pressure-relief band above the limit, as a fraction: derived absolute ceiling = `max_harvest_per_week × (1 + relief)` = 60,500. Relief is **exceptional** ("allowed more, but not every time"): the Analyze checklist shows amber at 1–3 relief weeks and red beyond 3 — or on any week past the derived ceiling — telling you to ramp harvests up earlier instead. 0 = no band | 0.10 |
+| `harvest_relief_pct` | pressure-relief band used to **judge** a plan: derived absolute ceiling = `max_harvest_per_week × (1 + relief)` = 60,500. **No engine reads this knob** — the planner's own weekly ceiling is the limit itself; weeks land in the relief band when a whole 6N pair had to drain or an INV-5 force-empty overdrew (that overage is borrowed back from the next week). What the knob decides is how such weeks are SCORED: the Analyze checklist shows amber at 1–3 relief weeks and red beyond 3 — or on any week past the derived ceiling — telling you to ramp harvests up earlier instead. It also drives the manual-window over-ceiling lint. 0 = no band | 0.10 |
 | `min_harvest_per_week` | weekly harvest floor | 30,000 |
-| `max_transfers_per_week` | weekly HANDLING BUDGET (transfer moves/week). A "move" = one distinct src→dst tank transfer with fish in it, exactly what a TransferPlan `Transfer` row shows (same-week duplicate legs are merged into one row; 0-fish float-residue legs are dropped; TranOG/Grade rows are not moves) — the engine's internal budget counts the **same unit**. Once a week's moves reach the budget, the deferrable quality passes (plan-diff *evening* top-ups, even-out, balancer, variable-quantity, remnant sweep) wait for a calmer week and the leveling resumes there; essential moves (6N rotation fills, arrival make-room/vacates, plan-diff *source drains* — tanks another batch takes over) are never blocked — an overrun on the handling gate (WARN >12 / FAIL >15) therefore means essential moves alone exceeded it, which happens when a TranOG arrival week coincides with a 6N rotation fill (the tanks the displaced batches need only free up that same week). 0 = off | 15 |
+| `max_transfers_per_week` | weekly HANDLING BUDGET (transfer moves/week). A "move" = one distinct src→dst tank transfer with fish in it, exactly what a TransferPlan `Transfer` row shows (same-week duplicate legs are merged into one row; 0-fish float-residue legs are dropped; TranOG/Grade rows are not moves) — the engine's internal budget counts the **same unit**. Once a week's moves reach the budget, the deferrable quality passes (plan-diff *evening* top-ups, even-out, balancer, variable-quantity, remnant sweep) wait for a calmer week and the leveling resumes there; essential moves (6N rotation fills, arrival make-room/vacates, plan-diff *source drains* — tanks another batch takes over) are never blocked — an overrun on the handling gate (WARN >12 / FAIL >15) therefore means essential moves alone exceeded it, which happens when a TranOG arrival week coincides with a 6N rotation fill (the tanks the displaced batches need only free up that same week). 0 = off. **Two scope limits worth knowing:** the *split* pass is NOT budget-gated (`placement.py:3491-3498`), and the **Global engines never read this knob at all** — expect Global plans well over the budget, flagged only by the (soft) handling gate | 15 |
 | `min_harvest_weight_g` | minimum weight a fish can be harvested at | 3,500 |
 | `min_tank_control` | force-empty floor (fish): a harvest/transfer leaving fewer than this empties the tank (INV-5) | 7,000 |
 | `min_transfer_count` | min rebalancer transfer size (fish): the density/load balancer won't split a sub-group **smaller than this OUT** of a tank (the OUT-side mirror of `min_tank_control`). **0 = OFF.** Suppresses tiny partial moves — trades fewer transfers for more *marginal* density over-cap (the small moves were doing fine-grained relief); whole-tank consolidation moves are unaffected | 0 (off) |
-| `harvest_grade_to_min` | **opt-in (default OFF).** On a 6N purge week whose move-in falls below `min_harvest_per_week`, peel **just enough** of the over-weight tail from near-market tanks (capped at the exact shortfall) to reach the floor: big → 6N purge, the **small tail stays in the source tank** (same batch — no extra tank), honoring `min_transfer_count` and `min_tank_control`. An **exception** (fires only below the floor), not a rule. **ON in the shipped config**, where it fires ~9×/PR. *Re-measured 2026-08-03 across 6 real PRs (vs OFF):* essentially a **wash on harvest pacing** — weeks below floor 22.5 vs 21.5 and total fish harvested flat (~5.72M) are both inside the noise floor, as is the empty-week difference. Its one real benefit is **peak tank density 113 → 102**. (An older single-config measurement claimed a production gain; the 6-PR result supersedes it.) **Do not widen its trigger** — the `min_transfer_count` floor makes it unreachable when the shortfall is small, and lifting that floor is measurably *worse*: empty weeks 6 → 9, because the peel pulls forward exactly the fish that would have filled a pair 2–3 weeks later. Conservation-clean (0 dropped / 0-drift). Bounded by free 6N pair tanks | false (config: **true**) |
+| `harvest_grade_to_min` | **INACTIVE — this switch no longer controls anything.** The behaviour it used to gate (on a 6N purge week whose move-in falls below `min_harvest_per_week`, peel just enough of the over-weight tail from near-market tanks to reach the floor: big → 6N purge, the small tail stays in the source tank) now runs **unconditionally** — `placement.py:1733`: *"NOW UNCONDITIONAL (subsumes the old opt-in `harvest_grade_to_min`, which remains accepted but no longer gates this)"*. Leaving it off does **not** disable the behaviour; it produced empty harvest weeks, which breaks the steady-harvest contract. Flipping the box changes only a row in the app's run summary. Kept so older configs load | n/a (inert) |
 | `default_hog_yield` | gross→HOG conversion (per-week overrides in FacilityLimits) | 0.81 |
 | `scenario_name` | label for the run (reports + RunConfig) | Forecast |
 | `facility_biomass_deviation_pct` | **FACILITY** setpoint band — the soft band below the (FW-inclusive) facility biomass/feed cap the harvest controller runs at; the one knob for how close to the *facility* cap to run (§4.3) | (config default) |
@@ -836,11 +855,12 @@ raw "OVER CAP" count to zero — read the *distribution*:
 **To find the right knobs, sweep — don't guess.** Two ways, both driven by the
 same engine (`forecast/tuning.py`):
 
-- **In the app (recommended):** sidebar **Mode → Tune (density knobs)**. With your
-  config set and a Production Report uploaded, pick **Quick** or **Full** sweep
-  depth and click **▶ Run tuning sweep**. It shows the peak-density distribution
-  per variant, a stacked-band chart, the **recommended** variant, and the
-  severe-batch list. The sweep itself never modifies your config — it runs each
+- **In the app (recommended):** **Mode → Analyze**, then the *📊 Density quality*
+  expander at the bottom of the board. It shows the peak-density distribution
+  per candidate, the severe-batch list, and the gate's verdict. (This replaced
+  the retired Tune mode — §13.1.) Reading rule: the gate counts batches at
+  **≥1.3× cap**; the drill-in table lists everything from **1.2×** so you can
+  see what is approaching severe. Nothing here modifies your config — it runs each
   variant in a temp copy — but the results panel has a **💾 Save these tuning knobs
   to my config** button if you want to keep the winner.
 - **CLI:** `python -m tools.tune_sweep --config-template "C:\path\config_template (N).xlsx"`
@@ -1196,7 +1216,7 @@ Everything the app does can be run from the terminal — useful for understandin
 pipeline (a direct run **narrates every stage to the console**) and for scripting.
 
 ```powershell
-# The app (visual: Run / Configure / Tune / Optimize / Compare & Choose)
+# The app (Configure / Run / Analyze / Compare & Choose / Optimize / How it works)
 streamlit run app.py
 
 # A single forecast, directly — prints the full stage-by-stage narration
@@ -1207,8 +1227,9 @@ python -m forecast.run --workbook Forecast.xlsm --output out.xlsm `
 # the L1-guided hybrid (§4.5). It has no --method flag; to run a specific method,
 # either set hybrid_follow in the config or use Compare & Choose in the app.
 
-# The GLOBAL (precalculated) method instead of the controller (§12) — writes
-# <stem>_GLOBAL.xlsx; or pick it on the app's Compare & Choose board
+# A GLOBAL whole-horizon method instead of the controller (§12) — writes
+# <stem>_GLOBAL.xlsx; or pick it on the app's Compare & Choose board.
+# Read §12's "What they do NOT do" before treating the output as executable.
 python -m tools.run_global_forecast --workbook Forecast.xlsm
 
 # Tests (the conservation + determinism guardrails)
@@ -1311,83 +1332,111 @@ given PR's layout can be flattened further. Measure it with `python -m tools.lns
 
 ---
 
-## 12. Optional: the Global (precalculated) planning method
+## 12. The Global (whole-horizon) planning methods
 
-An **alternative planning engine** to the closed-loop controller (§4), selectable in
-the app's sidebar (**Run forecast → Planning method → Global (precalculated)**) or
-via `tools/run_global_forecast.run_global(...)`. It is **experimental**; the
-**Controller is the validated default** and the one you should plan against. Global
-exists so you can run the same PR through a different engine and **compare
-apples-to-apples** — same workbook shape, each stamped with its method.
+Two of the five selectable methods (§7.4) are **Global**: instead of deciding
+week by week like the controller (§4), they lay out the whole horizon up front.
 
-**How it differs.** The controller decides harvest *reactively*, week by week, against
-the realized placement. The global method **pre-calculates** the whole horizon in
-layers:
-- **L1 (tankless harvest envelope).** Runs the biology and harvests just enough to
-  hold the **true whole-facility biomass** — FW (freshwater) + OG (grow-out) + the 6N
-  purge backlog, all counted — **within the cap every week**. It paces harvest
-  anticipatorily against the 2-week 6N purge lag, and **primes the purge pipeline with
-  the fish already mid-purge in the PR's 6N tanks** (mirroring `sixn.initial_purge_pair_
-  queue`) so it doesn't over-shoot at startup.
-- **L3 (placement LP).** A lexicographic linear program lays the whole horizon out at
-  once — meet the per-system caps first, then minimize transfers.
-- **Specific-tank pick.** Realizes the system plan as physical tanks **swap-free** (a
-  tank a batch leaves stays fallow a week before another batch enters it), which is what
-  guarantees **0 TANK_DRIFT** — every fish accounted for, the same continuity audit the
-  controller passes.
-- **Over-stock (optimizer-tuned).** A placement optimizer
-  (`tools/run_placement_optimize.py`) sweeps candidate levers and bakes in the winner:
-  **selectively concentrating light/young batches toward the hard density cap** to free
-  tanks (heavier batches stay at operating density). It cuts density-over-cap tank-weeks
-  ~30%.
+| Method (as it appears on the board) | Placement layer |
+|---|---|
+| **Global — lexicographic LP** | a lexicographic linear program |
+| **Global — CP-SAT optimal** | same front end; the grow-out tank layout is re-solved each week by an OR-Tools CP-SAT constraint solver |
 
-**Optimal placement (CP-SAT, optional).** Ticking *Optimal placement* in the app (or
-picking the *Global optimal* engine in **Compare & Choose**; there is no `--optimal`
-CLI flag) swaps the greedy L3 heuristic for an OR-Tools **CP-SAT** solve of
-each week's tank layout. It drives per-tank density to the cap (**~100 kg/m³**, where the
-heuristic leaves it 300+ and the controller ~123), places **every batch to a real tank**
-(no envelope residual, full conservation PASS), and minimizes system-load variance. The
-trade is **more transfers** (~1.9/fish vs ~0.8 heuristic / ~0.7 controller — it moves
-fish to keep density even) and a **~30-min** solve for a 52-week horizon (the heuristic LP
-is ~4 min). A fixed per-week deterministic budget + seed make the solve *quality*
-reproducible (~0.8% optimality gap); equally-optimal layouts can differ tank-for-tank.
-Output is stamped `_planned_OPTIMAL.xlsx`.
+Both share the same front end: an **L1 harvest envelope** (run the biology and
+harvest just enough to hold the *true whole-facility* biomass — freshwater +
+grow-out + the 6N purge backlog — under the cap every week, paced against the
+2-week depuration lag), then **L3**, which decides how many tanks each batch
+holds in each system each week, then a **specific-tank pick** that turns that
+into physical tanks. `optimal=True` is the only difference: it replaces the
+grow-out layout with the CP-SAT solve. Run them from the app's **Compare &
+Choose** board, or headlessly via `tools/run_global_forecast.run_global(...)`.
 
-**What's guaranteed.** Conservation is exact (seeded == harvested + standing +
-mortality + cull, 0.0000%); `TankContinuityAudit` shows **0 TANK_DRIFT**; L1 holds the
-true total within limits every week. The output is the standard workbook via the shared
-writers, with a `RunConfig` "GLOBAL METHOD EXPORT" stamp. The app names it
-`_planned_GLOBAL.xlsx` (`_planned_OPTIMAL.xlsx` for optimal placement); the CLI
-`tools.run_global_forecast` writes `<stem>_GLOBAL.xlsx`.
+### What they genuinely give you
 
-**Honest limitations.**
-- It emits the core sheets (HarvestPlan, FeedForecast, Advisory, WeeklyReport,
-  BatchLocations, FacilityMap, TransferPlan, TankContinuityAudit, StandingTrace,
-  ReconciliationReport) but **not** BiologyProjection, ValidationLog, YearlySummary,
-  TransferTemplate, or Control — so those app tabs render **empty** for a Global run.
-  The density heatmap + violation/worst-density/harvest KPIs work for both methods.
-- The residual per-tank **density over-cap** the *heuristic* leaves is a **placement
-  concentration**, not a hard capacity wall: the optimal CP-SAT mode (above) balances the
-  whole facility at once and drives peak density back to the cap (~100 kg/m³ vs the
-  heuristic's 300+), at the cost of more transfers. Within the *controller*, though, no
-  tuning knob removes it (§7.1: it's a stocking problem, not a controller-tuning one) —
-  only a global re-placement does, and only while total biomass stays under total
-  density-capacity.
-- It runs an LP per week, so it's **slower** than the controller (though fast once L1 is
-  within limits).
+- **Exact conservation.** Seeded == harvested + standing + mortality + cull;
+  `TankContinuityAudit` shows 0 TANK_DRIFT. This is the same bar the controller
+  passes, and it is real.
+- **The whole-horizon view.** L1 sees fat weeks and lean weeks at once, which
+  is precisely what a week-by-week controller cannot. That is valuable enough
+  that the shipped default *borrows* it: the hybrid controller (§4.5) runs L1
+  first and follows it as a target band.
+- **One batch per tank**, structurally, in both arms.
+- **Mode-aware 6N.** 33 production tanks in the purge era, 36 after the
+  production start date — the three 6N *mains* become grow-out then, while the
+  three *sisters* are harvest-staging in both modes and are never production
+  tanks (`global_planner_l3_poc.production_tanks_per_system`).
+- **The weekly harvest limit binds the 6N release.** A cohort whose release
+  would exceed `max_harvest_per_week` is split pro-rata and the remainder
+  deferred to the following week (`release_due_capped`).
+- **CP-SAT: a real per-tank density cap.** Each tank's own
+  `max_density_kg_m3 × volume_m3` from your facility config is a hard solver
+  constraint, plus system-load balancing.
 
-**What the build established (useful regardless of which engine you ship).** Holding the
-global method to the same conservation bar as the controller showed, from first
-principles, that **the controller is already near-optimal** for this facility — every
-correctness refinement made the global method converge toward what the controller does.
-It also surfaced one actionable finding in the *shipped* tool: the binding harvest
-controller enforced its cap on **OG only**, ignoring the 100–266k kg of **FW** standing
-on-farm, so the true total ran ~3–4% over the cap at peaks. **This has since been FIXED
-in the controller** (a 37-agent deployment audit, `docs/DEPLOYMENT_AUDIT.md`): the cap
-basis is now FW-inclusive, the controller anticipates the known FW curve, and the
-operator cap reports + the feed dual-limit were aligned to match (§4.1, §6). The two
-engines now agree on tonnage (~8.2M kg), both 0 weeks over the true cap. Use Global as a
-**cross-check and diagnostic**, not a replacement for the validated controller.
+### What they do NOT do — read this before adopting a Global plan
+
+These are not caveats about polish. They are the difference between a benchmark
+and a plan the crew can execute.
+
+- **They never read the handling budget.** `max_transfers_per_week` does not
+  appear anywhere in the Global code path. They *minimise* moves in their
+  objective, but nothing caps a week, so expect weeks well over the budget. The
+  handling-budget gate in Analyze will show it — and that gate is soft, so it
+  will not stop the plan being recommended.
+- **They enforce only part of the tier rulebook.** The Global pick imports only
+  `SIXN_SYSTEM`, `is_entry` and `move_allowed` from `forecast/tiers.py`. R2, R3
+  and R4 are checked when a move is paired up, and CP-SAT respects R6. **R1, R5
+  and R7 are not checked at all.** Worse, when no legal source exists for a move
+  the pick **emits the move anyway** and logs a `TOPOLOGY VIOLATION` row — the
+  controller would have refused it and left state unchanged.
+- **The planning pass decomposes into independent weekly problems**, which is
+  why week-to-week topology can break in the first place.
+- **The LP arm has no per-tank density constraint.** It sizes tanks off a single
+  facility-wide number — the *smallest* OG tank's legal mass × `density_target_pct`
+  — and where a batch cannot get enough tanks the pick packs it denser and flags
+  the row. Nothing rejects an over-cap tank. Only the CP-SAT arm constrains
+  density per tank.
+- **CP-SAT's infeasible-week fallback is a live path.** If a week cannot be
+  solved, that week falls through to a placement with **no density test at
+  all**, and the run writes `PLACEMENT DEGRADED — CP-SAT could not place N of M
+  week(s)` to the ValidationLog. Seeding the solver with real starting occupancy
+  took this to 0 weeks on the operator's PR — that is a *measurement*, not a
+  guarantee; check for the row.
+- **No gate fails a run for any of the above.** The Compare board's four badges
+  are conserves / fully placed / no empty week / under cap. Topology violations,
+  the placement gap, the CP-SAT degrade and the L3 solver warnings have **no
+  gate at all** — they are ValidationLog text.
+
+### Determinism
+
+L3's Pass A.2 and Pass B use **proved-only** solves (a solve that hits its limit
+is discarded and the previous pass's layout stands), and system symmetry is
+broken so equivalent systems cannot swap between runs. Two honest exceptions:
+Pass A.1 *does* use a limit-bound incumbent and only warns
+(`NON-DETERMINISTIC SOLVE` in the ValidationLog, whose text says the run is not
+reproducible), and CP-SAT accepts a FEASIBLE — not only OPTIMAL — solve, resting
+reproducibility on a fixed seed plus a deterministic work budget.
+
+### So which do I run?
+
+Use a **Controller** method for a plan you intend to execute: the controller
+family enforces R1-R7 while planning (an illegal move is refused, not logged),
+respects the handling budget by deferring its optional quality passes, and routes
+all harvest through 6N. Use **Global** to ask a different question — *how good
+could this facility's layout be if handling and topology cost nothing?* — and to
+read the L1 envelope, which is genuinely better information than the controller
+can produce alone.
+
+**Before adopting a Global plan**, open its workbook's **ValidationLog** and
+search for `TOPOLOGY VIOLATION`, `DEPURATION HOLD`, `PLACEMENT GAP`,
+`PLACEMENT DEGRADED`, `UNPLACED BATCH` and `NON-DETERMINISTIC SOLVE`, and check
+the handling-budget gate in Analyze.
+
+> **Reporting gap to know about.** A Global run writes a `RunConfig` sheet with a
+> completely different layout from a controller run's (a field stamp headed
+> "RUN CONFIG — GLOBAL METHOD EXPORT" rather than the re-importable YAML dump),
+> so **Configure → Import from workbook silently restores nothing** from a Global
+> workbook. Import config from a controller run or from a config template.
+
 
 ## 13. Analyze mode — find my best plan (one flow)
 
@@ -1411,10 +1460,13 @@ that whole composition in one flow and ends in a single recommendation card:
      (single pass over its space) and is marked **gate-bound** if no knob
      fixes the failure (the full search is skipped honestly). Each tuned
      winner is verified on its **own engine** and joins the board as
-     *"METHOD (tuned: knobs)"*. The Global methods have **no
-     conservation-safe knobs** (the only tunable knobs their path reads broke
-     the Global conservation proof when overridden — evidence in
-     `forecast/methods.py`), so they compete at stock in both depths.
+     *"METHOD (tuned: knobs)"*. The Global methods have **no tunable knobs
+     at all** (the only tunable knobs their path reads broke the Global
+     conservation proof when overridden, so the registry refuses to put them
+     in a search space — evidence in `forecast/methods.py`), so they compete
+     at stock in both depths. A consequence worth knowing: a Global method
+     that fails a hard rule is marked **gate-bound with no probe run** —
+     there is no knob to try.
      Business constants (`min_harvest_weight_g`, stocking) and the
      operational rules (`max_harvest_per_week`, `harvest_relief_pct`,
      `min_harvest_per_week`, `max_transfers_per_week`) are **untunable by
@@ -1422,16 +1474,35 @@ that whole composition in one flow and ends in a single recommendation card:
      estimated engine runs per method (and how much the variant cache already
      paid for) before you press go; the headless twin is
      `python -m tools.run_tuned_tournament --workbook <PR>`.
-3. **The checklist** — every candidate is judged on the hard-rule checklist:
-   conservation and never-an-empty-week are **hard** (a fail disqualifies);
-   the biomass cap, the 55k processing cap, and your **harvest targets** are
-   soft (flagged and penalized, never hidden). Harvest-compliance gates judge
-   the **planner weeks only**: manual-override window weeks you scripted
-   yourself (§3.5 manual override window) are excluded from the zero-week /
-   over-cap counts — those weeks execute exactly your script and are policed
-   by the ValidationLog `MANUAL WINDOW` lints instead, so a deliberately
-   harvest-free scripted week can't fail every engine at once. Conservation
-   stays whole-horizon.
+3. **The checklist** — every candidate is judged on **eight gates**, in this
+   order. Only the first two are **hard**; a hard FAIL sinks the plan whatever
+   else it scores. The other six rank a plan down without disqualifying it:
+
+   | # | Gate | Hard? | PASS / WARN / FAIL |
+   |---|---|---|---|
+   | 1 | Conservation (no fish created or lost) | **HARD** | PASS iff 0 dropped and 0 over-produced |
+   | 2 | Never an empty harvest week | **HARD** | PASS iff 0 empty weeks |
+   | 3 | Facility biomass cap | soft | PASS ≤100% of cap · WARN ≤110% · FAIL above |
+   | 4 | Weekly processing limit + relief | soft | PASS 0 relief weeks · WARN 1–3 · FAIL >3, or any week past the derived relief ceiling |
+   | 5 | Harvest targets (monthly/yearly) | soft | **never worse than WARN** — targets are penalized, never disqualifying |
+   | 6 | Per-batch density quality | soft | PASS iff no batch peaks ≥1.3× its tank cap, else WARN — **never FAILs** (no knob fixes it; see §7.1) |
+   | 7 | 6N one-way commitment (R7) | soft | PASS iff nothing left a depuration tank except by harvest |
+   | 8 | Weekly handling budget | soft | PASS every week within `max_transfers_per_week` · WARN any week over ~80% · FAIL any week over |
+
+   **Which weeks a gate judges.** Gates 2 and 4 judge the **planner's weeks
+   only**: manual-override window weeks you scripted yourself (§3.5) are
+   excluded from the zero-week and over-limit counts, and both verdicts now
+   say how many were excluded. Those weeks execute exactly your script and are
+   policed by the ValidationLog `MANUAL WINDOW` lints instead, so a
+   deliberately harvest-free scripted week can't fail every engine at once.
+   **Every other gate — including conservation — judges the whole horizon**,
+   scripted weeks included.
+
+   The practical consequence: a plan can be recommended with a red **handling
+   budget** or **R7** gate. That is by design (they are operational quality,
+   not correctness), but it means the checklist on the card is not decoration —
+   read it before pressing Adopt. This matters most for the Global methods,
+   which do not enforce R7 or the handling budget at all (§12).
 4. **The card** — one recommended plan (pick order: hard rules → soft rules →
    target shortfall → emphasis score), with **✅ Adopt this plan** (saves the
    knobs, sets the ▶ Run forecast method, loads the run) and **⭐ Promote as
@@ -1447,9 +1518,11 @@ a revenue figure. Harvest outside every band is reported **unpriced** rather
 than silently priced. These are analysis overlays: editing them re-judges
 existing results instantly and never invalidates cached runs.
 
-**The promoted default** lives in `config/analysis_defaults.yaml` — versioned
-with your config, included in config exports, never written to an output
-workbook, so it cannot be lost to a run. Promotion is **manual by design**:
+**The promoted default** lives in `config/analysis_defaults.yaml`, alongside
+the rest of your config, and is **never written to an output workbook** — so it
+cannot be lost to a run. Note the flip side: it is *not* part of the workbook's
+`RunConfig` snapshot (which carries control/biology/facility/batches/limits
+only), so importing config from a workbook will not restore it. Promotion is **manual by design**:
 the tool never changes its own defaults. Once promoted, the **⚡ Quick run**
 card at the top of Analyze re-validates that exact plan (one run + the
 checklist, minutes not hours) — use it as the everyday sanity check and the
