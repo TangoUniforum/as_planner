@@ -89,7 +89,8 @@ def _grade(out_path, cfg: dict, targets) -> dict:
     m, _d, _o = _opt.metrics_from_workbook(str(out_path), hv_cap,
                                            welfare_density=welfare,
                                            relief_ceiling=relief_ceiling,
-                                           move_cap=mv_cap)
+                                           move_cap=mv_cap,
+                                           min_harvest=min_hv or None)
     verdict = _conservation_verdict(str(out_path))
     harv = _harvest_extras(str(out_path), min_hv)
     tr = None
@@ -109,6 +110,10 @@ def _grade(out_path, cfg: dict, targets) -> dict:
         "dropped": verdict["dropped"], "overprod": verdict["overprod"],
         "zero_weeks": harv.get("zero_weeks"),
         "zero_weeks_excluded": harv.get("window_weeks_excluded"),
+        # The CONTRACT FLOOR, beside the degenerate empty-week rule.
+        "weeks_below_floor": harv.get("weeks_below_min"),
+        "min_week": harv.get("min_week"),
+        "min_harvest": min_hv or None,
         "weeks_over_harvest_cap": m.weeks_over_harvest_cap,
         "weeks_over_relief_ceiling": m.weeks_over_relief_ceiling,
         "sixn_outbound_purge": sixn_out,
@@ -221,15 +226,26 @@ def main(argv=None) -> int:
             m, wb, args.config_dir, args.scenario_dir,
             emphasis=args.emphasis, weights=weights, stock_hard_fails=fails,
             progress=_prog, max_workers=args.max_workers, variant_cache=vc,
-            max_rounds=args.max_rounds)
+            max_rounds=args.max_rounds,
+            # Arms the contract-floor no-regression guard: a tuned winner may
+            # never harvest LESS in the leanest week than this method's own
+            # stock run (forecast.tournament.floor_eligible).
+            stock_min_week=(g.get("harvest") or {}).get("min_week"))
         n_reused = sum(1 for v in tr["variants"]
                        if _opt._overrides_key(v.overrides) in pre_keys)
         msum = {"status": tr["status"], "plan": tr["plan"],
                 "stock_hard_fails": fails,
+                "floor_guard": tr.get("floor_guard"),
+                "stock_min_week": tr.get("stock_min_week"),
                 "n_variants": len(tr["variants"]), "n_cache_reused": n_reused,
                 "winner_overrides": tr["winner_overrides"],
                 "stock_gates": {x["key"]: x["status"] for x in g["gates"]}}
         summary["methods"][m.key] = msum
+        if tr.get("floor_guard") == "stood-down":
+            print(f"   [floor guard] NO candidate held the stock worst week "
+                  f"({tr.get('stock_min_week'):,.0f} fish) — the winner below "
+                  f"REGRESSES the steady-harvest contract; review before "
+                  f"promoting")
         print(f"   -> {tr['status']}"
               + (f", winner {tr['winner_overrides']}"
                  if tr["winner_overrides"] else "")

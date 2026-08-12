@@ -618,6 +618,45 @@ def _gate_no_empty_week(ctx):
     return "FAIL", f"{int(z)} totally empty harvest week(s){scope}"
 
 
+def _gate_harvest_floor(ctx):
+    """The steady-harvest CONTRACT floor (`min_harvest_per_week`).
+
+    `no_empty_week` above only catches the DEGENERATE case — a week that
+    harvests literally nothing. The contract the operator actually signed is
+    a weekly FLOOR, and until 2026-08-12 nothing in the tool judged it: the
+    count was computed (run_compare._harvest_extras), written to the
+    RunComparison sheet, and then read by no gate and no score component.
+    Measured consequence on the 7.29 PR: the tuned tournament promoted a
+    controller knob set that cut the worst harvest week 20,526 -> 16,185
+    fish, because the emphasis objective is statistically blind to the floor
+    (corr(worst week, score) = -0.03 over a 40-variant search).
+
+    SOFT by design: on a capacity-bound facility every plan has some
+    sub-floor weeks, so a FAIL here would fail everything and teach the
+    operator to ignore it. It reports, and `tournament.pick_winner` is what
+    refuses to PROMOTE a regression.
+
+    ctx keys: `weeks_below_floor`, `min_week`, `min_harvest` (the floor);
+    `zero_weeks_excluded` = scripted window weeks left out of the counts."""
+    n = ctx.get("weeks_below_floor")
+    floor = ctx.get("min_harvest")
+    if n is None or not floor:
+        return "N/A", ("no harvest floor configured (min_harvest_per_week)"
+                       if not floor else "weekly harvest series unavailable")
+    n = int(n)
+    ex = int(ctx.get("zero_weeks_excluded") or 0)
+    scope = (f" ({ex} operator-scripted window week(s) excluded)" if ex else "")
+    worst = ctx.get("min_week")
+    worst_txt = (f", worst week {float(worst):,.0f}" if worst is not None else "")
+    if n == 0:
+        return "PASS", (f"every planner week meets the {float(floor):,.0f}-fish "
+                        f"contract floor{worst_txt}{scope}")
+    return "WARN", (f"{n} planner week(s) below the {float(floor):,.0f}-fish "
+                    f"contract floor{worst_txt} — the steady-harvest contract "
+                    f"is the hardest business rule; compare candidates on this "
+                    f"number, not only on 'never an empty week'{scope}")
+
+
 def _gate_biomass_cap(ctx):
     p = ctx.get("peak_pct_of_cap")
     if p is None:
@@ -694,6 +733,8 @@ register_gate("conservation", "Conservation (no fish created or lost)",
               hard=True, fn=_gate_conservation)
 register_gate("no_empty_week", "Never an empty harvest week", hard=True,
               fn=_gate_no_empty_week)
+register_gate("harvest_floor", "Weekly contract floor (min harvest/week)",
+              hard=False, fn=_gate_harvest_floor)
 register_gate("biomass_cap", "Facility biomass cap", hard=False,
               fn=_gate_biomass_cap)
 register_gate("harvest_cap", "Weekly processing limit + relief",

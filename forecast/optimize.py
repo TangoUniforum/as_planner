@@ -41,7 +41,7 @@ from . import window_weeks
 # under old rules (the 2026-08 lesson: stale cached metrics defeat a metrics
 # fix silently). v2 = harvest-compliance counts exclude operator-scripted
 # manual-window weeks (forecast.window_weeks).
-METRICS_SCHEMA = "metrics-v2-window-weeks-excluded"
+METRICS_SCHEMA = "metrics-v3-harvest-floor"
 
 # Knob grid: (label, {control-knob: value}); baseline first. Every variant
 # inherits the caller's config (both leveling defaults — rebalance_level +
@@ -239,6 +239,23 @@ class Metrics:
     # tournament's probe treats None as UNKNOWN, never as a pass.
     harvest_zero_weeks: "int | None" = None
     harvest_min_week: "float | None" = None
+    # --- the CONTRACT FLOOR (min_harvest_per_week), measured but NOT scored ---
+    # The steady-harvest contract is a weekly FLOOR, and "not literally zero"
+    # (harvest_zero_weeks) is only its degenerate case. Measured 2026-08-12 on
+    # the 7.29 PR: across a 40-variant controller search the worst harvest week
+    # ranged 7,855..27,462 fish while the objective's only harvest term
+    # (harvest_var, a CV) moved 0.233..0.403 with corr(min_week, harvest_var)
+    # = +0.04 and corr(min_week, score) = -0.03 — i.e. the emphasis score is
+    # statistically BLIND to the floor, and the pool's best-floor plan ranked
+    # 36th of 40. These two fields make the floor VISIBLE (to the gate
+    # checklist and to tournament.pick_winner's no-regression guard) without
+    # silently re-weighting anyone's objective. None = not measured (no floor
+    # supplied, or an old cache entry) — never read as "the floor was met".
+    #   harvest_weeks_below_floor  planner weeks under min_harvest_per_week
+    #   harvest_floor_gap          mean shortfall below the floor as a fraction
+    #                              of it (0 = never below; scale-free)
+    harvest_weeks_below_floor: "int | None" = None
+    harvest_floor_gap: "float | None" = None
 
     def component(self, name):
         return getattr(self, name)
@@ -753,13 +770,15 @@ def _within_system_variation(wb):
 def metrics_from_workbook(out_path, harvest_cap,
                           welfare_density=WELFARE_DENSITY_KG_M3,
                           relief_ceiling=None,
-                          move_cap=None) -> tuple["Metrics", int, int]:
+                          move_cap=None, min_harvest=None) -> tuple["Metrics", int, int]:
     """`harvest_cap` = the weekly processing LIMIT (max_harvest_per_week);
     weeks over it are relief-band weeks. `relief_ceiling` = the derived
     absolute ceiling (limit * (1 + harvest_relief_pct)) for the never-legal
     count; None (legacy callers) counts ceiling breaches against the limit.
     `move_cap` = the weekly handling budget (15) for the move-count fields;
-    None leaves them 0 (legacy callers)."""
+    None leaves them 0 (legacy callers). `min_harvest` = the contract FLOOR
+    (min_harvest_per_week) for the floor fields; None (legacy callers) leaves
+    them None, which every reader must treat as UNKNOWN, never as a pass."""
     wb = openpyxl.load_workbook(out_path, data_only=True)
     bio, feed, bcap, fcap, per = _biomass_and_feed(wb)
     hv_weeks, fish = _harvest_weekly_series(wb)
@@ -846,6 +865,13 @@ def metrics_from_workbook(out_path, harvest_cap,
         crowded_fish_weeks=crowded_fw,
         harvest_zero_weeks=sum(1 for x in planner_fish if x < 1.0),
         harvest_min_week=(min(planner_fish) if planner_fish else 0.0),
+        harvest_weeks_below_floor=(
+            sum(1 for x in planner_fish if x < float(min_harvest))
+            if (min_harvest and planner_fish) else None),
+        harvest_floor_gap=(
+            sum(max(0.0, float(min_harvest) - x) for x in planner_fish)
+            / (float(min_harvest) * len(planner_fish))
+            if (min_harvest and planner_fish) else None),
     )
     dropped, overprod = tuning._conservation(out_path)
     return metrics, dropped, overprod
@@ -935,6 +961,25 @@ def _move_cap(config_dir, overrides):
     return int(cap) if cap > 0 else None
 
 
+def _min_harvest(config_dir, overrides):
+    """Effective min_harvest_per_week (fish/week) for a variant — the steady-
+    harvest CONTRACT floor. None when 0/unset (no floor configured), in which
+    case the floor metrics stay None (unknown) rather than reporting a pass."""
+    mn = 30000.0
+    try:
+        with open(os.path.join(config_dir, "control.yaml")) as f:
+            mn = float(yaml.safe_load(f).get("min_harvest_per_week", mn) or 0)
+    except (OSError, ValueError, TypeError) as e:
+        print(f"WARN: control.yaml unreadable for grading "
+              f"({type(e).__name__}) — judging vs default harvest floor {mn:g}")
+    if "min_harvest_per_week" in overrides:
+        try:
+            mn = float(overrides["min_harvest_per_week"] or 0)
+        except (ValueError, TypeError):
+            pass
+    return mn if mn > 0 else None
+
+
 def _relief_ceiling(config_dir, overrides):
     """Derived absolute relief ceiling (fish/week) for a variant:
     max_harvest_per_week * (1 + harvest_relief_pct). None when the relief
@@ -995,8 +1040,9 @@ def _infeasible_metrics() -> "Metrics":
                         "weeks_moves_over_cap", "weeks_moves_warn",
                         "moves_week_max"):
             kw[f.name] = 0
-        elif f.name in ("harvest_zero_weeks", "harvest_min_week"):
-            kw[f.name] = None      # unknown, NOT "passes the empty-week rule"
+        elif f.name in ("harvest_zero_weeks", "harvest_min_week",
+                        "harvest_weeks_below_floor", "harvest_floor_gap"):
+            kw[f.name] = None      # unknown, NOT "passes the empty-week/floor rule"
         else:
             kw[f.name] = 0.0
     return Metrics(**kw)
@@ -1014,7 +1060,8 @@ def run_variant(label, overrides, config_dir, scenario_dir, input_path) -> OptVa
             out, _harvest_cap(config_dir, overrides),
             welfare_density=_welfare_density(config_dir, overrides),
             relief_ceiling=_relief_ceiling(config_dir, overrides),
-            move_cap=_move_cap(config_dir, overrides))
+            move_cap=_move_cap(config_dir, overrides),
+            min_harvest=_min_harvest(config_dir, overrides))
         return OptVariant(label=label, overrides=dict(overrides),
                           metrics=metrics, dropped=dropped, overprod=overprod)
     except Exception as e:  # noqa: BLE001 — reject-and-continue, don't crash the sweep

@@ -15,6 +15,7 @@ never go blind.
 """
 from pathlib import Path
 
+import pytest
 from openpyxl import Workbook, load_workbook
 
 from forecast.optimize import metrics_from_workbook
@@ -112,6 +113,53 @@ class TestZeroWeekExclusion:
                            manual_weeks=_WINDOW)
         m, _, _ = metrics_from_workbook(p, 55_000.0)
         assert m.harvest_zero_weeks == 1       # W40 only; W33 excluded
+
+
+class TestContractFloorMetrics:
+    """The steady-harvest CONTRACT floor (min_harvest_per_week), measured.
+
+    `harvest_zero_weeks` only ever caught the DEGENERATE case (a week that
+    harvests literally nothing). The floor itself reached Metrics on
+    2026-08-12, after a tuned tournament on the operator's 7.29 PR promoted
+    knobs that cut the worst harvest week 20,526 -> 16,185 fish — a change
+    the objective could not see because it scores no floor term.
+    """
+
+    def test_floor_fields_are_none_without_a_floor(self, tmp_path):
+        p = _make_workbook(tmp_path / "nofloor.xlsx", _WEEKS,
+                           {w: 10_000.0 for w in _WEEKS})
+        m, _, _ = metrics_from_workbook(p, 55_000.0)
+        # UNKNOWN, never "the floor was met" — the same rule as zero_weeks.
+        assert m.harvest_weeks_below_floor is None
+        assert m.harvest_floor_gap is None
+
+    def test_counts_sub_floor_weeks_and_the_mean_shortfall(self, tmp_path):
+        harvest = {w: 40_000.0 for w in _WEEKS}
+        harvest["2026-W34"] = 15_000.0        # 15,000 short of a 30,000 floor
+        harvest["2026-W35"] = 27_000.0        # 3,000 short
+        p = _make_workbook(tmp_path / "floor.xlsx", _WEEKS, harvest)
+        m, _, _ = metrics_from_workbook(p, 55_000.0, min_harvest=30_000.0)
+        assert m.harvest_weeks_below_floor == 2
+        assert m.harvest_min_week == 15_000.0
+        # mean shortfall as a fraction of the floor: 18,000 / (30,000 x 5)
+        assert m.harvest_floor_gap == pytest.approx(0.12)
+
+    def test_a_plan_that_always_clears_the_floor_scores_zero_gap(self, tmp_path):
+        p = _make_workbook(tmp_path / "clear.xlsx", _WEEKS,
+                           {w: 30_000.0 for w in _WEEKS})
+        m, _, _ = metrics_from_workbook(p, 55_000.0, min_harvest=30_000.0)
+        assert m.harvest_weeks_below_floor == 0
+        assert m.harvest_floor_gap == 0.0
+
+    def test_scripted_window_weeks_are_not_blamed_on_the_planner(self, tmp_path):
+        # Same exclusion rule as every other compliance count: a lean week the
+        # OPERATOR scripted is not a planner floor miss.
+        harvest = {w: 40_000.0 for w in _WEEKS}
+        harvest["2026-W31"] = 1_000.0          # inside the manual window
+        p = _make_workbook(tmp_path / "wfloor.xlsx", _WEEKS, harvest,
+                           manual_weeks=_WINDOW)
+        m, _, _ = metrics_from_workbook(p, 55_000.0, min_harvest=30_000.0)
+        assert m.harvest_weeks_below_floor == 0 and m.harvest_floor_gap == 0.0
 
 
 class TestOverCeilingExclusion:

@@ -123,12 +123,63 @@ def probe_outcome(hard_oks: list) -> str:
     return "fixable" if any(ok is True for ok in hard_oks) else "gate-bound"
 
 
-def pick_winner(variants: list, weights: dict):
+def floor_eligible(variants: list, stock_min_week) -> list:
+    """The variants that do NOT regress the steady-harvest contract relative
+    to the method's own STOCK run — i.e. whose worst planner harvest week is
+    at least `stock_min_week` fish.
+
+    WHY THIS EXISTS (measured 2026-08-12, operator's 7.29 PR). The emphasis
+    objective scores no floor term at all: its only harvest components are a
+    CV (`harvest_var`) and an over-the-processing-limit fraction
+    (`harvest_overshoot`). Over a 40-variant controller search the worst
+    harvest week ranged 7,855..27,462 fish while corr(worst week, score) was
+    -0.03 — statistically blind. The search therefore promoted a knob set
+    that made the plain controller's worst week 21% WORSE (20,526 -> 16,185),
+    bought almost entirely with biomass_overshoot (-0.28 of a -0.35 total
+    score move) and density_overshoot (-0.19), while the harvest terms
+    together contributed +0.004 — 1% of the decision. Worse, the pool's
+    best-floor plan (27,462 fish, deviation 0.02) was evaluated and ranked
+    36th of 40, largely because `biomass_util_gap` PENALISES the headroom
+    that protects the floor.
+
+    A weight cannot fix that safely — any finite weight is still tradeable,
+    and max-normalisation shrinks a component's influence toward zero
+    whenever one outlier variant inflates its denominator. So the floor is a
+    RANK, not a term: tuning may buy any trade it likes among plans that
+    hold the contract at least as well as doing nothing, and may never sell
+    the contract for density/biomass/handling gains.
+
+    Returns [] when the guard cannot apply (no baseline, or nothing measured
+    it) — callers then fall back to the unguarded pool rather than pretending
+    a gate was cleared. `harvest_min_week` None means UNKNOWN (an old cache
+    entry), never a pass."""
+    if stock_min_week is None:
+        return []
+    try:
+        base = float(stock_min_week)
+    except (TypeError, ValueError):
+        return []
+    out = []
+    for v in variants:
+        mw = getattr(v.metrics, "harvest_min_week", None)
+        if mw is not None and float(mw) >= base:
+            out.append(v)
+    return out
+
+
+def pick_winner(variants: list, weights: dict, stock_min_week=None):
     """The tuned winner among a method's evaluated variants: emphasis-best
     among those passing ALL hard gates; if none passes the empty-week rule,
     fall back to conservation-OK only (the board will still show the failure
     honestly — a search never hides a gate). None if nothing conserves.
-    Deterministic tie-break by overrides key (parallel == sequential)."""
+    Deterministic tie-break by overrides key (parallel == sequential).
+
+    `stock_min_week` (the method's own stock-config worst harvest week) adds
+    the CONTRACT-FLOOR no-regression rank of `floor_eligible`: the winner is
+    chosen from the candidates that do not make the operator's hardest rule
+    worse than not tuning at all. If no candidate qualifies, the guard stands
+    down (the unguarded pool is used) so a search still returns its best —
+    `tune_method` reports which happened."""
     from . import optimize
     if not variants:
         return None
@@ -137,6 +188,7 @@ def pick_winner(variants: list, weights: dict):
     pool = full or [v for v in variants if v.conservation_ok]
     if not pool:
         return None
+    pool = floor_eligible(pool, stock_min_week) or pool
     return min(pool, key=lambda v: (v.score, optimize._overrides_key(v.overrides)))
 
 
@@ -175,16 +227,26 @@ def cached_count(variant_cache, grid) -> int:
 def tune_method(method, input_path, config_dir, scenario_dir, *,
                 emphasis, weights=None, stock_hard_fails=(),
                 progress=None, max_workers=None, variant_cache=None,
-                max_rounds: int = 3) -> dict:
+                max_rounds: int = 3, stock_min_week=None) -> dict:
     """Run one method's tournament leg (search only — the caller owns the
     stock run, the grading, and the winner's verification run).
 
-    Returns {method, plan, status, winner_overrides, probe, variants}:
+    `stock_min_week` = the method's own stock-config worst planner harvest
+    week. Pass it: it arms the contract-floor no-regression guard (see
+    `floor_eligible`) so a tuned winner can never be a knob set that harvests
+    LESS in the leanest week than not tuning at all. Omitted, the guard is
+    inert and selection is emphasis-score only (the pre-2026-08-12 behaviour).
+
+    Returns {method, plan, status, winner_overrides, probe, variants,
+    floor_guard}:
       status 'tuned'        winner_overrides = the method's best knob set
                             (its pins INCLUDED — apply as-is / promote as-is)
              'stock-only'   nothing to tune; competes at stock
              'gate-bound'   hard-gate failure no probed knob fixes
              'search-failed' no search variant conserved (engine refused all)
+      floor_guard  'off' (no baseline given) | 'applied' (the winner came from
+                   the no-regression pool) | 'stood-down' (nothing held the
+                   floor — the winner is emphasis-best and REGRESSES it)
     """
     from . import optimize
     if (method.knob_space or method.knob_grid) and method.engine != "controller":
@@ -197,7 +259,8 @@ def tune_method(method, input_path, config_dir, scenario_dir, *,
     w = weights or optimize.weights_for(emphasis)
     plan = plan_for(list(stock_hard_fails), method.knob_space)
     out = {"method": method.key, "plan": plan, "status": plan,
-           "winner_overrides": None, "probe": None, "variants": []}
+           "winner_overrides": None, "probe": None, "variants": [],
+           "floor_guard": "off", "stock_min_week": stock_min_week}
     if plan in ("gate-bound", "stock-only"):
         return out
 
@@ -222,10 +285,14 @@ def tune_method(method, input_path, config_dir, scenario_dir, *,
         progress=progress, max_workers=max_workers,
         variant_cache=variant_cache)
     out["variants"] = results
-    best = pick_winner(results, w)
+    best = pick_winner(results, w, stock_min_week=stock_min_week)
     if best is None:
         out["status"] = "search-failed"
         return out
+    if stock_min_week is not None:
+        out["floor_guard"] = ("applied" if floor_eligible(
+            [v for v in results if v.conservation_ok], stock_min_week)
+            else "stood-down")
     out["status"] = "tuned"
     out["winner_overrides"] = dict(best.overrides)
     out["winner_label"] = best.label

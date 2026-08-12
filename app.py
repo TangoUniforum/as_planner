@@ -3932,28 +3932,44 @@ Independent invariants, each catching a *different* failure (the hard lesson:
 6. **Closed freshwater mass-balance** — the FW phase can't leak fish either.
 7. **Steady-harvest contract** — no near-empty week past the startup handoff.
 
-**On top of the audits, Analyze grades every plan on eight gates, in this
+**On top of the audits, Analyze grades every plan on nine gates, in this
 order.** Only the first two are **hard** — a hard FAIL sinks a plan no matter
-how well it scores on everything else. The other six are flagged and
+how well it scores on everything else. The other seven are flagged and
 penalised, never disqualifying:
 
 | # | Gate | Hard? | Reads |
 |---|---|---|---|
 | 1 | Conservation (no fish created or lost) | **HARD** | 0 dropped **and** 0 over-produced, or FAIL |
 | 2 | Never an empty harvest week | **HARD** | 0 empty weeks, or FAIL |
-| 3 | Facility biomass cap | soft | PASS ≤100% of cap · WARN ≤110% · FAIL above |
-| 4 | Weekly processing limit + relief | soft | PASS 0 relief weeks · WARN 1-3 · FAIL >3 **or** any week past the relief ceiling |
-| 5 | Harvest targets (monthly/yearly) | soft | never worse than WARN — targets are penalised, never disqualifying |
-| 6 | Per-batch density quality | soft | PASS if no batch peaks ≥1.3× its tank cap, else WARN |
-| 7 | 6N one-way commitment (R7) | soft | PASS if nothing left a depuration tank except by harvest |
-| 8 | Weekly handling budget | soft | PASS every week within budget · WARN any week over ~80% · FAIL any week over |
+| 3 | Weekly contract floor (min harvest/week) | soft | PASS if every planner week clears `min_harvest_per_week`, else WARN with the count + the worst week |
+| 4 | Facility biomass cap | soft | PASS ≤100% of cap · WARN ≤110% · FAIL above |
+| 5 | Weekly processing limit + relief | soft | PASS 0 relief weeks · WARN 1-3 · FAIL >3 **or** any week past the relief ceiling |
+| 6 | Harvest targets (monthly/yearly) | soft | never worse than WARN — targets are penalised, never disqualifying |
+| 7 | Per-batch density quality | soft | PASS if no batch peaks ≥1.3× its tank cap, else WARN |
+| 8 | 6N one-way commitment (R7) | soft | PASS if nothing left a depuration tank except by harvest |
+| 9 | Weekly handling budget | soft | PASS every week within budget · WARN any week over ~80% · FAIL any week over |
 
-**Which weeks each gate judges.** Gates 2 and 4 judge the **planner's** weeks
-only: weeks you scripted yourself in the manual override window are excluded
-from both counts, and the verdict says how many were excluded. Your scripted
-weeks are policed instead by the `MANUAL WINDOW` lints in the ValidationLog.
-Every other gate — including conservation — judges the **whole horizon**,
-scripted weeks included.
+**Gate 3 is the contract, gate 2 is only its degenerate case.** "Never an
+empty week" catches a week that harvests *literally nothing*; the rule you
+actually signed is a weekly **floor**. A plan can pass gate 2 and still miss
+the floor nine times. Gate 3 is deliberately soft — near full utilisation
+every plan misses it sometimes, and a gate that always FAILs teaches you to
+ignore it — so use it to **compare** candidates, not to accept or reject one.
+
+**The tuned tournament cannot sell the floor to buy a better score.** The
+emphasis score has no floor term (its harvest components are a variability CV
+and an over-the-limit count), so on the 7.29 PR the knob search once chose
+settings that cut the plain controller's worst week 20,526 → 16,185 fish.
+A tuned winner is now picked only from candidates whose worst harvest week is
+**at least as good as that method's own un-tuned run**; if none is, the search
+still returns its best and says so, so you can judge the trade yourself.
+
+**Which weeks each gate judges.** Gates 2, 3 and 5 judge the **planner's**
+weeks only: weeks you scripted yourself in the manual override window are
+excluded from those counts, and the verdict says how many were excluded. Your
+scripted weeks are policed instead by the `MANUAL WINDOW` lints in the
+ValidationLog. Every other gate — including conservation — judges the **whole
+horizon**, scripted weeks included.
 
 Ranking order when Analyze picks a winner: hard FAILs → soft FAILs → total
 warnings → target shortfall → the emphasis score. No emphasis or weighting can
@@ -5608,7 +5624,8 @@ def _board_score(out_path):
     m, _dropped, _overprod = _opt.metrics_from_workbook(out_path, hv_cap,
                                                         welfare_density=welfare,
                                                         relief_ceiling=hv_ceiling,
-                                                        move_cap=mv_cap)
+                                                        move_cap=mv_cap,
+                                                        min_harvest=min_hv or None)
     verdict = _conservation_verdict(out_path)
     harv = _harvest_extras(out_path, min_hv)
     # "No empty week": the HARD contract rule is "never a NEAR-EMPTY week". A week a
@@ -6223,6 +6240,12 @@ def _ana_grade(res, targets, econ):
         "dropped": v.get("dropped", 0), "overprod": v.get("overprod", 0),
         "zero_weeks": h.get("zero_weeks"),
         "zero_weeks_excluded": h.get("window_weeks_excluded"),
+        # The CONTRACT FLOOR, beside the degenerate empty-week rule. Computed
+        # since forever by _harvest_extras and written to the RunComparison
+        # sheet — but until 2026-08-12 read by no gate and no score component.
+        "weeks_below_floor": h.get("weeks_below_min"),
+        "min_week": h.get("min_week"),
+        "min_harvest": h.get("min_harvest"),
         "weeks_over_harvest_cap": (m.weeks_over_harvest_cap
                                    if m is not None else None),
         "weeks_over_relief_ceiling": (
@@ -6495,7 +6518,13 @@ def _analyze():
                                 text=f"Phase 2/3 — tuning {_l} "
                                      f"[{i}{'/' + str(n) if n else ''}] "
                                      f"{label}…"),
-                        max_workers=_cpu_workers(), variant_cache=_vc)
+                        max_workers=_cpu_workers(), variant_cache=_vc,
+                        # Arms the contract-floor no-regression guard: a tuned
+                        # winner may never harvest LESS in the leanest week
+                        # than this method's own stock run
+                        # (forecast.tournament.floor_eligible).
+                        stock_min_week=((done["res"].get("_score") or {})
+                                        .get("harvest") or {}).get("min_week"))
                 except Exception as e:  # noqa: BLE001 — one method must not kill the board
                     st.error(f"Knob search for {mlabel} failed: {e}")
                     st.code(traceback.format_exc())

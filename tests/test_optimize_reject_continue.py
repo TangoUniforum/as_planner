@@ -48,7 +48,7 @@ def test_sweep_completes_when_one_variant_fails(monkeypatch):
     monkeypatch.setattr(
         opt, "metrics_from_workbook",
         lambda out, cap, welfare_density=None, relief_ceiling=None,
-        move_cap=None: (_zero_metrics(), 0, 0))
+        move_cap=None, min_harvest=None: (_zero_metrics(), 0, 0))
     grid = [("baseline", {}), ("hot", {"density_target_pct": 0.95})]
     res = opt.sweep("in.xlsm", "c", "s", grid=grid, parallel=False)
     assert len(res) == 2
