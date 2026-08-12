@@ -919,7 +919,14 @@ def main(
         all_states,
         placement.harvest_events,
         placement.tranog_events,
-        state,
+        # The PR-hydrated anchor, NOT `state` — a manual override window advances
+        # `state` in place to week N+1, so passing it opened the ledger's FIRST
+        # row (the first window week) from a state N weeks in the FUTURE. Every
+        # batch then read as drift on that one row: the count by the window's
+        # mortality + harvest, the biomass by the window's growth. Same anchor
+        # write_tank_continuity_audit uses, so the two ledgers agree. Without a
+        # window audit_initial_state IS state, so no-window runs are unchanged.
+        audit_initial_state,
         realized_biology=getattr(placement, "realized_biology", None),
         transfer_events=placement.transfer_events,
         grade_events=placement.grade_events,
