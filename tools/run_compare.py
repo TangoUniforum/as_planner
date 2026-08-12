@@ -197,7 +197,8 @@ def run_compare(input_path, *, config_dir=None, scenario_dir=None,
 
     def _score(rec, wb_path):
         metrics, _d, _o = _opt.metrics_from_workbook(str(wb_path), harvest_cap,
-                                                     welfare_density=welfare_density)
+                                                     welfare_density=welfare_density,
+                                                     min_harvest=min_harvest or None)
         verdict = _conservation_verdict(str(wb_path))
         rec["metrics"] = metrics
         rec["dropped"] = verdict["dropped"]

@@ -130,6 +130,16 @@ GATE_CONTROLS = {
     "no_empty_week": dict(
         neg={"zero_weeks": 2}, fires={"FAIL"},
         pos={"zero_weeks": 0}),
+    # The steady-harvest CONTRACT floor. Soft by design: near full
+    # utilisation every real plan misses it sometimes, and a gate that always
+    # FAILs is a gate the operator learns to ignore — so WARN is "fires".
+    # (The alarm that DISQUALIFIES is tournament.floor_eligible, which forbids
+    # promoting a tuned winner that lowers the worst week.)
+    "harvest_floor": dict(
+        neg={"weeks_below_floor": 9, "min_week": 16185.0,
+             "min_harvest": 30000.0}, fires={"WARN"},
+        pos={"weeks_below_floor": 0, "min_week": 31000.0,
+             "min_harvest": 30000.0}),
     "biomass_cap": dict(
         neg={"peak_pct_of_cap": 115.0}, fires={"FAIL"},
         pos={"peak_pct_of_cap": 97.0}),

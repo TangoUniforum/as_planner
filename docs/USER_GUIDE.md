@@ -154,7 +154,7 @@ Facility-wide knobs read into `ControlParams`:
 | `rebalance_varqty_budget` | precise-count shaving of over-cap systems (opt-in) | 0 |
 | `harvest_setpoint_lookahead_weeks` | **VESTIGIAL** — superseded by the dual-limit setpoint (§4.1/§4.3); kept for config back-compat but **not read** by the engine. Use `facility_biomass_deviation_pct` to set how close to the cap to run | 0.75 (ignored) |
 | `harvest_level_load` | **harvest smoother (ON by default)** — enforce `max_harvest_per_week` as a HARD ceiling + pre-harvest earlier so harvest is flat and biomass stays under cap. Paired with `rebalance_level`, which otherwise spikes harvest (see §4.3). Set `false` for old reactive behavior | **true** |
-| `hybrid_follow` | **L1 HARVEST GUIDE — `full` in the shipped config (§4.5).** Runs the Global engine's whole-horizon L1 harvest envelope first and feeds it to the controller as a per-week target band. The ceiling half is the point: it tells the reactive controller to harvest **less** in fat weeks so those fish are still there for lean ones — the one thing it can never decide for itself (all its own levers are `max()`). *Measured, 6 real PRs:* **totally empty harvest weeks 6 → 0**, weeks below floor 22.5 → 9.0, worst week 0 → 16,148 fish; **cost** peak biomass 102.6 → 107.1% of cap, peak density 102 → 124. `off` = old reactive-only behaviour. `floor` is a **no-op** — the controller already clears its floor whenever it can | `full` (dataclass default `off`) |
+| `hybrid_follow` | **L1 HARVEST GUIDE — `full` in the shipped config (§4.5).** Runs the Global engine's whole-horizon L1 harvest envelope first and feeds it to the controller as a per-week target band. The ceiling half is the point: it tells the reactive controller to harvest **less** in fat weeks so those fish are still there for lean ones — the one thing it can never decide for itself (all its own levers are `max()`). *Measured, 6 real PRs:* **totally empty harvest weeks 6 → 0**, weeks below floor 22.5 → 9.0, worst week 0 → 16,148 fish; **cost** peak biomass 102.6 → 107.1% of cap, peak density 102 → 124. `off` = old reactive-only behaviour. `floor` is **not** a no-op (that claim was retracted 2026-08-12) but it is **dominated** — measured on the 7.29 PR it produces a genuinely different plan (worst week 23,754 vs `off`'s 20,526) yet **11** weeks below the contract floor, worse than `off`'s 9 and far worse than `full`'s 3. Applying only the guide's floor half raises the lean weeks it can reach while leaving the controller free to over-harvest the fat ones; the **ceiling** half is what actually banks fish for later. Use `full` | `full` (dataclass default `off`) |
 | `hybrid_follow_band` | how tightly the controller tracks the guide (± fraction). Chosen by a 90-cell paired sweep as the most **stable** setting: holds 0–1 empty weeks under neutral perturbation where wider bands drift to 3–4 | **0.05** |
 | `harvest_smooth_lookahead_weeks` | level-load window K — weeks of coming-due biomass to spread the pre-harvest over | 6 |
 | `harvest_level_target` | flat fish/week floor when level-loading (unset/null = auto from realized growth) | null |
@@ -983,6 +983,20 @@ the 55k harvest cap (y). **Lower-left is best (both held);** the lower-left enve
 is the Pareto frontier, and your operating point is a *choice* along it. This is how
 you SEE that `tran_og=3` slid left-and-up (feed for harvest) before committing to it.
 
+**⚠ What the score does NOT contain: the harvest floor.** Every component above
+is either a cap-breach, a variability measure, or a cost. **None of them
+measures the contract floor** — the closest, `harvest_var`, is a coefficient of
+variation, which is blind to *which side* of the mean a week sits on. Measured
+on the 7.29 PR over a 40-variant search: the worst harvest week ranged
+7,855–27,462 fish while `corr(worst week, harvest_var)` was **+0.04** and
+`corr(worst week, score)` was **−0.03**. Worse, `biomass_util_gap` actively
+*rewards* running with no headroom, and headroom is exactly what fills a lean
+week — so the objective is mildly **anti**-floor. Read the **contract-floor
+gate** (§ Analyze, gate 3) beside the score; do not read the score alone. The
+tuned tournament now enforces a no-regression rank on the floor so this cannot
+be promoted silently, but a hand-run Optimize sweep is still ranked by score
+alone.
+
 **The transfer/density trade is real and is why it's selectable, not auto:** the
 rebalancer cuts biomass variability by *adding* transfers, so there's no single
 optimum — you choose. **Conservation is a hard gate:** any variant with dropped or
@@ -1494,26 +1508,53 @@ that whole composition in one flow and ends in a single recommendation card:
      estimated engine runs per method (and how much the variant cache already
      paid for) before you press go; the headless twin is
      `python -m tools.run_tuned_tournament --workbook <PR>`.
-3. **The checklist** — every candidate is judged on **eight gates**, in this
+3. **The checklist** — every candidate is judged on **nine gates**, in this
    order. Only the first two are **hard**; a hard FAIL sinks the plan whatever
-   else it scores. The other six rank a plan down without disqualifying it:
+   else it scores. The other seven rank a plan down without disqualifying it:
 
    | # | Gate | Hard? | PASS / WARN / FAIL |
    |---|---|---|---|
    | 1 | Conservation (no fish created or lost) | **HARD** | PASS iff 0 dropped and 0 over-produced |
    | 2 | Never an empty harvest week | **HARD** | PASS iff 0 empty weeks |
-   | 3 | Facility biomass cap | soft | PASS ≤100% of cap · WARN ≤110% · FAIL above |
-   | 4 | Weekly processing limit + relief | soft | PASS 0 relief weeks · WARN 1–3 · FAIL >3, or any week past the derived relief ceiling |
-   | 5 | Harvest targets (monthly/yearly) | soft | **never worse than WARN** — targets are penalized, never disqualifying |
-   | 6 | Per-batch density quality | soft | PASS iff no batch peaks ≥1.3× its tank cap, else WARN — **never FAILs** (no knob fixes it; see §7.1) |
-   | 7 | 6N one-way commitment (R7) | soft | PASS iff nothing left a depuration tank except by harvest |
-   | 8 | Weekly handling budget | soft | PASS every week within `max_transfers_per_week` · WARN any week over ~80% · FAIL any week over |
+   | 3 | Weekly contract floor (min harvest/week) | soft | PASS iff every planner week clears `min_harvest_per_week`, else WARN with the count **and the worst week** |
+   | 4 | Facility biomass cap | soft | PASS ≤100% of cap · WARN ≤110% · FAIL above |
+   | 5 | Weekly processing limit + relief | soft | PASS 0 relief weeks · WARN 1–3 · FAIL >3, or any week past the derived relief ceiling |
+   | 6 | Harvest targets (monthly/yearly) | soft | **never worse than WARN** — targets are penalized, never disqualifying |
+   | 7 | Per-batch density quality | soft | PASS iff no batch peaks ≥1.3× its tank cap, else WARN — **never FAILs** (no knob fixes it; see §7.1) |
+   | 8 | 6N one-way commitment (R7) | soft | PASS iff nothing left a depuration tank except by harvest |
+   | 9 | Weekly handling budget | soft | PASS every week within `max_transfers_per_week` · WARN any week over ~80% · FAIL any week over |
 
-   **Which weeks a gate judges.** Gates 2 and 4 judge the **planner's weeks
+   **Gate 3 is the contract; gate 2 is only its degenerate case.** "Never an
+   empty week" catches a week that harvests *literally nothing*. The rule the
+   business actually signed is a weekly **floor** (`min_harvest_per_week`), and
+   a plan can pass gate 2 while missing that floor nine times. The count was
+   always measured (it is a row on the RunComparison sheet) but until
+   2026-08-12 **no gate and no score component read it** — so nothing in the
+   tool defended it. Gate 3 is deliberately **soft**: near full utilisation
+   every real plan misses the floor sometimes, and a gate that always FAILs is
+   a gate you learn to ignore. Use it to **compare** candidates, not to accept
+   or reject one.
+
+   **The tuned tournament can no longer sell the floor to buy a better score.**
+   The emphasis score has no floor term at all — its only harvest components
+   are a variability CV and an over-the-limit count. Measured on the 7.29 PR
+   across a 40-variant controller search, the correlation between a plan's
+   worst harvest week and its score was **−0.03**: statistically blind. The
+   search duly promoted knobs that cut the plain controller's worst week from
+   **20,526 to 16,185 fish**, and ranked the pool's *best*-floor plan (27,462
+   fish) **36th of 40**. A tuned winner is now chosen only from candidates
+   whose worst harvest week is **at least as good as that method's own
+   un-tuned run**. If none is, the search still returns its best and says so
+   in the run log, so you can judge the trade yourself. (On the same PR this
+   changed the controller's winner from the 16,185 set to one worth 21,871 —
+   and left the hybrid's winner untouched, because that search was already
+   holding the contract.)
+
+   **Which weeks a gate judges.** Gates 2, 3 and 5 judge the **planner's weeks
    only**: manual-override window weeks you scripted yourself (§3.5) are
-   excluded from the zero-week and over-limit counts, and both verdicts now
-   say how many were excluded. Those weeks execute exactly your script and are
-   policed by the ValidationLog `MANUAL WINDOW` lints instead, so a
+   excluded from the zero-week, sub-floor and over-limit counts, and the
+   verdicts say how many were excluded. Those weeks execute exactly your script
+   and are policed by the ValidationLog `MANUAL WINDOW` lints instead, so a
    deliberately harvest-free scripted week can't fail every engine at once.
    **Every other gate — including conservation — judges the whole horizon**,
    scripted weeks included.

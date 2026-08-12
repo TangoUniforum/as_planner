@@ -167,6 +167,54 @@ def test_pick_winner_falls_back_to_conservation_only_then_none():
     assert T.pick_winner([], w) is None
 
 
+# --------------------------------------------------------------------------- #
+# The CONTRACT-FLOOR no-regression guard
+#
+# Measured 2026-08-12 on the operator's 7.29 PR: a 40-variant "Walk the line"
+# controller search chose knobs that cut the worst harvest week 20,526 ->
+# 16,185 fish. corr(worst week, score) over that pool was -0.03 — the emphasis
+# objective scores no floor term at all, so the search could sell the hardest
+# business rule for biomass/density gains. These lock the guard that stops it.
+# --------------------------------------------------------------------------- #
+def test_floor_eligible_keeps_only_non_regressing_candidates():
+    worse = _variant({"a": 1}, harvest_min_week=16185.0, label="worse")
+    same = _variant({"a": 2}, harvest_min_week=20526.0, label="same")
+    better = _variant({"a": 3}, harvest_min_week=27462.0, label="better")
+    keep = T.floor_eligible([worse, same, better], 20526.0)
+    assert [v.label for v in keep] == ["same", "better"]
+
+
+def test_floor_eligible_stands_down_without_a_measured_baseline():
+    v = _variant({"a": 1}, harvest_min_week=100.0)
+    assert T.floor_eligible([v], None) == []       # no baseline -> no guard
+    assert T.floor_eligible([v], "n/a") == []      # unusable baseline
+    # an UNMEASURED candidate (old cache entry) is never eligible: a gate is
+    # only ever cleared by a measurement, never by a missing field
+    assert T.floor_eligible([_variant({}, harvest_min_week=None)], 10.0) == []
+
+
+def test_pick_winner_refuses_a_tuned_winner_that_lowers_the_worst_week():
+    # The real 7.29 shape: the emphasis-best candidate regresses the floor,
+    # a slightly worse-scoring one holds it.
+    w = {c: 1.0 for c in O.COMPONENTS}
+    best_score = _variant({"dev": 0.01}, harvest_min_week=16185.0,
+                          label="score-best", harvest_var=0.0)
+    holds_floor = _variant({"dev": 0.005}, harvest_min_week=21871.0,
+                           label="holds", harvest_var=0.5)
+    assert T.pick_winner([best_score, holds_floor], w).overrides == {"dev": 0.01}
+    assert T.pick_winner([best_score, holds_floor], w,
+                         stock_min_week=20526.0).overrides == {"dev": 0.005}
+
+
+def test_pick_winner_guard_stands_down_when_nothing_holds_the_floor():
+    # The guard must never return None / crash a search: if no candidate holds
+    # the floor the emphasis-best still wins (and tune_method reports it).
+    w = {c: 1.0 for c in O.COMPONENTS}
+    a = _variant({"a": 1}, harvest_min_week=9000.0, label="a", harvest_var=0.0)
+    b = _variant({"a": 2}, harvest_min_week=8000.0, label="b", harvest_var=0.5)
+    assert T.pick_winner([a, b], w, stock_min_week=30000.0).overrides == {"a": 1}
+
+
 def test_tune_method_refuses_global_engine_with_a_space():
     m = dataclasses.replace(M.REGISTRY["global-lp"],
                             knob_space=(("some_knob", (1, 2)),))

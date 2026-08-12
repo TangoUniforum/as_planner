@@ -201,6 +201,32 @@ def test_gates_hard_failures():
     assert st["harvest_cap"] == "WARN"     # processing spikes warn, not fail
 
 
+def test_harvest_floor_gate_reports_the_contract_not_just_empty_weeks():
+    """The steady-harvest CONTRACT is a weekly FLOOR; `no_empty_week` only
+    ever caught its degenerate case. A plan can harvest something every week
+    and still miss the floor nine times — which is exactly what the 7.29
+    tuned controller did (worst week 16,185 vs a 30,000 floor) while passing
+    every hard gate."""
+    st = _statuses({"dropped": 0, "overprod": 0, "zero_weeks": 0,
+                    "weeks_below_floor": 9, "min_week": 16_185.0,
+                    "min_harvest": 30_000.0})
+    assert st["no_empty_week"] == "PASS"     # the old view: all clear
+    assert st["harvest_floor"] == "WARN"     # the contract: nine misses
+    g = {x["key"]: x for x in A.evaluate_gates(
+        {"weeks_below_floor": 9, "min_week": 16_185.0, "min_harvest": 30_000.0})}
+    assert "16,185" in g["harvest_floor"]["detail"]
+    assert g["harvest_floor"]["hard"] is False   # reports; never disqualifies
+
+
+def test_harvest_floor_gate_passes_and_is_na_without_a_floor():
+    st = _statuses({"weeks_below_floor": 0, "min_week": 31_000.0,
+                    "min_harvest": 30_000.0})
+    assert st["harvest_floor"] == "PASS"
+    # No floor configured, or no series -> N/A, never a silent PASS.
+    assert _statuses({"weeks_below_floor": 0})["harvest_floor"] == "N/A"
+    assert _statuses({"min_harvest": 30_000.0})["harvest_floor"] == "N/A"
+
+
 def test_targets_gate_is_penalized_not_disqualifying():
     tr = A.review_targets({"2026-07": 50.0}, {},
                           _targets(monthly={"2026-07": 100.0}))
