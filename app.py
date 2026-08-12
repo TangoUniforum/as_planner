@@ -602,7 +602,7 @@ _CONTROL_HELP = {
         "The harvest smoother. On = the weekly processing max is held as a "
         "hard ceiling and fish are pre-harvested a little early, so weekly "
         "harvest is flat instead of dump-then-nothing (measured: weeks over "
-        "the 55k cap 15 → 10, steadier weekly totals). Off = the old reactive "
+        "the weekly limit 15 → 10, steadier weekly totals). Off = the old reactive "
         "behavior. Travels together with Load leveling above, which otherwise "
         "makes harvest spikier."
         + _VALIDATED,
@@ -738,6 +738,17 @@ _CONTROL_LABEL = {
     "hybrid_purge_lever": "  ↳ guide lever: 6N staging (purge)",
     "hybrid_production_lever": "  ↳ guide lever: harvest cap (production)",
 }
+
+
+def _harvest_limit(default: float = 55_000.0) -> float:
+    """The live weekly processing limit (max_harvest_per_week), for readouts
+    that would otherwise hardcode 55k and lie the moment it is retuned. Never
+    raises — a readout must render even with no config seeded."""
+    try:
+        from forecast.config_io import load_control
+        return float(load_control(CONFIG_DIR).max_harvest_per_week or default)
+    except Exception:  # noqa: BLE001 — a label must never break the page
+        return default
 
 
 def _ctl_fmt(v) -> str:
@@ -2454,12 +2465,12 @@ def _mw_timeline(state, events, bad, forecast_start=None):
 
 
 def _mw_raw_grid(state):
-    """Power-user fallback: the same four event types as a flat table. Seeds from
+    """Power-user fallback: the same five event types as a flat table. Seeds from
     and writes back to the shared working set (not the YAML directly)."""
     st.caption(
-        "Same four event types as a raw table — for bulk edits or unequal per-tank "
-        "splits the click flow doesn't cover. **Apply to window** pushes these rows "
-        "into the visual editor + timeline above.")
+        "The same five event types as a raw table — for bulk edits or unequal "
+        "per-tank splits the click flow doesn't cover. **Apply to window** pushes "
+        "these rows into the visual editor + timeline above.")
     st.caption(
         "**og_transfer**: from_tank → to_tanks (count split evenly) · "
         "**harvest**: from_tank, count · **graded_harvest**: from_tank, "
@@ -2489,10 +2500,13 @@ def _mw_raw_grid(state):
             "count": st.column_config.NumberColumn("Count / target", step=1000),
             "mode": st.column_config.SelectboxColumn("Mode",
                 options=["", "stage", "harvest"],
-                help="graded_harvest only: 'stage' (the 6N-pickup default) = "
-                     "park the biggest N in the 6N pickup to purge, harvested "
-                     "later; 'harvest' = drain them to processing in the "
-                     "scripted week"),
+                help="graded_harvest only. What decides the outcome is the "
+                     "PICKUP tank plus this field. Pickup is a 6N tank + mode "
+                     "blank or 'stage' = park the biggest N there to purge, "
+                     "harvested later (the default). Pickup is a 6N tank + "
+                     "mode 'harvest' = drain them to processing in the "
+                     "scripted week. Pickup is an ordinary OG tank = harvest "
+                     "now, and mode 'stage' is refused."),
             "notes": st.column_config.TextColumn("Notes"),
         })
     if st.button("Apply to window", key="mw_grid_apply"):
@@ -2755,12 +2769,18 @@ def _manual_window_editor(uploaded):
     with st.expander("🗓 Starting setup — manual override window (optional)",
                      expanded=False):
         st.caption(
-            "See the facility projected forward and **click a tank to act on it** — "
-            "harvest it, move/split it, send it to 6N, or bring a freshwater cohort "
-            "into OG. The forecast EXECUTES your operations with full biology "
-            "(growth/mortality/feed), records them in the reports, then the planner "
-            "takes over after your last scripted week. Leave it empty to let the "
-            "planner do everything.")
+            "See the facility projected forward and **click a tank to act on "
+            "it** — harvest it, move/split it, send it to 6N, size-grade it "
+            "into 6N, or bring a freshwater cohort into OG. The forecast "
+            "EXECUTES your operations with full biology (growth/mortality/"
+            "feed), records them in the reports, then the planner takes over "
+            "after your last scripted week. **A window week runs your script "
+            "and nothing else** — no planner logic at all, so a week you give "
+            "no harvest harvests nothing (you get warned, not blocked). Every "
+            "operation writes a `MANUAL EVENT OK` or `MANUAL EVENT REFUSED` "
+            "line into the output workbook's ValidationLog, so nothing ever "
+            "happens — or fails to happen — silently. Leave the window empty "
+            "to let the planner do everything.")
 
         try:
             state, _fw, ctx = _hydrate_state_from_upload(uploaded)
@@ -4819,7 +4839,7 @@ def _opt_table(results) -> pd.DataFrame:
             "Harvest_overshoot": None if failed else round(m.harvest_overshoot, 3),
             "Feed_load": None if failed else round(m.feed_load),
             "Transfers/fish": None if failed else round(m.transfers_per_fish, 2),
-            "Wks_over_55k": None if failed else m.weeks_over_harvest_cap,
+            "Wks_over_limit": None if failed else m.weeks_over_harvest_cap,
             "Conservation": (f"INFEASIBLE — {v.failed[:90]}" if failed
                              else "OK" if v.conservation_ok
                              else f"FAIL ({v.dropped}/{v.overprod})"),
@@ -5165,7 +5185,7 @@ def _optimizer():
                     "Winning knobs": ", ".join(f"{k}={v}" for k, v in kb.items()) or "(baseline)",
                     "Hot spot": mt.get("system_peak"),
                     "Feed": mt.get("feed_load"),
-                    "Wks>55k": mt.get("weeks_over_harvest_cap"),
+                    "Wks>limit": mt.get("weeks_over_harvest_cap"),
                     "Saved": "✓" if h.get("saved_to_config") else "",
                     "Dropped": h.get("dropped"),
                 })
@@ -5422,10 +5442,14 @@ def _optimizer():
                        help="How lumpy the weekly harvest is (coefficient of "
                             "variation). Lower = steadier week-to-week; 0 = a "
                             "perfectly flat harvest.")
-            cc3.metric("Weeks over 55k", run_out["over"],
-                       help="Number of weeks whose harvest exceeds the 55,000-fish "
-                            "weekly processing limit — pressure-relief weeks, "
-                            "acceptable only as rare exceptions.")
+            _hvlim = _harvest_limit()
+            cc3.metric(f"Weeks over {_hvlim:,.0f}", run_out["over"],
+                       help=f"Number of weeks whose harvest exceeds the "
+                            f"{_hvlim:,.0f}-fish weekly processing limit "
+                            f"(max_harvest_per_week) — pressure-relief weeks, "
+                            f"acceptable only as rare exceptions. Weeks you "
+                            f"scripted yourself in the manual override window "
+                            f"are not counted.")
             st.download_button(
                 "⬇ Download optimized forecast workbook",
                 data=r["output_bytes"], file_name="Forecast_optimized.xlsm",
@@ -5455,7 +5479,8 @@ def _optimizer():
     st.subheader("Trade-off map — feed/biomass vs harvest")
     st.caption(
         "Every knob setting plotted by its two competing cap pressures: per-system "
-        "feed/biomass over-cap (x) vs weeks over the 55k harvest cap (y). "
+        f"feed/biomass over-cap (x) vs weeks over the {_harvest_limit():,.0f}-fish "
+        "weekly processing limit (y). "
         "**Lower-left is best** — both caps held. The lower-left envelope is the "
         "Pareto frontier; your operating point is a choice along it. E.g. "
         "`tran_og=3` slides left on feed but up on harvest, `baseline` the reverse — "
@@ -5468,7 +5493,7 @@ def _optimizer():
         for v, c in zip(pdf["Variant"], pdf["Conservation"])
     ]
     fig = px.scatter(
-        pdf, x="Sys_over-cap", y="Wks_over_55k", text="Variant", color="Kind",
+        pdf, x="Sys_over-cap", y="Wks_over_limit", text="Variant", color="Kind",
         color_discrete_map={"Recommended": "#2e7d32", "Rejected": "#bbbbbb",
                             "Variant": "#1f77b4"},
         title="Operating-point trade-off (lower-left = both caps held)",
@@ -5476,7 +5501,7 @@ def _optimizer():
     fig.update_traces(textposition="top center", marker=dict(size=11))
     fig.update_layout(height=430,
                       xaxis_title="Per-system feed/biomass over-cap (fraction)",
-                      yaxis_title="Weeks over 55k harvest cap")
+                      yaxis_title=f"Weeks over the {_harvest_limit():,.0f}-fish weekly limit")
     st.plotly_chart(fig, use_container_width=True)
 
     best = _opt_winner(results, rec)
@@ -5833,11 +5858,13 @@ def _compare_and_choose():
     st.header("⚖️ Compare & Choose — run the methods, pick the plan")
     st.caption(
         "Runs the planning methods on your PR, grades them on several lenses, and "
-        "lets **you** pick which plan becomes the report. Each plan is internally "
-        "consistent (0-drift, tank continuity) — you choose a whole plan, not a "
-        "splice. The hard rules (conserves · fully placed · harvest floor · under "
-        "cap) show as badges on every method, so a low-transfer plan can't hide a "
-        "contract breach.")
+        "lets **you** pick which plan becomes the report — and which method ▶ Run "
+        "forecast uses from then on. Each plan is internally consistent (0-drift, "
+        "tank continuity) — you choose a whole plan, not a splice. Four badges "
+        "(conserves · fully placed · no empty week · under cap) ride on every "
+        "method, so a low-transfer plan can't hide a contract breach. They are "
+        "not the whole rulebook, though — see the legend below before picking a "
+        "**Global** method.")
 
     _cfg_ok = _config_ready() and _scenario_ready()
     _pr_ok = pr is not None and pr["ok"]
@@ -5854,12 +5881,12 @@ def _compare_and_choose():
     _always = [k for k in _BOARD_ORDER if k not in _BOARD_OPTIONAL]
     st.caption(
         ", ".join(f"{_METHODS[k].label} ({_TYPICAL.get(k, '?')})" for k in _always)
-        + " always run. The CP-SAT leg gives each of your ~130 weeks its own "
-        "solver budget, so it can run well past its estimate — uncheck it for a "
-        "fast compare and add it later, since finished methods are reused. On a "
-        "capacity-bound config (facility full at peak) **Controller + LNS "
-        "usually matches plain Controller** — LNS only diverges when there's "
-        "tank slack to relocate into.")
+        + " always run. The CP-SAT leg gives EVERY week of your horizon its own "
+        "solver budget, so its total runtime scales with the horizon and can run "
+        "well past the estimate — uncheck it for a fast compare and add it later, "
+        "since finished methods are reused. On a capacity-bound config (facility "
+        "full at peak) **Controller + LNS usually matches plain Controller** — "
+        "LNS only diverges when there's tank slack to relocate into.")
     if include_milp:
         # value= seeds from the durable copy so leaving Compare mode (which
         # drops the widget key) doesn't snap the depth back to Balanced — that
@@ -6015,8 +6042,9 @@ def _compare_and_choose():
             "system runs hot that week.\n"
             "- **moves/fish** — tank-to-tank transfers ÷ fish placed. Lower = less "
             "handling, stress and labour.\n"
-            "- **density** — the worst per-tank density (kg/m³) reached anywhere; "
-            "compare to your ~95 kg/m³ cap. Lower = more headroom.\n"
+            "- **density** — the worst per-tank density (kg/m³) reached "
+            "anywhere; compare it to that tank's own cap in Configure → "
+            "Facility (grow-out tanks ship at 95). Lower = more headroom.\n"
             "- **between-sys CV** — how *evenly* biomass is spread **system-to-"
             "system**. 0 = perfectly balanced; higher = some systems packed while "
             "others sit light.\n"
@@ -6029,9 +6057,26 @@ def _compare_and_choose():
             "welfare / flesh quality — but usually means fewer fish / more tanks.\n\n"
             "**Grading lenses** — each card names the method that's best on one "
             "axis (fewest moves, steadiest harvest, most balanced, tightest "
-            "density, smallest footprint, fastest). No method wins them all — the "
-            "board shows the trade-offs so **you** pick the plan that fits your "
-            "priority, then press **Use this plan**.")
+            "density, best welfare, smallest footprint, fastest). Only methods "
+            "that pass **Conserves** and **Fully placed** are eligible to win a "
+            "lens. No method wins them all — the board shows the trade-offs so "
+            "**you** pick the plan that fits your priority, then press **Use "
+            "this plan** (which also becomes the method ▶ Run forecast uses "
+            "from then on).\n\n"
+            "⚠️ **These four badges are not the whole rulebook.** They do not "
+            "check the handling budget, the tier rules R1-R7, or the "
+            "depuration hold. That matters most for the two **Global** "
+            "methods: they plan the horizon as independent weekly problems, "
+            "never read the handling budget, and do not enforce R1, R5 or R7 "
+            "while planning — where no legal move exists they emit the move "
+            "anyway and log a `TOPOLOGY VIOLATION` row. A Global plan can "
+            "therefore win several lenses and still not be executable. Before "
+            "adopting one, open its workbook's **ValidationLog** and look for "
+            "`TOPOLOGY VIOLATION`, `DEPURATION HOLD` and `PLACEMENT DEGRADED` "
+            "rows, and check the handling-budget gate over in **Analyze**. "
+            "The Controller methods enforce all of it while planning, so they "
+            "are the ones to reach for when you want a plan the crew runs "
+            "rather than a benchmark to measure against.")
     pool = _board_lens_pool(scored)
     cols = st.columns(2)
     for i, (label, getter, blurb) in enumerate(_BOARD_LENSES):
@@ -6284,14 +6329,23 @@ def _analyze():
          "Tuned tournament — find each method's best knobs, then compare the "
          "TUNED methods"],
         key="ana_depth",
-        help="Quick = today's flow: every engine once as-configured, then one "
-             "knob search on the live config. Tuned = the symmetric tournament: "
-             "each method that passes the hard rules at stock config gets a full "
-             "knob search restricted to ITS OWN tunable space; a method that "
-             "fails a hard rule gets a cheap one-knob probe first (no knob fixes "
-             "it → marked gate-bound, full search skipped). The Global methods "
-             "have no conservation-safe knobs (see forecast/methods.py), so they "
-             "compete at stock either way.")
+        help="QUICK — run every engine once exactly as your config stands, then "
+             "do ONE knob search on the live config. Fast, but it compares one "
+             "tuned engine against the rest at stock, so a method can lose "
+             "merely for not having been tuned.\n\n"
+             "TUNED — the fair version: EVERY method gets its own knob search, "
+             "restricted to the knobs that method actually reads, and the board "
+             "then compares the methods at their best. A method that already "
+             "fails a hard rule at stock gets a cheap one-knob probe first; if "
+             "no probed knob clears the failure it is marked GATE-BOUND and the "
+             "full search is skipped (honestly — nothing there to find).\n\n"
+             "Note on the two Global methods: they have NO tunable knobs at "
+             "all, so they compete at stock under either depth. That is "
+             "deliberate — the only knobs their code path reads were measured "
+             "to break Global's own conservation proof when overridden, so the "
+             "registry refuses to put them in a search space. It also means a "
+             "Global method that fails a hard rule reads GATE-BOUND with no "
+             "probe: there is simply no knob to try.")
     tuned_mode = depth.startswith("Tuned")
     _n_eng = len([k for k in _BOARD_ORDER if k not in _BOARD_OPTIONAL or include_milp])
     if tuned_mode:
@@ -6320,10 +6374,16 @@ def _analyze():
             st.dataframe(pd.DataFrame(_brows), hide_index=True,
                          use_container_width=True)
             st.caption("Counts are FULL forecast runs (~30–40 s each for the "
-                       "controller family, parallelized). 'Already cached' = "
-                       "grid rows this PR+config already measured — the variant "
-                       "cache makes re-runs cheap. Methods with 0 grid/descent "
-                       "have no conservation-safe knobs and compete at stock.")
+                       "controller family, parallelized). 'Probe' only happens "
+                       "if the method fails a hard rule at stock; 'Descent' is "
+                       "an upper bound — it stops early when a round finds no "
+                       "improvement, so the real cost is usually well under "
+                       "the worst case. 'Already cached' = grid rows this "
+                       "PR+config already measured (keyed on file CONTENT, not "
+                       "timestamps), so re-running the tournament is cheap. "
+                       "Methods showing 0 grid and 0 descent have no tunable "
+                       "knobs and compete at stock — that is the two Global "
+                       "methods.")
     go = st.button(
         f"▶ Run {'TUNED tournament' if tuned_mode else 'full analysis'} "
         f"({_n_eng} engines + knob search + checklist)",
@@ -6645,8 +6705,13 @@ def _analyze():
     # ---- The card ----
     st.divider()
     st.subheader("🏆 Recommended plan")
-    st.caption(f"Analysis of {ana['made']} · emphasis **{ana.get('emphasis')}** · "
-               "pick order: hard rules → soft rules → target shortfall → score.")
+    st.caption(
+        f"Analysis of {ana['made']} · emphasis **{ana.get('emphasis')}** · "
+        "pick order: hard-rule FAILs → soft-rule FAILs → total warnings → "
+        "target shortfall → emphasis score. Only conservation and "
+        "never-an-empty-week are hard; everything else ranks a plan down "
+        "without disqualifying it, so **read the checklist before adopting** "
+        "— a recommended plan can still carry a red handling or R7 gate.")
     with st.container(border=True):
         st.markdown(f"### {winner['label']}")
         if winner.get("prov"):
@@ -6693,10 +6758,16 @@ def _analyze():
                        "at the top now uses this plan.")
 
         if a2.button("⭐ Promote as Quick-run default", key="ana_promote",
-                     help="Stores method + knobs in config/analysis_defaults.yaml "
-                          "(versioned with your config, exported with snapshots — "
-                          "cannot be lost to an output file). Manual by design: "
-                          "the tool never changes its own defaults."):
+                     help="Stores method + knobs in "
+                          "config/analysis_defaults.yaml, next to the rest of "
+                          "your config. It is NOT written into an output "
+                          "workbook, so it cannot be lost to a run — but note "
+                          "that also means importing config from a workbook "
+                          "will not restore it. Promoting changes nothing "
+                          "about the current run; it only sets what the ⚡ "
+                          "Quick run card at the top of this page will "
+                          "re-run. Manual by design: the tool never changes "
+                          "its own defaults."):
             _promote(winner, "won analysis")
 
     # ---- Tuned-tournament summary: what each method's search concluded ----
@@ -6705,9 +6776,11 @@ def _analyze():
             "tuned": "✅ tuned — winner verified on its own engine",
             "stock-best": "✅ stock config already best — the engine leg IS "
                           "the tuned candidate",
-            "stock-only": "◽ no conservation-safe knobs — competes at stock",
-            "gate-bound": "⛔ gate-bound — fails a hard rule and NO probed "
-                          "knob fixes it (full search skipped)",
+            "stock-only": "◽ no tunable knobs — competes at stock (its knobs "
+                          "would break its own conservation proof)",
+            "gate-bound": "⛔ gate-bound — fails a hard rule and no knob can "
+                          "fix it (either no probed knob cleared it, or the "
+                          "method has no tunable knobs to probe)",
             "search-failed": "❌ no search variant conserved",
             "verify-failed": "❌ tuned winner's verification run failed",
             "run-failed": "❌ engine run failed",
@@ -6800,11 +6873,16 @@ def _analyze():
                 use_container_width=True)
     with st.expander("📊 Density quality — distribution + severe batches "
                      "(the old Tune readout, per candidate)"):
-        st.caption("Read the DISTRIBUTION, not the raw over-cap count: 1.0–1.1× "
-                   "is normal at full utilisation; only **severe (≥1.3×)** rows "
-                   "matter — and if those cluster in time and peak mid-grow-out "
-                   "it's a **stocking/capacity** problem (use the stocking "
-                   "frontier below), not a knob to re-tune.")
+        st.caption("Each number is a batch's PEAK density as a multiple of its "
+                   "tank's cap (1.0× = exactly at cap). Read the "
+                   "DISTRIBUTION, not the raw over-cap count: 1.0–1.1× is "
+                   "normal at full utilisation. Only **severe (≥1.3×)** "
+                   "batches matter, and they are what the gate counts — the "
+                   "table below lists everything from **1.2×** up so you can "
+                   "see what is approaching severe. If the severe ones cluster "
+                   "in time and peak mid-grow-out it's a **stocking/capacity** "
+                   "problem (use the stocking frontier below), not a knob to "
+                   "re-tune.")
         for c in ranked:
             dr = c.get("density_review")
             if not dr:
