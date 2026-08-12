@@ -346,6 +346,7 @@ def advance_facility_window(state, batch_by_id, tables, forecast_start,
         opening_locations.extend(_snapshot_week(state, labels[i], week_start))
         # Operations next — they still date into THIS week for the continuity
         # audit — then biology, then the closing snapshot.
+        hv: list = []
         if events:
             tr, hv, tn, w, fwb = apply_events_for_week(
                 state, events, i + 1, week_start, week_label=labels[i],
@@ -358,34 +359,40 @@ def advance_facility_window(state, batch_by_id, tables, forecast_start,
                 rec = manual_fw_balance.setdefault(b, [0.0, 0.0])
                 rec[0] += cnt
                 rec[1] += culled
-            # Steady-harvest contract lint: window weeks run ONLY scripted
-            # events, so a window week without a scripted harvest is a
-            # ZERO-harvest week in the plan. Say so loudly — never let the
-            # operator discover an empty week in the output (operator-hit
-            # 2026-08: a graded staging silently replaced the expected
-            # harvest and W33 shipped nothing).
-            if not hv:
+        # Steady-harvest contract lint: window weeks run ONLY scripted events,
+        # so a window week without a scripted harvest is a ZERO-harvest week in
+        # the plan. Say so loudly — never let the operator discover an empty
+        # week in the output (operator-hit 2026-08: a graded staging silently
+        # replaced the expected harvest and W33 shipped nothing).
+        #
+        # OUTSIDE the `if events` guard on purpose. The emptiest window of all —
+        # `--advance-weeks N` with no scripted events at all (run.py takes
+        # window_n = max(advance_weeks, last event week), so a window can exist
+        # with an EMPTY event list) — is N consecutive zero-harvest weeks, and
+        # is exactly the case this lint exists to catch. Inside the guard it
+        # was the one case that could never fire.
+        if not hv:
+            warnings.append(
+                f"MANUAL WINDOW — {labels[i]} schedules NO harvest: window "
+                f"weeks execute only your scripted events, so this is a "
+                f"zero-harvest week (steady-harvest contract). Script a "
+                f"harvest or graded_harvest in this week if that is not "
+                f"intended.")
+        else:
+            # The mirror lint: the window executes the script even past the
+            # plant's weekly processing ceiling (operator law), but an
+            # over-ceiling week is physically suspect — say so.
+            _tot = sum(h.count for h in hv)
+            _cap = float(getattr(control, "max_harvest_per_week", 0) or 0)
+            _rel = float(getattr(control, "harvest_relief_pct", 0) or 0)
+            _ceil = _cap * (1.0 + _rel)
+            if _ceil > 0 and _tot > _ceil + 0.5:
                 warnings.append(
-                    f"MANUAL WINDOW — {labels[i]} schedules NO harvest: window "
-                    f"weeks execute only your scripted events, so this is a "
-                    f"zero-harvest week (steady-harvest contract). Script a "
-                    f"harvest or graded_harvest in this week if that is not "
-                    f"intended.")
-            else:
-                # The mirror lint: the window executes the script even past the
-                # plant's weekly processing ceiling (operator law), but an
-                # over-ceiling week is physically suspect — say so.
-                _tot = sum(h.count for h in hv)
-                _cap = float(getattr(control, "max_harvest_per_week", 0) or 0)
-                _rel = float(getattr(control, "harvest_relief_pct", 0) or 0)
-                _ceil = _cap * (1.0 + _rel)
-                if _ceil > 0 and _tot > _ceil + 0.5:
-                    warnings.append(
-                        f"MANUAL WINDOW — {labels[i]} scripts "
-                        f"{_tot:,.0f} fish of harvest, above the plant ceiling "
-                        f"{_ceil:,.0f} (max_harvest_per_week + relief). The "
-                        f"window executed your script anyway — check the week "
-                        f"is actually processable.")
+                    f"MANUAL WINDOW — {labels[i]} scripts "
+                    f"{_tot:,.0f} fish of harvest, above the plant ceiling "
+                    f"{_ceil:,.0f} (max_harvest_per_week + relief). The "
+                    f"window executed your script anyway — check the week "
+                    f"is actually processable.")
         wk_realized = advance_facility_one_week(
             state, batch_by_id, tables, week_start, labels[i])
         realized.update(wk_realized)

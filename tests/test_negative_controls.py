@@ -686,6 +686,20 @@ class TestManualWindowLints:
         assert any("schedules NO harvest" in w for w in res["warnings"]), \
             "a scripted zero-harvest week produced no lint"
 
+    def test_a_window_with_NO_events_at_all_still_fires_every_week(self):
+        """The emptiest window of all — `--advance-weeks N` with nothing
+        scripted (run.py: window_n = max(advance_weeks, last event week), so a
+        window can exist with an EMPTY event list). Those N weeks harvest
+        nothing, which is precisely what this lint exists to catch.
+
+        NEGATIVE CONTROL: the lint used to sit inside `if events:`, so the one
+        case it could never fire on was the one where EVERY week is empty. On
+        the parent commit this returns zero warnings."""
+        res = _run_window([], n_weeks=3)
+        hits = [w for w in res["warnings"] if "schedules NO harvest" in w]
+        assert len(hits) == 3, \
+            f"an all-empty 3-week window produced {len(hits)} lints, not 3"
+
     def test_impossible_event_is_refused_loudly(self):
         from forecast.manual_events import ManualEvent
         res = _run_window([ManualEvent(type="harvest", week=1, from_tank=99)])
