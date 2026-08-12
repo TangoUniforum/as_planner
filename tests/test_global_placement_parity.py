@@ -316,6 +316,34 @@ class TestCpSatWasOverConstrainedNotOverFull:
         assert "prev_tb.get(t) == b" in src
         assert "og_w[t] in nset" in src
 
+    def test_the_solver_is_seeded_with_real_starting_occupancy(self):
+        """THE remaining 36 infeasible weeks. R6 lets a >= 1 kg batch KEEP an
+        entry tank it already occupies, but `prev_tb` started EMPTY, so in week
+        0 no batch occupied anything and the allowance could never engage —
+        heavy fish were confined to the 21/24 grow-out tanks, and in 40 weeks
+        they need more than that while the entry tier sits at 2-4 of its 12.
+        Seeding from the facility's actual handoff state took CP-SAT from 36
+        proven-INFEASIBLE weeks to 0, with 0 kg of cap slack."""
+        import inspect
+        from forecast import global_placement_milp_poc as mp
+        sig = inspect.signature(mp.solve_cpsat_perweek)
+        assert "initial_tb" in sig.parameters
+        src = inspect.getsource(mp.solve_cpsat_perweek)
+        assert "prev_tb: dict = dict(initial_tb or {})" in src
+
+    def test_unplaced_weeks_are_reported_by_solver_verdict(self):
+        """INFEASIBLE and UNKNOWN mean opposite things — one says a constraint
+        forbids every layout (more time is useless), the other says the solver
+        found nothing in budget. Collapsing them hid which fix was needed."""
+        import inspect
+        from forecast import global_placement_milp_poc as mp
+        assert "_st_counts" in inspect.getsource(mp.solve_cpsat_perweek)
+        from tools.run_global_forecast import cpsat_degrade_warning
+        w = cpsat_degrade_warning({"n_weeks": 127, "n_infeasible": 36,
+                                   "unplaced_status": {"INFEASIBLE": 36}})
+        assert "INFEASIBLE" in w
+        assert cpsat_degrade_warning({"n_weeks": 127, "n_infeasible": 0}) == ""
+
     def test_light_fish_are_still_barred_from_grow_out_entry_rules_intact(self):
         """NEGATIVE CONTROL: the relaxation is for HEAVY fish keeping an entry
         tank only. A sub-1 kg batch must still be offered nursery tanks."""

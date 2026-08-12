@@ -351,7 +351,8 @@ def run_global(input_path, output_path, config_dir, scenario_dir, *,
         if optimal:
             grow_q, _cpsat_info = _solve_cpsat_q(
                 result, facility, system_limits, control,
-                cpsat_time, workers=cpsat_workers, det_time=cpsat_det_time)
+                cpsat_time, workers=cpsat_workers, det_time=cpsat_det_time,
+                initial_tb=(_mw_stitch or {}).get("window_close_state"))
             _w = cpsat_degrade_warning(_cpsat_info)
             if _w:
                 _engine_warns.append(_w)
@@ -485,16 +486,18 @@ def cpsat_degrade_warning(info) -> str:
         return ""
     n_wk = int((info or {}).get("n_weeks", 0) or 0)
     pct = (100.0 * n_inf / n_wk) if n_wk else 0.0
+    _sts = (info or {}).get("unplaced_status") or {}
+    _why = (f" Solver verdicts: {_sts}." if _sts else "")
     return (f"PLACEMENT DEGRADED - CP-SAT could not place {n_inf} of {n_wk} "
             f"week(s) ({pct:.0f}% of the horizon). Those weeks were laid out by "
             f"the tank-pick FALLBACK, which enforces no per-tank density cap - "
             f"their per-tank densities and per-system loads are NOT "
             f"solver-verified and may exceed the cap. This run is NOT an "
-            f"optimal placement.")
+            f"optimal placement." + _why)
 
 
 def _solve_cpsat_q(result, facility, system_limits, control, time_limit,
-                   workers: int = 8, det_time: float = 30.0):
+                   workers: int = 8, det_time: float = 30.0, initial_tb=None):
     """Run the CP-SAT full-horizon optimal placement on L1's standing and return
     ({week: {(batch, tank): kg}}, info) for the optimal grow-out layout (0-swap).
 
@@ -542,10 +545,16 @@ def _solve_cpsat_q(result, facility, system_limits, control, time_limit,
     # Deterministic budget (det_time) is the binding stop criterion; the passed
     # wall-clock time_limit is only a per-week safety cap (was hardcoded to 10.0,
     # which ignored the caller's cpsat_time AND left the ~2.6% gap open).
+    # Seed the solver with where the fish ACTUALLY are at the handoff, so R6
+    # (">= 1 kg fish MAY remain in entry-tier tanks") can apply from week 0.
+    _tanks = getattr(initial_tb, "tanks_by_id", None) or {}
+    _init_tb = {int(t): st.batch_id for t, st in _tanks.items()
+                if getattr(st, "batch_id", None)}
     q, info = solve_cpsat_perweek(by_week, og, tvol, vol, wl_of, system_limits,
                                   control, det_time=float(det_time),
                                   time_limit=float(time_limit),
-                                  workers=int(workers), verbose=True)
+                                  workers=int(workers), verbose=True,
+                                  initial_tb=_init_tb)
     print(f"  [CP-SAT per-week placement] worst_gap={info['worst_gap']*100:.2f}% "
           f"infeasible={info['n_infeasible']} slack={info.get('slack_kg'):,.0f} kg "
           f"solve={info.get('solve_s'):.0f}s")

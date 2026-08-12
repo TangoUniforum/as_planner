@@ -357,6 +357,7 @@ def solve_full_horizon(
 def solve_cpsat_perweek(
     by_week, og_tanks, tank_vol, vol, wl_of, system_limits, control,
     time_limit=4.0, workers=8, verbose=True, det_time=30.0,
+    initial_tb=None,
 ):
     """PER-WEEK placement — decomposes the intractable full-horizon MILP so the
     optimality GAP is fixed at the root (each week is a small MILP that reaches
@@ -383,9 +384,19 @@ def solve_cpsat_perweek(
     nset = set(NURSERY_SYSTEMS)
     weeks = sorted(by_week)
     q_by_w: dict = {}
-    prev_tb: dict = {}                         # tank_id -> batch (last week's occupant)
+    # tank_id -> batch that held it LAST week. Seeded from the facility's ACTUAL
+    # starting occupancy (the manual-window close state), not empty: R6 lets a
+    # >= 1 kg batch KEEP an entry tank it already occupies, and with an empty
+    # seed no batch occupies anything in week 0, so that allowance could never
+    # engage. Measured consequence: heavy batches were confined to the 21 (purge)
+    # / 24 (production) grow-out tanks, and in 40 weeks they need MORE than that
+    # while the entry tier sits at 2-4 of its 12 tanks — which is exactly the 36
+    # weeks CP-SAT proved INFEASIBLE (proved, not timed out: the solver reports
+    # INFEASIBLE for all 36, so no extra budget could ever have helped).
+    prev_tb: dict = dict(initial_tb or {})
     worst_gap = 0.0
     n_infeasible = 0
+    _st_counts: dict = {}
     total_slack = 0.0
     t_solve = 0.0
     for w in weeks:
@@ -418,6 +429,18 @@ def solve_cpsat_perweek(
                 # allowed; the backward MOVE is not.
                 cells += [t for t in og_w
                           if og_w[t] in nset and prev_tb.get(t) == b]
+            else:
+                # R2: an entry-tier cohort may move FORWARD to any OG3/4/5/6
+                # tank "at ANY weight" (tiers.move_allowed permits entry ->
+                # grow-out unconditionally). CP-SAT locked sub-1 kg fish to the
+                # 12 entry tanks, the same closed-box mistake the LP made — and
+                # there it was the whole of the density problem (74 of 75
+                # tank-weeks over the 95 cap were sub-1 kg fish stuck in
+                # OG1/OG2). R1 (arrivals ENTER the entry tier) is untouched:
+                # this only says where an already-placed nursery batch MAY go
+                # next. R4 still forbids ever coming back, which is enforced on
+                # the MOVE, not on occupancy.
+                cells += [t for t in og_w if og_w[t] in gset]
             for t in cells:
                 x[b, t] = m.NewBoolVar(f"x_{b}_{t}")
                 q[b, t] = m.NewIntVar(0, B, f"q_{b}_{t}")
@@ -497,18 +520,26 @@ def solve_cpsat_perweek(
             q_by_w[w] = qv
             prev_tb = {t: b for (b, t) in qv}
         else:
+            # "infeasible" was conflating two very different things, and the
+            # difference decides what to do next: INFEASIBLE means the model
+            # forbids every layout (more time is useless — a constraint has to
+            # go), UNKNOWN means the solver simply found nothing inside its
+            # budget (more time, or a better formulation, would help).
             n_infeasible += 1
+            _st_counts[solver.StatusName(st)] = (
+                _st_counts.get(solver.StatusName(st), 0) + 1)
             q_by_w[w] = {}
     # `n_weeks` is the DENOMINATOR for n_infeasible: callers must be able to say
     # "103 of 127 weeks" without re-deriving the horizon (a run that fails most
     # of its weeks is a fallback layout, not an optimal one).
     info = {"status": "per-week", "worst_gap": worst_gap,
-            "n_weeks": len(weeks),
+            "n_weeks": len(weeks), "unplaced_status": dict(_st_counts),
             "n_infeasible": n_infeasible, "slack_kg": total_slack,
             "solve_s": t_solve, "over_kg": 0}
     if verbose:
         print(f"  [CP-SAT per-week] {len(weeks)} weeks, worst gap "
-              f"{worst_gap * 100:.2f}%, {n_infeasible} infeasible, "
+              f"{worst_gap * 100:.2f}%, {n_infeasible} unplaced "
+              f"{_st_counts or '{}'}, "
               f"slack {total_slack:,.0f} kg, {t_solve:.0f}s solve")
     return q_by_w, info
 
