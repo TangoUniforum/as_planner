@@ -501,7 +501,19 @@ def _tranog_tank_need(cohort_kg, facility, control, plan_n=0):
 # over cap. Both functions below let a pass anticipate that instead. They only
 # ever REDUCE the moves a deferrable pass may make — neither authorises a move,
 # so neither can create a topology violation, a remnant or a multi-batch tank.
-# --------------------------------------------------------------------------- #
+#
+# ABLATION SWITCHES. The two layers are INDEPENDENT policies, so each has its
+# own module-level switch and they can be measured one at a time. These are not
+# operator config: there is deliberately no control.yaml key and no app control
+# for them, because the choice is a settled engineering result (see the
+# 4-arm x 3-PR x 2-knob-set ablation recorded in the RESERVE block inside
+# phase_d_emit_events), not a per-run decision. They exist so that result stays
+# reproducible — flip one, re-run, and the difference is attributable to that
+# layer alone. Both default to the shipped behaviour.
+_ANTICIPATE_ARRIVAL_RESERVE = True     # Layer A — reserve for arrival make-room
+_ANTICIPATE_PACING_DEFER = True        # Layer B — purge pacing stands down
+
+
 def _entry_makeroom_move_cost(need_tanks: int, empty_entry: int,
                               free_growout: int, vacatable_entry: int) -> int:
     """Transfer MOVES the arrival-week entry-tier make-room is going to need.
@@ -3632,8 +3644,10 @@ def phase_d_emit_events(
             signal the handling gate must still report, not a reason to
             silently starve the leveling.
             """
-            if _move_cap <= 0:
-                return 10 ** 9
+            # `_moves_left()` already returns the unbounded sentinel when the
+            # budget is off, so the ablation branch needs no special case.
+            if _move_cap <= 0 or not _ANTICIPATE_ARRIVAL_RESERVE:
+                return _moves_left()
             _res = min(_arrival_makeroom_reserve(), _move_cap)
             return max(0, _moves_left() - _res)
 
@@ -4469,7 +4483,8 @@ def phase_d_emit_events(
                 # moves each): both are weeks with no arrival of their own, where
                 # Layer A therefore reserves nothing. Ablating this branch puts
                 # both weeks straight back over the cap.
-                if _pacing_may_defer(_j, _moves_left()):
+                if (_ANTICIPATE_PACING_DEFER
+                        and _pacing_may_defer(_j, _moves_left())):
                     warnings.append(
                         f"{week_label}: anticipatory purge pacing DEFERRED for "
                         f"the TranOG arrival in {_wk} — the week is at its "
