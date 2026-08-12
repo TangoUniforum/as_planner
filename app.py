@@ -7739,7 +7739,7 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
                       help="The span of weeks over which this batch is harvested "
                            "out.")
             m4.metric("HOG (t)", f"{bp['HOG_t']:.0f}",
-                      help="Total head-on-gutted tonnes this batch yields over its "
+                      help="Total HOG (head-off, gutted) tonnes this batch yields over its "
                            "harvest window.")
             st.dataframe(pd.DataFrame(bp["milestones"]), hide_index=True,
                          use_container_width=True)
@@ -7758,7 +7758,15 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
     # shows even when per-batch plans are unavailable (Global LP).
     with tab_plan:
         st.divider()
-        st.subheader("🚚 Transfer plan — every move, week by week")
+        st.subheader("🚚 Transfer plan — every planned move, week by week")
+        st.caption(
+            "One **Transfer** row = one real tank-to-tank move (same-week "
+            "duplicate legs are merged), and those are the rows the weekly "
+            "handling budget counts. The other types are not crew moves in "
+            "the same sense: **TranOG** writes one row per destination tank "
+            "of a seawater arrival (From_Tank reads `FW`), and **Grade** "
+            "writes a pickup row plus a retention row for one size-sort. "
+            "Filter by Type to see just the tank-to-tank moves.")
         tp_df = _rv_memo("tp_df", _rid, lambda: pd.DataFrame(
             _transfer_plan_rows(r["output_path"])
             if r.get("output_path") else []))
@@ -7792,9 +7800,12 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
             if _bats and _bat_col:
                 view = view[view[_bat_col].astype(str).isin(_bats)]
             c1, c2 = st.columns(2)
-            c1.metric("Moves shown", len(view),
-                      help=f"{len(tp_df)} total in the plan")
-            c2.metric("Weeks with moves",
+            c1.metric("Rows shown", len(view),
+                      help=f"{len(tp_df)} rows in the plan. This counts "
+                           f"ROWS, not crew moves — filter Type to "
+                           f"'Transfer' for the tank-to-tank moves the "
+                           f"handling budget counts.")
+            c2.metric("Weeks with rows",
                       view[_wk_col].astype(str).nunique())
             st.dataframe(view, hide_index=True, use_container_width=True,
                          height=min(520, 46 + 35 * min(len(view), 13)))
