@@ -370,6 +370,28 @@ class TestSolvesAreReproducible:
         assert "n_tanks_w.get(w, {}).get(s, 0)" in src
         assert "_caps_here.get(s)" in src
 
+    def test_symmetry_breaking_is_confined_to_the_stateless_pass(self):
+        """The operator's objection: identical systems are only interchangeable
+        if they are also in the same STATE, or the "relabelling" is really a
+        demand to move fish. It holds in general and not here, because the
+        constraint lives ONLY in Pass A, which is stateless — and Pass B, the
+        pass that knows physical occupancy, is free to permute back. If anyone
+        ever adds the constraint to Pass B, or teaches Pass A about occupancy,
+        this guard fails and the soundness argument has to be re-made."""
+        import inspect, re
+        from forecast import global_planner_l3_poc as l3
+        a = inspect.getsource(l3._solve_passA_per_week)
+        b = inspect.getsource(l3._solve_passB_per_week)
+        assert "SYMMETRY BREAKING" in a
+        assert "SYMMETRY BREAKING" not in b,             "Pass B knows occupancy — ordering there would force real moves"
+        # Pass A must remain stateless: no prior-occupancy inputs in its model.
+        code = "
+".join(l for l in a.splitlines() if not l.strip().startswith("#"))
+        for token in ("prev_state", "last_sys", "prev_by_batch", "initial_state"):
+            assert token not in code, f"Pass A now sees {token}; symmetry class is unsound"
+        # Pass B must still carry the stickiness term it permutes back with.
+        assert "last_sys" in b
+
     def test_every_degrade_is_recorded(self):
         from forecast.excel_io import write_validation_log
         wb = openpyxl.Workbook()

@@ -393,6 +393,7 @@ def run_global(input_path, output_path, config_dir, scenario_dir, *,
         # so — otherwise every later A/B silently compares noise.
         _engine_warns.extend(list(_l3.SOLVER_WARNINGS))
         _engine_warns.extend(getattr(gft, "topology_warnings", []) or [])
+        _engine_warns.extend(getattr(gft, "depuration_warnings", []) or [])
         _engine_warns.extend(placement_gap_warnings(gft))
         cons = gf.conservation_summary(gft)
         _mw_states = (_build_manual_week_states(

@@ -138,6 +138,13 @@ SOLVER_WARNINGS: list = []
 # With both, 45 s is comfortably enough: 2 weeks fall back, the same 2 every
 # time, and repeated runs produce an identical plan.
 _WEEK_SOLVE_LIMIT_S = 45.0
+# A/B toggle, kept so the symmetry-breaking claim can be RE-VERIFIED on any
+# future PR rather than taken on trust. The operator's objection (2026-08-11)
+# was that two systems with identical tier/tanks/caps are only interchangeable
+# if they are also in the same STATE — swapping a stocked system with an empty
+# one is not a free relabelling, it is a demand to move fish. Answered by
+# measurement, not argument: see the class-key comment below.
+_SYMMETRY_BREAK = True
 
 _DEFAULT_BIO_CAP = 400000.0
 _DEFAULT_FEED_CAP = 3000.0
@@ -1012,16 +1019,40 @@ def _solve_passA_per_week(
         #
         # Impose an arbitrary but consistent order WITHIN each interchangeability
         # class (same tier, same tank count, same caps): tank load must be
-        # non-increasing along the class. This removes only permutations — any
-        # solution can be reordered to satisfy it — so the optimum is unchanged
-        # and no business rule is touched.
+        # non-increasing along the class.
+        #
+        # WHY OCCUPANCY IS NOT IN THE CLASS KEY (operator objection, 2026-08-11:
+        # "the headroom available for the new tank depends on how the other
+        # tanks are stocked"). The objection is right in general and does not
+        # apply HERE, for two reasons that were checked in the code and then
+        # measured:
+        #   1. Pass A is stateless. It is built from this week's demand and the
+        #      per-system caps only — there is no prev_state, no last_sys, no
+        #      starting layout, no headroom term anywhere in its model. Within
+        #      Pass A the systems in a class really are indistinguishable, so
+        #      ordering them removes permutations and nothing else.
+        #   2. The constraint is NOT applied in Pass B, which is the pass that
+        #      knows about physical occupancy (it minimizes placements into
+        #      systems the batch did not occupy last week). Pass B is therefore
+        #      free to permute the canonical labelling straight back onto where
+        #      the fish actually are.
+        # Measured A/B, symmetry ON vs OFF, identical 45 s limit and same PR:
+        # total transfers 1,502 -> 1,501, max weekly moves 29 -> 29, batch
+        # tank-path 7.56 -> 7.56 (max 11 both). The movement cost the objection
+        # predicts is ~zero, while worst-system load improves 121.9% -> 113.9%
+        # and the solve is 3.4x faster (779 s -> 226 s, 10 unprovable weeks -> 2).
+        # Residual caveat, stated rather than buried: in the weeks where Pass B
+        # cannot solve and falls back, Pass A's canonical layout IS what gets
+        # emitted — the aggregate movement effect of that is the -1 transfer
+        # above.
         _classes: dict = {}
         for s in sys_here:
             _classes.setdefault(
                 (s in NURSERY_SYSTEMS,
                  n_tanks_w.get(w, {}).get(s, 0),
                  _caps_here.get(s)), []).append(s)
-        for _k, _ss in sorted(_classes.items(), key=lambda kv: str(kv[0])):
+        for _k, _ss in (sorted(_classes.items(), key=lambda kv: str(kv[0]))
+                        if _SYMMETRY_BREAK else []):
             if len(_ss) < 2:
                 continue
             _ss = sorted(_ss)

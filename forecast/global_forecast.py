@@ -88,6 +88,7 @@ class GlobalForecastTables:
     mort_states: list               # _MortState for the audit COUNT balance
     unplaced_warnings: list = field(default_factory=list)  # LOUD never-drop misses
     topology_warnings: list = field(default_factory=list)  # R1-R7 breaches
+    depuration_warnings: list = field(default_factory=list)  # purge-hold breaches
 
 
 def build_tables(
@@ -143,6 +144,7 @@ def build_tables(
         mort_states=pick.mort_states,
         unplaced_warnings=list(getattr(pick, 'unplaced_warnings', []) or []),
         topology_warnings=list(getattr(pick, 'topology_warnings', []) or []),
+        depuration_warnings=list(getattr(pick, 'depuration_warnings', []) or []),
     )
 
 

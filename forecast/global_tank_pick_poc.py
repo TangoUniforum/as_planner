@@ -184,6 +184,7 @@ class TankPickResult:
     n_tank_weeks: int
     unplaced_warnings: list = field(default_factory=list)   # LOUD never-drop misses
     topology_warnings: list = field(default_factory=list)   # R1-R7 breaches emitted
+    depuration_warnings: list = field(default_factory=list) # purge-hold breaches
 
 
 # ---------------------------------------------------------------------------
@@ -372,6 +373,8 @@ def pick_tanks(
     oversub_weeks: list[str] = []
     # Batches L1 seeded that the pick could not give ANY legal tank (Pass 1c).
     unplaced_warnings: list[str] = []
+    # Purge-hold breaches, for the workbook (were stdout-only).
+    depuration_warnings: list[str] = []
     # Emitted transfers that break the R1-R7 conveyor topology.
     topology_warnings: list[str] = []
 
@@ -938,13 +941,20 @@ def pick_tanks(
                     drawn_c += take_c
                     if t in sixn_set:
                         _from6n += take_c
-                        # AUDIT (not a gate): did these fish serve the purge?
-                        _res = w - sixn_arrival.get(t, -10 ** 6)
-                        if _res < _hold_weeks:
-                            _hold_short_fish += take_c
-                            _hold_short_draws += 1
-                        _hold_total_fish += take_c
-                        _hold_total_draws += 1
+                        # AUDIT: did these fish serve the purge? Judged ONLY on
+                        # purge-era draws. From sixn_production_start the 6N
+                        # MAINS are ordinary grow-out tanks, so harvesting one is
+                        # a normal harvest under the in-place starvation period,
+                        # not a depuration draw — counting those inflated the
+                        # violation figure to 18% when the rule-accurate number
+                        # is 3.8%.
+                        if _purge_wk:
+                            _res = w - sixn_arrival.get(t, -10 ** 6)
+                            if _res < _hold_weeks:
+                                _hold_short_fish += take_c
+                                _hold_short_draws += 1
+                            _hold_total_fish += take_c
+                            _hold_total_draws += 1
                 if _purge_wk:
                     _purge_h_demand += drawn_c
                     _purge_h_from6n += _from6n
@@ -1079,6 +1089,15 @@ def pick_tanks(
 
     if _hold_total_draws:
         _pct = 100.0 * _hold_short_fish / max(1.0, _hold_total_fish)
+        if _hold_short_draws:
+            # Surface it where the graders and the operator look. It was stdout
+            # only, so a hold breach never reached the workbook or the board.
+            depuration_warnings.append(
+                f"DEPURATION HOLD - {_hold_short_draws} purge-era 6N draw(s) "
+                f"took {_hold_short_fish:,.0f} of {_hold_total_fish:,.0f} fish "
+                f"({_pct:.1f}%) before completing the {_hold_weeks}-week off-feed "
+                f"hold. The 6N pool is a BATCH process: fish must sit off-feed "
+                f"for the hold before harvest.")
         print(f"  [DEPURATION AUDIT] {_hold_short_draws} of {_hold_total_draws} "
               f"6N draws harvested BEFORE the {_hold_weeks}-week purge hold "
               f"({_hold_short_fish:,.0f} of {_hold_total_fish:,.0f} fish, "
@@ -1117,5 +1136,6 @@ def pick_tanks(
         oversub_weeks=oversub_weeks,
         n_tank_weeks=len(batch_locations),
         unplaced_warnings=unplaced_warnings,
+        depuration_warnings=depuration_warnings,
         topology_warnings=topology_warnings,
     )
