@@ -112,6 +112,44 @@ def test_grade_to_6n_approves_into_a_graded_harvest_event():
     assert ev3.destinations[0].tank == 67 and ev3.destinations[0].count == 9000.0
 
 
+def test_approved_partial_og_transfer_does_not_drain_the_whole_tank():
+    """The og_to_6n half of the partial-move fix was pinned; og_transfer — the
+    OTHER branch reading the same applier contract — was not.
+
+    `_apply_og_transfer` reads only the per-DESTINATION count and treats a lone
+    `count=None` dest as "all remaining". So an approved partial move whose
+    count rode only on the event would silently relocate the ENTIRE source
+    tank. This pins the count onto the destination, and pins the consequence:
+    a 4,000-fish approval must move 4,000 fish out of a 10,000-fish tank."""
+    from forecast.manual_events import (
+        ManualEvent, TYPE_OG_TRANSFER, _apply_og_transfer)
+    from forecast.state import FacilityState, TankState
+
+    m = copilot.Move(kind="og_transfer", engine="global-lp", priority=3,
+                     from_tank=31, to_tank=45, from_loc="OG3N-1", to_loc="OG4N-1",
+                     batch="B7", count=4000.0, avg_wt_kg=3.0, note="")
+    ev, = copilot.to_manual_events([m], window_week=3)
+    assert ev.type == TYPE_OG_TRANSFER
+    assert len(ev.destinations) == 1
+    assert ev.destinations[0].tank == 45
+    assert ev.destinations[0].count == 4000.0, \
+        "count=None on a single dest means 'drain the whole tank'"
+
+    # And what that actually does to the facility.
+    def _tank(tid, sysid):
+        return TankState(location_id=f"{sysid}-{tid}", tank_id=tid,
+                         system_id=sysid, volume_m3=500.0,
+                         max_density_kg_m3=95.0, max_feed_kg_day_cap=1000.0,
+                         type="OG")
+    src, dst = _tank(31, "OG3"), _tank(45, "OG4")
+    src.assign("B7", 10_000.0, 30_000.0, 3000.0, "SW")
+    state = FacilityState(today=date(2027, 3, 8), tanks=[src, dst])
+    _apply_og_transfer(state, ev, 1, event_date=date(2027, 3, 8))
+    assert round(src.count) == 6000, \
+        f"partial approval drained the source to {src.count}"
+    assert round(dst.count) == 4000
+
+
 class _Ctl:
     def __init__(self, growth=False, prod_start=None):
         self.sixn_growth = growth
