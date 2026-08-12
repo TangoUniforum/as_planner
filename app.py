@@ -3197,6 +3197,18 @@ def _config_fingerprint() -> str:
                                  exclude=_NON_ENGINE_CONFIG)
 
 
+def _engine_fingerprint() -> str:
+    """Hash of the ENGINE SOURCE that produces a run (forecast/ + tools/).
+
+    Cached engine results are identified by inputs AND code. Without this, the
+    2026-08-12 stale-board incident: the Global engines were rebuilt while
+    config/ and scenario/ stayed byte-identical, so _config_fingerprint never
+    moved and four of five board legs replayed Tuesday's pre-repair plans as
+    though they were today's. Only .py content is hashed (never __pycache__)."""
+    from forecast import analysis as _ana
+    return _ana.code_fingerprint((_ROOT / "forecast", _ROOT / "tools"))
+
+
 def _sweep_inputs_sig() -> str:
     """Identity of the inputs a sweep ran against (PR content + config/scenario
     state) — stored beside Tune/Optimize/Frontier results so a recommendation
@@ -3209,7 +3221,7 @@ def _sweep_inputs_sig() -> str:
     from forecast import optimize as _opt_sig
     return hashlib.md5(
         f"{st.session_state.get('_pr_key', '')}|{_config_fingerprint()}"
-        f"|{_opt_sig.METRICS_SCHEMA}"
+        f"|{_engine_fingerprint()}|{_opt_sig.METRICS_SCHEMA}"
         .encode()).hexdigest()
 
 
@@ -5715,7 +5727,7 @@ def _board_method_sig(mkey: str, pr_md5: str) -> str:
     The two axes are independent — a metrics-code bump re-grades the cached
     workbook, it must not force 30-minute engine re-runs."""
     import hashlib
-    parts = ["board3", pr_md5, _config_fingerprint(), mkey]
+    parts = ["board4", pr_md5, _config_fingerprint(), _engine_fingerprint(), mkey]
     if (_METHODS.get(mkey) or _METHODS["controller"]).engine_kwargs.get("optimal"):
         parts += [f"cpsat{_cpsat_det_time()}", str(_cpu_workers())]
     return hashlib.md5("|".join(parts).encode()).hexdigest()

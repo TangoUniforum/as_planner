@@ -486,6 +486,37 @@ def dirs_fingerprint(dirs, exclude=frozenset()) -> str:
     return h.hexdigest()
 
 
+def code_fingerprint(dirs) -> str:
+    """CONTENT hash of the ENGINE SOURCE (*.py) under `dirs`.
+
+    A cached result is only reusable when the CODE that produced it is
+    unchanged too — inputs alone are not its identity. The 2026-08-12 incident:
+    the Global engines were rebuilt over two days while config/ and scenario/
+    stayed byte-identical, so the input fingerprint never moved and FOUR OF FIVE
+    board legs replayed pre-repair results. The board presented a week-old
+    engine as current, showing 230 kg/m3 and 2 unplaced batches for a method
+    that had since been fixed.
+
+    __pycache__ is skipped: .pyc files carry build metadata and would make the
+    hash unstable run to run. An unreadable file degrades to a marker rather
+    than failing the whole fingerprint."""
+    import hashlib
+    h = hashlib.md5()
+    for d in dirs:
+        d = Path(d)
+        if not d.exists():
+            continue
+        for p in sorted(d.rglob("*.py"), key=lambda x: str(x)):
+            if "__pycache__" in p.parts:
+                continue
+            h.update(str(p.relative_to(d)).replace("\\", "/").encode())
+            try:
+                h.update(p.read_bytes())
+            except OSError:
+                h.update(b"<unreadable>")
+    return h.hexdigest()
+
+
 def board_leg_current(entry, expected_sig: str) -> bool:
     """Whether a cached board engine leg may be REPLAYED for the inputs on
     screen. A leg is usable only when it carries the exact signature of the
