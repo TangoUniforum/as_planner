@@ -377,7 +377,11 @@ grid — is one of these):
     ~2-week hold). **They do NOT appear in that week's HarvestPlan** — the
     ValidationLog's `MANUAL EVENT OK` line says so explicitly, and if that
     leaves the week with no harvest at all, a `MANUAL WINDOW` warning flags
-    the zero-harvest week (steady-harvest contract).
+    the zero-harvest week (steady-harvest contract). That lint now fires on
+    **every** window week with no scripted harvest — including a window opened
+    purely with `--advance-weeks`, where nothing is scripted at all and *every*
+    week is a zero-harvest week (until 2026-08 that was the one case it could
+    never fire on).
   - **Mode `harvest`** (the panel's "Harvest them this week" choice), or an
     **OG pickup** — the graded fish are **harvested in the scripted week**:
     the pickup is drained to processing that same week and the harvest appears
@@ -665,7 +669,7 @@ so you can always see the two side by side.
 | **YearlySummary** | facility-wide per-year: harvest count/HOG t/gross t/avg wt, feed t, peak+mean biomass, utilization | **year-over-year trends** |
 | **TransferTemplate** | (A) the canonical batch journey through seawater; (B) per-batch summary: SW entry week + weeks-from-start, entry weight/count/density, peak tank footprint, peak density (×cap) + Density_Status flag, harvest window + weight | **the general plan at a glance** — which batches enter when, their footprint, density risk, and harvest timing |
 | **Daily Harvest Schedule** | each week's harvest — **all tanks combined** — split evenly Mon–Fri (blended avg weights), with a per-week **Total** row and a blank line between weeks; Tank/Batch list every contributor | daily ops |
-| **WeeklyReport / MonthlyReport** | per-(batch, week/month) open/close ledger (count, weight, biomass, SGR, feed, FCR, mortality, harvest, transfers, checks) | detailed batch accounting |
+| **WeeklyReport / MonthlyReport** | per-(batch, week/month) open/close ledger (count, weight, biomass, **Peak_Density**, SGR, feed, FCR, mortality, harvest, transfers, checks) | detailed batch accounting |
 | **FeedForecastWeekly / Monthly** | feed by feed-type × period matrix | feed ordering |
 | **Advisory** | per-week capacity table: biomass/feed vs caps + excess + OK/REDUCE | capacity headroom + over-cap weeks |
 | **FacilityMap** | tank × week grid (cell = "Batch# AvgWt/Density"); **below it**: per-system × week **feed (kg/day)** and **biomass (kg)** blocks, each with a FACILITY total row | occupancy at a glance + per-system load vs caps |
@@ -680,6 +684,14 @@ so you can always see the two side by side.
 > The `ProductionReport` sheet stays the **historical** input month only — the
 > *forecast* is in the sheets above (same as the reference workbook). Skipped vs the
 > reference: AccumulatedReport, AccumulatedOutput, MonthlyTargets, RunComparison.
+>
+> **`Peak_Density (kg/m³)` in the two ledgers** is the **worst tank** the batch
+> occupied in that week/month (max over its tanks), not a mean — a batch normally
+> sits in several tanks, and a mean would hide one over-cap tank inside a roomy
+> average. Monthly = the max of the month's weekly peaks (a boundary week counts
+> in both months). **Blank** means the batch held no tank that period (e.g. a
+> freshwater week carried by the biology projection). Before 2026-08 this column
+> was a literal `0` on every row.
 >
 > **Monthly harvest attribution:** harvest is a Mon–Fri activity, so the **HarvestPlan
 > Report** and the **MonthlyReport** ledger both attribute each week's harvest to
@@ -1428,14 +1440,22 @@ can produce alone.
 
 **Before adopting a Global plan**, open its workbook's **ValidationLog** and
 search for `TOPOLOGY VIOLATION`, `DEPURATION HOLD`, `PLACEMENT GAP`,
-`PLACEMENT DEGRADED`, `UNPLACED BATCH` and `NON-DETERMINISTIC SOLVE`, and check
-the handling-budget gate in Analyze.
+`PLACEMENT DEGRADED`, `UNPLACED BATCH`, `NON-DETERMINISTIC SOLVE`,
+`PASS A.2 FALLBACK` and `PASS B FALLBACK`, and check the handling-budget gate
+in Analyze.
 
-> **Reporting gap to know about.** A Global run writes a `RunConfig` sheet with a
-> completely different layout from a controller run's (a field stamp headed
-> "RUN CONFIG — GLOBAL METHOD EXPORT" rather than the re-importable YAML dump),
-> so **Configure → Import from workbook silently restores nothing** from a Global
-> workbook. Import config from a controller run or from a config template.
+> **`PASS B FALLBACK`** (new 2026-08 — the category existed but nothing ever
+> emitted it) means L3 could not *prove* the transfer-minimising solve on those
+> weeks within the time limit and kept Pass A's layout. The plan is still legal
+> and still reproducible, but those weeks carry **more transfers than L3's
+> transfer count implies**. It names how many of how many weeks.
+
+> **Two different sheets are both called `RunConfig`.** A controller run embeds
+> the re-importable YAML dump; a Global run writes a **method stamp** headed
+> "RUN CONFIG — GLOBAL METHOD EXPORT" — a record of what ran, with nothing to
+> restore. **Configure → Import from workbook** now tells you which one it found
+> and why there is nothing to import, instead of reporting a flat "not found".
+> Import config from a controller run or from a config template.
 
 
 ## 13. Analyze mode — find my best plan (one flow)
@@ -1522,7 +1542,12 @@ existing results instantly and never invalidates cached runs.
 the rest of your config, and is **never written to an output workbook** — so it
 cannot be lost to a run. Note the flip side: it is *not* part of the workbook's
 `RunConfig` snapshot (which carries control/biology/facility/batches/limits
-only), so importing config from a workbook will not restore it. Promotion is **manual by design**:
+only), so importing config from a workbook will not restore it — and **must
+not**: a workbook you open from last month would otherwise silently re-point
+today's Quick run at a plan that won a tournament on a different PR. The same
+goes for `targets.yaml` and `economics.yaml`, the yardstick a run is *judged*
+against. The `RunConfig` sheet names all three omissions in its own header, so
+the gap is visible in the workbook rather than inferred. Promotion is **manual by design**:
 the tool never changes its own defaults. Once promoted, the **⚡ Quick run**
 card at the top of Analyze re-validates that exact plan (one run + the
 checklist, minutes not hours) — use it as the everyday sanity check and the
