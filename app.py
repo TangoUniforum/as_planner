@@ -4968,8 +4968,7 @@ def _harvest_mode_label(config_dir) -> str:
     except Exception:  # noqa: BLE001
         return "current app config"
     if c.get("harvest_level_load"):
-        return (f"level-load ON (K={c.get('harvest_smooth_lookahead_weeks')}, "
-                f"setpoint={c.get('harvest_setpoint_lookahead_weeks')})")
+        return f"level-load ON (K={c.get('harvest_smooth_lookahead_weeks')})"
     return "level-load OFF (default controller)"
 
 

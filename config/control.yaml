@@ -32,7 +32,6 @@ tran_og_default_tanks: 2
 global_buffer_pct: 0.05
 starvation_period_days: 7
 min_transfer_count: 7000.0
-harvest_grade_to_min: false
 sixn_level_drains: true
 density_target_pct: 0.9
 density_welfare_threshold_kg_m3: 85.0
@@ -40,7 +39,6 @@ rebalance_varqty_budget: 20
 rebalance_split_budget: 8
 rebalance_balance_budget: 30
 rebalance_level: true
-harvest_setpoint_lookahead_weeks: 1.5
 harvest_level_load: true
 harvest_smooth_lookahead_weeks: 12
 harvest_level_target: null

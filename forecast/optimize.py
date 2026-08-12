@@ -1330,13 +1330,31 @@ def sweep(input_path, config_dir, scenario_dir, grid=None, progress=None,
 # candidate values to try. Spans the levers that move the Minimize-loads objective
 # — placement (tran_og), the harvest controller (setpoint/K), packing density, and
 # the rebalancer budgets. Edit here to widen/narrow the search.
+# Revised 2026-08-12 from the 106-run control-parameter study. Two changes, both
+# measured rather than guessed:
+#   * The rebalance budgets were exploring only their NON-BINDING side. 60 was
+#     bit-identical to 30 and 12 bit-identical to 8 on every metric — five
+#     duplicate score rows in one controller search, ~40% of the descent's budget
+#     spent proving that a slack constraint is slack. The binding side is BELOW
+#     the current value (0 changes the plan materially), so the axes now bracket
+#     it instead.
+#   * `global_buffer_pct` and `min_tank_control` were in NO search space despite
+#     measurably moving the operator's hardest metric: global_buffer 0.05 -> 0.0
+#     bought +3,700 fish on the worst harvest week, and min_tank_control 7000 ->
+#     12000 bought +2,900 AND a better density peak (106 -> 101.6). Both are
+#     planner preferences, not business rules, so they are legitimately tunable.
+# `min_transfer_count` stays OUT: 7000 measured as a genuine optimum with sharp
+# loss either side (3500 -> 10,450 worst week), so a descent axis would only
+# rediscover it at the cost of runs.
 CD_KNOB_SPACE = [
     ("tran_og_default_tanks", [2, 3]),
     ("facility_biomass_deviation_pct", [0.005, 0.01, 0.02]),
     ("harvest_smooth_lookahead_weeks", [6, 12]),
     ("density_target_pct", [0.85, 0.90, 0.95]),
-    ("rebalance_balance_budget", [30, 60]),
-    ("rebalance_split_budget", [8, 12]),
+    ("global_buffer_pct", [0.0, 0.05, 0.10]),
+    ("min_tank_control", [7000, 12000]),
+    ("rebalance_balance_budget", [0, 15, 30]),
+    ("rebalance_split_budget", [0, 4, 8]),
 ]
 
 
