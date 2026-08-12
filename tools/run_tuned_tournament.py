@@ -115,6 +115,9 @@ def _grade(out_path, cfg: dict, targets) -> dict:
         "weeks_moves_over_cap": m.weeks_moves_over_cap,
         "weeks_moves_warn": m.weeks_moves_warn,
         "moves_week_max": m.moves_week_max,
+        # The budget the counts above were measured against, so the gate text
+        # names the operator's real number instead of a hardcoded 15.
+        "move_cap": mv_cap,
         "peak_pct_of_cap": peak_pct,
         "targets_review": tr,
         "density_review": _ana.density_review(str(out_path)),

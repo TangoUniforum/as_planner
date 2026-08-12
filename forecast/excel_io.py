@@ -196,7 +196,8 @@ def write_harvest_plan_output(
         del wb[sheet_name]
     ws = wb.create_sheet(sheet_name)
     ws.append(["HARVEST PLAN"])
-    ws.append(["For each harvest: specify batch, date or week#, tank, counts and biomass."])
+    ws.append(["Generated output - one row per harvest event: batch, week, "
+               "tank, counts and biomass. Rewritten every run."])
     ws.append([])
     ws.append([
         "Week", "Batch", "Tank", "Count (fish)",
@@ -255,8 +256,13 @@ def write_transfer_plan_output(
         del wb[sheet_name]
     ws = wb.create_sheet(sheet_name)
     ws.append(["TRANSFER PLAN"])
-    ws.append(["For each transfer: specify batch, date or week#, from/to tanks, count, avg weight. "
-               "Grade A = big size class, B = small (size-class split)."])
+    ws.append(["Generated output - one row per planned move. Rewritten every "
+               "run. Type=Transfer rows are real tank-to-tank moves (one row "
+               "= one move; same-week duplicate legs are merged). Type=TranOG "
+               "is one row per destination tank and From_Tank reads 'FW'. "
+               "Type=Grade emits a pickup row and a retention row, and the "
+               "Grade column carries 'pickup'/'retention' for those; on "
+               "Transfer rows Grade is A = big size class, B = small."])
     ws.append([])
     ws.append([
         "Week", "Batch", "Type", "From_Tank", "To_Tank",
@@ -2407,7 +2413,8 @@ def write_facility_map(
         del wb[sheet_name]
     ws = wb.create_sheet(sheet_name)
     ws.append(["FACILITY MAP"])
-    ws.append(["Each cell: Batch# AvgWt(kg) / Density(kg/m³). Color = batch."])
+    ws.append(["Each cell: Batch# AvgWt(kg) / Density(kg/m³). "
+               "Blank = tank empty that week."])
 
     # Order tanks by system + tank_id (OG tanks only for compactness).
     og_tanks = sorted(
@@ -2515,15 +2522,21 @@ def write_advisory(
     if sheet_name in wb.sheetnames:
         del wb[sheet_name]
     ws = wb.create_sheet(sheet_name)
-    ws.append(["CAPACITY ADVISORY - HARVEST RECOMMENDATIONS"])
-    ws.append(["Max Feed/Day:", f"{control.max_feed_per_day_kg:,.0f} kg/day"])
-    ws.append(["Max Facility Biomass:", f"{control.max_biomass_kg:,.0f} kg"])
+    ws.append(["CAPACITY ADVISORY - weeks where the plan runs over a facility cap"])
+    ws.append(["Max Feed/Day (Control default):",
+               f"{control.max_feed_per_day_kg:,.0f} kg/day"])
+    ws.append(["Max Facility Biomass (Control default):",
+               f"{control.max_biomass_kg:,.0f} kg"])
+    ws.append(["NOTE: the two figures above are the Control defaults. The "
+               "Biomass_Limit / Feed_Limit COLUMNS below are the per-week "
+               "resolved caps and win where FacilityLimits overrides them."])
     ws.append([])
     ws.append([
         "Week", "Week_Start", "Total_Biomass (kg)", "Biomass_Limit (kg)",
         "Biomass_Excess (kg)", "Total_Feed (kg/day)", "Feed_Limit (kg/day)",
         "Feed_Excess (kg/day)", "Harvest_Count", "Harvest_Biomass (kg)",
-        "Advisory", "Harvest_Batch", "Harvest_Recommended (kg)",
+        "Advisory", "Harvest_Batch (not populated)",
+        "Biomass_Over_Cap (kg)",
     ])
 
     bio: dict[str, float] = defaultdict(float)

@@ -708,29 +708,41 @@ register_gate("sixn_one_way", "6N one-way commitment (R7)", hard=False,
 
 
 def _gate_handling_budget(ctx):
-    """Operator rule 4 — weekly handling budget (15 transfer moves/week).
-    FAIL: any week over the cap; WARN: any week over ~80% of it (>12);
-    PASS: every week within. The engine defers its quality passes to hold
-    the cap, so an overrun means ESSENTIAL moves alone (arrival make-room,
-    rotation fills, the plan-diff) exceeded it that week."""
+    """Operator rule 4 — the weekly handling budget (`max_transfers_per_week`).
+    FAIL: any week over the budget; WARN: any week over ~80% of it;
+    PASS: every week within.
+
+    The budget number comes from ctx (`move_cap`) — the same value the counts
+    were measured against — never from a literal here: a gate that hardcodes
+    "15" starts lying the moment the knob is retuned.
+
+    A Controller engine defers its quality passes to hold the budget, so an
+    overrun there means ESSENTIAL moves alone (arrival make-room, rotation
+    fills, the plan-diff) exceeded it that week. The Global engines never read
+    the budget at all, so an overrun there is simply unbudgeted planning."""
     over = ctx.get("weeks_moves_over_cap")
     warn = ctx.get("weeks_moves_warn")
     if over is None and warn is None:
         return "N/A", "weekly transfer counts unavailable"
     over, warn = int(over or 0), int(warn or 0)
+    cap = int(ctx.get("move_cap") or 0)
+    cap_s = f"{cap}-move " if cap else ""
+    warn_s = f" (>{int(0.8 * cap)} moves)" if cap else ""
     mx = ctx.get("moves_week_max")
     mx_s = f" (worst week {int(mx)} moves)" if mx else ""
     if over > 0:
-        return "FAIL", (f"{over} week(s) over the 15-move handling budget"
-                        f"{mx_s} — essential moves alone exceeded it")
+        return "FAIL", (f"{over} week(s) over the {cap_s}handling budget"
+                        f"{mx_s} — on a Controller plan that means essential "
+                        f"moves alone exceeded it; the Global engines do not "
+                        f"read the budget at all")
     if warn > 0:
-        return "WARN", (f"{warn} week(s) above ~80% of the handling budget "
-                        f"(>12 moves){mx_s}")
-    return "PASS", f"every week within the 15-move handling budget{mx_s}"
+        return "WARN", (f"{warn} week(s) above ~80% of the {cap_s}handling "
+                        f"budget{warn_s}{mx_s}")
+    return "PASS", f"every week within the {cap_s}handling budget{mx_s}"
 
 
-register_gate("handling_budget", "Weekly handling budget (15 moves)",
-              hard=False, fn=_gate_handling_budget)
+register_gate("handling_budget", "Weekly handling budget", hard=False,
+              fn=_gate_handling_budget)
 
 
 # --------------------------------------------------------------------------- #

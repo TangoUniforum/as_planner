@@ -5613,7 +5613,8 @@ def _board_score(out_path):
     # what a gate judges) independently of the engine inputs — see
     # _ensure_board_score / analysis.drop_stale_grades.
     return {"metrics": m, "verdict": verdict, "harvest": harv, "gates": gates,
-            "sixn_outbound_purge": sixn_out, "schema": _opt.METRICS_SCHEMA}
+            "sixn_outbound_purge": sixn_out, "move_cap": mv_cap,
+            "schema": _opt.METRICS_SCHEMA}
 
 
 def _board_badges(gates):
@@ -6208,6 +6209,9 @@ def _ana_grade(res, targets, econ):
                              if m is not None else None),
         "moves_week_max": (getattr(m, "moves_week_max", None)
                            if m is not None else None),
+        # The budget the counts above were measured against, so the gate text
+        # names the operator's real number instead of a hardcoded 15.
+        "move_cap": sc.get("move_cap"),
         "peak_pct_of_cap": peak_pct,
         "targets_review": tr,
         "density_review": dr,
