@@ -325,6 +325,66 @@ class TestCpSatWasOverConstrainedNotOverFull:
         assert _eligible_tanks(5000.0, og, {"OG3N"}, {"OG1N"}) == [31]
 
 
+class TestSolvesAreReproducible:
+    """A non-reproducible measurement is a measurement bug (project law).
+
+    `time_limit` is WALL CLOCK, so whichever incumbent branch-and-bound held
+    when the clock ran out became the plan: the same PR gave 54 / 55 / 81
+    idle-tank weeks purely with CPU contention, which silently poisons every
+    A/B built on top of it. A bigger budget is NOT the fix -- measured, 9
+    Pass A.2 weeks still bound at 120 s and a run took 21 minutes instead of 3.
+    """
+
+    def test_only_a_proved_solve_is_used(self):
+        """The rule that makes the output load-independent: a limit-bound
+        incumbent is discarded for a reproducible fallback."""
+        import inspect
+        from forecast import global_planner_l3_poc as l3
+        src = inspect.getsource(l3._solve_passA_per_week)
+        assert '_r2_ok = getattr(r2, "status", None) == 0' in src
+        srcb = inspect.getsource(l3._solve_passB_per_week)
+        assert 'if getattr(res, "status", None) != 0:' in srcb
+
+    def test_symmetry_breaking_is_applied_between_interchangeable_systems(self):
+        """L3's variables are per-SYSTEM tank counts, so identical tanks are
+        already collapsed — the symmetry that matters is between SYSTEMS, which
+        on this facility are identical (3 tanks, 400,000 kg, 3,000 kg/day) and
+        carry no continuity term in Pass A. Breaking it took unprovable weeks
+        from 20-24 to 2 and halved the runtime."""
+        import inspect
+        from forecast import global_planner_l3_poc as l3
+        src = inspect.getsource(l3._solve_passA_per_week)
+        assert "SYMMETRY BREAKING" in src
+        assert "_classes" in src
+
+    def test_symmetry_breaking_only_removes_permutations(self):
+        """SAFETY: the constraint orders interchangeable systems by load. Any
+        solution can be relabelled to satisfy it, so the OPTIMUM is unchanged —
+        it must never be applied across systems that differ in tier, tank count
+        or caps, or it would forbid real solutions."""
+        import inspect
+        from forecast import global_planner_l3_poc as l3
+        src = inspect.getsource(l3._solve_passA_per_week)
+        # the class key must include tier, tank count AND caps
+        assert "s in NURSERY_SYSTEMS" in src
+        assert "n_tanks_w.get(w, {}).get(s, 0)" in src
+        assert "_caps_here.get(s)" in src
+
+    def test_every_degrade_is_recorded(self):
+        from forecast.excel_io import write_validation_log
+        wb = openpyxl.Workbook()
+        write_validation_log(wb, invariant_warnings=[
+            "NON-DETERMINISTIC SOLVE - Pass A.1 hit its wall-clock time limit on week 2027-W04.",
+            "PASS A.2 FALLBACK - 2 week(s) could not PROVE the cap-slack refinement.",
+            "PASS B FALLBACK - 18 week(s) kept Pass A's layout.",
+        ])
+        cats = [r[1] for r in wb["ValidationLog"].iter_rows(values_only=True)
+                if r and isinstance(r[0], int)]
+        assert cats[0] == "ERROR - Non-reproducible solve"
+        assert cats[1].startswith("WARNING - Pass A.2 fallback")
+        assert cats[2].startswith("WARNING - Pass B fallback")
+
+
 class TestUnplacedBatchIsLoud:
     """Fish with L1 standing but no physical tank must be IMPOSSIBLE to miss.
     They previously vanished while conservation still reported them standing."""

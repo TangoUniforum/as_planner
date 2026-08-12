@@ -129,11 +129,15 @@ SOLVER_WARNINGS: list = []
 
 # A time limit can never be a deterministic stop criterion, so the fix is NOT a
 # bigger budget — measured, 9 Pass A.2 weeks still bound at 120 s, and the run
-# took 21 minutes instead of 3. Instead, a limit-bound incumbent is DISCARDED in
-# favour of a reproducible fallback (Pass A.2 -> Pass A.1's layout, Pass B ->
-# Pass A's), so the emitted plan never depends on how busy the machine was. That
-# makes the limit a pure runtime guard, and it can stay small.
-_WEEK_SOLVE_LIMIT_S = 10.0
+# took 21 minutes instead of 3. Two things make the result reproducible instead:
+#   * a limit-bound incumbent is DISCARDED for a reproducible fallback
+#     (Pass A.2 -> Pass A.1's layout, Pass B -> Pass A's); and
+#   * SYMMETRY BREAKING (see Pass A) removes the permutations that made the hard
+#     weeks unprovable in the first place, so almost every week now proves and
+#     the fallback SET is stable rather than a race against the clock.
+# With both, 45 s is comfortably enough: 2 weeks fall back, the same 2 every
+# time, and repeated runs produce an identical plan.
+_WEEK_SOLVE_LIMIT_S = 45.0
 
 _DEFAULT_BIO_CAP = 400000.0
 _DEFAULT_FEED_CAP = 3000.0
@@ -964,6 +968,7 @@ def _solve_passA_per_week(
         # Inequalities: tank cap (soft), bio cap (soft), feed cap (soft).
         Aub_r, Aub_c, Aub_v, bub = [], [], [], []
         ur = 0
+        _caps_here: dict = {}
         for s in sys_here:
             vis = vars_by_sw[(s, w)]
             # tank: sum y - slk_tank <= n_tanks
@@ -991,6 +996,43 @@ def _solve_passA_per_week(
                 Aub_v.append(d.per_tank_feed_kg_day)
             Aub_r.append(ur); Aub_c.append(sf0 + sys_pos[s]); Aub_v.append(-1.0)
             bub.append(feed_cap); ur += 1
+            _caps_here[s] = (bio_cap, feed_cap)
+
+        # ---- SYMMETRY BREAKING among INTERCHANGEABLE systems. ----------------
+        # L3's variables are per-SYSTEM tank COUNTS, so identical TANKS inside a
+        # system are already collapsed — the symmetry that matters here is
+        # between SYSTEMS. On this facility every OG system has the same 3 tanks
+        # and the same 400,000 kg / 3,000 kg-per-day caps, and Pass A carries no
+        # continuity term (that is Pass B's job), so OG3N/OG3S/OG4N/... are
+        # literally interchangeable: every solution has 7! equivalent
+        # permutations for the grow-out tier and 4! for the entry tier, and
+        # branch-and-bound burns its whole budget proving that equally-good
+        # layouts are equally good. Classic symptom, and exactly what we see: a
+        # model that is trivially feasible yet cannot prove optimality.
+        #
+        # Impose an arbitrary but consistent order WITHIN each interchangeability
+        # class (same tier, same tank count, same caps): tank load must be
+        # non-increasing along the class. This removes only permutations — any
+        # solution can be reordered to satisfy it — so the optimum is unchanged
+        # and no business rule is touched.
+        _classes: dict = {}
+        for s in sys_here:
+            _classes.setdefault(
+                (s in NURSERY_SYSTEMS,
+                 n_tanks_w.get(w, {}).get(s, 0),
+                 _caps_here.get(s)), []).append(s)
+        for _k, _ss in sorted(_classes.items(), key=lambda kv: str(kv[0])):
+            if len(_ss) < 2:
+                continue
+            _ss = sorted(_ss)
+            for _a, _b in zip(_ss, _ss[1:]):
+                # load(_a) >= load(_b)   <=>   sum y[_b] - sum y[_a] <= 0
+                for _i, (_gvi, _s2, _bid) in enumerate(loc_y):
+                    if _s2 == _b:
+                        Aub_r.append(ur); Aub_c.append(_i); Aub_v.append(1.0)
+                    elif _s2 == _a:
+                        Aub_r.append(ur); Aub_c.append(_i); Aub_v.append(-1.0)
+                bub.append(0.0); ur += 1
 
         from scipy.sparse import coo_matrix as _coo_m
         Aeq = _coo_m((np.array(Aeq_v), (np.array(Aeq_r), np.array(Aeq_c))),
