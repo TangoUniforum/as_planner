@@ -2703,6 +2703,21 @@ def write_validation_log(
             # then not solver-verified, so this must read as an ERROR, not a
             # note — a degraded run reached the compare board graded "optimal".
             cat = "ERROR - Placement degraded (fallback)"
+        elif w.startswith("HYBRID GUIDE"):
+            # A lever the L1 guide refused, or a week it declined to steer.
+            # A decision the tool took on its own must be readable, even when
+            # it was the right one — see forecast/hybrid_guide.py's ledger.
+            cat = "INFO - Hybrid guide (L1) decision"
+        elif w.startswith("AUTO-FW-CALIB"):
+            # FRESHWATER GROWTH CALIBRATION — not hydration. These used to fall
+            # through to the "WARNING - Hydration" catch-all, which told an
+            # operator scanning the log that the PR read badly when in fact the
+            # model had rewritten a batch's fw_correction. A clamped or
+            # non-converged solve is a real warning (the transfer target is
+            # unreachable at this growth); an applied one is an INFO.
+            cat = ("WARNING - FW growth calibration (target unreachable)"
+                   if ("CLAMPED" in w or "did not converge" in w)
+                   else "INFO - FW growth calibration (fw_correction rewritten)")
         elif "INV-1" in w:
             cat = "WARNING - INV-1 (one-batch-per-tank)"
         elif "INV-5" in w:

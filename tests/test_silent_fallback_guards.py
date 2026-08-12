@@ -181,3 +181,171 @@ def test_run_global_routes_the_degrade_warning_into_the_validation_log():
     cats = [r[1] for r in wb["ValidationLog"].iter_rows(values_only=True)
             if r and isinstance(r[0], int)]
     assert cats == ["ERROR - Placement degraded (fallback)"]
+
+
+# =========================================================================== #
+# 2026-08 documentation audit — three more categories that could never fire,
+# or fired under the wrong name. Same class as everything above: the tool made
+# a decision and the operator had no way to read it.
+# =========================================================================== #
+class TestPassBFallbackIsActuallyProduced:
+    """`WARNING - Pass B fallback (no stickiness)` was a ValidationLog category
+    with NO producer anywhere in the repo — and the fallback it names is real
+    and live: `_solve_passB_per_week` collected `_passB_fallbacks` and then
+    threw the list away. A horizon could lose transfer minimisation on most of
+    its weeks and the workbook would say nothing."""
+
+    def _run_with_a_solver_that_never_proves(self):
+        import numpy as np
+        from forecast import global_planner_l3_poc as l3
+        from forecast.caps import SystemLimits
+
+        class _Failed:
+            status, x, message = 1, None, "iteration limit"
+
+        def _never_proves(*a, **kw):
+            return _Failed()
+
+        demand = {
+            ("B1", w): l3.TankDemandRow(
+                week=w, week_label=f"2026-W{31 + w}", batch_id="B1", tier="grow",
+                tanks=1, biomass_kg=50_000.0, feed_kg_day=500.0,
+                avg_wt_g=4000.0, per_tank_biomass_kg=50_000.0,
+                per_tank_feed_kg_day=500.0)
+            for w in (0, 1)
+        }
+        y_meta = [("B1", "OG3", 0), ("B1", "OG3", 1)]
+        xA = np.zeros(len(y_meta) + 3 * 2 + len(y_meta))
+        l3.SOLVER_WARNINGS.clear()
+        l3._solve_passB_per_week(
+            [0, 1], ["OG3"], {("OG3", 0): 0, ("OG3", 1): 1},
+            {("OG3", 0): [0], ("OG3", 1): [1]}, y_meta, demand,
+            {0: {"OG3": 4}, 1: {"OG3": 4}},
+            {0: "2026-W31", 1: "2026-W32"}, SystemLimits(),
+            {0: (0.0, 0.0), 1: (0.0, 0.0)}, xA, 1.0, np, _never_proves,
+            0.02, False)
+        return list(l3.SOLVER_WARNINGS)
+
+    def test_every_fallen_back_week_is_reported(self):
+        """NEGATIVE CONTROL: on the parent commit this list is empty."""
+        warns = self._run_with_a_solver_that_never_proves()
+        hits = [w for w in warns if w.startswith("PASS B FALLBACK")]
+        assert len(hits) == 1, f"Pass B fell back on every week and said: {warns}"
+        # The denominator matters as much as the count (the 2026-08 lesson):
+        # "2" reads very differently from "2 of 2".
+        assert "2 of 2 week(s)" in hits[0]
+        # And it must name the CONSEQUENCE, not just the event.
+        assert "transfer" in hits[0].lower()
+
+    def test_a_clean_pass_b_stays_silent(self):
+        """A warning on every run trains the operator to ignore the one that
+        matters — the proved path must add nothing."""
+        import numpy as np
+        from forecast import global_planner_l3_poc as l3
+        from forecast.caps import SystemLimits
+        l3.SOLVER_WARNINGS.clear()
+
+        class _Ok:
+            status, message = 0, ""
+            x = np.zeros(1 + 3 * 1)
+
+        l3._solve_passB_per_week(
+            [0], ["OG3"], {("OG3", 0): 0}, {("OG3", 0): [0]},
+            [("B1", "OG3", 0)],
+            {("B1", 0): l3.TankDemandRow(
+                week=0, week_label="2026-W31", batch_id="B1", tier="grow",
+                tanks=1, biomass_kg=50_000.0, feed_kg_day=500.0,
+                avg_wt_g=4000.0, per_tank_biomass_kg=50_000.0,
+                per_tank_feed_kg_day=500.0)},
+            {0: {"OG3": 4}}, {0: "2026-W31"}, SystemLimits(), {0: (0.0, 0.0)},
+            np.zeros(1 + 3 * 1 + 1), 1.0, np, lambda *a, **kw: _Ok(),
+            0.02, False)
+        assert not [w for w in l3.SOLVER_WARNINGS
+                    if w.startswith("PASS B FALLBACK")]
+
+    def test_the_warning_still_files_under_its_category(self):
+        from forecast.excel_io import write_validation_log
+        warns = self._run_with_a_solver_that_never_proves()
+        wb = openpyxl.Workbook()
+        write_validation_log(wb, invariant_warnings=warns)
+        cats = [r[1] for r in wb["ValidationLog"].iter_rows(values_only=True)
+                if r and isinstance(r[0], int)]
+        assert any(str(c).startswith("WARNING - Pass B fallback") for c in cats)
+
+
+class TestFwCalibrationIsNotFiledAsHydration:
+    """`AUTO-FW-CALIB ...` messages are FRESHWATER GROWTH CALIBRATIONS — the
+    model rewriting a batch's fw_correction. Every one of them fell through to
+    the `WARNING - Hydration` catch-all, telling an operator scanning the log
+    that the Production Report had read badly."""
+
+    def _cats(self, msgs):
+        from forecast.excel_io import write_validation_log
+        wb = openpyxl.Workbook()
+        write_validation_log(wb, invariant_warnings=msgs)
+        return [str(r[1]) for r in wb["ValidationLog"].iter_rows(values_only=True)
+                if r and isinstance(r[0], int)]
+
+    def test_an_applied_calibration_is_its_own_info_category(self):
+        cat, = self._cats(["AUTO-FW-CALIB B51: fw_correction 1.000 -> 1.180 "
+                           "to land pre-cull on 120g at transfer"])
+        assert "Hydration" not in cat, "a growth calibration filed as hydration"
+        assert "FW growth calibration" in cat and cat.startswith("INFO")
+
+    def test_a_clamped_or_unconverged_solve_stays_a_warning(self):
+        """These two mean the transfer target is UNREACHABLE at this growth —
+        the model did not do what was asked. That is not an INFO."""
+        clamped, diverged = self._cats([
+            "AUTO-FW-CALIB B51: landing on 120g needs fw_correction 2.400 — "
+            "CLAMPED to 1.500 [0.50,1.50] (target likely unreachable at this growth)",
+            "AUTO-FW-CALIB B52: FW correction did not converge; kept configured 1.000",
+        ])
+        for cat in (clamped, diverged):
+            assert cat.startswith("WARNING - FW growth calibration"), cat
+            assert "unreachable" in cat
+
+
+class TestHybridGuideLedgerReachesTheOperator:
+    """`HarvestGuide.ledger` recorded every lever the guide REFUSED and every
+    week it declined to steer — and nothing anywhere read it. The purge lever
+    silently self-disables whenever sixn_level_drains is off, so a run could
+    ignore a lever the operator had switched on and never say so."""
+
+    def test_a_refused_lever_is_recorded_at_all(self):
+        """The producing decision, pinned so the ledger cannot quietly empty."""
+        import inspect
+        from forecast import hybrid_guide
+        src = inspect.getsource(hybrid_guide.build_harvest_guide)
+        assert "purge lever REFUSED" in src
+        assert "notes.append" in src
+
+    def test_run_wires_the_ledger_into_the_validation_log(self):
+        import inspect
+        from forecast import run as frun
+        src = inspect.getsource(frun.main)
+        assert 'f"HYBRID GUIDE - {m}"' in src, \
+            "the guide ledger is still written to nothing"
+        assert "+ _guide_notes" in src, \
+            "the ledger notes never reach write_validation_log"
+
+    def test_the_notes_land_in_a_readable_category(self):
+        from forecast.excel_io import write_validation_log
+        from forecast.hybrid_guide import HarvestGuide
+        g = HarvestGuide(weeks={}, follow="full", band=0.05,
+                         min_harvest=30_000.0, max_harvest=55_000.0)
+        g.note("purge lever REFUSED: sixn_level_drains is off, which is the "
+               "guard against over-filling one 6N pair")
+        wb = openpyxl.Workbook()
+        write_validation_log(wb, invariant_warnings=[f"HYBRID GUIDE - {m}"
+                                                     for m in g.ledger])
+        rows = [r for r in wb["ValidationLog"].iter_rows(values_only=True)
+                if r and isinstance(r[0], int)]
+        assert len(rows) == 1
+        assert rows[0][1] == "INFO - Hybrid guide (L1) decision"
+        assert "REFUSED" in str(rows[0][2])
+
+    def test_a_guide_with_nothing_to_report_writes_nothing(self):
+        from forecast.hybrid_guide import HarvestGuide
+        g = HarvestGuide(weeks={}, follow="full", band=0.05,
+                         min_harvest=30_000.0, max_harvest=55_000.0)
+        assert g.ledger == []

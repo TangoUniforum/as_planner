@@ -845,6 +845,25 @@ def main(
         facility_limits, control, batches=batch_by_id, tables=tables,
         biology_states_by_batch=rl_states_by_batch,
     )
+    # HYBRID GUIDE ledger -> the ValidationLog. The guide records every lever it
+    # REFUSED and every week it declined to steer; until now nothing read that
+    # list, so the tool was silently choosing not to use a lever the operator
+    # had switched on (e.g. the purge lever self-disables when
+    # sixn_level_drains is off). A decision the tool takes on its own has to be
+    # readable even when it is the correct decision. Written only when the
+    # ledger is non-empty, so a clean hybrid run stays silent.
+    _guide_notes = [
+        f"HYBRID GUIDE - {m}"
+        for m in (list(getattr(harvest_guide, "ledger", []))
+                  if harvest_guide is not None else [])
+    ]
+    if _guide_notes:
+        print(f"\n  HYBRID guide ledger ({len(_guide_notes)} decision(s) — "
+              f"also in the ValidationLog):")
+        for _m in _guide_notes[:10]:
+            print(f"    {_m}")
+        if len(_guide_notes) > 10:
+            print(f"    ... and {len(_guide_notes) - 10} more")
     write_validation_log(
         wb,
         residuals=residuals,
@@ -853,7 +872,8 @@ def main(
         bottlenecks=canvas.bottlenecks,
         density_violations=density_violations,
         invariant_warnings=(list(hydration_warns) + list(inv_warns)
-                            + list(manual_warns) + list(fw_calib_warns)),
+                            + list(manual_warns) + list(fw_calib_warns)
+                            + _guide_notes),
         placed_batches={r.batch_id for r in placement.batch_locations},
     )
     write_daily_harvest_schedule(

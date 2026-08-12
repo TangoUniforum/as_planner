@@ -1315,9 +1315,26 @@ def _solve_passB_per_week(
         last_sys = new_last
         last_entry = new_entry
 
+    if _passB_fallbacks:
+        # The mirror of the PASS A.2 FALLBACK notice above, and for years the
+        # missing half of it: these weeks were collected but never reported, so
+        # a run could lose stickiness on most of its horizon and say nothing.
+        # Deterministic (a limit-bound incumbent is never used) but a DEGRADE —
+        # those weeks keep Pass A's layout, so their transfer counts are the
+        # un-minimised ones and the plan moves more fish than L3 claims.
+        SOLVER_WARNINGS.append(
+            f"PASS B FALLBACK - {len(_passB_fallbacks)} of {len(weeks)} week(s) "
+            f"could not PROVE the transfer-minimising (stickiness) solve within "
+            f"the time limit and kept Pass A's layout instead. The result is "
+            f"reproducible, but those weeks carry MORE transfers than a full "
+            f"Pass B would have produced: "
+            f"{', '.join(_passB_fallbacks[:6])}"
+            + (" ..." if len(_passB_fallbacks) > 6 else "") + ".")
     if verbose:
         print(f"  [L3] Pass B (sequential per-week): {len(weeks)} weekly "
-              f"stickiness MILPs solved")
+              f"stickiness MILPs solved"
+              + (f" ({len(_passB_fallbacks)} fell back to Pass A's layout)"
+                 if _passB_fallbacks else ""))
     return xB
 
 
