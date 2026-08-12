@@ -18,7 +18,9 @@ from forecast.optimize import _weekly_move_counts
 from forecast.placement import (
     _consolidate_remnants,
     _emit_transfers_for_batch_diff,
+    _entry_makeroom_move_cost,
     _even_out_density,
+    _pacing_may_defer,
 )
 from forecast.state import FacilityState, TankState
 
@@ -161,6 +163,110 @@ class TestDiffBudget:
             s, "B50", {31, 32, 33}, {31, 32, 33, 41}, TODAY, evs, warns)
         assert len([e for e in evs if e.count_transferred > 0]) == 3
         assert not s.tanks_by_id[41].is_empty
+
+
+class TestEntryMakeroomReserve:
+    """ANTICIPATORY RESERVE, layer A. The arrival-week entry-tier make-room
+    runs AFTER the deferrable quality passes, so its cost is priced up front
+    and held back from them. Pricing must be exact: over-reserving starves the
+    leveling for nothing, under-reserving lets the week go over cap again."""
+
+    def test_no_congestion_reserves_nothing(self):
+        # NEGATIVE CONTROL: the entry tier already has room for the cohort —
+        # nothing to vacate, so quality keeps its full budget.
+        assert _entry_makeroom_move_cost(
+            need_tanks=2, empty_entry=2, free_growout=0, vacatable_entry=6) == 0
+        assert _entry_makeroom_move_cost(
+            need_tanks=2, empty_entry=5, free_growout=0, vacatable_entry=6) == 0
+
+    def test_no_arrival_at_all_reserves_nothing(self):
+        assert _entry_makeroom_move_cost(0, 0, 0, 6) == 0
+
+    def test_one_vacate_per_short_tank_when_growout_is_free(self):
+        # 2 tanks short, 2 grow-out slots standing free -> 2 forward vacates.
+        assert _entry_makeroom_move_cost(
+            need_tanks=2, empty_entry=0, free_growout=2, vacatable_entry=6) == 2
+
+    def test_no_free_growout_doubles_the_cost(self):
+        # Each vacate must first free a grow-out slot (a 6N purge move-in),
+        # so a short tank costs TWO moves, not one.
+        assert _entry_makeroom_move_cost(
+            need_tanks=2, empty_entry=0, free_growout=0, vacatable_entry=6) == 4
+
+    def test_partial_growout_headroom_is_consumed_in_order(self):
+        # 3 short, only 1 grow-out slot free: 1 cheap vacate + 2 expensive.
+        assert _entry_makeroom_move_cost(
+            need_tanks=3, empty_entry=0, free_growout=1, vacatable_entry=6) == 5
+
+    def test_never_reserves_for_work_it_cannot_do(self):
+        # 4 tanks short but only ONE entry occupant is movable -> price 1
+        # vacate, not 4. (A depurating entry tank is not vacatable.)
+        assert _entry_makeroom_move_cost(
+            need_tanks=4, empty_entry=0, free_growout=9, vacatable_entry=1) == 1
+        assert _entry_makeroom_move_cost(
+            need_tanks=4, empty_entry=0, free_growout=9, vacatable_entry=0) == 0
+
+    def test_reserve_is_never_negative(self):
+        assert _entry_makeroom_move_cost(1, 9, 0, 9) == 0
+
+    def test_matches_the_measured_2026_w43_shape(self):
+        # The week that motivated this: 7.29.26 PR, 2026-W43 emitted 17 moves
+        # = 7 essential + 10 quality, and 2 of those essential moves were the
+        # entry-tier vacates that ran after quality had spent the budget.
+        # With 2 entry tanks short and grow-out slots free, the reserve is
+        # exactly those 2 moves — quality is capped at 8 and the week lands
+        # on 15.
+        assert _entry_makeroom_move_cost(
+            need_tanks=2, empty_entry=0, free_growout=4, vacatable_entry=8) == 2
+
+
+class TestPacingDeferral:
+    """ANTICIPATORY RESERVE, layer B. The purge-pacing pass walks a multi-week
+    lookahead, so in a week that is already at budget it stands down and a
+    calmer week inside the window pre-frees the tank instead. Work moves
+    EARLIER/LATER — it is never refused."""
+
+    def test_defers_when_at_budget_and_the_window_has_slack(self):
+        assert _pacing_may_defer(weeks_out=4, moves_left=0) is True
+        assert _pacing_may_defer(weeks_out=2, moves_left=0) is True
+
+    def test_does_not_defer_with_budget_to_spare(self):
+        # NEGATIVE CONTROL: no congestion -> the pass behaves exactly as before.
+        assert _pacing_may_defer(weeks_out=4, moves_left=1) is False
+        assert _pacing_may_defer(weeks_out=4, moves_left=15) is False
+
+    def test_never_defers_the_last_chance(self):
+        # An arrival landing NEXT week pre-stages regardless of the budget:
+        # essential work is never blocked, only re-timed.
+        assert _pacing_may_defer(weeks_out=1, moves_left=0) is False
+        assert _pacing_may_defer(weeks_out=0, moves_left=0) is False
+
+    def test_over_budget_week_still_defers(self):
+        # _moves_left() floors at 0, but be robust if a caller passes negative.
+        assert _pacing_may_defer(weeks_out=3, moves_left=-2) is True
+
+
+class TestReserveOnlySubtracts:
+    """The whole mechanism can only REDUCE what a deferrable pass may emit —
+    it never authorises a move. That is why it cannot introduce a topology
+    violation, a remnant, or a second batch in a tank: it emits nothing."""
+
+    def test_cost_is_monotone_in_the_deficit(self):
+        prev = -1
+        for need in range(0, 8):
+            c = _entry_makeroom_move_cost(need, 0, 2, 8)
+            assert c >= prev, "reserve must not shrink as the deficit grows"
+            prev = c
+
+    def test_cost_is_non_negative_over_a_grid(self):
+        for need in range(0, 6):
+            for empty in range(0, 6):
+                for free in range(0, 6):
+                    for vac in range(0, 6):
+                        c = _entry_makeroom_move_cost(need, empty, free, vac)
+                        assert c >= 0
+                        # never prices more than 2 moves per vacatable tank
+                        assert c <= 2 * vac
 
 
 class TestTransferPlanRowHonesty:

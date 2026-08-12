@@ -491,6 +491,67 @@ def _tranog_tank_need(cohort_kg, facility, control, plan_n=0):
     return max(plan_n, cfg_floor, density_n)
 
 
+# --------------------------------------------------------------------------- #
+# ANTICIPATORY HANDLING BUDGET — the two policy decisions, as pure functions.
+#
+# The weekly handling budget (operator rule 4) is spent by two kinds of pass:
+# DEFERRABLE quality leveling, which checks the budget before emitting, and
+# ESSENTIAL work, which never does. The essential passes run LAST in the week,
+# so quality used to spend the budget out from under them and the week ended
+# over cap. Both functions below let a pass anticipate that instead. They only
+# ever REDUCE the moves a deferrable pass may make — neither authorises a move,
+# so neither can create a topology violation, a remnant or a multi-batch tank.
+# --------------------------------------------------------------------------- #
+def _entry_makeroom_move_cost(need_tanks: int, empty_entry: int,
+                              free_growout: int, vacatable_entry: int) -> int:
+    """Transfer MOVES the arrival-week entry-tier make-room is going to need.
+
+    A TranOG cohort may enter ONLY the entry tier (R1), so it needs
+    `need_tanks` empty OG1/2 tanks. `empty_entry` are already free; each one
+    short must be VACATED, and each vacate costs:
+
+      * 1 move — the entry occupant goes FORWARD into a free grow-out tank
+        (R2, legal at any weight; never backward, never harvested — R4/R5);
+      * +1 move when no grow-out tank is standing free to receive it, because
+        a grow-out slot is freed by moving its fish into 6N first.
+
+    `vacatable_entry` caps it: the pass can only vacate as many entry tanks as
+    it has (non-depurating) occupants to move, so we never reserve budget for
+    work that cannot happen.
+
+    Pure arithmetic — no state, no side effects. Returns 0 when the entry tier
+    already has room, which is the no-congestion case (no reserve, quality
+    leveling proceeds at full budget).
+    """
+    deficit = min(int(need_tanks) - int(empty_entry), int(vacatable_entry))
+    free = int(free_growout)
+    cost = 0
+    for _ in range(max(0, deficit)):
+        cost += 1                      # entry -> grow-out forward vacate (R2)
+        if free > 0:
+            free -= 1
+        else:
+            cost += 1                  # free that slot: a 6N purge move-in
+    return cost
+
+
+def _pacing_may_defer(weeks_out: int, moves_left: int) -> bool:
+    """May the anticipatory purge pacing pass stand down this week?
+
+    That pass pre-frees a grow-out tank for a TranOG arrival that is
+    `weeks_out` weeks away, and it walks a multi-week lookahead — its own
+    contract is that an unavailable week simply waits. So it may stand down
+    when the week has no handling budget left (`moves_left` <= 0) AND the
+    arrival is more than one week out, i.e. the lookahead still has a calmer
+    week to do the work in.
+
+    Never True for an arrival landing NEXT week (`weeks_out` <= 1): the last
+    chance to pre-stage is always taken, so no arrival is left short a tank
+    and the work is only ever moved EARLIER, never refused.
+    """
+    return int(weeks_out) > 1 and int(moves_left) <= 0
+
+
 def phase_a_precalc(
     biology_states_by_batch: dict[str, list[BatchWeekState]],
     harvest_demands: list[HarvestDemand],
@@ -3461,6 +3522,121 @@ def phase_d_emit_events(
         ws_we = week_ranges.get(week_label)
         week_start_date = ws_we[0] if ws_we else _as_date(control.forecast_start)
 
+        # ---------------- ANTICIPATORY HANDLING RESERVE ------------------
+        # `_moves_left` above answers "what is left of the budget RIGHT NOW".
+        # That is blind in one direction: the week's ESSENTIAL passes (the
+        # arrival entry-vacate make-room, the anticipatory purge pacing) run
+        # AFTER the deferrable quality passes, so quality spends the budget
+        # down to exactly the cap and the essential work that follows pushes
+        # the week OVER it.
+        #
+        # MEASURED — per-move attribution of ALL 5 over-budget weeks on 6 PRs
+        # (moves = ESSENTIAL + quality):
+        #   7.29  2026-W43  17 = 7 (3 rotation fills, 2 source drains,
+        #                            2 entry vacates)      + 10 quality
+        #   7.17  2026-W39  16 = 5 (4 rotation fills, 1 pacing) + 11 quality
+        #   7.17  2027-W28  16 = 4 (3 rotation fills, 1 pacing) + 12 quality
+        #   7.9   2026-W43  17 = 6 (1 fill, 3 drains, 2 vacates) + 11 quality
+        #   7.2   2026-W43  16 = 6 (1 fill, 3 drains, 2 vacates) + 10 quality
+        # EVERY over-budget week was quality-saturated while carrying only 4-7
+        # essential moves. The pattern is identical in each: the passes that
+        # run BEFORE quality use k moves, quality then spends the budget out to
+        # exactly the cap (15 - k), and the essential passes that run AFTER add
+        # their 1-2 moves on top — which is the entire overrun. The budget was
+        # never short; the planner simply never looked ahead INSIDE the week.
+        # A sequencing blindness, not a capacity limit — so nothing here has to
+        # relax a business rule, and nothing here does.
+        #
+        # Everything the later passes need is knowable at the top of the week:
+        # the TranOG entry schedule comes from the batch registry
+        # (og_entry_day), the tanks a cohort needs from `_tranog_tank_need`,
+        # and the 6N rotation is a fixed cadence. Two layers use that:
+        #
+        #   A. RESERVE (here). Price the work that CANNOT be deferred — the
+        #      arrival-week entry-tier make-room — and let the deferrable
+        #      passes spend only what is left over (`_moves_left_quality`).
+        #      The essential passes keep the raw `_moves_left` and are never
+        #      blocked. Deferred quality work is not lost: the leveling
+        #      resumes in the next calmer week, exactly the contract the
+        #      handling budget already had.
+        #   B. DEFER (at the anticipatory purge pacing pass below). That pass
+        #      CAN be deferred by construction — it walks a multi-week
+        #      lookahead — so instead of reserving for it we let it stand down
+        #      in a week that is already at budget and pre-free its tank in a
+        #      calmer week inside the window.
+        #
+        # Layer B is not redundant with A: A is computed BEFORE the quality
+        # passes run, and those passes themselves fill empty grow-out tanks —
+        # so at reserve time the pacing pass's own demand still reads as
+        # satisfied. Reserve what you can predict; defer what you could not.
+        # (Ablation: without B, 7.17 stays at 2 weeks over / 16 worst. A
+        # reserve for the pacing pass was built, measured inert for the
+        # objective on all 6 PRs, and dropped rather than shipped.)
+        _arr_wk = ([s for s in splits
+                    if s.batch_id in og_entry_day
+                    and ws_we[0] <= og_entry_day[s.batch_id] < ws_we[1]]
+                   if ws_we is not None else [])
+
+        def _arrival_makeroom_reserve() -> int:
+            """Moves the arrival-week entry-tier make-room will need.
+
+            That pass MUST run this week — R1 says a TranOG cohort may enter
+            only OG1/2, and a cohort with nowhere to land is a conservation
+            breach (the hard no-drop abort). Each entry tank the arrival is
+            short costs one forward vacate (R2, entry -> grow-out), plus one
+            more move whenever no grow-out slot is standing free to receive
+            it (that slot is freed by moving a grow-out tank into 6N).
+
+            Read from live state on every call, so the reserve shrinks as the
+            week's earlier passes happen to free entry tanks.
+
+            PURGE ERA ONLY, and that scoping is structural rather than fitted:
+            the congestion this reserve relieves is the 6N ROTATION FILL (3-4
+            mandatory moves every week) colliding with an arrival, and in
+            production mode there is no rotation — 61/63/65 are ordinary
+            grow-out — so the collision cannot arise. Consistent with that,
+            all 5 measured over-budget weeks across 6 PRs are purge-era, and
+            reserving in production mode was measured to buy no budget at all
+            while perturbing the plan into a 61,240-fish week over the harvest
+            relief ceiling on 7.17 (a hard-gate FAIL). Scoped, not relaxed.
+            """
+            if not _arr_wk or not purge_this_week:
+                return 0
+            _need = 0
+            for _s in _arr_wk:
+                _ta = ta_index.get((_s.batch_id, week_label))
+                _pn = len(_ta.tank_ids) if _ta and _ta.tank_ids else 0
+                _need += _tranog_tank_need(
+                    _s.post_cull_count * (_s.post_cull_avg_wt_g / 1000.0),
+                    facility, control, _pn)
+            _empty_entry = _free_grow = _vacatable = 0
+            for _t in state.tanks_by_id.values():
+                if _t.type != "OG" or _t.system_id in _SIXN_SYSTEMS:
+                    continue
+                if _t.system_id in OG12_SYSTEMS:
+                    if _t.is_empty:
+                        _empty_entry += 1
+                    elif _t.stage != STAGE_STARVE:
+                        _vacatable += 1
+                elif _t.is_empty:
+                    _free_grow += 1
+            return _entry_makeroom_move_cost(
+                _need, _empty_entry, _free_grow, _vacatable)
+
+        def _moves_left_quality() -> int:
+            """`_moves_left` minus the anticipated essential work — the budget
+            the DEFERRABLE passes may spend.
+
+            Clamped so the reserve can never exceed the whole budget: a week
+            whose essential work alone is over the cap is a real capacity
+            signal the handling gate must still report, not a reason to
+            silently starve the leveling.
+            """
+            if _move_cap <= 0:
+                return 10 ** 9
+            _res = min(_arrival_makeroom_reserve(), _move_cap)
+            return max(0, _moves_left() - _res)
+
         # Advance the 6N phase machine for this week (entry advancement; the
         # empty/production advancement happens AFTER the week's 6N harvest below,
         # once the drain state is known). purge/winddown still run the 6N
@@ -4174,18 +4350,20 @@ def phase_d_emit_events(
                 _emit_transfers_for_batch_diff(
                     state, b, p, n, transfer_date, transfer_events, warnings,
                     min_keep=control.min_tank_control or 0.0,
-                    moves_left=_moves_left,
+                    # Only the EVENING half consults this; source drains are
+                    # essential and never blocked (see the function's docstring).
+                    moves_left=_moves_left_quality,
                 )
             # Even-out pass: fix PR/residual over-concentration by
             # leveling fish across each batch's tanks where a tank is
             # over density cap and the moves are legal. Runs for ALL
             # active batches (including unchanged sets the diff skipped).
             for b in sorted(set(prev_by_batch) | set(this_by_batch)):
-                if _moves_left() <= 0:
+                if _moves_left_quality() <= 0:
                     break             # handling budget spent — deferrable pass
                 _even_out_density(
                     state, b, transfer_date, transfer_events, warnings,
-                    max_moves=_moves_left(),
+                    max_moves=_moves_left_quality(),
                 )
 
             # Multi-objective balancer: relieve any tank still over density cap
@@ -4195,7 +4373,7 @@ def phase_d_emit_events(
             # Transfers; new tanks forward-persisted).
             _bal_budget = min(
                 int(getattr(control, "rebalance_balance_budget", 0) or 0),
-                _moves_left())            # handling budget: deferrable pass
+                _moves_left_quality())    # handling budget: deferrable pass
             if _rebal_on and _bal_budget > 0:
                 _balance_loads(
                     state, week_label, transfer_date, transfer_events, warnings,
@@ -4215,7 +4393,7 @@ def phase_d_emit_events(
             _vq_budget = min(
                 int(getattr(control, "rebalance_varqty_budget",
                             _REBALANCE_VARQTY_BUDGET) or 0),
-                _moves_left())            # handling budget: deferrable pass
+                _moves_left_quality())    # handling budget: deferrable pass
             if _rebal_on and _vq_budget > 0:
                 _variable_quantity_rebalance(
                     state, week_label, transfer_date, transfer_events, warnings,
@@ -4234,7 +4412,8 @@ def phase_d_emit_events(
             _consolidate_remnants(
                 state, transfer_date, week_label, transfer_events, warnings,
                 control.min_tank_control or 0.0,
-                max_moves=_moves_left(),  # handling budget: deferrable pass
+                # handling budget: deferrable pass
+                max_moves=_moves_left_quality(),
             )
 
         # ANTICIPATORY PURGE PACING (purge mode only). The TranOG arrival
@@ -4270,6 +4449,32 @@ def phase_d_emit_events(
                 _wk = sorted_weeks[_wi]
                 _need_wk = arrival_tank_need.get(_wk, 0)
                 if _need_wk <= 0:
+                    continue
+                # HANDLING BUDGET — LAYER B of the anticipatory reserve (see the
+                # block at the top of the week loop). Of everything that runs
+                # after the deferrable quality passes, THIS pass is the one that
+                # can legitimately wait: it walks a multi-week lookahead and its
+                # own contract already says so ("if no 6N slot or no market-ready
+                # growout tank is free this week we simply wait"). So in a week
+                # already at the handling budget it stands down and a calmer week
+                # inside the window pre-frees the same tank — the work moves
+                # EARLIER/LATER, it is never refused.
+                #
+                # Deferral stops one week out: an arrival landing NEXT week
+                # (_j == 1) pre-stages regardless, so the last chance is never
+                # skipped and no arrival is ever left short a tank. The reactive
+                # arrival-week make-room below remains the final backstop.
+                #
+                # This is what actually clears 7.17 (2026-W39 and 2027-W28, 16
+                # moves each): both are weeks with no arrival of their own, where
+                # Layer A therefore reserves nothing. Ablating this branch puts
+                # both weeks straight back over the cap.
+                if _pacing_may_defer(_j, _moves_left()):
+                    warnings.append(
+                        f"{week_label}: anticipatory purge pacing DEFERRED for "
+                        f"the TranOG arrival in {_wk} — the week is at its "
+                        f"handling budget ({_move_cap} moves); a calmer week "
+                        f"inside the lookahead pre-frees the tank instead")
                     continue
                 # Tanks already lined up for THIS arrival: currently-empty growout
                 # tanks that are EITHER unreserved OR reserved for this same week
