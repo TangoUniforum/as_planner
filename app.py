@@ -3486,10 +3486,35 @@ loudly), the derived-start contract, and the input-conservation audit
     with st.expander("2 · The manual override window (optional operator prefix)"):
         st.markdown("""
 **What it decides.** Nothing — *you* do. For weeks 1..N you script the exact
-operations (harvests, moves, sends to 6N, FW→OG) and the engine executes
-ONLY those, plus real biology (growth, mortality, feed). The planner takes
+operations and the engine executes ONLY those, plus real biology (growth,
+mortality, feed). A window week runs **no planner logic at all**: if you
+script no harvest that week, that week harvests nothing. The planner takes
 over at week N+1 (the handoff) from exactly the state your scripted weeks
 produced.
+
+**The five things you can script:**
+
+| Type | What it does |
+|---|---|
+| **harvest** | Take fish out of a grow-out or 6N tank. No count = the whole tank. |
+| **og_transfer** | Move / split fish between grow-out tanks. |
+| **og_to_6n** | Send fish into a 6N tank to purge — they go off-feed immediately. |
+| **graded_harvest** | Size-sort a tank: the biggest N go to a pickup tank, the rest stay growing. |
+| **fw_to_og** | Bring a freshwater cohort into the entry tier, culling down to your target count. |
+
+**Graded → 6N: staging or harvest?** When the pickup tank is a **6N** tank the
+default is **staging** — the big fish sit off-feed and are harvested *later*,
+after the 2-week hold (either you script that harvest, or the planner takes
+them). Set the event's **mode** to `harvest` to drain them to processing in
+the scripted week instead; the 6N tank is then only the route and ends the
+week empty. (A pickup tank that is *not* a 6N tank always means harvest now,
+and `mode: stage` there is refused.)
+
+**Every scripted event says what happened.** There are no silent no-ops: each
+event writes either a `MANUAL EVENT OK` line naming exactly what it did, or a
+`MANUAL EVENT REFUSED` line naming the reason and confirming the fish stayed
+put — both into the ValidationLog sheet of the output workbook. Read that
+sheet after a windowed run.
 
 **What it may never do.** The window may not invent operations you didn't
 script — and neither may the planner *pretend* you did: no engine may assume
@@ -3660,30 +3685,80 @@ of harvest left 6N early — must be the PR-hydrated exemptions only), the
 sister-fill density cap, R7 enforcement in the event layer, and the pair
 rotation's own continuity in the tank audit.""")
 
-    with st.expander("8 · The engines — one rulebook, several planners"):
-        st.markdown("""
-**What it decides.** Which planning *method* produced your plan. All methods
-consume the same inputs and obey the same rules above; only the planning
-brain differs:
+    with st.expander("8 · The engines — two families, and how far you can "
+                     "trust each"):
+        st.markdown(f"""
+**What it decides.** Which planning *method* produced your plan. Every method
+reads the same inputs and every method's output goes through the same audits —
+but they do **not** all enforce the same rules while planning. That difference
+is the single most important thing on this page, so it is spelled out below
+rather than smoothed over.
 
-* **Controller — hybrid** (the default): the validated week-by-week
-  controller guided by the long-horizon harvest envelope. Meets the
-  never-an-empty-week rule; the plain reactive controller does not.
-* **Controller — plain / + LNS**: reactive only; LNS adds an audited
-  relocation pass that helps when free tanks exist.
-* **Global — LP / CP-SAT**: plan the whole horizon up front (harvest envelope
-  → per-batch share → tank placement), realized as a continuity-proven tank
-  plan.
+**The Controller family — runnable operating plans.**
+
+* **Controller — hybrid (L1-guided harvest)** — *the default.* The validated
+  week-by-week controller, guided by a whole-horizon harvest envelope. It is
+  the only method measured to harvest something every single week.
+* **Controller — reactive greedy** — the same controller with the guide
+  switched off. Simpler to reason about; it leaves empty harvest weeks on 5 of
+  6 real ProductionReports.
+* **Controller — greedy + LNS** — adds an audited relocation pass. It only
+  changes anything when there are free tanks to relocate into, so on a
+  capacity-bound facility it usually matches the plain controller exactly.
+
+All three enforce the tier rules R1-R7 *while planning* (an illegal move is
+refused, not logged), respect the **{k['moves']}-move handling budget** by
+deferring their optional quality passes, and route all harvest through 6N.
+
+**The Global family — whole-horizon benchmarks, not drop-in operating plans.**
+
+* **Global — lexicographic LP** — plans the whole horizon up front: harvest
+  envelope → per-batch share per system → tank placement.
+* **Global — CP-SAT optimal** — the same front end, but the grow-out tank
+  layout is re-solved week by week with a constraint solver. Slowest by far;
+  tightest, most evenly balanced layouts.
+
+Both Global methods conserve fish exactly and pass the tank-continuity audit —
+that part is real. **What they do not do:**
+
+* They **never read the handling budget.** No Global code looks at
+  `max_transfers_per_week`; they minimise moves in their objective but nothing
+  caps a week. Expect weeks well above {k['moves']} moves.
+* They enforce only **part** of the tier rulebook. R2/R3/R4 are checked when a
+  transfer is paired up, and R6 is respected by the CP-SAT layout. **R1, R5 and
+  R7 are not checked at all** while planning. When no legal source exists for a
+  needed move, the Global pick **emits the move anyway** and writes a
+  `TOPOLOGY VIOLATION` row to the ValidationLog — the controller would have
+  refused it. Read that sheet before treating a Global plan as executable.
+* Their planning pass **decomposes the horizon into independent weekly
+  problems**, which is why week-to-week topology can break in the first place.
+* Only **CP-SAT** enforces a real per-tank density cap (each tank's own
+  kg/m³ × volume, from your facility config). The **LP** arm sizes tanks off a
+  single facility-wide number — the *smallest* OG tank's legal mass — and where
+  a batch cannot get enough tanks it packs it denser and flags the row.
+  Nothing rejects an over-cap tank on the LP path.
+* If CP-SAT cannot solve a week, that week falls through to an
+  **unconstrained** placement (no density test) and the run writes
+  `PLACEMENT DEGRADED` to the ValidationLog naming how many weeks it hit.
+  On the current facility + PR this is 0 weeks, but it is a real path, not a
+  removed one — so check for that row rather than assuming.
+
+Use Global to ask *"how good could a plan be if nothing constrained handling
+or topology?"* Use a Controller method for a plan the crew can actually run.
 
 **What they may never do.** Diverge on the starting state: the manual window,
-the PR hydration and the rulebook are shared — after a scripted window, *no*
+the PR hydration and the biology are shared — after a scripted window, *no*
 engine may assume unscripted pre-start staging, so comparisons are honest
 (a dark handoff week is dark in every engine, and the editor warned you
 about it first).
 
-**What binds them.** Every method's output passes the same audits, and
-Compare & Choose grades them with hard-rule badges — a low-transfer plan
-cannot hide a contract breach.""")
+**What binds them.** Conservation and tank continuity bind every method
+equally. The rest is graded, not enforced: Compare & Choose shows four
+hard-rule badges (conserves · fully placed · no empty week · under cap), and
+Analyze's checklist adds the density, handling-budget and R7 gates — but those
+three are **flagged, never disqualifying**. A Global plan can therefore top a
+lens and still be unrunnable; the badges and the ValidationLog are how you
+tell.""")
 
     with st.expander("9 · The checks that bind everything (the audit net)"):
         st.markdown("""
@@ -3702,10 +3777,32 @@ Independent invariants, each catching a *different* failure (the hard lesson:
 6. **Closed freshwater mass-balance** — the FW phase can't leak fish either.
 7. **Steady-harvest contract** — no near-empty week past the startup handoff.
 
-Plus the operational gates: handling budget, harvest floor/target/ceiling,
-per-system caps, per-tank density, and the depuration-hold audit. In Analyze,
-these are the **hard rules ranked first** — no emphasis or weighting can
-promote a plan past a failed gate.""")
+**On top of the audits, Analyze grades every plan on eight gates, in this
+order.** Only the first two are **hard** — a hard FAIL sinks a plan no matter
+how well it scores on everything else. The other six are flagged and
+penalised, never disqualifying:
+
+| # | Gate | Hard? | Reads |
+|---|---|---|---|
+| 1 | Conservation (no fish created or lost) | **HARD** | 0 dropped **and** 0 over-produced, or FAIL |
+| 2 | Never an empty harvest week | **HARD** | 0 empty weeks, or FAIL |
+| 3 | Facility biomass cap | soft | PASS ≤100% of cap · WARN ≤110% · FAIL above |
+| 4 | Weekly processing limit + relief | soft | PASS 0 relief weeks · WARN 1-3 · FAIL >3 **or** any week past the relief ceiling |
+| 5 | Harvest targets (monthly/yearly) | soft | never worse than WARN — targets are penalised, never disqualifying |
+| 6 | Per-batch density quality | soft | PASS if no batch peaks ≥1.3× its tank cap, else WARN |
+| 7 | 6N one-way commitment (R7) | soft | PASS if nothing left a depuration tank except by harvest |
+| 8 | Weekly handling budget | soft | PASS every week within budget · WARN any week over ~80% · FAIL any week over |
+
+**Which weeks each gate judges.** Gates 2 and 4 judge the **planner's** weeks
+only: weeks you scripted yourself in the manual override window are excluded
+from both counts, and the verdict says how many were excluded. Your scripted
+weeks are policed instead by the `MANUAL WINDOW` lints in the ValidationLog.
+Every other gate — including conservation — judges the **whole horizon**,
+scripted weeks included.
+
+Ranking order when Analyze picks a winner: hard FAILs → soft FAILs → total
+warnings → target shortfall → the emphasis score. No emphasis or weighting can
+lift a plan above one that beats it on an earlier tier.""")
 
     with st.expander("⚠ 10 · Known limits — the honest list"):
         st.markdown(f"""
@@ -3727,7 +3824,22 @@ promote a plan past a failed gate.""")
   — measured on real PRs; forcing it forward breaks feed caps.
 * **A week can exceed the {k['moves']}-move handling budget.** Essential
   moves (rotation fills, arrival make-room) are never blocked; such a week
-  is flagged on the handling gate rather than silently truncated.
+  is flagged on the handling gate rather than silently truncated. Note the
+  budget is a *Controller* mechanism — the Global engines never read it at
+  all (layer 8).
+* **The Global engines are benchmarks, not runnable plans.** They do not
+  enforce R1, R5 or R7 while planning, they ignore the handling budget, and
+  the LP variant has no per-tank density constraint. They conserve fish and
+  balance the facility beautifully; that is a different question from "can
+  the crew execute this". Layer 8 has the full list — read it before
+  adopting a Global plan.
+* **Only two gates can actually sink a plan.** Conservation and
+  never-an-empty-week are the hard ones. Two more can never even reach FAIL
+  by design — harvest targets and per-batch density stop at WARN. The
+  remaining four (biomass cap, processing limit, R7, handling budget) *can*
+  read FAIL but are soft: they rank a plan down, they do not disqualify it.
+  So a plan can be recommended with a red handling gate — the checklist
+  shows it, and it is your call, not the tool's.
 * **Severe per-batch density clusters are a stocking problem.** When a
   cohort's tanks collide mid-grow-out, no planner knob fixes it — the remedy
   is stocking fewer fish (the stocking frontier in Analyze quantifies the
@@ -3793,68 +3905,96 @@ with st.sidebar:
     # then honored by the run handler below.
     if st.session_state.pop("_goto_run_mode", False):
         st.session_state["app_mode"] = "Run forecast"
-    # Order = order of OPERATIONS: run daily; set up config; find the best
-    # plan; then the specialist diagnostics/searches Analyze composes.
+    # Listed in the ORDER OF OPERATIONS an operator actually works in:
+    # set up -> run -> analyse -> compare -> hand-steer -> read the rulebook.
+    # Each option carries a one-line caption saying what it is FOR, so the
+    # choice is legible without opening a tooltip.
     # If a stored selection references the retired Tune mode, reset it BEFORE
     # the radio instantiates (a stored value outside the options raises).
     if str(st.session_state.get("app_mode", "")).startswith("Tune"):
         st.session_state["app_mode"] = "Run forecast"
+    # The list reads as the order of operations, but the app must still LAND on
+    # the everyday mode, not on Configure (option 0). Seed the stored value on
+    # first render only — after that the operator's own selection wins.
+    st.session_state.setdefault("app_mode", "Run forecast")
     app_mode = st.radio(
         "Mode",
-        ["Run forecast", "Configure (models & control)",
-         "Analyze (find my best plan)",
-         "Optimize (multi-objective)", "Compare & Choose (all methods)",
-         "How it works (the rules)"],
-        help="Run forecast: upload a PR and run. Configure: edit the app's "
-             "biology models, facility, control, batches, limits, targets and "
-             "prices. How it works: the plain-language rulebook — every "
-             "pipeline layer, what it decides, what it's forbidden to do, and "
-             "which checks bind it. Analyze: ONE flow that runs "
-             "the engines, tunes the knobs, grades everything on the hard-rule "
-             "checklist (incl. your harvest targets, revenue, and the "
-             "per-batch density lens), and recommends a single "
-             "plan to adopt — the stocking frontier lives there too. "
-             "Optimize: sweep knobs and rank variants on a "
-             "selectable objective (walk the line + minimize feed/handling). "
-             "Compare & Choose: run all planning methods, grade them on several "
-             "lenses, and pick which plan becomes the report.",
+        ["Configure (models & control)", "Run forecast",
+         "Analyze (find my best plan)", "Compare & Choose (all methods)",
+         "Optimize (multi-objective)", "How it works (the rules)"],
+        captions=[
+            "Set up once — biology curves, tanks, batches, per-week limits, "
+            "control knobs, harvest targets and prices.",
+            "The everyday step — run your chosen plan on today's "
+            "ProductionReport and download the workbook.",
+            "“Which plan should I use?” — runs every engine, searches the "
+            "knobs, grades them all, recommends ONE.",
+            "Run the planning engines side by side and pick which whole plan "
+            "becomes the report.",
+            "Sweep control knobs on ONE engine and rank the settings on an "
+            "objective you choose.",
+            "The rulebook — what each layer decides, what it may never do, "
+            "and the honest list of known limits.",
+        ],
+        help="Listed in the order you normally work: Configure once, then Run "
+             "forecast every day. Analyze answers 'which plan?' end to end; "
+             "Compare & Choose and Optimize are the two halves of that "
+             "question you can steer by hand (Compare & Choose changes the "
+             "ENGINE, Optimize changes the KNOBS of one engine). How it works "
+             "is the plain-language rulebook — read it once before trusting "
+             "or challenging a plan.",
         key="app_mode",
     )
     with st.expander("ℹ️ Which mode? — the order of operations"):
         st.markdown(
-            "**The workflow:** set up **Configure** once (models, facility, "
-            "targets, prices) → run **Analyze** to pick + tune the best plan "
-            "(promote it as your Quick-run default) → then **Run forecast** "
-            "(or Analyze's ⚡ Quick run) is the everyday step. Optimize and "
-            "Compare & Choose are the specialist tools Analyze composes — "
-            "use them directly to steer one phase by hand.\n\n"
-            "- **Analyze** — the one-flow version of the whole decision: every "
-            "engine + knob search + the hard-rule checklist (conservation, "
-            "never-an-empty-week, caps, your harvest targets, revenue, and the "
-            "per-batch density lens) → one recommendation card with Adopt / "
-            "Promote. The stocking-for-quality frontier lives here too. "
-            "Finished runs are cached to disk and shared with Compare & Choose.\n"
-            "- **Run forecast** — runs the pipeline with your **current** Control knobs "
-            "and produces the plan + reports. This is the everyday mode. *\"Run with "
-            "tuned knobs\"* just means a normal Run **after** Analyze/Optimize has saved "
-            "better knobs into your config.\n"
-            "- **Optimize (multi-objective)** — sweeps knobs against **several goals at "
-            "once** (flat biomass, feed, handling, cap compliance) on a *selectable* "
-            "weighted objective, ranks variants, and applies the best. **Many axes**, and "
-            "it finds knob *combinations* a single-axis sweep can't.\n"
-            "- **Compare & Choose (all methods)** — runs the *different engines* "
-            "(Controller, Global heuristic, Global optimal CP-SAT) on one PR, grades "
-            "them on several lenses (fewest moves, steadiest harvest, between/within-"
-            "system balance, density, footprint) with hard-rule badges, and lets you "
-            "pick which whole plan becomes the report. Unlike Optimize (same "
-            "engine, different knobs), this compares *engines*.\n"
-            "- **Configure** — hand-edit the models, control knobs, facility, batches, "
-            "limits, targets and prices (every knob has a tooltip).\n"
-            "- **How it works** — the plain-language rulebook: every pipeline "
-            "layer (inputs → manual window → freshwater → entry → placement → "
-            "harvest → depuration → audits), what each decides, what it may "
-            "never do, which checks bind it, and the honest known-limits "
-            "list. Read it once before trusting or challenging a plan.\n\n"
+            "**The workflow, in order:** set up **Configure** once (models, "
+            "facility, targets, prices) → run **Analyze** to pick and tune the "
+            "best plan and **⭐ Promote** it → then **Run forecast** (or "
+            "Analyze's ⚡ Quick run) is the everyday step. **Compare & Choose** "
+            "and **Optimize** are the two halves of the Analyze decision, "
+            "available on their own when you want to steer one by hand.\n\n"
+            "- **Configure (models & control)** — hand-edit the biology curves, "
+            "the tank list, the batch schedule, the per-week limits, every "
+            "control knob, and your harvest targets + price bands. Saved to "
+            "`config/` + `scenario/` YAML, which is the source of truth for "
+            "every run. Every field has a tooltip explaining what it does, its "
+            "unit, and what it trades off.\n"
+            "- **Run forecast** — runs the pipeline with your **current** "
+            "Control knobs and your **currently picked method**, and produces "
+            "the plan + reports. This is the everyday mode. *\"Run with tuned "
+            "knobs\"* just means a normal Run **after** Analyze/Optimize has "
+            "saved better knobs into your config.\n"
+            "- **Analyze (find my best plan)** — the one-flow version of the "
+            "whole decision: every engine + a knob search + the hard-rule "
+            "checklist (conservation and never-an-empty-week are the two HARD "
+            "rules; caps, handling, your harvest targets, revenue and the "
+            "per-batch density lens are scored but never disqualifying) → one "
+            "recommendation card with **Adopt** (use it now) and **Promote** "
+            "(make it the Quick-run default). The stocking-for-quality "
+            "frontier lives here too. Finished runs are cached to disk and "
+            "shared with Compare & Choose, so nothing runs twice.\n"
+            "- **Compare & Choose (all methods)** — runs the *different "
+            "engines* (Controller plain / hybrid / +LNS, Global LP, Global "
+            "CP-SAT) on one PR, grades them on several lenses (fewest moves, "
+            "steadiest harvest, between/within-system balance, density, "
+            "welfare, footprint) with hard-rule badges, and lets you pick "
+            "which whole plan becomes the report. **This is where the "
+            "planning method is chosen** — ▶ Run forecast re-runs whatever you "
+            "picked here. Unlike Optimize (same engine, different knobs), this "
+            "compares *engines*.\n"
+            "- **Optimize (multi-objective)** — sweeps the **controller "
+            "family's** knobs against several goals at once (flat biomass, "
+            "feed, handling, cap compliance) on a *selectable* weighted "
+            "objective, ranks the settings, and can apply the best. It finds "
+            "knob *combinations* a one-knob-at-a-time sweep can't. It does not "
+            "tune the Global engines — those have no tunable knobs (see "
+            "Analyze's run-budget table).\n"
+            "- **How it works (the rules)** — the plain-language rulebook: "
+            "every pipeline layer (inputs → manual window → freshwater → entry "
+            "→ placement → harvest → depuration → audits), what each decides, "
+            "what it may never do, which checks bind it, and the honest "
+            "known-limits list. Read it once before trusting or challenging a "
+            "plan.\n\n"
             "*(The old Tune mode retired — its density distribution + severe-batch "
             "readout is now a checklist gate + drill-in on the Analyze board, and "
             "the stocking frontier moved there with it. The headless density sweep "

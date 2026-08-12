@@ -609,27 +609,39 @@ def _gate_harvest_cap(ctx):
     FAIL — any week above the derived relief ceiling, OR more than 3 relief
            weeks: the plan leans on relief as capacity — harvests must ramp
            up earlier instead.
+    Like the empty-week gate, this judges the PLANNER's weeks: operator-
+    scripted manual-window weeks are excluded upstream (forecast.window_weeks)
+    and the verdict says so, so a deliberately big scripted harvest cannot
+    fail every engine at once.
+
     ctx keys: `weeks_over_harvest_cap` = weeks over the LIMIT (relief usage);
     `weeks_over_relief_ceiling` = weeks over the derived ceiling (0/absent
-    when the workbook never breaches it)."""
+    when the workbook never breaches it); `zero_weeks_excluded` = how many
+    scripted window weeks were left out of both counts."""
     wc = ctx.get("weeks_over_harvest_cap")
     if wc is None:
         return "N/A", "weekly harvest series unavailable"
     wc = int(wc)
     wr = int(ctx.get("weeks_over_relief_ceiling") or 0)
+    ex = int(ctx.get("zero_weeks_excluded") or 0)
+    scope = (f" ({ex} operator-scripted window week(s) excluded — judged by "
+             f"the ValidationLog MANUAL WINDOW lints instead)" if ex else "")
     if wr > 0:
-        return "FAIL", (f"{wr} week(s) above the relief ceiling "
+        return "FAIL", (f"{wr} planner week(s) above the relief ceiling "
                         f"(limit + harvest_relief_pct) — the plant cannot "
-                        f"take it; the plan must ramp harvests up earlier")
+                        f"take it; the plan must ramp harvests up earlier"
+                        f"{scope}")
     if wc == 0:
-        return "PASS", "no week over the weekly processing limit"
+        return "PASS", (f"no planner week over the weekly processing limit"
+                        f"{scope}" if ex
+                        else "no week over the weekly processing limit")
     if wc <= 3:
-        return "WARN", (f"pressure relief used {wc}x (weeks over the "
+        return "WARN", (f"pressure relief used {wc}x (planner weeks over the "
                         f"processing limit, within the relief ceiling) — "
-                        f"acceptable if exceptional")
+                        f"acceptable if exceptional{scope}")
     return "FAIL", (f"{wc} relief week(s) — the plan leans on the relief "
                     f"band as everyday capacity; relief must stay "
-                    f"exceptional: ramp harvests up earlier instead")
+                    f"exceptional: ramp harvests up earlier instead{scope}")
 
 
 def _gate_targets(ctx):
