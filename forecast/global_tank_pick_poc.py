@@ -903,8 +903,23 @@ def pick_tanks(
             if h_cnt > 1e-9 and old_tanks:
                 _ws_date = ws.date() if hasattr(ws, "date") else ws
                 _purge_wk = is_purge_mode(control, _ws_date)
-                starve_first = ([t for t in old_tanks if t in sixn_set]
-                                + [t for t in old_tanks if t not in sixn_set])
+                # DEPURATION RESIDENCY drives the draw order: within 6N, take
+                # the tanks that have sat off-feed LONGEST first. The draw used
+                # to run in tank-id order, so a tank stocked THIS week could be
+                # emptied while one that had already served its full hold sat
+                # untouched — 18% of harvested fish left 6N without completing
+                # the 2-week hold (the controller's genuinely-short figure is
+                # 3%). Oldest-first is both the physically correct draw from a
+                # batch process and the one that satisfies the hold wherever the
+                # pool makes it possible. `_hold_weeks` is L1's own constant, so
+                # the pick and the envelope cannot disagree about the length —
+                # including the change at sixn_production_start.
+                def _residency(t, _w=w):
+                    return _w - sixn_arrival.get(t, -10 ** 6)
+
+                _six = sorted((t for t in old_tanks if t in sixn_set),
+                              key=lambda t: (-_residency(t), t))
+                starve_first = _six + [t for t in old_tanks if t not in sixn_set]
                 drawn_c = 0.0
                 _from6n = 0.0
                 for t in starve_first:

@@ -2660,6 +2660,14 @@ def write_validation_log(
             cat = "WARNING - Manual window"
         elif w.startswith("MANUAL"):
             cat = "WARNING - Manual window"
+        elif w.startswith("NON-DETERMINISTIC SOLVE"):
+            # The plan depended on how busy the machine was. Any comparison
+            # against it is comparing noise.
+            cat = "ERROR - Non-reproducible solve"
+        elif w.startswith("PASS A.2 FALLBACK"):
+            cat = "WARNING - Pass A.2 fallback (less balanced)"
+        elif w.startswith("PASS B FALLBACK"):
+            cat = "WARNING - Pass B fallback (no stickiness)"
         elif w.startswith("TOPOLOGY VIOLATION"):
             # A move the conveyor rules (R1-R7) forbid. The controller
             # family emits none; a Global plan that does is not

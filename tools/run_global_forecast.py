@@ -388,6 +388,10 @@ def run_global(input_path, output_path, config_dir, scenario_dir, *,
         # plan even though L1's batch-level reconciliation still calls it
         # standing. Surface it as an ERROR row, never a silent gap.
         _engine_warns.extend(getattr(gft, "unplaced_warnings", []) or [])
+        # Solver-health findings from L3 (non-reproducible solves, Pass B
+        # fallbacks). A plan whose layout depended on machine load must say
+        # so — otherwise every later A/B silently compares noise.
+        _engine_warns.extend(list(_l3.SOLVER_WARNINGS))
         _engine_warns.extend(getattr(gft, "topology_warnings", []) or [])
         _engine_warns.extend(placement_gap_warnings(gft))
         cons = gf.conservation_summary(gft)

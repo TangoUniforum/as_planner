@@ -117,6 +117,24 @@ from .tiers import SIXN_SYSTEM, is_entry
 
 # Default per-system caps when the SystemLimits sheet has no cap for a
 # (week, system) — matches the uniform 400,000 kg / 3,000 kg-feed sheet.
+# Solver-health findings from the most recent plan_l3() call. A wall-clock
+# TIME LIMIT is not a deterministic stop criterion: whichever incumbent the
+# branch-and-bound happened to hold when the clock ran out becomes the answer,
+# so the SAME inputs give different plans depending on machine load. Measured:
+# 4 of 127 Pass-B weeks were limit-bound, and the emitted plan moved (54 vs 55
+# vs 81 idle-tank weeks) purely with CPU contention. The limits below are now
+# set high enough not to bind; if one ever does, the run is NOT reproducible and
+# must say so rather than quietly returning a load-dependent plan.
+SOLVER_WARNINGS: list = []
+
+# A time limit can never be a deterministic stop criterion, so the fix is NOT a
+# bigger budget — measured, 9 Pass A.2 weeks still bound at 120 s, and the run
+# took 21 minutes instead of 3. Instead, a limit-bound incumbent is DISCARDED in
+# favour of a reproducible fallback (Pass A.2 -> Pass A.1's layout, Pass B ->
+# Pass A's), so the emitted plan never depends on how busy the machine was. That
+# makes the limit a pure runtime guard, and it can stay small.
+_WEEK_SOLVE_LIMIT_S = 10.0
+
 _DEFAULT_BIO_CAP = 400000.0
 _DEFAULT_FEED_CAP = 3000.0
 
@@ -564,6 +582,8 @@ def plan_l3(
                if s in (set(NURSERY_SYSTEMS) | set(GROWOUT_SYSTEMS) | {SIXN_SYSTEM})]
     sys_idx = {s: i for i, s in enumerate(systems)}
 
+    SOLVER_WARNINGS.clear()   # per-run: findings belong to THIS solve
+
     demand = build_tank_demand(l1, facility, control)
     # Index demand by (batch, week) and collect weeks / batches.
     weeks = sorted({d.week for d in demand})
@@ -903,7 +923,10 @@ def _solve_passA_per_week(
     # caps) are real bin-packing MILPs. A short per-week time limit + a modest
     # relative-gap returns a near-optimal incumbent quickly; the lexicographic
     # priority (tank slack first) is preserved exactly by the two-solve split.
-    wk_opts = {"mip_rel_gap": max(mip_rel_gap, 0.02), "time_limit": 4.0}
+    wk_opts = {"mip_rel_gap": max(mip_rel_gap, 0.02),
+               "time_limit": _WEEK_SOLVE_LIMIT_S}
+
+    _a2_fallbacks: list = []
 
     for wi, w in enumerate(weeks):
         if verbose and wi % 10 == 0:
@@ -982,6 +1005,11 @@ def _solve_passA_per_week(
         r1 = linprog(c1, A_ub=Aub, b_ub=np.array(bub), A_eq=Aeq,
                      b_eq=np.array(beq), bounds=bnds, method="highs",
                      integrality=intg, options=wk_opts)
+        if getattr(r1, "status", None) == 1:
+            # No deterministic fallback exists for A.1 — it IS the layout. Rare
+            # (never observed on the operator's PR); if it fires, the run really
+            # is not reproducible and must say so.
+            _note_limit_bound("Pass A.1", week_label.get(w, str(w)))
         tank_w = float(r1.x[st0:st0 + len(sys_here)].sum())
         # A.2: fix tank slack, min bio+feed.
         Aub2_r = list(Aub_r) + [ur] * len(sys_here)
@@ -996,7 +1024,15 @@ def _solve_passA_per_week(
         r2 = linprog(c2, A_ub=Aub2, b_ub=np.array(bub2), A_eq=Aeq,
                      b_eq=np.array(beq), bounds=bnds, method="highs",
                      integrality=intg, options=wk_opts)
-        x2 = r2.x if r2.x is not None else r1.x
+        # Use Pass A.2's refinement ONLY if it proved its objective. A
+        # limit-bound incumbent is whatever the clock happened to catch, so it
+        # is discarded in favour of Pass A.1's layout — a worse objective, but
+        # the SAME one on every machine. Determinism beats a marginal gain that
+        # cannot be reproduced or measured.
+        _r2_ok = getattr(r2, "status", None) == 0 and r2.x is not None
+        if not _r2_ok:
+            _a2_fallbacks.append(week_label.get(w, str(w)))
+        x2 = r2.x if _r2_ok else r1.x
         bio_w = float(x2[sb0:sb0 + len(sys_here)].sum())
         feed_w = float(x2[sf0:sf0 + len(sys_here)].sum())
         cap_w = bio_w + feed_w
@@ -1010,11 +1046,33 @@ def _solve_passA_per_week(
         for i, (gvi, s, bid) in enumerate(loc_y):
             xA[OFF_Y + gvi] = x2[i]
 
+    if _a2_fallbacks:
+        # Deterministic, but a DEGRADE: those weeks keep Pass A.1's layout
+        # (min tank slack) without A.2's cap-slack refinement.
+        SOLVER_WARNINGS.append(
+            f"PASS A.2 FALLBACK - {len(_a2_fallbacks)} week(s) could not PROVE "
+            f"the cap-slack refinement within the time limit and kept Pass A.1's "
+            f"layout instead. The result is reproducible (a limit-bound "
+            f"incumbent is never used), but those weeks are less balanced: "
+            f"{', '.join(_a2_fallbacks[:6])}"
+            + (" ..." if len(_a2_fallbacks) > 6 else "") + ".")
     if verbose:
         print(f"  [L3] Pass A (per-week exact): tank_slack={total_tank:.1f} "
               f"tanks, capslack(bio+feed)={total_cap:,.1f} kg "
               f"(sum of {len(weeks)} weekly MILPs)")
     return total_tank, total_cap, xA
+
+
+def _note_limit_bound(pass_name: str, wk: str) -> None:
+    """A solve that stopped on the CLOCK, not on optimality. Its answer is
+    whichever incumbent it happened to hold, so the plan depends on machine load
+    and the run is not reproducible. Never allowed to be silent."""
+    SOLVER_WARNINGS.append(
+        f"NON-DETERMINISTIC SOLVE - {pass_name} hit its wall-clock time limit "
+        f"on week {wk}. The layout is whichever incumbent branch-and-bound held "
+        f"when the clock ran out, so this run is NOT reproducible: the same "
+        f"inputs on a busier machine give a different plan. Raise "
+        f"_WEEK_SOLVE_LIMIT_S or simplify the week.")
 
 
 def _solve_passB_per_week(
@@ -1050,6 +1108,7 @@ def _solve_passB_per_week(
     # MILPs with no cross-week term, whereas Pass B walks the weeks in order
     # with the previous week's solution in hand.
     last_entry: dict[str, float] = {}
+    _passB_fallbacks: list = []
 
     for w in weeks:
         sys_here = [s for s in systems if (s, w) in vars_by_sw]
@@ -1150,9 +1209,14 @@ def _solve_passB_per_week(
                       b_eq=np.array(beq), bounds=bnds, method="highs",
                       integrality=intg,
                       options={"mip_rel_gap": max(mip_rel_gap, 0.02),
-                               "time_limit": 4.0})
+                               "time_limit": _WEEK_SOLVE_LIMIT_S})
+        # Same rule as Pass A.2: only a PROVEN Pass B result is used; a
+        # limit-bound one is dropped back to Pass A's layout.
+        if getattr(res, "status", None) != 0:
+            res.x = None
         x = res.x
         if x is None:
+            _passB_fallbacks.append(week_label.get(w, str(w)))
             # Fall back to Pass A's layout for this week.
             new_last: dict[str, set[str]] = {}
             new_entry: dict[str, float] = {}
