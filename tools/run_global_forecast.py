@@ -288,7 +288,7 @@ def _build_manual_week_states(opening_locations, realized_biology):
 
 
 def run_global(input_path, output_path, config_dir, scenario_dir, *,
-               no_pr: bool = False, overstock: bool = True,
+               no_pr: bool = False, overstock: bool = False,
                max_iterations: int = 10, margin_frac: float = 0.5,
                slack_epsilon: float = 1000.0, mip_time_limit: float = 180.0,
                mip_rel_gap: float = 0.01,
@@ -296,9 +296,23 @@ def run_global(input_path, output_path, config_dir, scenario_dir, *,
                cpsat_workers: int = 8, cpsat_det_time: float = 30.0) -> int:
     """Produce the standard GLOBAL-method workbook at `output_path` from the PR at
     `input_path` + the app's config/scenario. Callable mirror of `main()` for the
-    UI (parallel to `forecast.run.main`). `overstock=True` bakes in the placement
-    optimizer's winning SELECTIVE over-stock (light<2.5kg toward the hard cap).
-    Returns 0 on success. Touches no production file.
+    UI (parallel to `forecast.run.main`). Returns 0 on success. Touches no
+    production file.
+
+    `overstock` (DEFAULT OFF since 2026-08-12, operator's call) is the SELECTIVE
+    over-stock lever: batches averaging under 2.5 kg placed to 100% of the HARD
+    density cap (95 kg/m3) instead of the operating target every other method
+    plans to. It was default ON, which broke comparison parity — the controller
+    family plans to `density_target_pct` (a knob the tournament SEARCHES, 0.9
+    live / 0.95 in the tuned winner) while this hardcoded 100% for a whole
+    biomass class, so Global entered every comparison with capacity its rivals
+    did not take, and part of its density/utilisation lead was bought with it.
+    The operator's rule is 95 hard / target 85 "as much as possible", and no
+    weight-based density exemption exists in it: the 2.5 kg threshold and the
+    "light fish are safe to concentrate" claim were engineering inventions.
+    Leaving it available as an explicit, off-by-default lever so a placement
+    study can still measure it (tools/run_placement_optimize.py sweeps it) —
+    but a comparison run must not turn it on for one method only.
     """
     from forecast import global_planner_l3_poc as _l3
     control, tables, facility = load_config(str(config_dir))
@@ -332,7 +346,8 @@ def run_global(input_path, output_path, config_dir, scenario_dir, *,
     if overstock:
         _l3._OVERSTOCK_DENSITY_PCT, _l3._OVERSTOCK_MAX_WT_G = 1.0, 2500.0
         print("  overstock=True: selective over-stock active — <2.5 kg fish "
-              "may be placed to the HARD density cap (100%)")
+              "may be placed to the HARD density cap (100%). NOT COMPARABLE "
+              "with the controller family, which plans to density_target_pct.")
     try:
         result = loop.run_loop(
             batches, tables, control, facility, system_limits,
