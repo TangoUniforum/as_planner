@@ -502,16 +502,34 @@ def _tranog_tank_need(cohort_kg, facility, control, plan_n=0):
 # ever REDUCE the moves a deferrable pass may make — neither authorises a move,
 # so neither can create a topology violation, a remnant or a multi-batch tank.
 #
-# ABLATION SWITCHES. The two layers are INDEPENDENT policies, so each has its
-# own module-level switch and they can be measured one at a time. These are not
-# operator config: there is deliberately no control.yaml key and no app control
-# for them, because the choice is a settled engineering result (see the
-# 4-arm x 3-PR x 2-knob-set ablation recorded in the RESERVE block inside
-# phase_d_emit_events), not a per-run decision. They exist so that result stays
-# reproducible — flip one, re-run, and the difference is attributable to that
-# layer alone. Both default to the shipped behaviour.
-_ANTICIPATE_ARRIVAL_RESERVE = True     # Layer A — reserve for arrival make-room
-_ANTICIPATE_PACING_DEFER = True        # Layer B — purge pacing stands down
+# BOTH LAYERS ARE OFF. They were built to make the plan meet the 15-move
+# handling budget structurally, and they do — but a 4-arm ablation (both off /
+# A only / B only / both on) x 3 PRs x 2 knob sets measured what they cost, and
+# the operator's rule order (steady weekly harvest is HARD; on handling they
+# said "we can move to 15 if we need to") puts the trade the wrong way round.
+# Full evidence table in the RESERVE block inside phase_d_emit_events; the
+# headline, on the operator's own PR (7.29.26 + their manual window) with their
+# tuned hybrid knobs:
+#
+#                 wks over 15   worst wk   worst harvest   wks < 30k floor
+#   both OFF            1          17         24,137          3  (9,721 short)
+#   A only              0          15         23,513          5 (22,687 short)
+#   B only              1          17         24,137          3  (9,721 short)
+#   both ON             0          15         23,513          5 (22,687 short)
+#
+# Layer A buys the budget compliance AND pays for it out of the harvest floor —
+# they are the same lever, not two. Layer B is inert on 2 of the 3 PRs (its
+# plan is IDENTICAL to both-off) and net harmful on the third. And on 7.9.26
+# with tuned knobs, Layer A produces a 69,677-fish harvest week — past the
+# 60,500 relief ceiling, a hard-rule breach that neither OFF nor B ever commits.
+#
+# The switches STAY (rather than deleting the code) because they are the
+# reproducibility handle for that measurement and the one-line lever if the
+# operator ever re-orders the rules and makes <=15 moves hard. They are NOT
+# operator config: deliberately no control.yaml key and no app control, because
+# this is a settled engineering result, not a per-run decision.
+_ANTICIPATE_ARRIVAL_RESERVE = False    # Layer A — reserve for arrival make-room
+_ANTICIPATE_PACING_DEFER = False       # Layer B — purge pacing stands down
 
 
 def _entry_makeroom_move_cost(need_tanks: int, empty_entry: int,
@@ -547,8 +565,25 @@ def _entry_makeroom_move_cost(need_tanks: int, empty_entry: int,
     return cost
 
 
+def _quality_moves_left(moves_left: int, reserve: int, move_cap: int) -> int:
+    """LAYER A. The budget the DEFERRABLE quality passes may spend: the raw
+    remaining budget minus the anticipated arrival-week make-room `reserve`.
+
+    Clamped so the reserve can never exceed the whole budget: a week whose
+    essential work alone is over the cap is a real capacity signal the handling
+    gate must still report, not a reason to silently starve the leveling.
+
+    With `_ANTICIPATE_ARRIVAL_RESERVE` off (the shipped default — see the
+    evidence block above) this is the identity on `moves_left`, i.e. exactly
+    the pre-reserve behaviour: quality spends the whole remaining budget.
+    """
+    if move_cap <= 0 or not _ANTICIPATE_ARRIVAL_RESERVE:
+        return moves_left
+    return max(0, int(moves_left) - min(int(reserve), int(move_cap)))
+
+
 def _pacing_may_defer(weeks_out: int, moves_left: int) -> bool:
-    """May the anticipatory purge pacing pass stand down this week?
+    """LAYER B. May the anticipatory purge pacing pass stand down this week?
 
     That pass pre-frees a grow-out tank for a TranOG arrival that is
     `weeks_out` weeks away, and it walks a multi-week lookahead — its own
@@ -560,7 +595,13 @@ def _pacing_may_defer(weeks_out: int, moves_left: int) -> bool:
     Never True for an arrival landing NEXT week (`weeks_out` <= 1): the last
     chance to pre-stage is always taken, so no arrival is left short a tank
     and the work is only ever moved EARLIER, never refused.
+
+    With `_ANTICIPATE_PACING_DEFER` off (the shipped default) this is
+    constantly False — the pass never stands down, which is the pre-layer
+    behaviour.
     """
+    if not _ANTICIPATE_PACING_DEFER:
+        return False
     return int(weeks_out) > 1 and int(moves_left) <= 0
 
 
@@ -3581,9 +3622,52 @@ def phase_d_emit_events(
         # passes run, and those passes themselves fill empty grow-out tanks —
         # so at reserve time the pacing pass's own demand still reads as
         # satisfied. Reserve what you can predict; defer what you could not.
-        # (Ablation: without B, 7.17 stays at 2 weeks over / 16 worst. A
-        # reserve for the pacing pass was built, measured inert for the
-        # objective on all 6 PRs, and dropped rather than shipped.)
+        #
+        # ------------------------ BOTH LAYERS ARE OFF ---------------------
+        # Everything above is why they WORK. This is why they are not on.
+        #
+        # 4-ARM ABLATION (both off / A only / B only / both on) x 3 PRs x 2
+        # knob sets = 24 plans, every cell re-run and reproduced, and the
+        # both-off arm verified against a physically pre-layer placement.py
+        # (identical on every metric). Weeks over the 15-move budget | worst
+        # week's moves | weeks under the 30,000 contract floor (fish short):
+        #
+        #   PR / knobs        both OFF        A only        B only       both ON
+        #   7.29 tuned      1|17|3 (9.7k)  0|15|5 (22.7k) 1|17|3 (9.7k) 0|15|5 (22.7k)
+        #   7.29 stock      1|17|3 (11.5k) 0|15|4 (22.5k) 1|17|3 (11.5k) 0|15|4 (22.5k)
+        #   7.17 tuned      1|16|4 (36.3k) 0|15|9 (56.7k) 0|15|5 (42.0k) 0|15|6 (36.9k)
+        #   7.17 stock      2|16|6 (35.9k) 2|16|6 (35.9k) 1|17|7 (45.1k) 0|15|5 (35.0k)
+        #   7.9  tuned      1|17|3 (17.8k) 0|15|3 (20.4k) 1|17|3 (17.8k) 0|15|3 (20.4k)
+        #   7.9  stock      1|17|6 (28.4k) 0|15|4 (18.2k) 1|17|6 (28.4k) 0|15|4 (18.2k)
+        #
+        # Read down the columns and the hoped-for split is not there:
+        #
+        #   * The layers are ONE lever, not two. Layer A buys essentially all
+        #     the budget compliance (5 of 6 cells alone) and pays for all of
+        #     it out of the harvest floor. On the operator's own PR under both
+        #     knob sets, A moves weeks-under-floor 3 -> 5 / 3 -> 4 and more
+        #     than doubles the cumulative shortfall.
+        #   * Layer B is mostly INERT: on 7.29 and 7.9 its TransferPlan +
+        #     HarvestPlan are byte-identical to both-off under both knob sets.
+        #     It still logs "pacing DEFERRED" there — it stands down only in
+        #     weeks where the pass had no tank to free anyway. Where it does
+        #     bite (7.17) it is net harmful alone: stock goes 2 weeks over at
+        #     16 moves to 1 week over at 17.
+        #   * Layer A breaks a HARD rule. On 7.9 with tuned knobs it produces
+        #     a 69,677-fish week (2028-W22) — 26% over the 55,000 processing
+        #     limit and past the 60,500 relief ceiling, which is never legal.
+        #     Both-off and B-only peak at 54,945 there. Starving the quality
+        #     rebalancer concentrates the facility (worst tank density rises
+        #     102.5 -> 106.3 on 7.29 tuned), and the harvest controller clears
+        #     that concentration with a make-room dump.
+        #
+        # The operator's rule order decides it: steady weekly harvest is HARD
+        # (a 30,000/week contract), and on handling they said "we can move to
+        # 15 if we need to". Off costs one 17-move week in 130 on their PR;
+        # on costs two more weeks under the contract floor plus a ceiling
+        # breach. So both layers are off, and the flags at the top of this
+        # module are the lever if that ordering ever changes.
+        # ------------------------------------------------------------------
         _arr_wk = ([s for s in splits
                     if s.batch_id in og_entry_day
                     and ws_we[0] <= og_entry_day[s.batch_id] < ws_we[1]]
@@ -3637,19 +3721,17 @@ def phase_d_emit_events(
 
         def _moves_left_quality() -> int:
             """`_moves_left` minus the anticipated essential work — the budget
-            the DEFERRABLE passes may spend.
-
-            Clamped so the reserve can never exceed the whole budget: a week
-            whose essential work alone is over the cap is a real capacity
-            signal the handling gate must still report, not a reason to
-            silently starve the leveling.
+            the DEFERRABLE passes may spend. Policy lives in the pure
+            `_quality_moves_left`; this closure only supplies the live numbers.
             """
-            # `_moves_left()` already returns the unbounded sentinel when the
-            # budget is off, so the ablation branch needs no special case.
+            # Short-circuit when the layer is off (or the budget is disabled):
+            # skips the facility scan `_arrival_makeroom_reserve` would do, and
+            # `_moves_left()` already returns the unbounded sentinel for a
+            # disabled budget. Same answer as the call below, no work.
             if _move_cap <= 0 or not _ANTICIPATE_ARRIVAL_RESERVE:
                 return _moves_left()
-            _res = min(_arrival_makeroom_reserve(), _move_cap)
-            return max(0, _moves_left() - _res)
+            return _quality_moves_left(
+                _moves_left(), _arrival_makeroom_reserve(), _move_cap)
 
         # Advance the 6N phase machine for this week (entry advancement; the
         # empty/production advancement happens AFTER the week's 6N harvest below,
@@ -4479,12 +4561,14 @@ def phase_d_emit_events(
                 # skipped and no arrival is ever left short a tank. The reactive
                 # arrival-week make-room below remains the final backstop.
                 #
-                # This is what actually clears 7.17 (2026-W39 and 2027-W28, 16
-                # moves each): both are weeks with no arrival of their own, where
-                # Layer A therefore reserves nothing. Ablating this branch puts
-                # both weeks straight back over the cap.
-                if (_ANTICIPATE_PACING_DEFER
-                        and _pacing_may_defer(_j, _moves_left())):
+                # OFF BY DEFAULT — `_pacing_may_defer` is constantly False
+                # unless `_ANTICIPATE_PACING_DEFER` is set. The 4-arm ablation
+                # (table at the top of the week loop) found this branch inert
+                # on 2 of 3 PRs — plan byte-identical to not having it, while
+                # still logging the DEFERRED warning below, because it only
+                # ever stood down in weeks where the pass had no tank to free
+                # anyway — and net harmful on the third. Kept, gated, measured.
+                if _pacing_may_defer(_j, _moves_left()):
                     warnings.append(
                         f"{week_label}: anticipatory purge pacing DEFERRED for "
                         f"the TranOG arrival in {_wk} — the week is at its "

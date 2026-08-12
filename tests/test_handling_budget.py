@@ -7,20 +7,24 @@ reported by the handling gate, not silently truncated.
 from __future__ import annotations
 
 from datetime import date
+from pathlib import Path
 
 import openpyxl
+import pytest
 
 from forecast.analysis import _gate_handling_budget
 from forecast.events import TankAllocation, Transfer
 from forecast.excel_io import write_transfer_plan_output
 from forecast.models import ControlParams
 from forecast.optimize import _weekly_move_counts
+from forecast import placement as _pl
 from forecast.placement import (
     _consolidate_remnants,
     _emit_transfers_for_batch_diff,
     _entry_makeroom_move_cost,
     _even_out_density,
     _pacing_may_defer,
+    _quality_moves_left,
 )
 from forecast.state import FacilityState, TankState
 
@@ -221,10 +225,17 @@ class TestEntryMakeroomReserve:
 
 
 class TestPacingDeferral:
-    """ANTICIPATORY RESERVE, layer B. The purge-pacing pass walks a multi-week
-    lookahead, so in a week that is already at budget it stands down and a
-    calmer week inside the window pre-frees the tank instead. Work moves
-    EARLIER/LATER — it is never refused."""
+    """ANTICIPATORY RESERVE, layer B, WITH THE SWITCH ON. The purge-pacing pass
+    walks a multi-week lookahead, so in a week that is already at budget it
+    stands down and a calmer week inside the window pre-frees the tank instead.
+    Work moves EARLIER/LATER — it is never refused.
+
+    The switch ships OFF (see TestAnticipatoryLayerSwitches for why); these
+    tests pin the policy so re-enabling it is a one-line, covered change."""
+
+    @pytest.fixture(autouse=True)
+    def _layer_b_on(self, monkeypatch):
+        monkeypatch.setattr(_pl, "_ANTICIPATE_PACING_DEFER", True)
 
     def test_defers_when_at_budget_and_the_window_has_slack(self):
         assert _pacing_may_defer(weeks_out=4, moves_left=0) is True
@@ -244,6 +255,77 @@ class TestPacingDeferral:
     def test_over_budget_week_still_defers(self):
         # _moves_left() floors at 0, but be robust if a caller passes negative.
         assert _pacing_may_defer(weeks_out=3, moves_left=-2) is True
+
+
+class TestQualityReserveWithSwitchOn:
+    """ANTICIPATORY RESERVE, layer A, WITH THE SWITCH ON: the deferrable
+    quality passes get the remaining budget MINUS the priced make-room."""
+
+    @pytest.fixture(autouse=True)
+    def _layer_a_on(self, monkeypatch):
+        monkeypatch.setattr(_pl, "_ANTICIPATE_ARRIVAL_RESERVE", True)
+
+    def test_reserve_is_subtracted(self):
+        assert _quality_moves_left(moves_left=10, reserve=2, move_cap=15) == 8
+
+    def test_zero_reserve_leaves_the_budget_whole(self):
+        assert _quality_moves_left(moves_left=10, reserve=0, move_cap=15) == 10
+
+    def test_never_goes_negative(self):
+        assert _quality_moves_left(moves_left=1, reserve=9, move_cap=15) == 0
+
+    def test_reserve_is_clamped_to_the_whole_budget(self):
+        # A week whose essential work alone blows the cap is a capacity signal
+        # the handling gate must report — not a reason to over-subtract.
+        assert _quality_moves_left(moves_left=15, reserve=99, move_cap=15) == 0
+
+    def test_budget_off_is_untouched(self):
+        # move_cap <= 0 means the handling budget is disabled entirely.
+        assert _quality_moves_left(moves_left=10 ** 9, reserve=4,
+                                   move_cap=0) == 10 ** 9
+
+
+class TestAnticipatoryLayerSwitches:
+    """THE SHIPPED DECISION: both anticipatory layers are OFF.
+
+    Measured by a 4-arm (both off / A only / B only / both on) x 3-PR x
+    2-knob-set ablation, with the both-off arm verified against a physically
+    pre-layer placement.py. Layer A buys the 15-move budget compliance and pays
+    for it out of the 30,000/week harvest floor — on the operator's own PR it
+    moves weeks-under-floor 3 -> 5 and more than doubles the shortfall, and on
+    7.9 with tuned knobs it produces a 69,677-fish week, past the 60,500 relief
+    ceiling. Layer B is plan-identical to both-off on 2 of the 3 PRs. The
+    operator's rule order (steady harvest HARD, handling flexible) makes that
+    trade a loss, so both ship off — and these tests hold that line, because a
+    silent flip back would cost the contract floor."""
+
+    def test_both_layers_ship_off(self):
+        assert _pl._ANTICIPATE_ARRIVAL_RESERVE is False
+        assert _pl._ANTICIPATE_PACING_DEFER is False
+
+    def test_layer_a_off_is_the_identity_on_the_budget(self):
+        # Quality spends the whole remaining budget — exactly the pre-layer
+        # behaviour, whatever the make-room would have cost.
+        for reserve in (0, 1, 5, 99):
+            assert _quality_moves_left(
+                moves_left=10, reserve=reserve, move_cap=15) == 10
+
+    def test_layer_b_off_never_defers(self):
+        # Constantly False, including the cases the ON policy would defer.
+        assert _pacing_may_defer(weeks_out=4, moves_left=0) is False
+        assert _pacing_may_defer(weeks_out=2, moves_left=0) is False
+        assert _pacing_may_defer(weeks_out=3, moves_left=-2) is False
+
+    def test_switches_are_not_operator_config(self):
+        # They are an engineering result, not a knob: no control.yaml key and
+        # no ControlParams field may shadow them (an operator-flippable layer
+        # would put the harvest floor back at risk from the app).
+        cfg_text = (Path(__file__).resolve().parents[1]
+                    / "config" / "control.yaml").read_text()
+        for name in ("anticipate_arrival_reserve", "anticipate_pacing_defer",
+                     "handling_reserve", "pacing_defer"):
+            assert name not in cfg_text
+            assert not hasattr(ControlParams, name)
 
 
 class TestReserveOnlySubtracts:
