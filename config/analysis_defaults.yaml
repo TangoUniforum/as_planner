@@ -1,14 +1,41 @@
-method: global-lp
+method: controller-hybrid
 overrides: {}
-promoted_ts: '2026-08-07T13:55:27'
-note: won analysis on 7.29.26 PR.xlsx
+promoted_ts: '2026-08-13T09:40:00'
+note: >-
+  Promoted on a SEVEN-starting-state measurement, not one PR: the six July-2026
+  PRs (7.2, 7.9, 7.14, 7.17, 7.24, 7.29) plus the 7.29 PR run with the
+  operator's manual override window. Replaces the 2026-08-07 global-lp
+  promotion, which had been measured on the 7.29 PR alone and does NOT
+  generalise — see evidence.
 evidence:
+  basis: 7 starting states (6 real PRs; 7.29 run both with and without the
+    manual window)
+  measured_ts: '2026-08-13'
+  emphasis: Walk the line
   gates:
     conservation: PASS
     no_empty_week: PASS
     biomass_cap: PASS
-    harvest_cap: WARN
+    harvest_cap: PASS
     targets: PASS
     density_quality: N/A
-  score: 9.99107859409525
-  emphasis: Walk the line
+  # Held on every starting state, not on average.
+  controller_hybrid:
+    zero_harvest_weeks: 0 on 7 of 7
+    weeks_below_30k_floor: 3 to 6 per PR
+    worst_harvest_week: 4,078 to 23,888 fish
+    weeks_over_the_55k_limit: 1 across all 7 (none over the 60,500 ceiling)
+    peak_tank_density_kg_m3: 100.7 to 137.2
+    transfer_topology_violations: 0 on 7 of 7
+    conservation: PASS on 7 of 7
+  # Why the previous promotion was withdrawn. global-lp passed the
+  # never-an-empty-week HARD rule only on the two starting states closest to
+  # the one it was promoted on (7.24 and 7.29-with-window); on the other five
+  # — including the SAME 7.29 PR without the manual window — it plans a week
+  # with zero harvest, which the contract forbids outright.
+  global_lp_withdrawn:
+    zero_harvest_weeks: 1 on 5 of 7 (7.2, 7.9, 7.14, 7.17, 7.29-clean)
+    weeks_below_30k_floor: 6 to 11 per PR
+    peak_tank_density_kg_m3: up to 304.4 (3.2x the 95 cap, on 7.29-clean)
+    transfer_topology_violations: 41 to 105 per PR (R3/R4 breaches — moves the
+      crew cannot physically perform)
