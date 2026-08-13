@@ -167,6 +167,39 @@ def floor_eligible(variants: list, stock_min_week) -> list:
     return out
 
 
+def ceiling_eligible(variants: list) -> list:
+    """The variants that never breach the RELIEF CEILING (the processing limit
+    plus its relief band) in any planner week.
+
+    WHY THIS EXISTS (measured 2026-08-13, 8 starting states, 717 plans). The
+    weekly processing limit is enforced in the objective by exactly ONE term,
+    `harvest_overshoot` — and the `harvest_cap` gate is SOFT, so `pick_winner`
+    never filtered on it. That leaves the constraint protected by a single
+    weight in a single preset family. The "Product quality" preset sets
+    `harvest_overshoot` to weight 0 (every other preset gives it 0.5-2), so
+    under it NOTHING in the search — objective or gate — could see a breach.
+    Its winners planned 82,181 / 83,152 / 82,626 / 83,504-fish weeks on 4 of 8
+    starting states: ~50% over the 55,000 limit and 36-38% over the 60,500
+    ceiling the config itself calls never legal. Walk the line breached on
+    none, purely because its `harvest_overshoot` weight happens to be 2.
+
+    A constraint whose enforcement depends on one preset's weight is not
+    enforced. So, exactly like `floor_eligible`, the ceiling becomes a RANK:
+    tuning may buy any trade it likes among plans that stay inside the
+    operator's stated ceiling, and may never sell the ceiling for welfare,
+    density or biomass gains. This is emphasis-independent by construction.
+
+    Returns [] when nothing measured it (old cache entries) so callers fall
+    back to the unguarded pool rather than pretending a gate was cleared.
+    `weeks_over_relief_ceiling` None means UNKNOWN, never a pass."""
+    out = []
+    for v in variants:
+        n = getattr(v.metrics, "weeks_over_relief_ceiling", None)
+        if n is not None and int(n) == 0:
+            out.append(v)
+    return out
+
+
 def pick_winner(variants: list, weights: dict, stock_min_week=None):
     """The tuned winner among a method's evaluated variants: emphasis-best
     among those passing ALL hard gates; if none passes the empty-week rule,
@@ -174,12 +207,18 @@ def pick_winner(variants: list, weights: dict, stock_min_week=None):
     honestly — a search never hides a gate). None if nothing conserves.
     Deterministic tie-break by overrides key (parallel == sequential).
 
-    `stock_min_week` (the method's own stock-config worst harvest week) adds
-    the CONTRACT-FLOOR no-regression rank of `floor_eligible`: the winner is
-    chosen from the candidates that do not make the operator's hardest rule
-    worse than not tuning at all. If no candidate qualifies, the guard stands
-    down (the unguarded pool is used) so a search still returns its best —
-    `tune_method` reports which happened."""
+    Two emphasis-independent RANKS are then applied, in the operator's own
+    priority order, each standing down if it would empty the pool (a search
+    still returns its best, and `tune_method` reports which happened):
+      1. `ceiling_eligible` — no winner may breach the relief ceiling. The
+         objective protects that limit with a single term whose weight is 0
+         in one shipped preset, so a weight cannot be the enforcement.
+      2. `floor_eligible` — no winner may harvest less in its leanest week
+         than the method's own stock run (`stock_min_week`).
+    The ceiling is applied FIRST because it is the harder rule: a week over
+    the processing ceiling cannot be executed at all, whereas a lean week is
+    a shortfall. Applying it first also means the floor guard chooses among
+    executable plans rather than ranking an illegal one to the top."""
     from . import optimize
     if not variants:
         return None
@@ -188,6 +227,7 @@ def pick_winner(variants: list, weights: dict, stock_min_week=None):
     pool = full or [v for v in variants if v.conservation_ok]
     if not pool:
         return None
+    pool = ceiling_eligible(pool) or pool
     pool = floor_eligible(pool, stock_min_week) or pool
     return min(pool, key=lambda v: (v.score, optimize._overrides_key(v.overrides)))
 

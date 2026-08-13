@@ -302,3 +302,68 @@ def test_promoted_evidence_survives_round_trip(tmp_path):
     p = A.load_promoted_default(str(cfg))
     assert p["evidence"]["gates"]["conservation"] == "PASS"
     assert p["overrides"] == {"tran_og_default_tanks": 3}
+
+
+# --------------------------------------------------------------------------- #
+# The RELIEF-CEILING no-breach guard
+#
+# Measured 2026-08-13 across 8 starting states / 717 conserved plans. The
+# weekly processing limit is carried in the objective by ONE term,
+# `harvest_overshoot`, and its gate is SOFT — so `pick_winner` never filtered
+# on it. The shipped "Product quality" preset sets that term's weight to 0
+# (every other preset: 0.5-2), which left NOTHING in the search able to see a
+# breach: its winners planned 82,181 / 83,152 / 82,626 / 83,504-fish weeks on
+# 4 of 8 states — ~50% over the 55,000 limit, 36-38% over the 60,500 ceiling
+# the config calls never legal. "Walk the line" breached on none, purely
+# because its weight for that one term happens to be 2.
+#
+# A constraint enforced by a single weight in a single preset is not enforced.
+# Hence a RANK, like the contract floor: emphasis-independent by construction.
+# --------------------------------------------------------------------------- #
+
+def test_ceiling_eligible_keeps_only_plans_inside_the_relief_ceiling():
+    inside = _variant({"a": 1}, weeks_over_relief_ceiling=0, label="ok")
+    over = _variant({"a": 2}, weeks_over_relief_ceiling=2, label="breach")
+    got = T.ceiling_eligible([inside, over])
+    assert [v.label for v in got] == ["ok"]
+
+
+def test_ceiling_eligible_treats_unmeasured_as_unknown_never_a_pass():
+    """An old cache entry predating the field must not be assumed compliant —
+    the same rule the floor guard and variant_hard_ok already follow."""
+    assert T.ceiling_eligible(
+        [_variant({}, weeks_over_relief_ceiling=None)]) == []
+
+
+def test_a_ceiling_breach_can_never_win_however_good_its_score():
+    """THE control: the Product-quality failure in one assertion. The breaching
+    plan is given the better emphasis score, exactly as it had in the real
+    searches (nothing in that objective could see the breach)."""
+    w = {c: 1.0 for c in O.COMPONENTS}
+    breach = _variant({"a": 1}, weeks_over_relief_ceiling=2, label="breach",
+                      harvest_var=0.0, crowded_biomass_fraction=0.0)
+    legal = _variant({"a": 2}, weeks_over_relief_ceiling=0, label="legal")
+    assert T.pick_winner([breach, legal], w).overrides == {"a": 2}
+
+
+def test_the_ceiling_guard_stands_down_rather_than_returning_nothing():
+    """If every candidate breaches, a search still reports its best — the board
+    shows the failure honestly rather than the tuner going silent."""
+    w = {c: 1.0 for c in O.COMPONENTS}
+    a = _variant({"a": 1}, weeks_over_relief_ceiling=1, label="a")
+    b = _variant({"a": 2}, weeks_over_relief_ceiling=3, label="b")
+    assert T.pick_winner([a, b], w) is not None
+
+
+def test_the_ceiling_outranks_the_floor():
+    """Priority order: a week over the processing ceiling cannot be executed at
+    all; a lean week is a shortfall. So a legal-but-leaner plan beats an
+    illegal-but-fuller one."""
+    w = {c: 1.0 for c in O.COMPONENTS}
+    illegal_but_full = _variant({"a": 1}, weeks_over_relief_ceiling=1,
+                                harvest_min_week=30000.0, label="illegal")
+    legal_but_lean = _variant({"a": 2}, weeks_over_relief_ceiling=0,
+                              harvest_min_week=20000.0, label="legal")
+    win = T.pick_winner([illegal_but_full, legal_but_lean], w,
+                        stock_min_week=25000.0)
+    assert win.overrides == {"a": 2}
