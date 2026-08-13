@@ -82,9 +82,16 @@ OPT_FULL_GRID = [
     ("dev=0.005 (tight)", {"facility_biomass_deviation_pct": 0.005}),
     ("dev=0.02 (loose)", {"facility_biomass_deviation_pct": 0.02}),
     ("smooth:K12", {"harvest_smooth_lookahead_weeks": 12}),
-    # rebalancer effort
-    ("balance=60", {"rebalance_balance_budget": 60}),
-    ("varqty=20", {"rebalance_varqty_budget": 20}),
+    # rebalancer effort. Both of these are DEFERRABLE-pass budgets, clamped to
+    # min(knob, quality budget <= max_transfers_per_week) — so every value at or
+    # above 15 produces the identical plan. "balance=60" was therefore a no-op
+    # duplicate of baseline (the live config sits at 30), and "varqty=20" was
+    # one too (live config 20). Both now sweep values the search can actually
+    # tell apart, and varqty gets BOTH endpoints for the same reason
+    # rebalance_level does — so the trade shows up wherever the config sits.
+    ("balance=8", {"rebalance_balance_budget": 8}),
+    ("varqty=off", {"rebalance_varqty_budget": 0}),
+    ("varqty=max", {"rebalance_varqty_budget": 15}),
     # leveling controls — test BOTH endpoints explicitly so the trade shows up no
     # matter where the baseline config sits (else, if the config already has
     # rebalance_level off, "density-only" is a no-op duplicate of baseline and the
@@ -1353,7 +1360,13 @@ CD_KNOB_SPACE = [
     ("density_target_pct", [0.85, 0.90, 0.95]),
     ("global_buffer_pct", [0.0, 0.05, 0.10]),
     ("min_tank_control", [7000, 12000]),
-    ("rebalance_balance_budget", [0, 15, 30]),
+    # 2026-08-13: the de-duplication above was left half-done. A deferrable
+    # pass gets min(knob, quality budget) and the quality budget can never
+    # exceed max_transfers_per_week (15), so 15 and 30 are the SAME plan —
+    # measured bit-identical on all 7 real starting states, which is how a
+    # single-PR search came to report "30 -> 15" as a tuned win. 15 is the
+    # highest value the search can distinguish; 8 brackets the binding side.
+    ("rebalance_balance_budget", [0, 8, 15]),
     ("rebalance_split_budget", [0, 4, 8]),
 ]
 

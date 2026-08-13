@@ -60,6 +60,109 @@ class TestGate:
             "max_transfers_per_week"].default == 15
 
 
+class TestDeferrablePassBudgetsSaturateAtTheHandlingCap:
+    """A deferrable pass's OWN budget knob is INERT at any value >= the weekly
+    handling cap — the pass gets `min(knob, moves_left_quality)` and the quality
+    budget can never exceed `max_transfers_per_week`.
+
+    WHY THIS IS PINNED (measured 2026-08-13, 7 real starting states: the six
+    July-2026 PRs plus the 7.29 PR run with the operator's manual window). A
+    single-PR tuning run reported `rebalance_balance_budget: 30 -> 15` as part
+    of a winning knob set. Re-run across all seven, arm `15` was IDENTICAL to
+    arm `30` on every metric on every PR — worst harvest week, weeks under the
+    30,000 floor and their cumulative depth, zero weeks, weeks over the 55,000
+    limit and the 60,500 relief ceiling, peak density, tank-weeks over 95, max
+    weekly moves, peak biomass, conservation. Not close: the same numbers.
+    Arm `14` (one below the cap) differed on 1 of 7 and arm `0` on 7 of 7, so
+    the knob is live — it simply saturates, exactly as the arithmetic below
+    says it must. The "delta" was never a delta, and the search had spent a
+    third of that axis on a value it could not distinguish.
+
+    The general rule this locks: a tuning result that moves one of these knobs
+    between two values >= max_transfers_per_week is a measurement artifact,
+    never evidence. (`rebalance_split_budget` is NOT one of these — it bounds
+    the PLAN-layer split pass, upstream of the handling accounting, so it does
+    bite at any value.)
+    """
+
+    #: The deferrable passes whose budget is clamped by the quality budget.
+    CLAMPED_KNOBS = ("rebalance_balance_budget", "rebalance_varqty_budget")
+
+    def test_the_quality_budget_can_never_exceed_the_cap(self):
+        # _moves_left() returns max(0, cap - used_pairs) <= cap, and
+        # _quality_moves_left only ever subtracts from it (see
+        # TestReserveOnlySubtracts). So the deferrable passes see <= cap.
+        for cap in (1, 5, 15, 30):
+            for used in range(0, cap + 3):
+                moves_left = max(0, cap - used)
+                for reserve in (0, 1, cap, 99):
+                    assert _quality_moves_left(moves_left, reserve, cap) <= cap
+
+    def test_any_two_values_at_or_above_the_cap_are_indistinguishable(self):
+        # The clamp the call sites apply: min(knob, quality_budget).
+        cap = ControlParams.__dataclass_fields__[
+            "max_transfers_per_week"].default
+        for quality_budget in range(0, cap + 1):
+            budgets = {min(knob, quality_budget)
+                       for knob in (cap, cap + 1, 20, 30, 60, 10 ** 6)}
+            assert len(budgets) == 1, (
+                f"knob values >= {cap} must all clamp to the same budget, "
+                f"got {sorted(budgets)} at quality_budget={quality_budget}")
+
+    def test_the_call_sites_really_apply_that_clamp(self):
+        # Behaviour above is only the operator's reality while the engine keeps
+        # taking min(knob, _moves_left_quality()). If a pass is ever unclamped,
+        # its knob starts biting above the cap and this reasoning expires.
+        import inspect
+        import re
+        src = inspect.getsource(_pl)
+        for knob in self.CLAMPED_KNOBS:
+            m = re.search(
+                r"min\(\s*int\(getattr\(control,\s*[\"']" + knob +
+                r"[\"'],[^)]*\)\s*or\s*0\),\s*_moves_left_quality\(\)", src)
+            assert m, (f"{knob} is no longer clamped to _moves_left_quality() "
+                       f"— re-measure before trusting any tuning result on it")
+
+    def test_the_search_space_is_not_wasting_cells_on_saturated_values(self):
+        # The tuner's own axis for these knobs must not offer two values that
+        # are provably the same plan; a duplicate cell lets a search "win" on a
+        # knob it never moved (2026-08-13 finding).
+        from forecast.optimize import CD_KNOB_SPACE
+        cap = ControlParams.__dataclass_fields__[
+            "max_transfers_per_week"].default
+        for knob, values in CD_KNOB_SPACE:
+            if knob not in self.CLAMPED_KNOBS:
+                continue
+            saturated = [v for v in values if v >= cap]
+            assert len(saturated) <= 1, (
+                f"{knob} search axis {list(values)} offers {saturated} — all "
+                f"of those clamp to the same {cap}-move budget, so the search "
+                f"cannot tell them apart; keep at most one")
+
+    def test_no_grid_row_sweeps_a_value_it_cannot_distinguish(self):
+        # Same hazard on the fixed grids: a row that sets one of these knobs
+        # ABOVE the cap is a no-op duplicate of whatever the config already has
+        # (the module's own warning: "no-op duplicate of baseline"). Rows may
+        # sit AT the cap — that is the highest meaningful value.
+        from forecast.optimize import OPT_FULL_GRID, OPT_QUICK_GRID
+        from forecast.tuning import FULL_GRID, QUICK_GRID
+        cap = ControlParams.__dataclass_fields__[
+            "max_transfers_per_week"].default
+        for grid_name, grid in (("OPT_FULL_GRID", OPT_FULL_GRID),
+                                ("OPT_QUICK_GRID", OPT_QUICK_GRID),
+                                ("tuning.FULL_GRID", FULL_GRID),
+                                ("tuning.QUICK_GRID", QUICK_GRID)):
+            for label, ov in grid:
+                for knob in self.CLAMPED_KNOBS:
+                    if knob in ov:
+                        assert ov[knob] <= cap, (
+                            f"{grid_name} row {label!r} sets {knob}="
+                            f"{ov[knob]}, above the {cap}-move handling cap — "
+                            f"it plans identically to {knob}={cap} and to any "
+                            f"config already at or above the cap, so the row "
+                            f"measures nothing")
+
+
 class TestEvenOutBudget:
     def _crowded(self):
         s = _mk_state()

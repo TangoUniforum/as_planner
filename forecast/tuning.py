@@ -48,8 +48,12 @@ FULL_GRID: list[tuple[str, dict]] = [
     ("baseline", {}),
     ("density=0.90", {"density_target_pct": 0.90}),
     ("density=0.85", {"density_target_pct": 0.85}),
-    ("varqty=20", {"rebalance_varqty_budget": 20}),
-    ("balance=60", {"rebalance_balance_budget": 60}),
+    # Deferrable-pass budgets are clamped to min(knob, quality budget), and the
+    # quality budget can never exceed max_transfers_per_week (15) — so 20, 30
+    # and 60 are all the SAME plan as each other and as the live config. The
+    # old rows swept only that non-binding side (see optimize.CD_KNOB_SPACE).
+    ("varqty=off", {"rebalance_varqty_budget": 0}),
+    ("balance=8", {"rebalance_balance_budget": 8}),
     # facility_biomass_deviation_pct is the live harvest-tightness knob (it
     # superseded harvest_setpoint_lookahead_weeks, which is now vestigial).
     ("deviation=0.005", {"facility_biomass_deviation_pct": 0.005}),
