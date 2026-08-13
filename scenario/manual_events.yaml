@@ -1,20 +1,17 @@
-# Manual starting-state events (operator-authored). Applied to the
-# PR-hydrated week-0 state BEFORE the forecast runs forward. See
-# forecast/manual_events.py. Starting-state only (not future pins).
-events:
-- type: harvest
-  week: 1
-  from_tank: 65
-  destinations: []
-  count: null
-  batch: null
-  mode: transfer
-  notes: ''
-- type: harvest
-  week: 2
-  from_tank: 61
-  destinations: []
-  count: null
-  batch: null
-  mode: transfer
-  notes: ''
+# LEGACY shared manual-events file — DELIBERATELY EMPTY. Do not add events here.
+#
+# Manual starting-state events are PR-SPECIFIC and live in
+# scenario/manual_events/<PR-closing-date>.yaml (see forecast/manual_events.py).
+# This file is the pre-migration fallback, read ONLY when that directory holds
+# no .yaml at all.
+#
+# Why it was emptied (2026-08-13): it still carried two harvest events (tanks
+# 65 and 61) authored for the 2026-07-31 PR. They were inert only while the
+# per-PR directory was non-empty — but empty that directory for any reason (a
+# cleanup, a fresh clone, a new machine) and those two operations would have
+# silently applied to EVERY PR uploaded afterwards. That is exactly the
+# cross-PR bleed the per-PR directory was built to prevent, and it would have
+# been invisible: the events execute and log as legitimate scripted operations.
+# The two events were a stale subset of scenario/manual_events/2026-07-31.yaml,
+# so nothing was lost; the originals remain in git history.
+events: []
