@@ -1390,16 +1390,34 @@ def plan(
     # (never released): fold them into the per-batch standing so conservation
     # (seeded == harvested + standing + mort + cull) still closes exactly.
     held_at_end: dict[str, float] = {}
+    held_kg_at_end: dict[str, float] = {}
     if model_purge_hold:
         for rel in purge_buffer.values():
             for e in rel:
-                held_at_end[e["batch_id"]] = (
-                    held_at_end.get(e["batch_id"], 0.0) + e["count"])
-    for s in seeds:
-        c = cons[s.batch_id]
-        c["standing_count"] = (work[s.batch_id].total_count()
-                               + held_at_end.get(s.batch_id, 0.0))
-        c["standing_kg"] = work[s.batch_id].biomass_kg()
+                _b = e["batch_id"]
+                held_at_end[_b] = held_at_end.get(_b, 0.0) + e["count"]
+                held_kg_at_end[_b] = (held_kg_at_end.get(_b, 0.0)
+                                      + float(e.get("biomass_kg", 0.0)))
+    # Walk EVERY conservation record, not just the seeded ones. `cons` gains
+    # entries from two sources: the forward seeds, and batches already sitting
+    # in the 6N purge hold at handoff (the `purge_release_schedule` /
+    # `purge_inflight` setdefault blocks above, which create a record carrying
+    # only seeded/harvested/mortality/cull). Iterating `seeds` left the second
+    # kind without `standing_count`, and `conservation_summary` then died on
+    # KeyError reading it — 9 minutes into a run, after all the real work.
+    # Latent until a starting state produced a purge-hold batch with no forward
+    # plan: the operator's 2026-08-13 PR, whose manual window moved B41 and B43
+    # into 6N as terminal batches. A batch with no `work` entry is standing
+    # only by what it still holds in the purge buffer.
+    for bid, c in cons.items():
+        w = work.get(bid)
+        c["standing_count"] = ((w.total_count() if w is not None else 0.0)
+                               + held_at_end.get(bid, 0.0))
+        # Held biomass counts in kg too. It always should have — the count side
+        # already folded it in — so a purge-only batch would otherwise report
+        # standing fish weighing nothing.
+        c["standing_kg"] = ((w.biomass_kg() if w is not None else 0.0)
+                            + held_kg_at_end.get(bid, 0.0))
         accounted = (c["harvested_count"] + c["standing_count"]
                      + c["mortality_count"] + c["cull_count"])
         c["accounted_count"] = accounted
