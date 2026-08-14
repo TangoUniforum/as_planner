@@ -99,6 +99,7 @@ from .caps import (
     METRIC_BIOMASS,
     METRIC_FEED_DAY,
     SystemLimits,
+    require_system_cap,
     resolve_system_cap,
 )
 from .global_planner_l2_poc import (
@@ -115,8 +116,6 @@ from .global_planner_poc import BatchStandingRow, PlannerResult
 from .models import ControlParams, FacilityConfig
 from .tiers import SIXN_SYSTEM, is_entry
 
-# Default per-system caps when the SystemLimits sheet has no cap for a
-# (week, system) — matches the uniform 400,000 kg / 3,000 kg-feed sheet.
 # Solver-health findings from the most recent plan_l3() call. A wall-clock
 # TIME LIMIT is not a deterministic stop criterion: whichever incumbent the
 # branch-and-bound happened to hold when the clock ran out becomes the answer,
@@ -146,8 +145,15 @@ _WEEK_SOLVE_LIMIT_S = 45.0
 # measurement, not argument: see the class-key comment below.
 _SYMMETRY_BREAK = True
 
-_DEFAULT_BIO_CAP = 400000.0
-_DEFAULT_FEED_CAP = 3000.0
+# NOT a capacity. These are `None` sentinels threaded through `_system_cap`
+# so that a (week, system) with no configured cap RAISES naming the missing
+# input, instead of silently substituting a ceiling the operator never set.
+# They held 400,000 / 3,000 until 2026-08-14 — figures that were merely the
+# then-uniform contents of the limits file, and which would have quietly
+# planned OG6N (700,000 in purge) at 57% of its real capacity the moment the
+# file stopped being uniform.
+_DEFAULT_BIO_CAP = None
+_DEFAULT_FEED_CAP = None
 
 # SELECTIVE over-stock lever (placement optimizer candidate, default OFF =
 # operating density everywhere -> byte-identical). When set, a batch whose mean
@@ -533,8 +539,16 @@ def _eligible_systems(
 
 def _system_cap(
     metric: str, week_label: str, system_id: str,
-    system_limits: SystemLimits, default: float,
+    system_limits: SystemLimits, default: Optional[float],
 ) -> float:
+    """Resolve a per-(week, system) cap; `default=None` means "must exist".
+
+    Same contract as the MILP placement pass's `_scap`: capacities are
+    operator inputs, so an absent one is named and raised rather than
+    invented (caps.require_system_cap).
+    """
+    if default is None:
+        return require_system_cap(metric, week_label, system_id, system_limits)
     v = resolve_system_cap(metric, week_label, system_id, system_limits)
     return v if v is not None else default
 

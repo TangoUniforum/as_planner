@@ -188,6 +188,20 @@ def test_run_global_routes_the_degrade_warning_into_the_validation_log():
 # or fired under the wrong name. Same class as everything above: the tool made
 # a decision and the operator had no way to read it.
 # =========================================================================== #
+def _caps_for(*system_ids):
+    """A SystemLimits with a default cap for each named system.
+
+    These tests are about the Pass-B fallback WARNING, not about caps — but
+    L3 no longer invents a ceiling for a system the operator never
+    configured (it raises naming the missing input), so the fixture has to
+    state one. The values are arbitrary and non-binding for this demand.
+    """
+    from forecast.caps import SystemLimits
+    return SystemLimits(defaults={
+        (s, m): v for s in system_ids
+        for m, v in (("biomass", 400_000.0), ("feed_per_day", 3_000.0))})
+
+
 class TestPassBFallbackIsActuallyProduced:
     """`WARNING - Pass B fallback (no stickiness)` was a ValidationLog category
     with NO producer anywhere in the repo — and the fallback it names is real
@@ -221,7 +235,7 @@ class TestPassBFallbackIsActuallyProduced:
             [0, 1], ["OG3"], {("OG3", 0): 0, ("OG3", 1): 1},
             {("OG3", 0): [0], ("OG3", 1): [1]}, y_meta, demand,
             {0: {"OG3": 4}, 1: {"OG3": 4}},
-            {0: "2026-W31", 1: "2026-W32"}, SystemLimits(),
+            {0: "2026-W31", 1: "2026-W32"}, _caps_for("OG3"),
             {0: (0.0, 0.0), 1: (0.0, 0.0)}, xA, 1.0, np, _never_proves,
             0.02, False)
         return list(l3.SOLVER_WARNINGS)
@@ -257,7 +271,7 @@ class TestPassBFallbackIsActuallyProduced:
                 tanks=1, biomass_kg=50_000.0, feed_kg_day=500.0,
                 avg_wt_g=4000.0, per_tank_biomass_kg=50_000.0,
                 per_tank_feed_kg_day=500.0)},
-            {0: {"OG3": 4}}, {0: "2026-W31"}, SystemLimits(), {0: (0.0, 0.0)},
+            {0: {"OG3": 4}}, {0: "2026-W31"}, _caps_for("OG3"), {0: (0.0, 0.0)},
             np.zeros(1 + 3 * 1 + 1), 1.0, np, lambda *a, **kw: _Ok(),
             0.02, False)
         assert not [w for w in l3.SOLVER_WARNINGS

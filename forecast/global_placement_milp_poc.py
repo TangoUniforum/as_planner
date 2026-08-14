@@ -33,7 +33,8 @@ import math
 from dataclasses import dataclass
 from typing import Optional
 
-from .caps import METRIC_BIOMASS, METRIC_FEED_DAY, SystemLimits, resolve_system_cap
+from .caps import (METRIC_BIOMASS, METRIC_FEED_DAY, SystemLimits,
+                   require_system_cap, resolve_system_cap)
 from .global_planner_l2_poc import GROWOUT_SYSTEMS, NURSERY_SYSTEMS
 from .global_planner_poc import PlannerResult
 from .models import ControlParams, FacilityConfig
@@ -206,20 +207,15 @@ def _scap(metric, wl, s, system_limits, default):
     """Resolve a per-(week, system) cap from the operator's limits file.
 
     `default` is None for the capacity metrics (see _DEFAULT_BIO_CAP), so a
-    genuinely missing row raises here, naming the exact input that is absent,
+    genuinely missing cap raises here, naming the exact input that is absent,
     instead of substituting an invented ceiling that the operator never set and
     could not see anywhere in the output. Failing with an address beats
-    planning against a number nobody chose."""
+    planning against a number nobody chose. The raise itself lives in
+    caps.require_system_cap, shared with the L3 planner."""
+    if default is None:
+        return require_system_cap(metric, wl, s, system_limits)
     v = resolve_system_cap(metric, wl, s, system_limits)
-    if v is None:
-        v = default
-    if v is None:
-        raise ValueError(
-            f"No {metric} cap configured for system {s} in week {wl}. "
-            f"Add a row to scenario/limits.yaml: "
-            f"{{week: {wl}, system: {s}, metric: {metric}, value: <kg>}}. "
-            f"Capacities are operator inputs — this code will not invent one.")
-    return v
+    return v if v is not None else default
 
 
 def solve_full_horizon(
