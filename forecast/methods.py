@@ -279,8 +279,31 @@ register(Method(
     # Same empty space as global-lp (same L1/L3 knob consumption).
     knob_grid=GLOBAL_KNOB_GRID,
     knob_space=GLOBAL_KNOB_SPACE,
-    blurb="Same L1 cascade + facility share, but the whole-horizon grow-out "
-          "layout is placed by a CP-SAT optimal (0-swap) solver, not the LP.",
+    # BLURB CORRECTED 2026-08-14. It used to read "the whole-horizon grow-out
+    # layout is placed by a CP-SAT optimal (0-swap) solver". Both halves were
+    # wrong and the error actively misled a placement investigation into
+    # treating this method as a foresight benchmark:
+    #   * NOT whole-horizon. tools.run_global_forecast.run_cpsat calls
+    #     global_placement_milp_poc.solve_cpsat_perweek, which builds and solves
+    #     ONE model per week (`info["status"] == "per-week"`), seeded only by
+    #     last week's occupancy. It is exactly as myopic as the controller; what
+    #     differs is that its objective carries an explicit min-max BALANCE term
+    #     (`100 * (zb + zf)`, the per-week hottest system biomass/feed
+    #     fractions) that the controller has no equivalent of.
+    #   * NOT 0-swap. Same-week swaps are a SOFT objective term (`+ 3 *
+    #     sum(tr_swap)`) — the cheapest penalty in the whole objective, two
+    #     orders of magnitude under the cap-slack and balance terms — so the
+    #     solver buys swaps freely whenever they relieve a hot system, and the
+    #     realised plan emits thousands of transfers. (The hard 0-swap
+    #     formulation exists in this module as the full-horizon/rolling-window
+    #     solvers, which the registered method does not use.)
+    blurb="Same L1 cascade + facility share, but the grow-out layout is placed "
+          "by a CP-SAT solve. Like the LP it plans ONE WEEK AT A TIME (seeded "
+          "by last week's occupancy) — not the whole horizon — and its "
+          "advantage is not foresight but an explicit min-max balance term in "
+          "the objective, which holds the hottest system's biomass/feed down. "
+          "Same-week tank swaps are only softly penalised, so it buys them "
+          "freely: expect a transfer-heavy plan.",
 ))
 register(Method(
     key="controller-hybrid",

@@ -514,8 +514,15 @@ def cpsat_degrade_warning(info) -> str:
 
 def _solve_cpsat_q(result, facility, system_limits, control, time_limit,
                    workers: int = 8, det_time: float = 30.0, initial_tb=None):
-    """Run the CP-SAT full-horizon optimal placement on L1's standing and return
-    ({week: {(batch, tank): kg}}, info) for the optimal grow-out layout (0-swap).
+    """Run the CP-SAT placement on L1's standing and return
+    ({week: {(batch, tank): kg}}, info) for the grow-out layout.
+
+    NOT full-horizon and NOT 0-swap (both claims corrected 2026-08-14): the
+    callee is `solve_cpsat_perweek`, which solves ONE model per week seeded by
+    last week's occupancy, and in it same-week swaps are a soft objective term
+    (`+ 3 * sum(tr_swap)`) — the cheapest term in the objective — not a
+    constraint. The hard 0-swap formulations in that module (full-horizon /
+    rolling-window) are NOT what this path calls.
 
     `info` carries the solver's own self-report — crucially `n_infeasible`, the
     number of weeks CP-SAT could NOT place. Those weeks come back EMPTY
