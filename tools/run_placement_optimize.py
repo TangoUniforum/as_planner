@@ -49,7 +49,7 @@ def _score(pick) -> tuple:
 def main() -> int:
     control, tables, facility = load_config("config")
     batches = load_batches("scenario")
-    _fl, system_limits = load_limits("scenario")
+    _fl, system_limits = load_limits("scenario", control)
     inflight_og, fw_inflight, ds, purge_inflight = _hydrate_pr(
         Path("Forecast.xlsm"), batches)
     if ds is not None:

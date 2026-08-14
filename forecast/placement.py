@@ -50,6 +50,7 @@ from .caps import (
     METRIC_MIN_HARVEST,
     FacilityLimits,
     SystemLimits,
+    carry_forward_cap_lookup,
     predictive_move_in_count,
     resolve_facility_cap,
     resolve_system_cap,
@@ -3616,26 +3617,17 @@ def phase_d_emit_events(
             d[tid] = a.batch_id
     week_index_r = {wl: i for i, wl in enumerate(sorted_weeks)}
     _rebal_buf = 1.0 + (control.global_buffer_pct or 0.0)
-    _cap_weeks: dict[tuple[str, str], list] = {}
-    if system_limits is not None:
-        for (wk, sysid, metric), val in system_limits.caps.items():
-            _cap_weeks.setdefault((sysid, metric), []).append((wk, val))
-        for _k in _cap_weeks:
-            _cap_weeks[_k].sort()
+    # Same cap lookup the SystemLimitsAudit reports and the LNS optimizer
+    # scores against (caps.carry_forward_cap_lookup) — the rebalancer must
+    # be working against the number that will be judged.
+    _cap_lookup = (carry_forward_cap_lookup(system_limits)
+                   if system_limits is not None else None)
 
     def _sys_cap(wl_, sysid):
-        def cf(metric):
-            lst = _cap_weeks.get((sysid, metric))
-            if not lst:
-                return None
-            best = lst[0][1]
-            for w, v in lst:
-                if w <= wl_:
-                    best = v
-                else:
-                    break
-            return best
-        return (cf(METRIC_BIOMASS), cf(METRIC_FEED_DAY))
+        if _cap_lookup is None:
+            return (None, None)
+        return (_cap_lookup(wl_, sysid, METRIC_BIOMASS),
+                _cap_lookup(wl_, sysid, METRIC_FEED_DAY))
 
     # 6N purge pipeline queue (only meaningful while in purge mode; ignored
     # if the forecast starts in production mode). Pairs are ordered with

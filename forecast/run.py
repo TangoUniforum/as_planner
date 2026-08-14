@@ -297,13 +297,17 @@ def main(
     # ----- Caps -----
     fs_date = control.forecast_start.date() if hasattr(control.forecast_start, "date") else control.forecast_start
     from .scenario_io import load_limits
-    facility_limits, system_limits = load_limits(scenario_dir)
+    # `control` is required: system defaults may be mode-specific (6N), and
+    # the mode of a week is derived from Control's sixn fields.
+    facility_limits, system_limits = load_limits(scenario_dir, control)
     # Operator-authored starting events are applied above (manual_events); the
     # workbook upload is the ProductionReport only. The realized closed-loop
     # planner has no separate pin-ingestion path.
     print(f"\n  Caps:")
     print(f"    FacilityLimits overrides: {len(facility_limits.overrides)}")
-    print(f"    SystemLimits caps:        {len(system_limits.caps)}")
+    print(f"    System defaults:          {len(system_limits.defaults)} "
+          f"(+{len(system_limits.mode_defaults)} mode-specific)")
+    print(f"    Per-week exceptions:      {len(system_limits.caps)}")
     print(f"    Control R24 deviation:    ±{control.facility_biomass_deviation_pct*100:.1f}% (biomass + feed)")
     print(f"    Control R29 global buf:   ±{control.global_buffer_pct*100:.1f}% (system caps)")
     print(f"    Default TranOG tanks:     {control.tran_og_default_tanks}")

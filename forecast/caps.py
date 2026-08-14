@@ -3,9 +3,10 @@
 Three cap levels (DESIGN §6):
 
 - **Tank**: density × volume per tank (from FacilityConfig). No buffer.
-- **System**: per-week per-system per-metric (from SystemLimits sheet).
-  Blank cell → no cap for that (week, system, metric). Buffered by
-  Control R29 `Global buffer` (5% default).
+- **System**: per-system per-metric, stated ONCE as a default and
+  overridden per week only where a genuine one-off applies (see
+  "System cap precedence" below). Buffered by Control R29
+  `Global buffer` (5% default).
 - **Facility**: per-week per-metric. Default from Control; per-week
   override from FacilityLimits (blank cell → use Control default).
   Buffered by Control R24 `Target Biomass deviation` (±1% default) on
@@ -13,10 +14,32 @@ Three cap levels (DESIGN §6):
 
 Buffers are symmetric (cap × (1 ± buffer_pct)).
 
+System cap precedence
+---------------------
+A capacity is a FACT ABOUT THE FACILITY: it changes rarely, and when it
+changes the operator wants to change ONE number. So it is stated once as
+a default and only overridden per week where a genuine one-off applies.
+`SystemLimits.resolve` walks exactly four steps, highest first:
+
+  1. **per-week row**   `caps[(week, system, metric)]`
+     — a genuine one-off week (maintenance, a trial, a shutdown).
+  2. **system+mode default** `mode_defaults[(system, mode, metric)]`
+     — the same system has a different capacity in a different operating
+     MODE. Only 6N has one today: it holds more while it is a depuration
+     station than it does once its 3 mains become grow-out. The mode of a
+     week is DERIVED from Control (`sixn_growth` + `sixn_production_start`)
+     by `mode_for_week`, so the split cannot drift away from the date that
+     defines it.
+  3. **system default** `defaults[(system, metric)]`
+     — the ordinary answer, and the only one most systems ever need.
+  4. **absent** → `None`. A cap nobody set stays unset; callers that
+     require one (`require_system_cap`) raise naming the missing input
+     rather than inventing a number. No capacity figure lives in code.
+
 System-id naming:
 - FacilityConfig identifies systems as `OG1N`, `OG1S`, ..., `OG6S`.
-- SystemLimits sheet labels them `1N`, `1S`, ..., `6S` (no `OG` prefix).
-- Internally we normalize to the FacilityConfig convention.
+- The legacy Excel SystemLimits sheet labelled them `1N` ... `6S` (no `OG`
+  prefix); `tools/vba_to_config.py` normalizes on import.
 """
 from __future__ import annotations
 
@@ -34,6 +57,13 @@ METRIC_FEED_DAY = "feed_per_day"
 METRIC_MAX_HARVEST = "max_harvest_per_week"
 METRIC_MIN_HARVEST = "min_harvest_per_week"
 METRIC_HOG_YIELD = "hog_yield"
+
+# Operating modes a system-default may be qualified by. Today only 6N has
+# two; the dimension is general so a future mode (a system taken off-line
+# seasonally, say) is a data change and not a code change.
+MODE_PURGE = "purge"
+MODE_PRODUCTION = "production"
+SYSTEM_MODES = (MODE_PURGE, MODE_PRODUCTION)
 
 
 # ============================================================
@@ -54,16 +84,116 @@ class FacilityLimits:
         return self.overrides.get((week_label, metric), default)
 
 
+def week_label_start(week_label: str) -> Optional[date]:
+    """Monday of an absolute ISO week label ('2028-W01' → 2028-01-03).
+
+    Returns None for anything that is not an absolute ISO label, so a
+    caller can fall back rather than crash on a stray key.
+    """
+    s = (week_label or "").strip().upper()
+    if "-W" not in s:
+        return None
+    y, _, w = s.partition("-W")
+    try:
+        return date.fromisocalendar(int(y), int(w), 1)
+    except (ValueError, TypeError):
+        return None
+
+
 @dataclass
 class SystemLimits:
-    """Per-week per-system per-metric system-level caps.
+    """Per-system capacity caps: defaults, mode defaults, per-week exceptions.
 
-    Keys are (week_label, system_id, metric). Blank cell → no cap
-    (None returned by get).
+    Three layers, resolved by `resolve` in the order documented at the top
+    of this module (per-week row > system+mode default > system default >
+    absent):
+
+    - `defaults[(system_id, metric)]` — the standing capacity. One entry
+      per system per metric; this is what the operator edits.
+    - `mode_defaults[(system_id, mode, metric)]` — the capacity while that
+      system is in a particular operating mode (see `MODE_*`).
+    - `caps[(week_label, system_id, metric)]` — a genuine one-off week.
+
+    Mode binding
+    ------------
+    A mode default is meaningless without the Control fields that say WHICH
+    mode a given week is in, so `mode_defaults` must be bound to Control
+    (`bind_sixn_mode`) before any week can be resolved. Resolving an
+    unbound object that carries mode defaults RAISES rather than guessing a
+    mode — silently picking one would apply the wrong ceiling to half the
+    horizon and look like a planner defect. Objects with no mode defaults
+    need no binding.
     """
     caps: dict[tuple[str, str, str], float] = field(default_factory=dict)
+    defaults: dict[tuple[str, str], float] = field(default_factory=dict)
+    mode_defaults: dict[tuple[str, str, str], float] = field(default_factory=dict)
+    # Control fields that decide a week's mode; set by `bind_sixn_mode`.
+    sixn_growth: bool = False
+    sixn_production_start: Optional[date] = None
+    mode_bound: bool = False
+
+    # ---- mode binding -------------------------------------------------
+
+    def bind_sixn_mode(self, control) -> "SystemLimits":
+        """Attach the Control fields that decide each week's 6N mode.
+
+        Mutates and returns self so it composes with `load_limits`. Call
+        this once, wherever Control is loaded next to the scenario.
+        """
+        self.sixn_growth = bool(getattr(control, "sixn_growth", False))
+        self.sixn_production_start = getattr(control, "sixn_production_start", None)
+        self.mode_bound = True
+        return self
+
+    def mode_for_week(self, week_label: str) -> str:
+        """Operating mode of `week_label` — MODE_PURGE or MODE_PRODUCTION.
+
+        Delegates the rule to `sixn.purge_mode_on` so this and the engine's
+        own 6N phase machine can never disagree about where the boundary
+        is. The week is represented by its ISO Monday: a week is in
+        production mode once its first day is on/after
+        `sixn_production_start`.
+        """
+        from .sixn import purge_mode_on
+        d = week_label_start(week_label)
+        if d is None:
+            # Not an absolute ISO label — treat as the pre-transition mode
+            # (what a horizon with no dates could only be).
+            return MODE_PURGE
+        return (MODE_PURGE
+                if purge_mode_on(self.sixn_growth, self.sixn_production_start, d)
+                else MODE_PRODUCTION)
+
+    # ---- resolution ---------------------------------------------------
+
+    def resolve(self, week_label: str, system_id: str,
+                metric: str) -> Optional[float]:
+        """The one place a system cap is decided. See module docstring."""
+        v = self.caps.get((week_label, system_id, metric))
+        if v is not None:
+            return v
+        if self.mode_defaults:
+            if not self.mode_bound:
+                systems = sorted({s for (s, _m, _k) in self.mode_defaults})
+                raise ValueError(
+                    "System caps carry mode-specific defaults "
+                    f"({', '.join(systems)}) but this SystemLimits was never "
+                    "bound to Control, so the operating mode of week "
+                    f"{week_label} is unknown. Load it with "
+                    "`load_limits(scenario_dir, control)` (or call "
+                    "`.bind_sixn_mode(control)`) before resolving caps.")
+            v = self.mode_defaults.get(
+                (system_id, self.mode_for_week(week_label), metric))
+            if v is not None:
+                return v
+        return self.defaults.get((system_id, metric))
 
     def get(self, week_label: str, system_id: str, metric: str) -> Optional[float]:
+        """Alias of `resolve` (kept: callers say `.get`)."""
+        return self.resolve(week_label, system_id, metric)
+
+    def row(self, week_label: str, system_id: str, metric: str) -> Optional[float]:
+        """The per-week EXCEPTION only, ignoring defaults. For editors."""
         return self.caps.get((week_label, system_id, metric))
 
 
@@ -169,8 +299,88 @@ def resolve_system_cap(
     system_id: str,
     system_limits: SystemLimits,
 ) -> Optional[float]:
-    """Return the resolved system cap or None if no cap is set."""
-    return system_limits.get(week_label, system_id, metric)
+    """Return the resolved system cap or None if no cap is set.
+
+    Precedence: per-week row > system+mode default > system default >
+    absent (module docstring).
+    """
+    return system_limits.resolve(week_label, system_id, metric)
+
+
+def require_system_cap(
+    metric: str,
+    week_label: str,
+    system_id: str,
+    system_limits: SystemLimits,
+) -> float:
+    """`resolve_system_cap`, but a missing cap RAISES with its address.
+
+    Capacities are operator inputs. A planner that substitutes an invented
+    ceiling for one the operator never set plans against a number nobody
+    chose and that appears nowhere in the output — so the engines that need
+    a hard bound call this instead, and the error names the exact input to
+    add. Shared by the MILP and L3 placement layers so the two cannot drift
+    into different notions of "missing".
+    """
+    v = system_limits.resolve(week_label, system_id, metric)
+    if v is None:
+        raise ValueError(
+            f"No {metric} cap configured for system {system_id} in week "
+            f"{week_label}. Set it in scenario/limits.yaml — normally once, "
+            f"under system_defaults:\n"
+            f"  system_defaults:\n    {system_id}:\n      {metric}: <value>\n"
+            f"or, for this week only, as an exception row "
+            f"{{week: {week_label}, system: {system_id}, metric: {metric}, "
+            f"value: <value>}}. Capacities are operator inputs — this code "
+            f"will not invent one.")
+    return v
+
+
+def carry_forward_cap_lookup(system_limits: SystemLimits):
+    """Cap lookup for the REPORTING sweeps over realized weeks.
+
+    Returns `f(week_label, system_id, metric) -> Optional[float]`, the same
+    precedence as `resolve_system_cap` plus one compatibility clause:
+
+      per-week row > system+mode default > system default
+        > nearest per-week row carried forward > absent
+
+    The carry-forward tail exists only for a limits file written in the
+    ROW-ONLY format (every week materialized, no defaults). Those files
+    stop at their last week, and the audit sweeps whatever weeks the plan
+    actually realized — which can run past it — so the last stated cap is
+    carried. It sits BELOW the defaults deliberately: once a system has a
+    default, a one-off exception week must not leak its value into every
+    later week, which is exactly what an unconditional carry-forward would
+    do.
+
+    Previously hand-inlined three times (excel_io.write_system_limits_audit,
+    lns_placement._carry_forward_caps, placement's rebalancer) with the same
+    body; the audit and the optimizer must report the identical number, so
+    there is one copy.
+    """
+    by_sys_metric: dict[tuple[str, str], list[tuple[str, float]]] = {}
+    for (wk, sysid, metric), val in system_limits.caps.items():
+        by_sys_metric.setdefault((sysid, metric), []).append((wk, val))
+    for k in by_sys_metric:
+        by_sys_metric[k].sort()
+
+    def lookup(week_label: str, system_id: str, metric: str) -> Optional[float]:
+        v = system_limits.resolve(week_label, system_id, metric)
+        if v is not None:
+            return v
+        lst = by_sys_metric.get((system_id, metric))
+        if not lst:
+            return None
+        best = lst[0][1]
+        for w, val in lst:
+            if w <= week_label:
+                best = val
+            else:
+                break
+        return best
+
+    return lookup
 
 
 def system_cap_with_buffer(

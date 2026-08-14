@@ -31,34 +31,19 @@ from collections import defaultdict
 from datetime import timedelta
 
 from .biology import realized_feed_kg_day
+from .caps import carry_forward_cap_lookup
 from .tiers import ENTRY_SYSTEMS as OG12_SYSTEMS  # entry tier — source of truth in tiers.py
 from .time_grid import iso_week_label
 
 
 # --------------------------------------------------------------------------- #
 # Hot-spot metric — mirrors excel_io.write_system_limits_audit so the number we
-# optimize against is IDENTICAL to the reported SystemLimitsAudit peak.
+# optimize against is IDENTICAL to the reported SystemLimitsAudit peak. Both
+# now call the one lookup in caps, so "identical" is structural rather than a
+# pair of hand-kept copies.
 # --------------------------------------------------------------------------- #
 def _carry_forward_caps(system_limits):
-    smw: dict = defaultdict(list)
-    for (wk, sysid, metric), val in system_limits.caps.items():
-        smw[(sysid, metric)].append((wk, val))
-    for k in smw:
-        smw[k].sort()
-
-    def cap(wk, sysid, metric):
-        lst = smw.get((sysid, metric))
-        if not lst:
-            return None
-        best = lst[0][1]
-        for w, v in lst:
-            if w <= wk:
-                best = v
-            else:
-                break
-        return best
-
-    return cap
+    return carry_forward_cap_lookup(system_limits)
 
 
 def system_loads(batch_locations, batch_by_id, tables, system_limits):

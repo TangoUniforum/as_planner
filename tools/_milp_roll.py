@@ -15,7 +15,7 @@ TL = int(sys.argv[3]) if len(sys.argv) > 3 else 60
 STRIDE = int(sys.argv[2]) if len(sys.argv) > 2 else 4
 control, tables, facility = load_config("config")
 batches = load_batches("scenario")
-_fl, system_limits = load_limits("scenario")
+_fl, system_limits = load_limits("scenario", control)
 inflight_og, fw_inflight, ds, purge_inflight = _hydrate_pr(Path("Forecast.xlsm"), batches)
 if ds is not None: control.forecast_start = ds
 r = gpp.plan(batches, tables, control, facility, inflight_og=inflight_og,

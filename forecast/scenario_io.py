@@ -12,10 +12,12 @@ config + scenario.
 `dump_scenario` serializes exactly what the Excel readers produce, so the YAML
 is seeded faithfully from the workbook and round-trips bit-for-bit.
 
-Limits are keyed by absolute ISO week label (e.g. "2026-W23"), which is stable
-as long as forecast_start (= ProductionReport closing + 1) is stable for the
-scenario. When limits become app-authored, the operator edits these weeks
-directly.
+System capacities are stated once per system in `system_defaults`, with
+per-week rows kept as one-off EXCEPTIONS (keyed by absolute ISO week label,
+e.g. "2026-W23"). The row-per-week form was the original schema and still
+loads: it made the horizon's coverage a function of when the file was
+generated, so a ProductionReport that moved the horizon left weeks at the
+end with no cap at all — invisibly. A default covers every week there is.
 """
 from __future__ import annotations
 
@@ -122,6 +124,7 @@ def facility_limits_from_list(data: list[dict]) -> FacilityLimits:
 
 
 def system_limits_to_list(sl: SystemLimits) -> list[dict]:
+    """The per-week EXCEPTION rows only (`system:` in the YAML)."""
     return [
         {"week": wk, "system": s, "metric": m, "value": v}
         for (wk, s, m), v in sorted(sl.caps.items())
@@ -133,6 +136,60 @@ def system_limits_from_list(data: list[dict]) -> SystemLimits:
         (str(r["week"]), str(r["system"]), str(r["metric"])): float(r["value"])
         for r in data or []
     })
+
+
+# ---------- System capacity defaults (the `system_defaults:` block) ----------
+#
+# Shape — one block per system, the whole capacity of that system in one
+# place, with an optional `modes:` sub-block for a system whose capacity
+# depends on its operating mode:
+#
+#   system_defaults:
+#     OG1N:
+#       biomass: 400000.0
+#       feed_per_day: 3000.0
+#     OG6N:
+#       feed_per_day: 3000.0
+#       modes:
+#         purge:      {biomass: 700000.0}
+#         production: {biomass: 400000.0}
+#
+# `modes` is the one reserved key inside a system block; every other key is
+# a metric name (see caps.METRIC_*).
+
+MODES_KEY = "modes"
+
+
+def system_defaults_to_dict(sl: SystemLimits) -> dict:
+    """Serialize `defaults` + `mode_defaults` into the nested block above."""
+    out: dict[str, dict] = {}
+    for (sys_id, metric), v in sorted(sl.defaults.items()):
+        out.setdefault(sys_id, {})[metric] = v
+    for (sys_id, mode, metric), v in sorted(sl.mode_defaults.items()):
+        modes = out.setdefault(sys_id, {}).setdefault(MODES_KEY, {})
+        modes.setdefault(mode, {})[metric] = v
+    # `modes` last within each system so the plain metrics read first.
+    for sys_id, block in out.items():
+        if MODES_KEY in block:
+            block[MODES_KEY] = block.pop(MODES_KEY)
+    return out
+
+
+def system_defaults_from_dict(data: dict) -> tuple[dict, dict]:
+    """Parse the block into (defaults, mode_defaults) keyed as SystemLimits."""
+    defaults: dict[tuple[str, str], float] = {}
+    mode_defaults: dict[tuple[str, str, str], float] = {}
+    for sys_id, block in (data or {}).items():
+        for key, val in (block or {}).items():
+            if key == MODES_KEY:
+                for mode, metrics in (val or {}).items():
+                    for metric, v in (metrics or {}).items():
+                        if v is None:
+                            continue
+                        mode_defaults[(str(sys_id), str(mode), str(metric))] = float(v)
+            elif val is not None:
+                defaults[(str(sys_id), str(key))] = float(val)
+    return defaults, mode_defaults
 
 
 # ---------- Top-level dump / load ----------
@@ -158,16 +215,54 @@ def dump_scenario(
     )
     write_text_atomic(d / BATCHES_FILE, batches_text)
 
-    limits_text = (
-        "# Per-week caps. facility: one row per (week, metric); system:\n"
-        "# one row per (week, system, metric). Weeks are absolute ISO\n"
-        "# labels. Blank/absent = use Control default (facility) / no cap.\n"
-        + yaml.safe_dump({
-            "facility": facility_limits_to_list(facility_limits),
-            "system": system_limits_to_list(system_limits),
-        }, sort_keys=False, allow_unicode=True, default_flow_style=False)
-    )
-    write_text_atomic(d / LIMITS_FILE, limits_text)
+    write_text_atomic(d / LIMITS_FILE, limits_yaml_text(facility_limits,
+                                                        system_limits))
+
+
+_LIMITS_HEADER = """\
+# Capacity limits — OPERATOR INPUT. Capacities live here, never in code.
+#
+# A capacity is a fact about the facility: it changes rarely, so it is
+# stated ONCE and a per-week row is the exception, not the rule.
+#
+#   system_defaults: the standing capacity of each system. One block per
+#       system; each key is a metric (biomass = kg of standing fish;
+#       feed_per_day = kg of feed per day). A system whose capacity depends
+#       on its operating MODE adds a `modes:` sub-block — 6N is the one that
+#       does, because it holds more while it is the depuration station than
+#       it does from sixn_production_start (config/control.yaml), when its
+#       3 mains become grow-out and only the 3 sisters stage harvest. Which
+#       weeks are which is DERIVED from that date, so the split cannot drift
+#       away from it.
+#   system: one-off EXCEPTION rows, one per (week, system, metric). Absent
+#       is the normal case. A row here overrides the default for that week
+#       alone.
+#   facility: one row per (week, metric); absent = use the Control default.
+#
+# Precedence, highest first:
+#   per-week `system` row  >  system+mode default  >  system default  >
+#   no cap at all (an engine that needs one then names the missing input
+#   rather than inventing a number).
+#
+# Weeks are absolute ISO labels (e.g. 2028-W01).
+"""
+
+
+def limits_yaml_text(facility_limits: FacilityLimits,
+                     system_limits: SystemLimits) -> str:
+    """The full text of limits.yaml — header plus the three blocks.
+
+    Written here rather than by editing the file in place: the header
+    documents the schema below it, so the two are generated together and a
+    save from the app cannot leave the rationale behind (it did once —
+    dump_scenario's old three-line header silently replaced a longer
+    hand-written one).
+    """
+    return _LIMITS_HEADER + yaml.safe_dump({
+        "system_defaults": system_defaults_to_dict(system_limits),
+        "system": system_limits_to_list(system_limits),
+        "facility": facility_limits_to_list(facility_limits),
+    }, sort_keys=False, allow_unicode=True, default_flow_style=False)
 
 
 def _load_yaml(path) -> dict:
@@ -178,9 +273,20 @@ def load_batches(scenario_dir) -> list[BatchInput]:
     return batches_from_list(_load_yaml(Path(scenario_dir) / BATCHES_FILE).get("batches", []))
 
 
-def load_limits(scenario_dir) -> tuple[FacilityLimits, SystemLimits]:
+def load_limits(scenario_dir, control=None) -> tuple[FacilityLimits, SystemLimits]:
+    """Read limits.yaml into (FacilityLimits, SystemLimits).
+
+    Pass `control` whenever the result will be RESOLVED (i.e. anywhere a
+    forecast runs). Mode-specific defaults need Control's `sixn_growth` +
+    `sixn_production_start` to know which mode a week is in; resolving
+    without them raises rather than guessing. Editors that only display or
+    rewrite the file may omit it.
+    """
     d = _load_yaml(Path(scenario_dir) / LIMITS_FILE)
-    return (
-        facility_limits_from_list(d.get("facility", [])),
-        system_limits_from_list(d.get("system", [])),
-    )
+    defaults, mode_defaults = system_defaults_from_dict(d.get("system_defaults") or {})
+    sl = system_limits_from_list(d.get("system", []))
+    sl.defaults = defaults
+    sl.mode_defaults = mode_defaults
+    if control is not None:
+        sl.bind_sixn_mode(control)
+    return (facility_limits_from_list(d.get("facility", [])), sl)

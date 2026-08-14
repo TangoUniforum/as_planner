@@ -71,7 +71,7 @@ def main() -> int:
 
     control, tables, facility = load_config(args.config_dir)
     batches = load_batches(args.scenario_dir)
-    _facility_limits, system_limits = load_limits(args.scenario_dir)
+    _facility_limits, system_limits = load_limits(args.scenario_dir, control)
     print(f"  Config:   {args.config_dir}")
     print(f"  Scenario: {len(batches)} batches from {args.scenario_dir}")
 
@@ -317,7 +317,7 @@ def run_global(input_path, output_path, config_dir, scenario_dir, *,
     from forecast import global_planner_l3_poc as _l3
     control, tables, facility = load_config(str(config_dir))
     batches = load_batches(str(scenario_dir))
-    _facility_limits, system_limits = load_limits(str(scenario_dir))
+    _facility_limits, system_limits = load_limits(str(scenario_dir), control)
     inflight_og, fw_inflight, purge_inflight = {}, {}, {}
     _mw_stitch = None   # manual-window rows/events to prepend into the output
     _mw_weeks = 0       # manual-window length (0 = no window)

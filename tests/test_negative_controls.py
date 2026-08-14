@@ -43,6 +43,7 @@ from openpyxl import Workbook
 
 from forecast import analysis, tournament, tuning
 from forecast import excel_io
+from forecast.caps import SystemLimits
 from forecast.time_grid import forecast_week_labels, iso_week_label
 
 
@@ -422,11 +423,15 @@ class TestTankContinuityAudit:
 
 
 class TestSystemLimitsAudit:
-    def _write(self, locs, caps, tables=None):
+    def _write(self, locs, caps, tables=None, **sl_kwargs):
+        # A real SystemLimits, not a duck-typed stand-in: the audit resolves
+        # caps through caps.carry_forward_cap_lookup (per-week exception >
+        # system+mode default > system default), so a stub carrying only
+        # `.caps` would test a lookup the product does not use.
         wb = Workbook()
         wb.remove(wb.active)
         res = excel_io.write_system_limits_audit(
-            wb, locs, {}, tables, SimpleNamespace(caps=caps),
+            wb, locs, {}, tables, SystemLimits(caps=caps, **sl_kwargs),
             SimpleNamespace(global_buffer_pct=0.0))
         return wb, res
 

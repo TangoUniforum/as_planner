@@ -2943,8 +2943,9 @@ def write_system_limits_audit(
     against the SystemLimits caps — so over-cap systems went unsurfaced. This
     audit closes that gap, mirroring TankContinuityAudit. Feed is the realized
     tank feed (biomass × SGR × FCR at the tank's actual weight), NOT the raw
-    projection (which over-counts un-harvested fish). Caps are carried forward
-    past the data's last week and buffered by Control R29. OG6N's BIOMASS cap
+    projection (which over-counts un-harvested fish). Caps resolve through
+    `caps.carry_forward_cap_lookup` (per-week exception > system+mode default
+    > system default) and are buffered by Control R29. OG6N's BIOMASS cap
     is enforced like any other system's (it is an operator input); only its
     FEED cap is exempt — purge fish are STARVE and eat nothing, so that check
     could only ever report 0.
@@ -2956,24 +2957,11 @@ def write_system_limits_audit(
 
     buf = 1.0 + (getattr(control, "global_buffer_pct", 0.0) or 0.0)
 
-    # Carry-forward cap lookup per (system, metric).
-    smw: dict = defaultdict(list)
-    for (wk, sysid, metric), val in system_limits.caps.items():
-        smw[(sysid, metric)].append((wk, val))
-    for k in smw:
-        smw[k].sort()
-
-    def _cap(wk, sysid, metric):
-        lst = smw.get((sysid, metric))
-        if not lst:
-            return None
-        best = lst[0][1]
-        for w, v in lst:
-            if w <= wk:
-                best = v
-            else:
-                break
-        return best
+    # One shared cap lookup (caps.carry_forward_cap_lookup): per-week
+    # exception > system+mode default > system default, with the legacy
+    # carry-forward only where a row-only file has no default at all.
+    from .caps import carry_forward_cap_lookup
+    _cap = carry_forward_cap_lookup(system_limits)
 
     sb: dict = defaultdict(float)
     sf: dict = defaultdict(float)

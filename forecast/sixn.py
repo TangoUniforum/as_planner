@@ -45,6 +45,24 @@ def _as_date(d):
     return d
 
 
+def purge_mode_on(sixn_growth: bool, sixn_production_start, today) -> bool:
+    """The purge/production boundary rule, on loose fields.
+
+    Same resolution as `is_purge_mode`, but taking the two Control values
+    directly so callers that hold them without a full ControlParams — the
+    cap resolver deciding which mode a week's system default belongs to
+    (`caps.SystemLimits.mode_for_week`) — decide the boundary with THIS
+    function rather than a second copy of the rule. One definition means
+    the 6N capacity step and the 6N phase machine cannot land on different
+    weeks.
+    """
+    if sixn_growth:
+        return False
+    if sixn_production_start is None:
+        return True
+    return _as_date(today) < _as_date(sixn_production_start)
+
+
 def is_purge_mode(control: ControlParams, today) -> bool:
     """True if 6N is operating in purge (depuration) mode on `today`.
 
@@ -54,12 +72,8 @@ def is_purge_mode(control: ControlParams, today) -> bool:
       - `sixn_growth=False`, with `sixn_production_start`:
           purge while today < production_start; production thereafter.
     """
-    if control.sixn_growth:
-        return False
-    if control.sixn_production_start is None:
-        return True
-    psd = _as_date(control.sixn_production_start)
-    return _as_date(today) < psd
+    return purge_mode_on(control.sixn_growth,
+                         control.sixn_production_start, today)
 
 
 def in_transition_window(control: ControlParams, today) -> bool:
