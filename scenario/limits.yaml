@@ -1,4 +1,16 @@
-# Per-week caps. facility: []
+# Per-week capacity limits — OPERATOR INPUT. Capacities live here, never
+# in code (ruling 2026-08-14).
+#   facility: one row per (week, metric); blank/absent = use the Control
+#             default.
+#   system:   one row per (week, system, metric); absent = no cap.
+# Weeks are absolute ISO labels; values carry forward past the last row.
+#
+# OG6N is the only system whose cap is not uniform. It has SIX tanks
+# (10,320 m3) where every other system has three, so a blanket figure
+# under-states it. Operator values: 700,000 kg while 6N is in PURGE, and
+# 400,000 kg from sixn_production_start (2028-01-01), when its 3 mains
+# become grow-out and only the 3 sisters stage harvest.
+facility: []
 system:
 - week: 2026-W27
   system: OG1N
@@ -83,7 +95,7 @@ system:
 - week: 2026-W27
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2026-W27
   system: OG6N
   metric: feed_per_day
@@ -179,7 +191,7 @@ system:
 - week: 2026-W28
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2026-W28
   system: OG6N
   metric: feed_per_day
@@ -275,7 +287,7 @@ system:
 - week: 2026-W29
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2026-W29
   system: OG6N
   metric: feed_per_day
@@ -371,7 +383,7 @@ system:
 - week: 2026-W30
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2026-W30
   system: OG6N
   metric: feed_per_day
@@ -467,7 +479,7 @@ system:
 - week: 2026-W31
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2026-W31
   system: OG6N
   metric: feed_per_day
@@ -563,7 +575,7 @@ system:
 - week: 2026-W32
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2026-W32
   system: OG6N
   metric: feed_per_day
@@ -659,7 +671,7 @@ system:
 - week: 2026-W33
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2026-W33
   system: OG6N
   metric: feed_per_day
@@ -755,7 +767,7 @@ system:
 - week: 2026-W34
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2026-W34
   system: OG6N
   metric: feed_per_day
@@ -851,7 +863,7 @@ system:
 - week: 2026-W35
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2026-W35
   system: OG6N
   metric: feed_per_day
@@ -947,7 +959,7 @@ system:
 - week: 2026-W36
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2026-W36
   system: OG6N
   metric: feed_per_day
@@ -1043,7 +1055,7 @@ system:
 - week: 2026-W37
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2026-W37
   system: OG6N
   metric: feed_per_day
@@ -1139,7 +1151,7 @@ system:
 - week: 2026-W38
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2026-W38
   system: OG6N
   metric: feed_per_day
@@ -1235,7 +1247,7 @@ system:
 - week: 2026-W39
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2026-W39
   system: OG6N
   metric: feed_per_day
@@ -1331,7 +1343,7 @@ system:
 - week: 2026-W40
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2026-W40
   system: OG6N
   metric: feed_per_day
@@ -1427,7 +1439,7 @@ system:
 - week: 2026-W41
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2026-W41
   system: OG6N
   metric: feed_per_day
@@ -1523,7 +1535,7 @@ system:
 - week: 2026-W42
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2026-W42
   system: OG6N
   metric: feed_per_day
@@ -1619,7 +1631,7 @@ system:
 - week: 2026-W43
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2026-W43
   system: OG6N
   metric: feed_per_day
@@ -1715,7 +1727,7 @@ system:
 - week: 2026-W44
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2026-W44
   system: OG6N
   metric: feed_per_day
@@ -1811,7 +1823,7 @@ system:
 - week: 2026-W45
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2026-W45
   system: OG6N
   metric: feed_per_day
@@ -1907,7 +1919,7 @@ system:
 - week: 2026-W46
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2026-W46
   system: OG6N
   metric: feed_per_day
@@ -2003,7 +2015,7 @@ system:
 - week: 2026-W47
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2026-W47
   system: OG6N
   metric: feed_per_day
@@ -2099,7 +2111,7 @@ system:
 - week: 2026-W48
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2026-W48
   system: OG6N
   metric: feed_per_day
@@ -2195,7 +2207,7 @@ system:
 - week: 2026-W49
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2026-W49
   system: OG6N
   metric: feed_per_day
@@ -2291,7 +2303,7 @@ system:
 - week: 2026-W50
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2026-W50
   system: OG6N
   metric: feed_per_day
@@ -2387,7 +2399,7 @@ system:
 - week: 2026-W51
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2026-W51
   system: OG6N
   metric: feed_per_day
@@ -2483,7 +2495,7 @@ system:
 - week: 2026-W52
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2026-W52
   system: OG6N
   metric: feed_per_day
@@ -2579,7 +2591,7 @@ system:
 - week: 2026-W53
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2026-W53
   system: OG6N
   metric: feed_per_day
@@ -2675,7 +2687,7 @@ system:
 - week: 2027-W01
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2027-W01
   system: OG6N
   metric: feed_per_day
@@ -2771,7 +2783,7 @@ system:
 - week: 2027-W02
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2027-W02
   system: OG6N
   metric: feed_per_day
@@ -2867,7 +2879,7 @@ system:
 - week: 2027-W03
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2027-W03
   system: OG6N
   metric: feed_per_day
@@ -2963,7 +2975,7 @@ system:
 - week: 2027-W04
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2027-W04
   system: OG6N
   metric: feed_per_day
@@ -3059,7 +3071,7 @@ system:
 - week: 2027-W05
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2027-W05
   system: OG6N
   metric: feed_per_day
@@ -3155,7 +3167,7 @@ system:
 - week: 2027-W06
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2027-W06
   system: OG6N
   metric: feed_per_day
@@ -3251,7 +3263,7 @@ system:
 - week: 2027-W07
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2027-W07
   system: OG6N
   metric: feed_per_day
@@ -3347,7 +3359,7 @@ system:
 - week: 2027-W08
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2027-W08
   system: OG6N
   metric: feed_per_day
@@ -3443,7 +3455,7 @@ system:
 - week: 2027-W09
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2027-W09
   system: OG6N
   metric: feed_per_day
@@ -3539,7 +3551,7 @@ system:
 - week: 2027-W10
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2027-W10
   system: OG6N
   metric: feed_per_day
@@ -3635,7 +3647,7 @@ system:
 - week: 2027-W11
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2027-W11
   system: OG6N
   metric: feed_per_day
@@ -3731,7 +3743,7 @@ system:
 - week: 2027-W12
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2027-W12
   system: OG6N
   metric: feed_per_day
@@ -3827,7 +3839,7 @@ system:
 - week: 2027-W13
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2027-W13
   system: OG6N
   metric: feed_per_day
@@ -3923,7 +3935,7 @@ system:
 - week: 2027-W14
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2027-W14
   system: OG6N
   metric: feed_per_day
@@ -4019,7 +4031,7 @@ system:
 - week: 2027-W15
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2027-W15
   system: OG6N
   metric: feed_per_day
@@ -4115,7 +4127,7 @@ system:
 - week: 2027-W16
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2027-W16
   system: OG6N
   metric: feed_per_day
@@ -4211,7 +4223,7 @@ system:
 - week: 2027-W17
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2027-W17
   system: OG6N
   metric: feed_per_day
@@ -4307,7 +4319,7 @@ system:
 - week: 2027-W18
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2027-W18
   system: OG6N
   metric: feed_per_day
@@ -4403,7 +4415,7 @@ system:
 - week: 2027-W19
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2027-W19
   system: OG6N
   metric: feed_per_day
@@ -4499,7 +4511,7 @@ system:
 - week: 2027-W20
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2027-W20
   system: OG6N
   metric: feed_per_day
@@ -4595,7 +4607,7 @@ system:
 - week: 2027-W21
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2027-W21
   system: OG6N
   metric: feed_per_day
@@ -4691,7 +4703,7 @@ system:
 - week: 2027-W22
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2027-W22
   system: OG6N
   metric: feed_per_day
@@ -4787,7 +4799,7 @@ system:
 - week: 2027-W23
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2027-W23
   system: OG6N
   metric: feed_per_day
@@ -4883,7 +4895,7 @@ system:
 - week: 2027-W24
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2027-W24
   system: OG6N
   metric: feed_per_day
@@ -4979,7 +4991,7 @@ system:
 - week: 2027-W25
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2027-W25
   system: OG6N
   metric: feed_per_day
@@ -5075,7 +5087,7 @@ system:
 - week: 2027-W26
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2027-W26
   system: OG6N
   metric: feed_per_day
@@ -5171,7 +5183,7 @@ system:
 - week: 2027-W27
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2027-W27
   system: OG6N
   metric: feed_per_day
@@ -5267,7 +5279,7 @@ system:
 - week: 2027-W28
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2027-W28
   system: OG6N
   metric: feed_per_day
@@ -5363,7 +5375,7 @@ system:
 - week: 2027-W29
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2027-W29
   system: OG6N
   metric: feed_per_day
@@ -5459,7 +5471,7 @@ system:
 - week: 2027-W30
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2027-W30
   system: OG6N
   metric: feed_per_day
@@ -5555,7 +5567,7 @@ system:
 - week: 2027-W31
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2027-W31
   system: OG6N
   metric: feed_per_day
@@ -5651,7 +5663,7 @@ system:
 - week: 2027-W32
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2027-W32
   system: OG6N
   metric: feed_per_day
@@ -5747,7 +5759,7 @@ system:
 - week: 2027-W33
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2027-W33
   system: OG6N
   metric: feed_per_day
@@ -5843,7 +5855,7 @@ system:
 - week: 2027-W34
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2027-W34
   system: OG6N
   metric: feed_per_day
@@ -5939,7 +5951,7 @@ system:
 - week: 2027-W35
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2027-W35
   system: OG6N
   metric: feed_per_day
@@ -6035,7 +6047,7 @@ system:
 - week: 2027-W36
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2027-W36
   system: OG6N
   metric: feed_per_day
@@ -6131,7 +6143,7 @@ system:
 - week: 2027-W37
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2027-W37
   system: OG6N
   metric: feed_per_day
@@ -6227,7 +6239,7 @@ system:
 - week: 2027-W38
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2027-W38
   system: OG6N
   metric: feed_per_day
@@ -6323,7 +6335,7 @@ system:
 - week: 2027-W39
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2027-W39
   system: OG6N
   metric: feed_per_day
@@ -6419,7 +6431,7 @@ system:
 - week: 2027-W40
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2027-W40
   system: OG6N
   metric: feed_per_day
@@ -6515,7 +6527,7 @@ system:
 - week: 2027-W41
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2027-W41
   system: OG6N
   metric: feed_per_day
@@ -6611,7 +6623,7 @@ system:
 - week: 2027-W42
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2027-W42
   system: OG6N
   metric: feed_per_day
@@ -6707,7 +6719,7 @@ system:
 - week: 2027-W43
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2027-W43
   system: OG6N
   metric: feed_per_day
@@ -6803,7 +6815,7 @@ system:
 - week: 2027-W44
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2027-W44
   system: OG6N
   metric: feed_per_day
@@ -6899,7 +6911,7 @@ system:
 - week: 2027-W45
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2027-W45
   system: OG6N
   metric: feed_per_day
@@ -6995,7 +7007,7 @@ system:
 - week: 2027-W46
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2027-W46
   system: OG6N
   metric: feed_per_day
@@ -7091,7 +7103,7 @@ system:
 - week: 2027-W47
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2027-W47
   system: OG6N
   metric: feed_per_day
@@ -7187,7 +7199,7 @@ system:
 - week: 2027-W48
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2027-W48
   system: OG6N
   metric: feed_per_day
@@ -7283,7 +7295,7 @@ system:
 - week: 2027-W49
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2027-W49
   system: OG6N
   metric: feed_per_day
@@ -7379,7 +7391,7 @@ system:
 - week: 2027-W50
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2027-W50
   system: OG6N
   metric: feed_per_day
@@ -7475,7 +7487,7 @@ system:
 - week: 2027-W51
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2027-W51
   system: OG6N
   metric: feed_per_day
@@ -7571,7 +7583,7 @@ system:
 - week: 2027-W52
   system: OG6N
   metric: biomass
-  value: 600000.0
+  value: 700000.0
 - week: 2027-W52
   system: OG6N
   metric: feed_per_day
