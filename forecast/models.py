@@ -112,6 +112,22 @@ class ControlParams:
     # fits capacity every week (86% mean / 97% peak), so the breaches were pure
     # distribution. Set false to recover the old density-only behavior.
     rebalance_level: bool = True
+    # END-OF-WEEK CAP REPAIR (moves/week; 0 = OFF = byte-identical). Every other
+    # realised repair pass runs BEFORE the week's day-by-day biology, but the
+    # BatchLocations snapshot that the SystemLimitsAudit sums is taken AFTER it
+    # — so they all aim at the START-of-week load while every published metric
+    # measures the END-of-week one, with a full week of growth (~+7% biomass,
+    # ~+11% feed at entry-tier weights) landing in between unchecked. Measured
+    # on the 7.29 PR: 79 of 104 non-6N over-cap system-weeks were ALREADY
+    # compliant when the balancer finished (0.94-0.99 of cap) and nothing but
+    # growth carried them over. This pass runs LAST — after biology, after the
+    # grade split, immediately before the snapshot — and moves the minimum out
+    # of any system over its RAW cap into the coldest legal one. A repair, not
+    # a leveller. It relaxes no business rule (tiers R2-R4/R7, one batch per
+    # tank, per-tank density, remnant + min-transfer floors, TranOG holds) and
+    # is deferrable: it spends only the weekly handling budget left over, which
+    # — uniquely, because nothing follows it — is exact.
+    cap_repair_budget: int = 0
     # Anticipatory harvest setpoint: hold facility biomass below the cap by ~this
     # many weeks of the facility's REALIZED weekly growth (margin clamped to
     # [0.5%, 4%] of cap), so harvest pre-sheds each peak across the calm run-up

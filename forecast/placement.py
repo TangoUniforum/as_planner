@@ -295,6 +295,47 @@ _BALANCE_SYS_FILL = 0.90
 # violation into the destination.
 _VARQTY_DST_FILL = 0.95
 
+# ---- END-OF-WEEK CAP REPAIR (`cap_repair_budget`) --------------------------
+# Every realised repair pass above (`_rebalance_systems_realized`,
+# `_even_out_density`, `_balance_loads`, `_variable_quantity_rebalance`,
+# `_consolidate_remnants`) runs BEFORE the week's day-by-day biology
+# (`advance_tank_one_day`, further down phase_d_emit_events) — but the
+# BatchLocations snapshot the SystemLimitsAudit sums is taken AFTER it. So the
+# whole stack aims at the START-of-week load while every published metric
+# measures the END-of-week one, and a full week of growth (~+7% biomass, ~+11%
+# feed at entry-tier weights) lands in between with nothing left to check it.
+# MEASURED on the 7.29 PR: of 104 non-6N over-cap (system, week) cells, the
+# balancer had ALREADY left 79 of them compliant at its own exit (0.94-0.99 of
+# cap) with no further event touching the system — growth alone carried them
+# over. That is why `_BALANCE_SYS_FILL = 0.90` was not enough: 0.90 x 1.11 ~ 1.0.
+# The repair pass below closes the loop by running LAST — after biology, after
+# the grade split, immediately before the snapshot — on the state that is
+# actually measured. It is a REPAIR, not a leveller: it fires only on a system
+# over its RAW cap (the audited definition), moves the minimum, and stops.
+# Running last also makes it the only pass whose handling-budget arithmetic is
+# exact: nothing essential follows it, so spending `_moves_left()` can never
+# push the week over `max_transfers_per_week`.
+_REPAIR_SRC_FILL = 0.98      # relieve the hot system to this fraction of cap
+_REPAIR_DST_FILL = 0.95      # never fill a destination system past this
+_REPAIR_DENS_FILL = 0.95     # never fill a destination TANK past this x density cap
+# FOOTPRINT-NEUTRAL: the repair may only top up a tank the batch ALREADY holds,
+# never claim an empty one. This is a measured restriction, not caution:
+#   * REACH is barely affected. Of the 104 non-6N over-cap cells on the 7.29 PR,
+#     103 had a legal same-batch destination in a system under 0.95 of cap and
+#     only 82 had a legal EMPTY one — so same-batch-only is the LARGER of the
+#     two candidate sets, not a subset.
+#   * The empty-claim variant broke the harvest contract. Measured over 8
+#     starting states, claiming empties (with the matching `_persist_system_add`
+#     that keeps the new tank in the batch's forward plan) shrank the free-tank
+#     pool the harvest controller relies on, and on 7.29-nowin the 2028-W22 week
+#     went from 46,974 fish over 3 tanks to a single 83,869-fish dump of three
+#     whole B57 tanks — straight through the 60,500 relief CEILING, which is
+#     never legal. That is precisely the free-tank antagonism already recorded
+#     for harvest_level_load (leveling spreads fish thinner -> fewer free whole
+#     tanks -> more make-room dumps -> spikier harvest).
+# Keeping the tank SET unchanged also means no forward plan edit and no diff
+# churn — the same property `_variable_quantity_rebalance` was built around.
+
 # Pad applied to the 6N fill FLOOR clamp (and the graded floor fills) so a
 # fill sized to the weekly harvest floor still drains AT the floor after the
 # ~2-week purge-residency mortality (~0.15%); without it every floor-clamped
@@ -2952,6 +2993,177 @@ def _balance_loads(
     return moves
 
 
+def _repair_over_cap_systems(
+    state, wl, event_date, transfer_events, warnings,
+    cap_lookup, batch_meta, tables, og_systems, og_tanks_by_system, budget,
+    reserved=frozenset(), min_transfer=0.0, min_keep=0.0,
+):
+    """END-OF-WEEK cap repair — see the `_REPAIR_*` block above for WHY.
+
+    Runs on the post-growth state the SystemLimitsAudit actually measures.
+    While any OG system is over its RAW per-system biomass or feed cap, move the
+    MINIMUM mass out of the hottest one into the COLDEST legal system, one
+    conserved partial Transfer per move, until the budget runs out or nothing
+    legal is left.
+
+    Every business rule is honoured, and none of them is relaxed here:
+      * tiers.move_allowed (R2-R4) from the SOURCE tank's system at its avg
+        weight — no backward move into the entry tier, no intra-entry split at
+        >= 1 kg; R7 (6N depuration one-way) via the STARVE skips below and
+        `Transfer.apply`'s own gate;
+      * one batch per tank — the destination is a tank ALREADY holding the
+        source's batch (see the footprint-neutral note above: an empty tank is
+        never claimed either, so the tank SET is unchanged and no forward plan
+        edit is needed);
+      * per-tank density — a destination tank is filled only to
+        _REPAIR_DENS_FILL of its density cap, and `Transfer.apply` is the final
+        INV gate;
+      * remnant floor (`min_keep` = min_tank_control) via `_floored_partial`,
+        and the min-transfer floor (`min_transfer`) — this pass only ever emits
+        PARTIAL moves, so it can never strand a sub-floor residue or empty a
+        source;
+      * TranOG holds (`reserved`) and 6N-pipeline tanks are never touched;
+      * the handling budget — `budget` is what the caller has left, and this
+        pass is deferrable by construction (it emits nothing when budget <= 0).
+
+    Returns the number of moves made. Never raises; a refused Transfer just
+    marks that source stuck and the loop moves on.
+    """
+    if budget <= 0:
+        return 0
+    sixn = SIXN_MAIN_TANKS | SIXN_SISTER_TANKS
+
+    def loads():
+        sb = collections.defaultdict(float)
+        sf = collections.defaultdict(float)
+        for s, ids in og_tanks_by_system.items():
+            for tid in ids:
+                t = state.tanks_by_id.get(tid)
+                if t is None or t.is_empty:
+                    continue
+                sb[s] += t.biomass_kg            # STARVE biomass counts to caps
+                if t.stage != STAGE_STARVE:      # but STARVE fish eat nothing
+                    sf[s] += realized_feed_kg_day(
+                        t.avg_wt_g, t.biomass_kg, batch_meta.get(t.batch_id),
+                        tables)
+        return sb, sf
+
+    moves = 0
+    stuck: set = set()                            # source tank ids that can't move
+    for _ in range(int(budget)):
+        sb, sf = loads()
+        ratio = {}
+        for s in og_tanks_by_system:
+            bc, fc = cap_lookup(wl, s)
+            ratio[s] = max((sb[s] / bc) if bc else 0.0,
+                           (sf[s] / fc) if fc else 0.0)
+        # Hottest OVER-CAP system first (deterministic tiebreak by system id).
+        over = sorted(((r, s) for s, r in ratio.items()
+                       if r > 1.0 and s in og_systems),
+                      key=lambda x: (-x[0], x[1]))
+        if not over:
+            break
+        placed = False
+        for _r, S in over:
+            bc, fc = cap_lookup(wl, S)
+            # Mass to shed to reach _REPAIR_SRC_FILL of the BINDING cap.
+            need_bio = (sb[S] - bc * _REPAIR_SRC_FILL) if bc else 0.0
+            over_feed = (sf[S] - fc * _REPAIR_SRC_FILL) if fc else 0.0
+            best = None
+            for tid in sorted(og_tanks_by_system.get(S, [])):
+                if tid in stuck:
+                    continue
+                src = state.tanks_by_id.get(tid)
+                if (src is None or src.is_empty or src.stage == STAGE_STARVE
+                        or src.avg_wt_g <= 0 or src.biomass_kg <= 1.0):
+                    continue
+                b = src.batch_id
+                src_feed = realized_feed_kg_day(
+                    src.avg_wt_g, src.biomass_kg, batch_meta.get(b), tables)
+                intensity = (src_feed / src.biomass_kg
+                             if src.biomass_kg > 0 else 0.0)
+                want = need_bio
+                if over_feed > 0 and intensity > 0:
+                    want = max(want, over_feed / intensity)
+                # Lift a too-small shave up to the min-transfer floor (a move
+                # below it would be refused outright) — still bounded by every
+                # headroom below, so this can never overshoot a destination.
+                if min_transfer > 0:
+                    want = max(want, min_transfer * src.avg_wt_g / 1000.0)
+                if want <= 1.0:
+                    continue
+                for T in sorted(og_tanks_by_system):
+                    if T == S or T not in og_systems:
+                        continue
+                    if not move_allowed(S, T, src.avg_wt_g)[0]:
+                        continue
+                    tbc, tfc = cap_lookup(wl, T)
+                    bio_head = (tbc * _REPAIR_DST_FILL - sb[T]) if tbc else 1e18
+                    feed_head = (tfc * _REPAIR_DST_FILL - sf[T]) if tfc else 1e18
+                    if bio_head <= 0 or feed_head <= 0:
+                        continue
+                    for tid2 in sorted(og_tanks_by_system.get(T, [])):
+                        if tid2 in sixn or tid2 in reserved:
+                            continue
+                        t2 = state.tanks_by_id.get(tid2)
+                        if t2 is None or t2.stage == STAGE_STARVE:
+                            continue
+                        # FOOTPRINT-NEUTRAL (see _REPAIR_* above): top up a tank
+                        # the batch already holds. An empty tank is never
+                        # claimed (that starves the harvest controller's free
+                        # pool) and a tank holding ANOTHER batch never can be
+                        # (one batch per tank).
+                        if t2.is_empty or t2.batch_id != b:
+                            continue
+                        cap_kg = (t2.max_biomass_kg * _REPAIR_DENS_FILL
+                                  if t2.max_density_kg_m3 > 0 else 1e18)
+                        dens_head = cap_kg - t2.biomass_kg
+                        if dens_head <= 0:
+                            continue
+                        move_kg = min(want, bio_head, dens_head,
+                                      src.biomass_kg * 0.95)
+                        if intensity > 0:
+                            move_kg = min(move_kg, feed_head / intensity)
+                        if move_kg <= 1.0:
+                            continue
+                        # COLDEST legal system first (spread, don't concentrate);
+                        # then the BIGGER relief; then tank id for determinism.
+                        key = (round(ratio.get(T, 0.0), 6), -move_kg, tid2)
+                        if best is None or key < best[0]:
+                            best = (key, src, t2, move_kg, T)
+            if best is None:
+                # Nothing legal for this system this round — don't retry it
+                # while its tanks are unchanged; try the next-hottest.
+                continue
+            _key, src, dst, move_kg, T = best
+            move_count = move_kg / (src.avg_wt_g / 1000.0)
+            move_count = _floored_partial(src.count, move_count, min_keep)
+            if move_count < max(1.0, min_transfer):
+                stuck.add(src.tank_id)
+                continue
+            before = src.biomass_kg
+            ev = Transfer(
+                batch_id=src.batch_id, event_date=event_date,
+                source_tank_id=src.tank_id,
+                destinations=[TankAllocation(
+                    tank_id=dst.tank_id, count=move_count,
+                    avg_wt_g=src.avg_wt_g, cv_pct=src.cv_pct,
+                )],
+                leaves_source_empty=False,
+            )
+            warnings.extend(ev.apply(state))
+            transfer_events.append(ev)
+            if src.biomass_kg >= before - 1.0:     # refused by the INV gate
+                stuck.add(src.tank_id)
+                continue
+            moves += 1
+            placed = True
+            break
+        if not placed:
+            break                                  # no legal move anywhere
+    return moves
+
+
 def _consolidate_remnants(
     state: FacilityState,
     event_date: date,
@@ -5274,6 +5486,25 @@ def phase_d_emit_events(
             )
             warnings.extend(ev.apply(state))
             grade_events.append(ev)
+
+        # ---- END-OF-WEEK CAP REPAIR (opt-in: control.cap_repair_budget) ----
+        # LAST pass of the week, on the post-growth / post-grade state the
+        # snapshot below records — the only point where "is this system over
+        # cap?" is asked of the state the audit will actually measure. See the
+        # _REPAIR_* block near the top of this module for the measurement that
+        # motivates it. Deferrable: it spends only what is left of the weekly
+        # handling budget, and because nothing follows it that budget is exact.
+        _repair_budget = min(
+            int(getattr(control, "cap_repair_budget", 0) or 0), _moves_left())
+        if _rebal_on and _repair_budget > 0 and ws_we is not None:
+            _repair_over_cap_systems(
+                state, week_label, ws_we[0], transfer_events, warnings,
+                _sys_cap, batch_meta, tables, _og_sys, _og_tanks,
+                _repair_budget,
+                reserved=_reserved_og,
+                min_transfer=getattr(control, "min_transfer_count", 0.0) or 0.0,
+                min_keep=control.min_tank_control or 0.0,
+            )
 
         # Snapshot BatchLocations for this week — iterate ALL non-empty
         # tanks (not just Phase C's planned assignments). Otherwise tanks

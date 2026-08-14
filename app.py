@@ -593,6 +593,15 @@ _CONTROL_HELP = {
         "cap system-weeks 312 → 25). Off = the old crowding-only behavior. "
         "Uses the main rebalancer's move budget."
         + _VALIDATED,
+    "cap_repair_budget":
+        "End-of-week cap repair. Every other rebalancing pass runs BEFORE the "
+        "week's growth is applied, but the numbers you see are measured AFTER "
+        "it — so a system left just under its cap grows straight back over it "
+        "with nothing left to catch it. This pass runs last, on the state that "
+        "is actually reported, and moves the least it can out of any system "
+        "still over its feed or biomass cap into the coolest system that can "
+        "legally take it. It never breaks a transfer rule and never exceeds "
+        "the weekly handling budget. 0 = off. Unit: moves/week.",
     "harvest_setpoint_lookahead_weeks":
         "DOES NOTHING (inactive). Superseded by the newer harvest logic — no "
         "part of the plan reads this value anymore; it remains only so older "
@@ -721,6 +730,7 @@ _CONTROL_LABEL = {
     "rebalance_split_budget": "Split-pass moves / week",
     "rebalance_varqty_budget": "Variable-qty moves / week",
     "rebalance_level": "Load leveling (on/off)",
+    "cap_repair_budget": "End-of-week cap repair / week",
     "harvest_setpoint_lookahead_weeks": "Setpoint lookahead (INACTIVE)",
     "harvest_level_load": "Harvest smoother (on/off)",
     "harvest_smooth_lookahead_weeks": "Harvest smoother window K",
