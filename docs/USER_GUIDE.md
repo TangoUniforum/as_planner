@@ -180,6 +180,44 @@ batches then grow/feed differently, producing a different biomass trajectory,
 harvest timing, and peaks. Conservation holds regardless of the models chosen, so
 this is a safe way to stress-test or re-plan.
 
+### 3.3a Facility capacity limits (`scenario/limits.yaml`, **Configure → Limits**)
+A capacity is a fact about the facility — how much fish a system can hold, how
+much feed its line can deliver. It changes rarely, so you state it **once** and
+it applies to every week of every horizon.
+
+**Configure → Limits** has three parts:
+
+| Part | What it is | When you touch it |
+|---|---|---|
+| **System capacities** | One row per system, one column per metric: `biomass` (kg of standing fish) and `feed_per_day` (kg of feed per day). Blank = that system has no cap for that metric. | Whenever a real capacity changes. This is the normal edit — one cell. |
+| **Mode-specific capacities** | A capacity that depends on what the system is being *used for*. Today only **OG6N** has one: it holds more (700,000 kg) while it is the depuration station than it does (400,000 kg) once its 3 mains become grow-out. | Rarely. |
+| **Per-week system exceptions** (collapsed, advanced) | A cap for ONE unusual week — a shutdown, a trial, maintenance. Blank is the normal state. | Almost never. |
+
+**Which weeks are which mode is derived**, not typed: a week is in `purge` mode
+while its start date is before Control's `sixn_production_start`, and
+`production` from that date on (and every week is production if *Run 6N as
+grow-out* is on). Move that date and the capacity step follows it — the two
+cannot disagree.
+
+**Resolution order**, highest first:
+
+```
+per-week exception  >  system + mode default  >  system default  >  no cap at all
+```
+
+The last rung is real: a capacity nobody set stays unset. An engine that needs a
+hard bound (the Global MILP / L3 placement passes) then **raises, naming the
+missing input** — it will not substitute an invented ceiling. No capacity number
+lives anywhere in the code.
+
+> **Why this replaced the per-week grid (2026-08-14).** `limits.yaml` used to
+> hold one row per (week, system, metric) — 3,120 near-identical rows — so
+> changing one capacity meant editing 130 cells, and the actual value was
+> invisible. It also silently expired: the rows covered a fixed span of absolute
+> weeks, so a ProductionReport that moved the horizon left the tail of the run
+> with **no cap at all**. On the operator's own 2026-08-12 PR that was six weeks
+> × twelve systems. A default has no week axis and cannot run out.
+
 ### 3.4 The biology tables (`config/biology.yaml`, **Configure → Biology models**)
 These are the curves every batch grows and eats along, edited as four grids:
 
