@@ -39,6 +39,14 @@ rebalance_varqty_budget: 20
 rebalance_split_budget: 8
 rebalance_balance_budget: 30
 rebalance_level: true
+# END-OF-WEEK CAP REPAIR, moves/week. Every other rebalancing pass runs BEFORE
+# the week's growth is applied, but the reports measure the state AFTER it — so
+# a system left just under its cap grows back over with nothing left to catch
+# it. This pass runs last, on the state that is actually reported. 0 = OFF (the
+# shipped default: measured a big, 8-of-8-state per-system gain but NOT a strict
+# improvement — see docs/USER_GUIDE.md §7.3 for the trade). 8 is the setting to
+# try; 15 measured identical (the handling budget binds first).
+cap_repair_budget: 0
 harvest_level_load: true
 harvest_smooth_lookahead_weeks: 12
 harvest_level_target: null
