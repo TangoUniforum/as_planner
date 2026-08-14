@@ -34,6 +34,12 @@ S_FAC = "Facility"
 S_BATCH = "Batches"
 S_FLIM = "FacilityLimits"
 S_SLIM = "SystemLimits"
+# The standing per-system capacities (defaults + mode defaults). SystemLimits
+# above stays the per-week EXCEPTION grid; this sheet is where a capacity
+# normally lives, so a template round-trip carries it in one legible row per
+# system instead of 130 identical columns.
+S_SCAP = "SystemCapacities"
+_SCAP_COLS = ["system", "mode", "metric", "value"]
 
 # Headers for the empty-template / fixed-schema sheets.
 _FAC_COLS = ["location_id", "system_id", "tank_id",
@@ -93,7 +99,11 @@ def write_config_template(out_path, config_dir=None, scenario_dir=None,
     info.append(["One sheet per config piece. Keep the header row. "
                  "Dates as YYYY-MM-DD. Blank cells = default/none."])
     info.append(["Sheets: Control, Biology_Growth/Mortality/Feed/Cull, "
-                 "Facility, Batches, FacilityLimits, SystemLimits."])
+                 "Facility, Batches, FacilityLimits, SystemCapacities, "
+                 "SystemLimits."])
+    info.append(["SystemCapacities holds each system's standing cap (blank "
+                 "mode = every mode) — edit a capacity THERE. SystemLimits is "
+                 "for one-off weeks only; blank means 'use the capacity'."])
     info.column_dimensions["A"].width = 100
 
     # ---- Control ----
@@ -151,12 +161,14 @@ def write_config_template(out_path, config_dir=None, scenario_dir=None,
                   METRIC_MIN_HARVEST, METRIC_HOG_YIELD]
     sl_metrics = [METRIC_BIOMASS, METRIC_FEED_DAY]
     fl_cur, sl_cur = {}, {}
+    sl_defaults, sl_mode_defaults = {}, {}
     if scenario_dir and (Path(scenario_dir) / "limits.yaml").exists():
         fl, sl = load_limits(scenario_dir)
         fl_cur = {(r["week"], r["metric"]): r["value"]
                   for r in facility_limits_to_list(fl)}
         sl_cur = {(r["week"], r["system"], r["metric"]): r["value"]
                   for r in system_limits_to_list(sl)}
+        sl_defaults, sl_mode_defaults = dict(sl.defaults), dict(sl.mode_defaults)
     if horizon_weeks and forecast_start is not None:
         weeks = forecast_week_labels(forecast_start, int(horizon_weeks))
     else:
@@ -173,6 +185,14 @@ def write_config_template(out_path, config_dir=None, scenario_dir=None,
         [[s, m] + [sl_cur.get((wk, s, m)) for wk in weeks]
          for s in systems for m in sl_metrics],
     )
+    # Standing capacities: one row per (system, mode, metric). `mode` blank =
+    # applies in every mode. Written AFTER SystemLimits so the exception grid
+    # keeps its familiar position.
+    scap_rows = [[s, "", m, sl_defaults.get((s, m))]
+                 for s in systems for m in sl_metrics]
+    scap_rows += [[s, mode, m, v]
+                  for (s, mode, m), v in sorted(sl_mode_defaults.items())]
+    _write_table(wb.create_sheet(S_SCAP), _SCAP_COLS, scap_rows)
 
     out = Path(out_path)
     wb.save(out)
@@ -242,6 +262,28 @@ def _system_limits_records(wb) -> list[dict]:
             v = r.get(wk)
             if v not in (None, ""):
                 out.append({"week": wk, "system": s, "metric": m, "value": v})
+    return out
+
+
+def _system_capacity_records(wb) -> list[dict]:
+    """Read SystemCapacities → {system, mode, metric, value} records.
+
+    Blank `mode` means "in every mode". Blank value = no default for that
+    (system, metric), which is a real state (no cap) and NOT the same as an
+    absent sheet — see import_config_template.
+    """
+    _header, rows = _read_table(wb, S_SCAP)
+    out = []
+    for r in rows or []:
+        s, m = r.get("system"), r.get("metric")
+        if not s or not m:
+            continue
+        if r.get("value") in (None, ""):
+            continue
+        out.append({"system": str(s).strip(),
+                    "mode": str(r.get("mode") or "").strip(),
+                    "metric": str(m).strip(),
+                    "value": float(r["value"])})
     return out
 
 
@@ -316,15 +358,31 @@ def import_config_template(wb, config_dir, scenario_dir) -> list[str]:
     _, batch = _read_table(wb, S_BATCH)
     flim = _facility_limits_records(wb)   # long records, blanks already skipped
     slim = _system_limits_records(wb)
-    if batch or flim or slim:
+    scap = _system_capacity_records(wb)
+    if batch or flim or slim or scap:
         batches = (batches_from_list(batch) if batch
                    else (load_batches(scenario_dir)
                          if (Path(scenario_dir) / "batches.yaml").exists() else []))
-        if flim or slim:
+        if flim or slim or scap:
             fl = facility_limits_from_list(flim)
             sl = system_limits_from_list(slim)
         else:
             fl, sl = load_limits(scenario_dir)
+        if scap:
+            for r in scap:
+                if r["mode"]:
+                    sl.mode_defaults[(r["system"], r["mode"], r["metric"])] = r["value"]
+                else:
+                    sl.defaults[(r["system"], r["metric"])] = r["value"]
+        elif (flim or slim) and (Path(scenario_dir) / "limits.yaml").exists():
+            # An OLDER template (or one built before SystemCapacities existed)
+            # carries per-week rows but no capacities sheet. Rebuilding from it
+            # alone would silently delete every standing capacity and leave the
+            # facility uncapped — so keep what is on disk. A template that DOES
+            # carry the sheet is authoritative and replaces them.
+            _fl0, sl0 = load_limits(scenario_dir)
+            sl.defaults = dict(sl0.defaults)
+            sl.mode_defaults = dict(sl0.mode_defaults)
         dump_scenario(scenario_dir, batches=batches, facility_limits=fl, system_limits=sl)
         written += ["scenario/batches.yaml", "scenario/limits.yaml"]
 

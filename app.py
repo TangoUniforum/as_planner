@@ -273,6 +273,59 @@ def _preserved_system_limits(sl_cur, shown_weeks):
             for (wk, s, m), v in sl_cur.items() if wk not in shown]
 
 
+# ---- System capacity DEFAULTS grid (the common case) ----------------------
+#
+# A capacity is a fact about the facility, so the editor for it is one row
+# per system — not the 130-column week grid, which is technically editable
+# and humanly useless. These four helpers are the pure grid<->model mapping,
+# kept out of the Streamlit body so they are testable headlessly.
+
+def _system_defaults_records(defaults, systems, metrics):
+    """One record per system: {"system": s, <metric>: value or None}."""
+    return [{"system": s, **{m: defaults.get((s, m)) for m in metrics}}
+            for s in systems]
+
+
+def _system_defaults_from_records(records, metrics):
+    """Grid rows -> {(system, metric): value}. Blank cell = no default."""
+    out = {}
+    for r in records or []:
+        s = (r.get("system") or "").strip()
+        if not s:
+            continue
+        for m in metrics:
+            v = r.get(m)
+            if v is None or v == "":
+                continue
+            out[(s, m)] = float(v)
+    return out
+
+
+def _mode_default_records(mode_defaults):
+    """{(system, mode, metric): v} -> sorted list of editable rows."""
+    return [{"system": s, "mode": mode, "metric": m, "value": v}
+            for (s, mode, m), v in sorted(mode_defaults.items())]
+
+
+def _mode_defaults_from_records(records):
+    """Editable rows -> {(system, mode, metric): value}.
+
+    Skips rows that are not fully specified: a mode default needs all four
+    fields to mean anything, and a half-filled row is an accident (the
+    dynamic editor appends a blank row the moment you click +).
+    """
+    out = {}
+    for r in records or []:
+        s = (r.get("system") or "").strip()
+        mode = (r.get("mode") or "").strip()
+        m = (r.get("metric") or "").strip()
+        v = r.get("value")
+        if not (s and mode and m) or v is None or v == "":
+            continue
+        out[(s, mode, m)] = float(v)
+    return out
+
+
 def _result_rid(r):
     """Stable identity of a result dict, for binding derived data to the run it
     came from. Results stored before `_rid` existed fall back to something
@@ -3051,41 +3104,140 @@ def _limit_week_cols(fl_cur, sl_cur):
     return sorted({k[0] for k in fl_cur} | {k[0] for k in sl_cur})
 
 
+def _sixn_prod_start_str():
+    """The live `sixn_production_start`, formatted, or a plain-language note.
+
+    Read at RENDER time. The mode split shown in this editor is decided by
+    this date, so the tooltip must quote the value the config actually
+    holds rather than a number baked into prose that rots on the next edit
+    (app.py help-text contract, `_ctl_help`).
+    """
+    try:
+        from forecast.config_io import load_control
+        c = load_control(CONFIG_DIR)
+        if getattr(c, "sixn_growth", False):
+            return ("not applicable — 'Run 6N as grow-out' is ON, so every "
+                    "week is production mode")
+        d = getattr(c, "sixn_production_start", None)
+        if d is None:
+            return "not set — every week counts as purge mode"
+        return (d.date().isoformat() if hasattr(d, "date") else str(d))
+    except Exception:  # noqa: BLE001
+        return "unreadable (check config/control.yaml)"
+
+
 def _edit_limits():
     from forecast.scenario_io import (
         load_batches, load_limits, facility_limits_to_list,
-        system_limits_to_list, facility_limits_from_list,
-        system_limits_from_list, dump_scenario,
+        system_limits_to_list, facility_limits_from_list, dump_scenario,
     )
     from forecast.caps import (METRIC_BIOMASS, METRIC_FEED_DAY, METRIC_MAX_HARVEST,
-                               METRIC_MIN_HARVEST, METRIC_HOG_YIELD)
-    st.caption("Per-week caps — weeks across the top, one row per parameter. "
-               "Label columns + header stay frozen as you scroll. Blank = no "
-               "cap (facility blank = use the Control default).")
+                               METRIC_MIN_HARVEST, METRIC_HOG_YIELD,
+                               SYSTEM_MODES, SystemLimits)
+    st.caption(
+        "Capacity limits. A capacity is a fact about the facility, so it is "
+        "stated **once** per system below and applies to every week of every "
+        "horizon. A single unusual week is an *exception* — see the expander "
+        "at the bottom. Resolution order, highest first: per-week exception → "
+        "system + mode default → system default → no cap at all."
+    )
     fl, sl = load_limits(SCENARIO_DIR)
     fl_cur = {(r["week"], r["metric"]): r["value"] for r in facility_limits_to_list(fl)}
     sl_cur = {(r["week"], r["system"], r["metric"]): r["value"]
               for r in system_limits_to_list(sl)}
-    weeks = _limit_week_cols(fl_cur, sl_cur)
-    if not weeks:
-        st.info("No weeks yet — upload a ProductionReport (sets the horizon) or "
-                "import a template with limits.")
-        return
     fl_metrics = [METRIC_BIOMASS, METRIC_FEED_DAY, METRIC_MAX_HARVEST,
                   METRIC_MIN_HARVEST, METRIC_HOG_YIELD]
     sl_metrics = [METRIC_BIOMASS, METRIC_FEED_DAY]
     systems = _og_systems_app()
-    if "flim_wide" not in st.session_state:
-        fac = pd.DataFrame([{"metric": m, **{wk: fl_cur.get((wk, m)) for wk in weeks}}
-                            for m in fl_metrics]).astype({wk: "float64" for wk in weeks})
-        sysd = pd.DataFrame([{"system": s, "metric": m,
-                              **{wk: sl_cur.get((wk, s, m)) for wk in weeks}}
-                             for s in systems for m in sl_metrics]
-                            ).astype({wk: "float64" for wk in weeks})
-        st.session_state["flim_wide"] = fac
-        st.session_state["slim_wide"] = sysd
+    # Weeks drive the EXCEPTION grid only; the defaults editor needs none, so
+    # an empty horizon is no longer a dead end (it used to return early and
+    # leave the operator with nothing editable at all).
+    weeks = _limit_week_cols(fl_cur, sl_cur)
+
+    if "sysdef_grid" not in st.session_state:
+        st.session_state["sysdef_grid"] = pd.DataFrame(
+            _system_defaults_records(sl.defaults, systems, sl_metrics)
+        ).astype({m: "float64" for m in sl_metrics})
+        st.session_state["modedef_grid"] = pd.DataFrame(
+            _mode_default_records(sl.mode_defaults)
+            or [{"system": "", "mode": "", "metric": "", "value": None}])
+        st.session_state["flim_wide"] = pd.DataFrame(
+            [{"metric": m, **{wk: fl_cur.get((wk, m)) for wk in weeks}}
+             for m in fl_metrics]).astype({wk: "float64" for wk in weeks})
+        st.session_state["slim_wide"] = pd.DataFrame(
+            [{"system": s, "metric": m,
+              **{wk: sl_cur.get((wk, s, m)) for wk in weeks}}
+             for s in systems for m in sl_metrics]
+        ).astype({wk: "float64" for wk in weeks})
         st.session_state["_lim_weeks"] = weeks
     weeks = st.session_state["_lim_weeks"]
+
+    # ---------------- System capacities (the common case) ----------------
+    st.markdown("**System capacities**")
+    st.caption("One row per system — change a capacity in one cell. Blank = "
+               "that system has no cap for that metric.")
+    sysdef_cfg = {
+        "system": st.column_config.Column(
+            pinned=True, disabled=True,
+            help="The grow-out system (water loop). Its tanks share these "
+                 "caps together — a tank-level density cap is separate "
+                 "(Facility config)."),
+        METRIC_BIOMASS: st.column_config.NumberColumn(
+            "biomass (kg)", format="%.0f",
+            help="Most standing fish weight this system may hold, in "
+                 "kilograms, in any week. Raising it lets the planner "
+                 "concentrate more fish here before it must move or harvest "
+                 "them; lowering it pushes load onto the other systems and, "
+                 "once every system is tight, forces earlier harvest. "
+                 "Unit: kg."),
+        METRIC_FEED_DAY: st.column_config.NumberColumn(
+            "feed/day (kg/day)", format="%.0f",
+            help="Most feed this system may deliver per day, in kilograms "
+                 "per day — the physical limit of its feed line. Binds "
+                 "before biomass does on the grow-out systems. Unit: kg/day."),
+    }
+    sysdef_df = st.data_editor(st.session_state["sysdef_grid"], hide_index=True,
+                               column_config=sysdef_cfg, key="sysdef_grid_w",
+                               use_container_width=True)
+
+    # ---------------- Mode-specific capacities ----------------
+    _psd = _sixn_prod_start_str()
+    st.markdown("**Mode-specific capacities**")
+    st.caption(
+        f"For a system whose capacity depends on what it is being USED for. "
+        f"6N is the one that does: it holds more while it is the depuration "
+        f"station than it does once its 3 mains become grow-out. A row here "
+        f"overrides that system's plain capacity above, for the weeks in that "
+        f"mode. Which weeks are which is derived from the 6N production start "
+        f"date in Control — currently **{_psd}** — so this split can never "
+        f"drift away from that date."
+    )
+    modedef_cfg = {
+        "system": st.column_config.SelectboxColumn(
+            options=systems, required=False,
+            help="The system this mode-specific capacity belongs to."),
+        "mode": st.column_config.SelectboxColumn(
+            options=list(SYSTEM_MODES), required=False,
+            help="purge = the system is running depuration (pre-transition). "
+                 "production = it is ordinary grow-out (from the 6N "
+                 "production start date). Weeks are assigned to a mode by "
+                 "that date, not by hand."),
+        "metric": st.column_config.SelectboxColumn(
+            options=sl_metrics, required=False,
+            help="biomass = kg of standing fish; feed_per_day = kg of feed "
+                 "per day."),
+        "value": st.column_config.NumberColumn(
+            format="%.0f",
+            help="The cap for this system while it is in this mode. Unit "
+                 "follows the metric: kg for biomass, kg/day for "
+                 "feed_per_day."),
+    }
+    modedef_df = st.data_editor(st.session_state["modedef_grid"],
+                                hide_index=True, num_rows="dynamic",
+                                column_config=modedef_cfg, key="modedef_grid_w",
+                                use_container_width=True)
+
+    # ---------------- Facility limits ----------------
     _metric_help = (
         "Which cap this row sets, for the week in each column: "
         "biomass_kg = most standing fish weight (kg); "
@@ -3096,39 +3248,67 @@ def _edit_limits():
         width="small",
         help=f"The cap value for ISO week {wk} (unit = whatever the row's "
              f"metric uses). Blank facility cell = fall back to the Control "
-             f"default; blank system cell = no cap that week.")
+             f"default; blank system cell = use the system capacity above.")
         for wk in weeks}
-    fac_cfg = {"metric": st.column_config.Column(
-        pinned=True, disabled=True, help=_metric_help), **wk_cfg}
-    sys_cfg = {"system": st.column_config.Column(
-        pinned=True, disabled=True,
-        help="The grow-out system (water loop) this row caps — its tanks "
-             "share the cap together."),
-        "metric": st.column_config.Column(
-            pinned=True, disabled=True, help=_metric_help), **wk_cfg}
-    st.markdown("**Facility limits**")
-    fdf = st.data_editor(st.session_state["flim_wide"], hide_index=True,
-                         column_config=fac_cfg, key="flim_wide_w")
-    st.markdown("**System limits**")
-    sdf = st.data_editor(st.session_state["slim_wide"], hide_index=True,
-                         column_config=sys_cfg, key="slim_wide_w", height=400)
-    _hidden = ({k[0] for k in fl_cur} | {k[0] for k in sl_cur}) - set(weeks)
-    if _hidden:
+    with st.expander(f"Facility limits — per-week overrides "
+                     f"({len(fl_cur)} set)", expanded=False):
+        st.caption("Whole-facility caps for one week. Blank = use the Control "
+                   "default for that metric.")
+        if weeks:
+            fdf = st.data_editor(
+                st.session_state["flim_wide"], hide_index=True,
+                key="flim_wide_w",
+                column_config={"metric": st.column_config.Column(
+                    pinned=True, disabled=True, help=_metric_help), **wk_cfg})
+        else:
+            fdf = st.session_state["flim_wide"]
+            st.info("No weeks to show — upload a ProductionReport to set the "
+                    "horizon.")
+
+    # ---------------- Per-week system exceptions ----------------
+    with st.expander(f"Per-week system exceptions — advanced "
+                     f"({len(sl_cur)} set)", expanded=False):
         st.caption(
-            f"ℹ️ {len(_hidden)} week(s) in `limits.yaml` fall outside the current "
-            f"forecast horizon and are not shown here "
-            f"({min(_hidden)} … {max(_hidden)}). They are **kept** on save, not "
-            f"deleted — edit them by loading a PR whose horizon covers them."
-        )
+            "Only for a genuinely unusual week — a shutdown, a trial, "
+            "maintenance. A value here overrides that system's capacity above "
+            "for that ONE week. Leave blank (the normal case) and the system "
+            "capacity applies. Weeks run across the top; the label columns "
+            "stay frozen as you scroll.")
+        if weeks:
+            sdf = st.data_editor(
+                st.session_state["slim_wide"], hide_index=True, height=400,
+                key="slim_wide_w",
+                column_config={
+                    "system": st.column_config.Column(
+                        pinned=True, disabled=True,
+                        help="The grow-out system this exception applies to."),
+                    "metric": st.column_config.Column(
+                        pinned=True, disabled=True, help=_metric_help),
+                    **wk_cfg})
+        else:
+            sdf = st.session_state["slim_wide"]
+            st.info("No weeks to show — upload a ProductionReport to set the "
+                    "horizon.")
+        _hidden = ({k[0] for k in fl_cur} | {k[0] for k in sl_cur}) - set(weeks)
+        if _hidden:
+            st.caption(
+                f"ℹ️ {len(_hidden)} week(s) in `limits.yaml` fall outside the "
+                f"current forecast horizon and are not shown here "
+                f"({min(_hidden)} … {max(_hidden)}). They are **kept** on "
+                f"save, not deleted — edit them by loading a PR whose horizon "
+                f"covers them.")
+
     b1, b2, _ = st.columns([1, 1, 3])
     if b1.button("💾 Save Limits", key="save_lim"):
         try:
-            # Save REPLACES limits.yaml wholesale, but this grid only shows the
-            # current forecast horizon (_limit_week_cols). Any week stored in the
-            # file OUTSIDE that horizon has no column here, so rebuilding purely
-            # from the grid would silently DELETE it — e.g. every earlier week
-            # after uploading a PR that starts later. Carry those through
-            # untouched; the operator never saw them and cannot have edited them.
+            # Save REPLACES limits.yaml wholesale, but the exception grid only
+            # shows the current forecast horizon (_limit_week_cols). Any week
+            # stored in the file OUTSIDE that horizon has no column here, so
+            # rebuilding purely from the grid would silently DELETE it — e.g.
+            # every earlier week after uploading a PR that starts later. Carry
+            # those through untouched; the operator never saw them and cannot
+            # have edited them. (Defaults have no week axis, so they are not
+            # exposed to this hazard at all — which is the point of them.)
             fl_recs = _preserved_facility_limits(fl_cur, weeks)
             sl_recs = _preserved_system_limits(sl_cur, weeks)
             fl_recs += [{"week": wk, "metric": r["metric"], "value": float(r[wk])}
@@ -3140,17 +3320,24 @@ def _edit_limits():
                         if r.get(wk) not in (None, "")]
             fl_recs.sort(key=lambda r: (r["week"], r["metric"]))
             sl_recs.sort(key=lambda r: (r["week"], r["system"], r["metric"]))
+            new_sl = SystemLimits(
+                caps={(r["week"], r["system"], r["metric"]): float(r["value"])
+                      for r in sl_recs},
+                defaults=_system_defaults_from_records(_records(sysdef_df),
+                                                       sl_metrics),
+                mode_defaults=_mode_defaults_from_records(_records(modedef_df)),
+            )
             dump_scenario(SCENARIO_DIR, batches=load_batches(SCENARIO_DIR),
                           facility_limits=facility_limits_from_list(fl_recs),
-                          system_limits=system_limits_from_list(sl_recs))
-            _reset_keys("flim_wide", "slim_wide")
+                          system_limits=new_sl)
+            _reset_keys("flim_wide", "slim_wide", "sysdef_grid", "modedef_grid")
             st.session_state.pop("_lim_weeks", None)
             st.success("Saved scenario/limits.yaml")
             st.rerun()
         except Exception as e:  # noqa: BLE001
             st.error(f"Save failed: {e}")
     if b2.button("↻ Reload", key="reload_lim"):
-        _reset_keys("flim_wide", "slim_wide")
+        _reset_keys("flim_wide", "slim_wide", "sysdef_grid", "modedef_grid")
         st.session_state.pop("_lim_weeks", None)
         st.rerun()
 
