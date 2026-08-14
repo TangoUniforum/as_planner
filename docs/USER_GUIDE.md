@@ -1121,9 +1121,9 @@ neutral control nudges that establish what this engine's chaos alone can move:
 
 | | baseline (8 states) | `cap_repair_budget: 8` | neutral-nudge range |
 |---|---|---|---|
-| over-cap system-weeks | 1,223 | **728** (−40%, better on 8/8) | −10 … +37 |
+| over-cap system-weeks | 1,223 | **724** (−41%, better on 8/8) | −10 … +37 |
 | ...of which entry tier (OG1/2) | 757 | **342** (−55%, 8/8) | −23 … +36 |
-| `system_overshoot` | 0.7845 | **0.4645** (8/8) | −0.006 … +0.024 |
+| `system_overshoot` | 0.7845 | **0.4644** (8/8) | −0.006 … +0.024 |
 | `system_peak` (hottest system-week) | 11.198 | **10.005** (8/8) | −0.46 … −0.08 |
 | zero-harvest weeks | 0 | **0** | 0 |
 | weeks over the 60,500 relief ceiling | 0 | **0** | 0 … +2 ⚠ |
@@ -1133,14 +1133,18 @@ neutral control nudges that establish what this engine's chaos alone can move:
 | transfers per fish | 6.158 | 6.232 (worse) | −0.105 … +0.022 |
 | dropped fish / topology breaches | 0 / 0 | **0 / 0** | 0 / 0 |
 
-**Read the last column before the second.** The per-system gain is 13× the largest
-excursion a neutral nudge produces and improves *every* state; that is a real effect.
-The harvest-floor and handling costs are **inside** the nudge band — i.e. this engine
+**Read the last column before the second.** On `system_overshoot` the effect is
+**13× the largest excursion a neutral nudge produces**, every state improves, and
+even the *smallest* per-state improvement (0.024) beats the *largest* per-state
+nudge (0.016) — that is a real effect, not chaos. On `system_peak` it is 2.6× the
+largest nudge and again 8/8, but note that every nudge lowered that total too (the
+range is entirely negative), so read the peak as corroborating, not independent.
+The harvest-floor and handling costs sit **inside** the nudge band — this engine
 moves them that much on its own when you change `min_tank_control` by one fish — so
 they are honest costs to watch, not measured regressions. The ⚠ is the same point in
 reverse: a neutral nudge *did* breach the relief ceiling on a clean state (an
-81,541-fish week), so a single ceiling breach anywhere is not by itself evidence
-about a knob.
+81,541-fish week on 7.24 without the window), so a single ceiling breach anywhere is
+not by itself evidence about a knob.
 
 It is **off by default** because it is not a strict improvement: the cumulative floor
 shortfall and transfers per fish move the wrong way, and on two states the worst
