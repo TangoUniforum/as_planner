@@ -152,6 +152,7 @@ Facility-wide knobs read into `ControlParams`:
 | `rebalance_level` | **load-LEVELING (ON by default)** — cap-agnostic balancer that spreads load off the hottest system onto the COLDEST (vs concentrating); levels feed+biomass+density together. Cuts per-system feed/biomass over-cap ~90% at the cost of more marginal-density tank-weeks (see §7.3). Set `false` for the old density-only behavior | **true** |
 | `rebalance_split_budget` | split over-dense batches into free tanks (moves/week) | 8 |
 | `rebalance_varqty_budget` | precise-count shaving of over-cap systems (opt-in) | 0 |
+| `cap_repair_budget` | **end-of-week cap repair (opt-in, OFF by default)** — every *other* rebalancing pass runs before the week's growth is applied, but the reports measure the state *after* it, so a system left just under its cap grows back over with nothing left to catch it. This pass runs last, on the state that is actually reported, and moves the least it can out of any system still over its feed/biomass cap into the coldest system that can legally take it. Big, clean per-system gain; costs a little handling and moves the harvest floor around (see §7.3). Try **8** | 0 (off) |
 | `harvest_setpoint_lookahead_weeks` | **VESTIGIAL** — superseded by the dual-limit setpoint (§4.1/§4.3); kept for config back-compat but **not read** by the engine. Use `facility_biomass_deviation_pct` to set how close to the cap to run | 0.75 (ignored) |
 | `harvest_level_load` | **harvest smoother (ON by default)** — enforce `max_harvest_per_week` as a HARD ceiling + pre-harvest earlier so harvest is flat and biomass stays under cap. Paired with `rebalance_level`, which otherwise spikes harvest (see §4.3). Set `false` for old reactive behavior | **true** |
 | `hybrid_follow` | **L1 HARVEST GUIDE — `full` in the shipped config (§4.5).** Runs the Global engine's whole-horizon L1 harvest envelope first and feeds it to the controller as a per-week target band. The ceiling half is the point: it tells the reactive controller to harvest **less** in fat weeks so those fish are still there for lean ones — the one thing it can never decide for itself (all its own levers are `max()`). *Measured, 6 real PRs:* **totally empty harvest weeks 6 → 0**, weeks below floor 22.5 → 9.0, worst week 0 → 16,148 fish; **cost** peak biomass 102.6 → 107.1% of cap, peak density 102 → 124. `off` = old reactive-only behaviour. `floor` is **not** a no-op (that claim was retracted 2026-08-12) but it is **dominated** — measured on the 7.29 PR it produces a genuinely different plan (worst week 23,754 vs `off`'s 20,526) yet **11** weeks below the contract floor, worse than `off`'s 9 and far worse than `full`'s 3. Applying only the guide's floor half raises the lean weeks it can reach while leaving the controller free to over-harvest the fat ones; the **ceiling** half is what actually banks fish for later. Use `full` | `full` (dataclass default `off`) |
@@ -1099,6 +1100,54 @@ handling** may pick `density-only` (fewer transfers). So you confirm the knob
 trades feed ↔ density; a layout respecting all caps provably exists (it fits in the
 tanks), but finding it perfectly needs a constraint *solver*, not a greedy pass —
 leveling gets most of the way, the optimizer tells you how far.
+
+**End-of-week cap repair (`cap_repair_budget`, OFF by default).** Leveling and every
+other rebalancing pass run *before* the week's growth is applied, but the
+SystemLimitsAudit — and every per-system number you read — measures the state *after*
+it. That gap is most of what is left. Traced on the 7.29 PR: of the 104 non-6N
+over-cap (system, week) cells, **79 were already back under cap when the balancer
+finished** (0.94–0.99 of cap), with no later event touching the system. A week of
+growth alone carried them over, which is why the balancer's 0.90 destination margin
+was not enough — 0.90 × 1.11 ≈ 1.0. `cap_repair_budget` adds one final pass, on the
+state that is actually reported: while a system is over its cap it moves the minimum
+into the coldest system that can legally take it, and stops. It only tops up tanks a
+batch **already holds** (never opens a new one), so the free-tank pool the harvest
+controller needs is untouched, and it spends only what is left of
+`max_transfers_per_week` — being last, that arithmetic is exact.
+
+*Measured across 8 starting states* (the six real July-2026 PRs, with 7.24 and 7.29
+run both with and without the operator's manual window), at budget 8, against five
+neutral control nudges that establish what this engine's chaos alone can move:
+
+| | baseline (8 states) | `cap_repair_budget: 8` | neutral-nudge range |
+|---|---|---|---|
+| over-cap system-weeks | 1,223 | **728** (−40%, better on 8/8) | −10 … +37 |
+| ...of which entry tier (OG1/2) | 757 | **342** (−55%, 8/8) | −23 … +36 |
+| `system_overshoot` | 0.7845 | **0.4645** (8/8) | −0.006 … +0.024 |
+| `system_peak` (hottest system-week) | 11.198 | **10.005** (8/8) | −0.46 … −0.08 |
+| zero-harvest weeks | 0 | **0** | 0 |
+| weeks over the 60,500 relief ceiling | 0 | **0** | 0 … +2 ⚠ |
+| weeks below the 30,000 floor | 38 | **32** (no state worse) | −3 … +2 |
+| cumulative floor shortfall (fish) | 193,485 | 208,953 (worse) | −19,950 … +44,400 |
+| worst harvest week, summed | 134,172 | 123,454 (worse) | −26,694 … +10,848 |
+| transfers per fish | 6.158 | 6.232 (worse) | −0.105 … +0.022 |
+| dropped fish / topology breaches | 0 / 0 | **0 / 0** | 0 / 0 |
+
+**Read the last column before the second.** The per-system gain is 13× the largest
+excursion a neutral nudge produces and improves *every* state; that is a real effect.
+The harvest-floor and handling costs are **inside** the nudge band — i.e. this engine
+moves them that much on its own when you change `min_tank_control` by one fish — so
+they are honest costs to watch, not measured regressions. The ⚠ is the same point in
+reverse: a neutral nudge *did* breach the relief ceiling on a clean state (an
+81,541-fish week), so a single ceiling breach anywhere is not by itself evidence
+about a knob.
+
+It is **off by default** because it is not a strict improvement: the cumulative floor
+shortfall and transfers per fish move the wrong way, and on two states the worst
+harvest week drops sharply. Turn it on when the per-system utilization maps are your
+binding problem, verify it through the optimizer / Compare on *your* PR, and read the
+harvest floor as well as the cap compliance. Budget 15 measured **identical** to 8 —
+the leftover handling budget binds first — so 8 is the setting to try.
 
 ### 7.4 Compare & Choose — run every method, pick the plan (`Mode → Compare & Choose`)
 
