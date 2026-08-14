@@ -455,15 +455,31 @@ class TestSystemLimitsAudit:
         assert nf == 1 and worst_f > 1.0
         assert "FEED_OVER" in _sheet_text(wb, "SystemLimitsAudit")
 
-    def test_og6n_depuration_pool_is_a_documented_no_fire_zone(self):
-        # SPEC: OG6N (purge) is intentionally uncapped — reported, never
-        # flagged. This control pins the exemption so a future refactor that
-        # silently widens it to other systems trips the controls above.
-        wb, (nb, nf, _, _) = self._write(
+    def test_og6n_biomass_cap_fires_like_any_other_system(self):
+        # SPEC CHANGED 2026-08-14. OG6N's BIOMASS cap used to be exempt on the
+        # reasoning that depuration is "intentionally uncapped" — but the cap
+        # is an operator INPUT (scenario/limits.yaml), and code that ignores an
+        # operator-set input is code overriding the operator. The exemption hid
+        # a live breach: the purge rotation peaked at 674,070 kg against a
+        # configured 400,000, on every run, flagged nowhere. Now enforced.
+        wb, (nb, nf, worst_b, _) = self._write(
             [_loc(_W1, 61, "B1", 5000, 5000, system_id="OG6N",
                   stage="STARVE")],
             {(_W1, "OG6N", "biomass"): 1000.0})
-        assert (nb, nf) == (0, 0)
+        assert nb == 1 and worst_b > 1.0
+        assert "BIOMASS_OVER" in _sheet_text(wb, "SystemLimitsAudit")
+
+    def test_og6n_feed_stays_exempt_for_a_physical_reason(self):
+        # The ONE exemption that survives, and it is physics not policy: purge
+        # fish are STARVE, `_row_feed_kg_day` returns 0 for them, so a feed-RATE
+        # cap on a system that by construction eats nothing could only ever
+        # report 0. Pinned so nobody "fixes" it into a check that cannot fire —
+        # the exact defect class this suite exists to catch.
+        wb, (nb, nf, _, _) = self._write(
+            [_loc(_W1, 61, "B1", 5000, 5000, system_id="OG6N",
+                  stage="STARVE")],
+            {(_W1, "OG6N", "feed_per_day"): 0.001})
+        assert nf == 0
 
 
 # =========================================================================== #

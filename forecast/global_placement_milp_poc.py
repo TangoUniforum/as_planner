@@ -38,8 +38,16 @@ from .global_planner_l2_poc import GROWOUT_SYSTEMS, NURSERY_SYSTEMS
 from .global_planner_poc import PlannerResult
 from .models import ControlParams, FacilityConfig
 
-_DEFAULT_BIO_CAP = 400000.0
-_DEFAULT_FEED_CAP = 3000.0
+# Fallbacks used ONLY when scenario/limits.yaml carries no row for a
+# (week, system, metric). A facility capacity belongs in the operator's input
+# files, never in code (operator ruling 2026-08-14: "that should be controlled
+# from the input parameters not from the code itself"), so these are set to
+# None = NO CAP rather than to a number. A missing limit row must not silently
+# impose an invented 400 t / 3,000 kg-day ceiling that the operator never
+# configured and cannot see — on this facility the real purge-era 6N figure is
+# 600 t, half again the old hardcoded default. An absent cap is now absent.
+_DEFAULT_BIO_CAP = None
+_DEFAULT_FEED_CAP = None
 W_SLACK = 1.0e7     # meet per-system caps first
 W_SWAP = 1.0e6      # then avoid same-week A->B swaps (each would cause drift)
 W_OVER = 1.0e3      # then minimize per-tank over-density
@@ -195,8 +203,23 @@ def solve_week(
 
 
 def _scap(metric, wl, s, system_limits, default):
+    """Resolve a per-(week, system) cap from the operator's limits file.
+
+    `default` is None for the capacity metrics (see _DEFAULT_BIO_CAP), so a
+    genuinely missing row raises here, naming the exact input that is absent,
+    instead of substituting an invented ceiling that the operator never set and
+    could not see anywhere in the output. Failing with an address beats
+    planning against a number nobody chose."""
     v = resolve_system_cap(metric, wl, s, system_limits)
-    return v if v is not None else default
+    if v is None:
+        v = default
+    if v is None:
+        raise ValueError(
+            f"No {metric} cap configured for system {s} in week {wl}. "
+            f"Add a row to scenario/limits.yaml: "
+            f"{{week: {wl}, system: {s}, metric: {metric}, value: <kg>}}. "
+            f"Capacities are operator inputs — this code will not invent one.")
+    return v
 
 
 def solve_full_horizon(

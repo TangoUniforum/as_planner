@@ -2944,8 +2944,10 @@ def write_system_limits_audit(
     audit closes that gap, mirroring TankContinuityAudit. Feed is the realized
     tank feed (biomass × SGR × FCR at the tank's actual weight), NOT the raw
     projection (which over-counts un-harvested fish). Caps are carried forward
-    past the data's last week and buffered by Control R29. OG6N (depuration)
-    has no biomass/feed caps in purge mode, so it's reported but unflagged.
+    past the data's last week and buffered by Control R29. OG6N's BIOMASS cap
+    is enforced like any other system's (it is an operator input); only its
+    FEED cap is exempt — purge fish are STARVE and eat nothing, so that check
+    could only ever report 0.
 
     Returns (n_biomass_over, n_feed_over, worst_biomass_ratio, worst_feed_ratio).
     """
@@ -2990,7 +2992,7 @@ def write_system_limits_audit(
     ws = wb.create_sheet(sheet_name)
     ws.append(["SYSTEM LIMITS AUDIT"])
     ws.append(["Realized per-system biomass + feed vs caps "
-               "(carry-forward, +R29 buffer). OG6N = depuration (no caps)."])
+               "(carry-forward, +R29 buffer). OG6N feed exempt (purge = no feed)."])
     ws.append([])
     ws.append(["Week", "System", "Biomass_kg", "Biomass_cap", "Bio_flag",
                "Feed_kg_day", "Feed_cap", "Feed_flag"])
@@ -3003,15 +3005,25 @@ def write_system_limits_audit(
         bcap = _cap(wk, sysid, "biomass")
         fcap = _cap(wk, sysid, "feed_per_day")
         bflag = fflag = ""
-        # OG6N is the depuration pool (purge mode): fish starve (no feed) and
-        # the system is intentionally uncapped. Report its rows but never flag.
-        flaggable = sysid != "OG6N"
-        if bcap and flaggable:
+        # OG6N's BIOMASS cap is now enforced like every other system's. It used
+        # to be exempt on the reasoning that depuration is "intentionally
+        # uncapped" — but the cap is an INPUT (scenario/limits.yaml), and code
+        # that ignores an operator-set input is code overriding the operator.
+        # It hid a real breach: with the cap at 400,000 the purge rotation was
+        # staging a 674,070 kg peak — 68% over — on every run, invisible on
+        # every sheet, while a diagnostic computing over-cap weeks directly
+        # found 70 of them. (Operator 2026-08-14: 6N holds up to 600 t in
+        # purge; that is now the configured purge-era value, and 674 t still
+        # exceeds it.) FEED stays exempt for a physical reason, not a policy
+        # one: purge fish are STARVE, `_row_feed_kg_day` returns 0 for them, so
+        # a feed-rate cap on a system that by construction eats nothing can
+        # only ever report 0 — the one check here that genuinely cannot fire.
+        if bcap:
             worst_b = max(worst_b, bio / bcap)
             if bio > bcap * buf:
                 bflag = "BIOMASS_OVER"
                 nb += 1
-        if fcap and flaggable:
+        if fcap and sysid != "OG6N":
             worst_f = max(worst_f, feed / fcap)
             if feed > fcap * buf:
                 fflag = "FEED_OVER"

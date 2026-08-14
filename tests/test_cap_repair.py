@@ -361,10 +361,31 @@ def test_uncapped_systems_are_never_flagged_or_filled_past_reason():
     assert moves == 0 and events == []
 
 
-def test_off_by_default_in_the_shipped_config():
-    """The knob ships OFF, so an operator who does not opt in gets exactly the
-    engine they had. (The 8-state measurement lives in the study, not here.)"""
+def test_the_shipped_config_value_is_the_operator_s_measured_choice():
+    """ADOPTED 2026-08-14 at 8, after the operator ran it on their own PR.
+
+    It shipped at 0 because the 8-state study, while better on system balance
+    on 8 of 8, was not a STRICT improvement. The operator then measured it
+    themselves (7.29 PR + their manual window, base vs repair): cap breaches
+    29 -> 11, entry-tier feed breaches 26 -> 10, worst breach 135% -> 120% of
+    cap, and worst tank density 115.5 -> 106.1 kg/m3 — with every hard rule
+    held (0 empty weeks, 0 over the limit, 0 over the relief ceiling, moves
+    unchanged at 17/1). The only cost, 1,239 fish off the worst harvest week,
+    is ~1/20th of that metric's measured noise band.
+
+    The value is pinned so a config edit that silently reverts it fails here
+    rather than quietly returning the plan to the unbalanced engine."""
     import os
     from forecast.config_io import load_control
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    assert load_control(os.path.join(root, "config")).cap_repair_budget == 0
+    assert load_control(os.path.join(root, "config")).cap_repair_budget == 8
+
+
+def test_zero_still_means_off():
+    """Adoption must not weld the pass in: 0 remains a true bypass, so the
+    operator can A/B it or revert without a code change."""
+    import dataclasses
+    from forecast.models import ControlParams
+    fld = next(f for f in dataclasses.fields(ControlParams)
+               if f.name == "cap_repair_budget")
+    assert fld.default == 0
