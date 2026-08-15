@@ -291,3 +291,108 @@ def test_board_lens_pool_excludes_partial_plans():
     # Nothing passes -> fall back to the whole board (cards still render).
     scored_bad = {"a": _res(False, True), "b": _res(True, False)}
     assert set(app._board_lens_pool(scored_bad)) == {"a", "b"}
+
+
+# --------------------------------------------------------------------------- #
+# A raising config loader on a render path = a BLANK PAGE with no message
+# --------------------------------------------------------------------------- #
+def test_read_or_explain_names_the_failure_instead_of_raising():
+    """DEFECT: every render path read its config file unguarded, so a file that
+    EXISTS but does not LOAD (a schema migration, a hand edit, a value that
+    became required) let the exception escape the rerun — and Streamlit renders
+    that as a blank page with no text at all. In the sidebar, which runs in
+    every mode before the mode dispatch, it also removed the only route back to
+    the editor that would repair the file.
+
+    The guard must (a) never propagate, (b) name the file, the exception type
+    and the way to fix it."""
+    seen = []
+    orig = app.st.error
+    app.st.error = seen.append
+    try:
+        def _boom():
+            raise ValueError("horizon_weeks is required but blank")
+
+        ok, val = app._read_or_explain(_boom, "config/control.yaml")
+        assert ok is False and val is None, "a bad file must not blank the page"
+        assert len(seen) == 1
+        msg = seen[0]
+        assert "config/control.yaml" in msg          # WHICH file
+        assert "ValueError" in msg                    # WHAT went wrong
+        assert "horizon_weeks is required" in msg     # the loader's own words
+        assert "Template & import" in msg             # HOW to fix it
+
+        # The happy path is transparent: value through, nothing reported.
+        seen.clear()
+        assert app._read_or_explain(lambda: 42, "config/control.yaml") == (True, 42)
+        assert seen == []
+
+        # A caller-supplied hint replaces the default (used where the risk is
+        # not "re-import" but "do not save the empty editor over the file").
+        seen.clear()
+        app._read_or_explain(_boom, "scenario/manual_events/", hint="do not save")
+        assert "do not save" in seen[0] and "Template & import" not in seen[0]
+    finally:
+        app.st.error = orig
+
+
+# --------------------------------------------------------------------------- #
+# A name used but never imported = NameError = the same blank page
+# --------------------------------------------------------------------------- #
+def test_no_function_uses_a_config_loader_it_never_imported():
+    """DEFECT: app.py imports its forecast helpers LOCALLY, once per function.
+    A call added to a function that lacks that function's own import is a
+    NameError at render — indistinguishable from the blank page it was written
+    to prevent, and invisible to `py_compile`.
+
+    Real case: binding Control at every `load_limits` call site added
+    `load_control(CONFIG_DIR)` to `_edit_limits` and `_edit_batches`, neither of
+    which imported it. `_edit_limits` raised at the top of the render, so the
+    Limits tab was blank for every operator on every visit.
+
+    Checked statically (calling the editors needs a Streamlit runtime): every
+    Load-context name in a function must resolve to a local import/binding, a
+    module-level name, or a builtin."""
+    import ast
+    import builtins
+
+    src = open(app.__file__, encoding="utf-8").read()
+    tree = ast.parse(src)
+
+    module_names = set(dir(builtins))
+    for node in tree.body:
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            module_names.update(a.asname or a.name.split(".")[0]
+                                for a in node.names)
+        elif isinstance(node, (ast.FunctionDef, ast.ClassDef)):
+            module_names.add(node.name)
+        elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            module_names.update(t.id for t in ast.walk(node)
+                                if isinstance(t, ast.Name))
+
+    # The loaders whose absence produced a blank page. Narrow on purpose: a
+    # full scope checker would flag comprehension/closure names this doesn't
+    # model, and a noisy guard gets deleted.
+    watched = {"load_control", "load_limits", "load_batches", "dump_scenario",
+               "load_biology_tables", "load_facility_config", "dump_config",
+               "control_to_dict", "facility_to_dict", "load_manual_events"}
+
+    offenders = []
+    for fn in (n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)):
+        bound = set()
+        for n in ast.walk(fn):
+            if isinstance(n, (ast.Import, ast.ImportFrom)):
+                bound.update(a.asname or a.name.split(".")[0] for a in n.names)
+            elif isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store):
+                bound.add(n.id)
+            elif isinstance(n, ast.arg):
+                bound.add(n.arg)
+        for n in ast.walk(fn):
+            if (isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
+                    and n.id in watched
+                    and n.id not in bound and n.id not in module_names):
+                offenders.append(f"{fn.name}() line {n.lineno}: {n.id}")
+
+    assert not offenders, (
+        "config loader used with no import in scope — NameError at render "
+        "(blank page): " + "; ".join(sorted(set(offenders))))

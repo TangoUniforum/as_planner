@@ -72,6 +72,39 @@ def _scenario_ready() -> bool:
     return (SCENARIO_DIR / "batches.yaml").exists()
 
 
+# A file EXISTING is not the same as a file LOADING. `_config_ready` /
+# `_scenario_ready` only test existence, so every render path that reads an
+# operator-editable file has to survive that file being unreadable.
+_READ_FIX_HINT = ("Fix the file on disk, or re-import it from "
+                  "**Configure → Template & import**.")
+
+
+def _read_or_explain(loader, what: str, hint: str = _READ_FIX_HINT):
+    """Run a config/scenario loader; NAME a failure instead of blanking out.
+
+    Streamlit renders an exception escaping a rerun as a BLANK PAGE with no
+    text at all. That is the worst failure this tool has: it tells the
+    operator nothing, and in the sidebar — which runs in EVERY mode, before
+    the mode dispatch — it also removes the only route back to the editor
+    that would repair the file. A defaults-plus-overrides migration, a hand
+    edit, a value that is suddenly required: all of them land here.
+
+    So every read of an operator-editable file on a render path goes through
+    this, and a bad file costs one named message naming the file, the
+    exception and the way to fix it — never the whole app.
+
+    Returns `(True, value)` or `(False, None)`; callers render a stub and
+    return on False. The project standard: a failure must be VISIBLE and
+    NAMED, never silent.
+    """
+    try:
+        return True, loader()
+    except Exception as e:  # noqa: BLE001 — any loader failure, named not hidden
+        st.error(f"**{what}** could not be read — {type(e).__name__}: {e}\n\n"
+                 f"{hint}")
+        return False, None
+
+
 def _cpu_workers() -> int:
     """Parallel-work budget from the sidebar's "Computer power" percent: that
     share of this machine's logical CPUs, at least 1. One number feeds both
@@ -942,7 +975,10 @@ def _edit_control():
     _pr = _ingest_pr(uploaded) if uploaded is not None else None
     _derived = (_pr["forecast_start"].date()
                 if (_pr and _pr["ok"] and _pr["forecast_start"]) else None)
-    d = control_to_dict(load_control(CONFIG_DIR))
+    _ok, d = _read_or_explain(lambda: control_to_dict(load_control(CONFIG_DIR)),
+                              "config/control.yaml")
+    if not _ok:
+        return
     with st.form("control_form"):
         new = {}
         for k, v in d.items():
@@ -974,14 +1010,17 @@ def _edit_control():
             # value that cannot be one (e.g. text typed into a knob that is
             # currently null, so it rendered as a text box). Catch it here: the
             # alternative is a saved string that fails much later in arithmetic.
+            # dump_config needs all three files, so an unreadable biology.yaml /
+            # facility.yaml fails the SAVE too — inside the try, so it reports
+            # rather than blanking the page mid-edit.
             try:
                 _ctl = control_from_dict(new)
-            except ValueError as e:
-                st.error(f"Not saved — {e}")
-            else:
                 dump_config(CONFIG_DIR, control=_ctl,
                             tables=load_biology_tables(CONFIG_DIR),
                             facility=load_facility_config(CONFIG_DIR))
+            except Exception as e:  # noqa: BLE001
+                st.error(f"Not saved — {type(e).__name__}: {e}")
+            else:
                 st.success("Saved config/control.yaml")
 
 
@@ -992,7 +1031,14 @@ def _edit_biology():
     st.caption("Growth (SGR FW/SW), FCR curves, mortality, feed types, and "
                "culling. Edits persist until you Save or Reload.")
     if "bio_models" not in st.session_state:
-        g, m, f, c, models = _biology_to_frames(load_biology_tables(CONFIG_DIR))
+        # _biology_to_frames indexes the SGR columns positionally, so a ragged
+        # curve (a size row added without its SGR values) raises here too.
+        _ok, _frames = _read_or_explain(
+            lambda: _biology_to_frames(load_biology_tables(CONFIG_DIR)),
+            "config/biology.yaml")
+        if not _ok:
+            return
+        g, m, f, c, models = _frames
         st.session_state.update({"bio_growth": g, "bio_mort": m, "bio_feed": f,
                                  "bio_cull": c, "bio_models": models})
     models = st.session_state["bio_models"]
@@ -1052,8 +1098,12 @@ def _edit_facility():
         facility_to_dict, facility_from_dict, dump_config,
     )
     st.caption("Tank definitions: system, stage, volume, density/feed caps, type.")
-    base = _persist("fac_df", lambda: pd.DataFrame(
-        facility_to_dict(load_facility_config(CONFIG_DIR))["tanks"]))
+    _ok, _tanks = _read_or_explain(
+        lambda: facility_to_dict(load_facility_config(CONFIG_DIR))["tanks"],
+        "config/facility.yaml")
+    if not _ok:
+        return
+    base = _persist("fac_df", lambda: pd.DataFrame(_tanks))
     edited = st.data_editor(base, num_rows="dynamic", hide_index=True,
                             use_container_width=True, key="fac_df_w",
                             column_config={c: st.column_config.Column(help=h)
@@ -1076,14 +1126,19 @@ def _edit_facility():
 
 
 def _edit_batches():
+    from forecast.config_io import load_control
     from forecast.scenario_io import (
         load_batches, load_limits, batches_to_list, batches_from_list,
         dump_scenario,
     )
     st.caption("Forward batch schedule + metadata. In-flight state comes from "
                "the ProductionReport; this is the planning/metadata layer.")
-    base = _persist("batch_df", lambda: pd.DataFrame(
-        batches_to_list(load_batches(SCENARIO_DIR))))
+    _ok, _rows = _read_or_explain(
+        lambda: batches_to_list(load_batches(SCENARIO_DIR)),
+        "scenario/batches.yaml")
+    if not _ok:
+        return
+    base = _persist("batch_df", lambda: pd.DataFrame(_rows))
     edited = st.data_editor(base, num_rows="dynamic", hide_index=True,
                             use_container_width=True, key="batch_df_w",
                             column_config={c: st.column_config.Column(help=h)
@@ -1294,8 +1349,15 @@ def _mw_events():
     cur = st.session_state.get("_pr_key")
     if ("mw_events" not in st.session_state
             or st.session_state.get("_mw_events_pr", "±") != cur):
-        st.session_state["mw_events"] = load_manual_events(
-            SCENARIO_DIR, pr_closing=_pr_closing())
+        # Guarded: this runs as soon as a PR is uploaded, so an event file the
+        # loader chokes on used to blank Run mode outright.
+        _ok, _evs = _read_or_explain(
+            lambda: load_manual_events(SCENARIO_DIR, pr_closing=_pr_closing()),
+            "scenario/manual_events/ (this PR's operations)",
+            hint="The editor below is showing an EMPTY window — **do not save "
+                 "it over the file** until the error above is fixed, or the "
+                 "stored operations are lost.")
+        st.session_state["mw_events"] = _evs if _ok else []
         st.session_state["_mw_events_pr"] = cur
         _mw_bump_grid()
     return st.session_state["mw_events"]
@@ -2615,8 +2677,13 @@ def _mw_save_bar(events, bad):
         except Exception as e:  # noqa: BLE001
             st.error(f"Save failed: {e}")
     if c2.button("↻ Reload from file", key="mw_reload"):
-        _mw_set(load_manual_events(SCENARIO_DIR, pr_closing=_pr_closing()))
-        st.rerun()
+        _ok_r, _evs_r = _read_or_explain(
+            lambda: load_manual_events(SCENARIO_DIR, pr_closing=_pr_closing()),
+            "scenario/manual_events/ (this PR's operations)",
+            hint="Nothing was reloaded — the window on screen is unchanged.")
+        if _ok_r:
+            _mw_set(_evs_r)
+            st.rerun()
     if c3.button("🧹 Clear window", key="mw_clear", disabled=not n):
         _mw_set([])
         st.rerun()
@@ -3131,6 +3198,7 @@ def _sixn_prod_start_str():
 
 
 def _edit_limits():
+    from forecast.config_io import load_control
     from forecast.scenario_io import (
         load_batches, load_limits, facility_limits_to_list,
         system_limits_to_list, facility_limits_from_list, dump_scenario,
@@ -3145,7 +3213,15 @@ def _edit_limits():
         "at the bottom. Resolution order, highest first: per-week exception → "
         "system + mode default → system default → no cap at all."
     )
-    fl, sl = load_limits(SCENARIO_DIR, load_control(CONFIG_DIR))
+    # Guarded: this is the tab the operator opens to REPAIR limits.yaml, so it
+    # must survive BOTH inputs being unreadable — limits.yaml itself, and the
+    # control.yaml whose 6N production-start date binds the mode-specific caps.
+    _ok, _limits = _read_or_explain(
+        lambda: load_limits(SCENARIO_DIR, load_control(CONFIG_DIR)),
+        "scenario/limits.yaml (bound to config/control.yaml)")
+    if not _ok:
+        return
+    fl, sl = _limits
     fl_cur = {(r["week"], r["metric"]): r["value"] for r in facility_limits_to_list(fl)}
     sl_cur = {(r["week"], r["system"], r["metric"]): r["value"]
               for r in system_limits_to_list(sl)}
@@ -3573,8 +3649,11 @@ def _edit_targets_prices():
                 "should deliver. Judged with a tolerance and **penalized, "
                 "never disqualifying**: Analyze flags shortfalls and prefers "
                 "plans that meet them, but a miss doesn't hide a plan.")
-    t = _ana.load_targets(CONFIG_DIR) or {"basis": "hog", "tolerance_pct": 5.0,
-                                          "monthly": {}, "yearly": {}}
+    _ok, t = _read_or_explain(lambda: _ana.load_targets(CONFIG_DIR),
+                              "config/targets.yaml")
+    if not _ok:
+        return
+    t = t or {"basis": "hog", "tolerance_pct": 5.0, "monthly": {}, "yearly": {}}
     c1, c2 = st.columns(2)
     basis = c1.radio("Target basis", ["hog", "gross"], horizontal=True,
                      index=0 if t["basis"] == "hog" else 1, key="tgt_basis",
@@ -3624,9 +3703,12 @@ def _edit_targets_prices():
                 "Analyze board. Each harvest event is priced by its average "
                 "fish weight; harvest falling in **no band is reported as "
                 "unpriced** (a loud gap, never an invented price).")
-    e = _ana.load_economics(CONFIG_DIR) or {"currency": "USD", "basis": "hog",
-                                            "model_cv_pct": 18.0,
-                                            "price_bands": []}
+    _ok, e = _read_or_explain(lambda: _ana.load_economics(CONFIG_DIR),
+                              "config/economics.yaml")
+    if not _ok:
+        return
+    e = e or {"currency": "USD", "basis": "hog", "model_cv_pct": 18.0,
+              "price_bands": []}
     c3, c4, c5 = st.columns(3)
     cur = c3.text_input("Currency", value=e["currency"], key="eco_cur",
                         help="Currency label shown on revenue figures (e.g. "
@@ -4419,10 +4501,16 @@ with st.sidebar:
         st.caption("Picked on the Compare & Choose board. Pick another there, "
                    "or re-select the hybrid to go back to the default.")
     if _cfg_ok:
+        # Guarded because this runs in EVERY mode, before the mode dispatch: an
+        # unreadable control.yaml here used to blank the whole app, including
+        # the Configure tab that would fix it.
         from forecast.config_io import load_control, control_to_dict
-        _render_active_config(
-            control_to_dict(load_control(CONFIG_DIR)),
-            "ℹ️ Active configuration — what this run will do")
+        _ok_cd, _cd = _read_or_explain(
+            lambda: control_to_dict(load_control(CONFIG_DIR)),
+            "config/control.yaml")
+        if _ok_cd:
+            _render_active_config(
+                _cd, "ℹ️ Active configuration — what this run will do")
     run_clicked = st.button(
         "▶ Run forecast",
         type="primary",
@@ -4908,6 +4996,7 @@ def _parse_output_workbook(path: Path) -> dict:
 
     from forecast.optimize import _density_quality, WELFARE_DENSITY_KG_M3
     _wl = WELFARE_DENSITY_KG_M3
+    _wl_note = None
     try:                                    # operator's welfare line from Configure
         from forecast.config_io import load_control
         # `or default`: an unset/zero line means "the default 80", the SAME
@@ -4915,8 +5004,13 @@ def _parse_output_workbook(path: Path) -> dict:
         # a 0 here would mark ALL biomass crowded on this KPI only.
         _wl = float(load_control(CONFIG_DIR).density_welfare_threshold_kg_m3
                     or WELFARE_DENSITY_KG_M3)
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as _e:  # noqa: BLE001
+        # Was `pass`: the KPI then judged density against a line the operator
+        # never set, with nothing on screen to say so. A fallback is fine; a
+        # SILENT one is not (its sibling read a few lines up already WARNs).
+        _wl_note = (f"welfare density line unreadable "
+                    f"({type(_e).__name__}) — judged against the "
+                    f"{WELFARE_DENSITY_KG_M3:.0f} kg/m³ default")
     _q_mean, _q_fw, _q_frac = _density_quality(wb, _wl)
     return {
         "violations": len(violations),
@@ -4926,6 +5020,7 @@ def _parse_output_workbook(path: Path) -> dict:
         "crowded_biomass_fraction": _q_frac,
         "crowded_fish_weeks": _q_fw,
         "welfare_density": _wl,
+        "welfare_density_note": _wl_note,
         "system_biomass_cap": sys_cap_biomass,
         "harvest_kg": harvest_kg,
         "harvest_count": harvest_count,
@@ -5393,9 +5488,12 @@ def _optimizer():
         return
 
     from forecast.config_io import load_control, control_to_dict
+    _ok_bc, _base_cd = _read_or_explain(
+        lambda: control_to_dict(load_control(CONFIG_DIR)), "config/control.yaml")
+    if not _ok_bc:
+        return
     _render_active_config(
-        control_to_dict(load_control(CONFIG_DIR)),
-        "ℹ️ Base configuration — the search tunes knobs ON TOP of this")
+        _base_cd, "ℹ️ Base configuration — the search tunes knobs ON TOP of this")
 
     # Optimize tunes the controller-family pipeline (the live config's engine).
     # If the plan picked on the Compare board is a GLOBAL engine, knobs found
@@ -6501,8 +6599,12 @@ def _analyze():
         st.info("Upload a valid **ProductionReport** in the sidebar first.")
         return
 
-    targets = _ana.load_targets(CONFIG_DIR)
-    econ = _ana.load_economics(CONFIG_DIR)
+    _ok_t, targets = _read_or_explain(lambda: _ana.load_targets(CONFIG_DIR),
+                                      "config/targets.yaml")
+    _ok_e, econ = _read_or_explain(lambda: _ana.load_economics(CONFIG_DIR),
+                                   "config/economics.yaml")
+    if not (_ok_t and _ok_e):
+        return
     _t_bits = []
     _t_bits.append(f"🎯 {len((targets or {}).get('monthly', {}))} monthly + "
                    f"{len((targets or {}).get('yearly', {}))} yearly target(s)"
@@ -7275,6 +7377,8 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
                        f"welfare line.",
                   delta=f"{r.get('crowded_biomass_fraction', 0) * 100:.0f}% crowded",
                   delta_color="inverse")
+        if r.get("welfare_density_note"):
+            k3.caption(f"⚠ {r['welfare_density_note']}")
         k4.metric("Total harvest", f"{r['harvest_kg']/1000:,.1f} t",
                   help="Sum of all harvest events across the horizon")
         k5.metric("Run time", f"{r['elapsed']:.1f}s")
