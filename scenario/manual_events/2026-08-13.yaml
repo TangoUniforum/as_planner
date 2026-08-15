@@ -70,3 +70,36 @@ events:
   batch: null
   mode: transfer
   notes: ''
+- type: og_transfer
+  week: 1
+  from_tank: 24
+  destinations:
+  - tank: 32
+    count: null
+    avg_wt_g: null
+  count: null
+  batch: null
+  mode: transfer
+  notes: ''
+- type: og_transfer
+  week: 3
+  from_tank: 11
+  destinations:
+  - tank: 44
+    count: null
+    avg_wt_g: null
+  count: null
+  batch: null
+  mode: transfer
+  notes: ''
+- type: og_transfer
+  week: 3
+  from_tank: 14
+  destinations:
+  - tank: 56
+    count: null
+    avg_wt_g: null
+  count: null
+  batch: null
+  mode: transfer
+  notes: ''

@@ -150,8 +150,8 @@ batches:
   input_date: '2025-09-11'
   input_count: 550000
   tran_sf_date: '2025-12-08'
-  tran_og_date: '2026-08-27'
-  tran_og_count: 290000
+  tran_og_date: '2026-09-14'
+  tran_og_count: 280000
   tran_og_avg_wt_g: 370.0
   tran_og_cv: 16.0
   fcr_model: FCR_116_Quick
