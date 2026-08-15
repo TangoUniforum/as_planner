@@ -1663,6 +1663,25 @@ that whole composition in one flow and ends in a single recommendation card:
    run time, grading-rules version, inputs-signature prefix — so a candidate
    replayed from cache or re-graded under newer rules always says so.
 
+   **Adopting a plan that breaks a rule (2026-08-15).** The card's pick order
+   *ranks* on gate failures; it does not *filter* on them, and the weekly
+   processing limit + relief gate is soft — so before this the recommended plan
+   could carry a relief-ceiling breach straight into `control.yaml`. Adopt and
+   Promote now apply the **same winner-eligibility rules** the tuned tournament
+   and Optimize apply (hard gates, then the relief ceiling, then the
+   contract-floor no-regression versus that method's own un-tuned run).
+   Unlike those two, this door does **not** exclude anything: you can see the
+   plan and may have a reason, so the buttons stay. What changes is that a
+   breaching plan cannot be saved **silently** — the breach is spelled out by
+   name and you tick an acknowledgement box before either button will write.
+   The same applies to the *Promote a different candidate* picker, which can
+   reach the rows that were ranked last precisely because they fail a rule.
+   Whatever you accept is recorded: the breach text and the gate summary go
+   into `analysis_defaults.yaml`'s `evidence` (so the **⚡ Quick run** card
+   warns every time it offers that default), the run label in the tabs is
+   flagged, and every adoption or promotion is appended to
+   `adoption_history.jsonl` beside `optimize_history.jsonl`.
+
 **Targets & prices** (Configure → Targets & prices): monthly/yearly harvest
 targets in kg (HOG or gross) judged with a tolerance — *penalized, never
 disqualifying* — and price-per-kg bands by fish size that turn each plan into

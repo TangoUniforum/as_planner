@@ -6586,6 +6586,60 @@ def _ana_checklist(gates):
                     f" — {g['detail']}")
 
 
+def _adoption_refusal(cand, acknowledged: bool):
+    """The message to show when an Adopt/Promote write must be REFUSED, or
+    None to let it through. Pure — the button handlers call exactly this, so
+    the refusal rule is testable without a Streamlit runtime.
+
+    Analyze ranks candidates by gate-failure counts; it does not filter on
+    them, and the relief-ceiling gate is SOFT. So the card's winner — and any
+    candidate the promote picker can reach — may carry a breach that both
+    other doors to config (`tournament.pick_winner`, `optimize.recommend`)
+    would refuse. The operator may still overrule that; they may not do it by
+    accident."""
+    from forecast import analysis as _ana
+    br = (cand or {}).get("breaches") or []
+    if not _ana.adoption_blocked(br, acknowledged):
+        return None
+    return ("**Nothing was saved.** This plan breaks "
+            f"{len(br)} hard rule(s): " + "; ".join(br)
+            + ". Tick the acknowledgement box to save it anyway — the breach "
+              "is recorded with it.")
+
+
+def _adoption_gate(cand, sig: str, slot: str, box=None) -> bool:
+    """Render the breach panel + the explicit acknowledgement for one adoption
+    candidate; return whether a write is confirmed.
+
+    SHAPE, decided deliberately: the button never disappears. Hiding it would
+    take a judgement call away from the operator on the one surface that is
+    theirs — they can see the plan, its checklist and its provenance, and a
+    hard-gate FAIL on a Global leg may be a known modelling gap they mean to
+    accept. Leaving it unguarded, though, is how a relief-ceiling breach walks
+    into control.yaml unremarked. So: adopt anything you can justify, never
+    anything you did not notice.
+
+    The acknowledgement key carries the input signature AND the candidate
+    label, so a tick never survives into a different plan or a re-analysis on
+    different inputs (state outliving its inputs is a defect class this file
+    has paid for twice)."""
+    box = box or st
+    br = (cand or {}).get("breaches") or []
+    if not br:
+        return True
+    import hashlib as _hl
+    box.error(
+        f"⛔ **{cand['label']} breaks {len(br)} hard rule(s)** — the tuned "
+        f"tournament and Optimize both refuse to crown a plan like this:\n\n"
+        + "\n".join(f"- {b}" for b in br)
+        + "\n\nYou can still adopt or promote it on your own judgement; the "
+          "breach is then recorded with what you save.")
+    _k = _hl.md5(f"{sig}|{slot}|{cand['label']}".encode()).hexdigest()[:10]
+    return bool(box.checkbox(
+        f"I have read the {len(br)} breach(es) above and accept them for "
+        f"**{cand['label']}**", key=f"ana_ack_{_k}"))
+
+
 def _analyze():
     import hashlib
     from datetime import datetime as _dtn
@@ -6632,6 +6686,16 @@ def _analyze():
             st.markdown(f"**⚡ Promoted default** — `{promoted['method']}` · {_pk} · "
                         f"promoted {promoted.get('promoted_ts', '?')}"
                         + (f" · _{promoted['note']}_" if promoted.get("note") else ""))
+            # A default promoted OVER a known breach must say so every time it
+            # is offered — the acknowledgement happened once, in a session that
+            # is long gone; whoever presses ⚡ next may not be the same reader.
+            _pev = promoted.get("evidence")
+            _pev = _pev if isinstance(_pev, dict) else {}
+            if _pev.get("accepted_with_breach"):
+                st.warning(
+                    "⚠ This default was promoted WITH accepted rule breach(es): "
+                    + "; ".join(str(b) for b in (_pev.get("breaches") or []))
+                    + " — a quick run replays exactly that plan.")
             qc1, qc2 = st.columns([1, 3])
             if qc1.button("⚡ Quick run this default", key="ana_quick",
                           help="One run + the checklist — minutes, not the full "
@@ -7072,6 +7136,15 @@ def _analyze():
         _by_label = {v.label: v.score for v in _variants}
         for c in cands:
             c["score"] = _by_label.get(c["label"])
+    # Winner-ELIGIBILITY, the same rules the other two doors to config apply.
+    # rank_key below RANKS on gate failures; it never filters on them, and the
+    # relief-ceiling gate is soft — so this is what stands between a
+    # rule-breaking plan and control.yaml / analysis_defaults.yaml. Computed
+    # for EVERY candidate (the promote picker can reach any row), not just the
+    # card's winner.
+    for c in cands:
+        c["breaches"] = _ana.adoption_breaches(
+            c, _ana.stock_reference_min_week(c, cands))
 
     from forecast.analysis import rank_key as _rank_key
     ranked = sorted(cands, key=_rank_key)
@@ -7086,7 +7159,11 @@ def _analyze():
         "target shortfall → emphasis score. Only conservation and "
         "never-an-empty-week are hard; everything else ranks a plan down "
         "without disqualifying it, so **read the checklist before adopting** "
-        "— a recommended plan can still carry a red handling or R7 gate.")
+        "— a recommended plan can still carry a red handling or R7 gate. "
+        "Adopt/Promote apply the same winner-eligibility rules as the tuned "
+        "tournament and Optimize (hard gates, the relief ceiling, the contract "
+        "floor): a plan that breaks one can still be saved, but only after you "
+        "acknowledge the breach by name, and the breach is saved with it.")
     with st.container(border=True):
         st.markdown(f"### {winner['label']}")
         if winner.get("prov"):
@@ -7102,33 +7179,74 @@ def _analyze():
         if runner is not None:
             st.caption(f"Runner-up: **{runner['label']}** — kept below for "
                        "drill-in; the full table shows every candidate.")
+        # The last door to config. One acknowledgement covers both buttons —
+        # they save the same plan, so they carry the same breach.
+        _card_ok = _adoption_gate(winner, ana.get("sig", ""), "card")
+
+        def _log_adoption(cand, action, method, ok_msg):
+            """Durable record of what was accepted, breach included, so a later
+            reader isn't left with only the knobs."""
+            from datetime import datetime as _dtn3
+            _ana.append_adoption_log(
+                _ana.adoption_record(
+                    cand, ts=_dtn3.now().isoformat(timespec="seconds"),
+                    action=action, method=method,
+                    overrides=cand.get("overrides"),
+                    breaches=cand.get("breaches"),
+                    source=f"Analyze ({ana.get('emphasis')}) on {uploaded.name}"),
+                str(_ROOT / _ana.DEFAULT_ADOPTION_LOG))
+            if cand.get("breaches"):
+                st.warning(f"{ok_msg} **with {len(cand['breaches'])} accepted "
+                           f"rule breach(es)** — recorded in "
+                           f"`{_ana.DEFAULT_ADOPTION_LOG}`.")
+
         a1, a2 = st.columns(2)
         if a1.button("✅ Adopt this plan", type="primary", key="ana_adopt",
                      help="Saves the winning knobs (if any) to config, makes "
                           "this the method ▶ Run forecast uses, and loads the "
                           "run into the tabs."):
-            if winner["overrides"]:
-                optimize.save_overrides_to_config(str(CONFIG_DIR),
-                                                  winner["overrides"])
-                _clear_all_editor_state()
-            st.session_state["_chosen_method"] = (
-                winner["key"] if winner["key"] in _METHODS else _DEFAULT_METHOD)
-            st.session_state.result = {
-                **winner["res"], "_run_label": f"Analyze — {winner['label']}"}
-            st.session_state["_goto_run_mode"] = True
-            st.rerun()
+            _refusal = _adoption_refusal(winner, _card_ok)
+            if _refusal:
+                st.error(_refusal)
+            else:
+                _m = (winner["key"] if winner["key"] in _METHODS
+                      else _DEFAULT_METHOD)
+                if winner["overrides"]:
+                    optimize.save_overrides_to_config(str(CONFIG_DIR),
+                                                      winner["overrides"])
+                    _clear_all_editor_state()
+                # Logged AFTER the write, so a failed write never leaves a
+                # record of an adoption that did not happen.
+                _log_adoption(winner, "adopt", _m, "Adopted")
+                st.session_state["_chosen_method"] = _m
+                st.session_state.result = {
+                    **winner["res"],
+                    "_run_label": (f"Analyze — {winner['label']}"
+                                   + (" ⚠ adopted with an accepted rule breach"
+                                      if winner.get("breaches") else ""))}
+                st.session_state["_goto_run_mode"] = True
+                st.rerun()
+
         def _promote(cand, note_prefix):
             from datetime import datetime as _dtn2
             _gsum = {g["key"]: g["status"] for g in cand["gates"]}
+            _br = list(cand.get("breaches") or [])
+            _m = (cand["key"] if cand["key"] in _METHODS else _DEFAULT_METHOD)
             _ana.save_promoted_default(
                 str(CONFIG_DIR),
-                method=(cand["key"] if cand["key"] in _METHODS
-                        else _DEFAULT_METHOD),
+                method=_m,
                 overrides=cand["overrides"],
                 promoted_ts=_dtn2.now().isoformat(timespec="seconds"),
-                note=f"{note_prefix} on {uploaded.name}",
+                note=(("⚠ ACCEPTED WITH A KNOWN RULE BREACH — " if _br else "")
+                      + f"{note_prefix} on {uploaded.name}"),
                 evidence={"gates": _gsum, "score": cand.get("score"),
-                          "emphasis": ana.get("emphasis")})
+                          "emphasis": ana.get("emphasis"),
+                          # Travels with the promoted default so ⚡ Quick run —
+                          # which replays exactly this — can say the plan
+                          # carries a flagged rule.
+                          "breaches": _br,
+                          "accepted_with_breach": bool(_br)})
+            _log_adoption(cand, "promote", _m, "Promoted")
             st.success(f"Promoted **{cand['label']}** — the ⚡ Quick run card "
                        "at the top now uses this plan.")
 
@@ -7143,7 +7261,11 @@ def _analyze():
                           "Quick run card at the top of this page will "
                           "re-run. Manual by design: the tool never changes "
                           "its own defaults."):
-            _promote(winner, "won analysis")
+            _refusal = _adoption_refusal(winner, _card_ok)
+            if _refusal:
+                st.error(_refusal)
+            else:
+                _promote(winner, "won analysis")
 
     # ---- Tuned-tournament summary: what each method's search concluded ----
     if ana.get("tuned_methods"):
@@ -7228,10 +7350,21 @@ def _analyze():
         [c["label"] for c in ranked], key="ana_promote_pick",
         help="The card's ⭐ promotes the winner; this promotes whichever "
              "candidate YOUR judgment picks (e.g. after cross-PR evidence).")
+    # This picker reaches EVERY row, including the ones ranked last precisely
+    # because they fail a rule — so it needs the same door as the card.
+    _pick_cand = next((c for c in ranked if c["label"] == _pick_lbl), None)
+    _pick_ok = (_adoption_gate(_pick_cand, ana.get("sig", ""), "picker", _pc1)
+                if _pick_cand is not None else True)
     if _pc2.button("⭐ Promote selected", key="ana_promote_any",
                    use_container_width=True):
-        _cand = next(c for c in ranked if c["label"] == _pick_lbl)
-        _promote(_cand, "operator pick from the candidates table")
+        _refusal = (_adoption_refusal(_pick_cand, _pick_ok)
+                    if _pick_cand is not None else None)
+        if _pick_cand is None:
+            st.error("That candidate is no longer on the board — re-pick.")
+        elif _refusal:
+            st.error(_refusal)
+        else:
+            _promote(_pick_cand, "operator pick from the candidates table")
     with st.expander("🎯 Target detail — every period, every candidate"):
         for c in ranked:
             tr = c.get("targets_review")
