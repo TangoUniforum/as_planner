@@ -325,6 +325,85 @@ class TestInputConservationAudit:
         assert "FW mass-balance OK" in text
 
 
+class TestFwBalanceCrossingWeek:
+    """The FW->SW crossing week must not decide the verdict.
+
+    A week's `stage` is its CLOSING stage and the FW->SW flip always lands on
+    the first day of a week, so a TranOG_Date that IS a week start puts the
+    reconciliation cull into a week labelled SW. Summing only FW/EGG weeks then
+    loses that cull and the gate fires on a conserving batch — the balance
+    swung on which weekday the operator picked. (Live case: B49 read +14.4%
+    purely from moving tran_og_date 2026-08-27 -> 2026-09-14.)
+    """
+
+    def _write(self, batches, locs, harv, **kw):
+        wb = Workbook()
+        wb.remove(wb.active)
+        excel_io.write_input_conservation_audit(wb, batches, locs, harv,
+                                                _CONTROL, **kw)
+        return wb
+
+    @staticmethod
+    def _wk(label, stage, count=0.0, mort=0.0, cull=0.0):
+        return SimpleNamespace(stage=stage, week_label=label, count=count,
+                               mort_count_week=mort, cull_count_week=cull)
+
+    def _audit(self, states):
+        tog = [SimpleNamespace(batch_id="B1",
+                               destinations=[SimpleNamespace(count=80000.0)])]
+        wb = self._write([_batch(input_count=100000.0, tran_og_count=80000.0)],
+                         [_loc(_W1, 40, "B1", 80000)], [],
+                         tranog_events=tog, biology_states_by_batch=states)
+        return _sheet_text(wb, "InputConservationAudit")
+
+    def test_cull_in_the_sw_crossing_week_is_counted(self):
+        """TranOG_Date on a week start: cull + flip land the same day, so the
+        cull is recorded in an SW-labelled week. It still closes the balance."""
+        text = self._audit({"B1": [
+            self._wk("2026-W20", "FW", count=100000.0, mort=15000.0),
+            # Crossing week: reads SW, carries the reconciliation cull.
+            self._wk("2026-W21", "SW", count=80000.0, cull=5000.0),
+        ]})
+        assert "FW MASS-BALANCE BREACH" not in text
+        assert "FW mass-balance OK" in text
+
+    def test_crossing_week_mortality_is_NOT_credited(self):
+        """Only the crossing week's CULL carries over. Its mortality is applied
+        after OG entry (TankContinuity's to account for) and `realized_tog` is
+        measured before it — crediting it here would under-report a real leak."""
+        text = self._audit({"B1": [
+            self._wk("2026-W20", "FW", count=100000.0),
+            # 20k of mortality in the crossing week must not fill the 20k hole.
+            self._wk("2026-W21", "SW", count=80000.0, mort=20000.0),
+        ]})
+        assert "FW MASS-BALANCE BREACH" in text
+
+    def test_verdict_does_not_depend_on_the_tranog_weekday(self):
+        """The same conserving batch, cull booked either side of the boundary,
+        must get the same verdict. This is the invariant B49 broke."""
+        mid_week = {"B1": [                       # TranOG_Date mid-week
+            self._wk("2026-W20", "FW", count=100000.0, mort=15000.0, cull=5000.0),
+            self._wk("2026-W21", "SW", count=80000.0),
+        ]}
+        week_start = {"B1": [                     # TranOG_Date on the boundary
+            self._wk("2026-W20", "FW", count=100000.0, mort=15000.0),
+            self._wk("2026-W21", "SW", count=80000.0, cull=5000.0),
+        ]}
+        mid_text, start_text = self._audit(mid_week), self._audit(week_start)
+        breach = "FW MASS-BALANCE BREACH"
+        assert (breach in mid_text) == (breach in start_text)
+        assert breach not in start_text
+        assert "FW mass-balance OK" in start_text
+
+    def test_a_genuine_fw_leak_still_fires(self):
+        """The carry-over must not blunt the gate: no cull anywhere, 20k gone."""
+        text = self._audit({"B1": [
+            self._wk("2026-W20", "FW", count=100000.0),
+            self._wk("2026-W21", "SW", count=80000.0),
+        ]})
+        assert "FW MASS-BALANCE BREACH" in text
+
+
 class TestTankContinuityAudit:
     def _write(self, locs, initial, realized, transfer_events=None,
                harvest_events=None):

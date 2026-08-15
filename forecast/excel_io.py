@@ -1670,16 +1670,41 @@ def write_input_conservation_audit(
     # otherwise pass every gate — TankContinuity only starts at OG, and the drop/
     # over guards never balanced FW losses. Pre-TranOG there is no harvest, so the
     # balance is clean (no M4 pre/post-harvest mortality ambiguity); the few-percent
-    # tolerance absorbs the FW->SW transition-week boundary.
+    # tolerance absorbs the half-week lag between a week's mean count and its
+    # opening count. The FW->SW crossing week is accounted exactly (see below),
+    # NOT left to the tolerance — it is larger than the tolerance.
     _FW_BALANCE_THRESH = 0.02   # flag |residual| / first_FW_count beyond 2%
     fw_loss = {}   # batch_id -> (first_fw_count, mortality, cull) over FW/EGG weeks
     for b_id, sl in (biology_states_by_batch or {}).items():
-        fws = sorted((s for s in sl if s.stage in ("FW", "EGG")),
-                     key=lambda s: s.week_label)
+        ordered = sorted(sl, key=lambda s: s.week_label)
+        fws = [s for s in ordered if s.stage in ("FW", "EGG")]
         if not fws:
             continue
         m = sum(getattr(s, "mort_count_week", 0.0) for s in fws)
         c = sum(getattr(s, "cull_count_week", 0.0) for s in fws)
+        # The CROSSING week's cull belongs to the freshwater phase even though
+        # the week is labelled SW. A week's `stage` is its CLOSING stage, and
+        # the FW->SW flip always lands on the first day of a week
+        # (og_entry_week_start). So when TranOG_Date is itself a week start,
+        # the reconciliation cull fires and the stage flips on the SAME day:
+        # the cull that closes the FW phase is recorded in a week that reads
+        # SW, and summing only FW/EGG weeks loses it entirely. That is a
+        # calendar artifact, not a leak — the biology applies the cull either
+        # way — but it made the balance depend on which weekday TranOG_Date
+        # falls on (B49 read +14.4% purely from a date shift, 2026-08-27 ->
+        # 2026-09-14; the same batch is -0.2% both ways once counted here).
+        # Only the CULL is carried over, never the mortality: the crossing
+        # week's mortality is applied after OG entry, so it is TankContinuity's
+        # to account for, and `realized_tog` is measured before it. Scheduled
+        # bottom culls cannot fire in a crossing week (they require stage
+        # "FW"), so this term is exactly the TranOG handling mortality +
+        # reconciliation cull, and it is 0 when the crossing week is not also
+        # the cull week (the ordinary mid-week TranOG_Date).
+        crossing = next((s for s in ordered
+                         if s.week_label > fws[-1].week_label and s.stage == "SW"),
+                        None)
+        if crossing is not None:
+            c += getattr(crossing, "cull_count_week", 0.0)
         fw_loss[b_id] = (fws[0].count, m, c)
     fw_bal_base = 0.0       # summed first-FW count of crossed-in-horizon batches
     fw_bal_residual = 0.0   # summed signed residual (first - tranog - mort - cull)
