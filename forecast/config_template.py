@@ -107,8 +107,11 @@ def write_config_template(out_path, config_dir=None, scenario_dir=None,
     info.column_dimensions["A"].width = 100
 
     # ---- Control ----
-    if config_dir and (Path(config_dir) / "control.yaml").exists():
-        d = control_to_dict(load_control(config_dir))
+    _tpl_control = (load_control(config_dir)
+                    if config_dir and (Path(config_dir) / "control.yaml").exists()
+                    else None)
+    if _tpl_control is not None:
+        d = control_to_dict(_tpl_control)
         ctrl_rows = [[k, "" if v is None else v] for k, v in d.items()]
     else:
         ctrl_rows = []
@@ -163,7 +166,7 @@ def write_config_template(out_path, config_dir=None, scenario_dir=None,
     fl_cur, sl_cur = {}, {}
     sl_defaults, sl_mode_defaults = {}, {}
     if scenario_dir and (Path(scenario_dir) / "limits.yaml").exists():
-        fl, sl = load_limits(scenario_dir)
+        fl, sl = load_limits(scenario_dir, _tpl_control)
         fl_cur = {(r["week"], r["metric"]): r["value"]
                   for r in facility_limits_to_list(fl)}
         sl_cur = {(r["week"], r["system"], r["metric"]): r["value"]
@@ -367,7 +370,7 @@ def import_config_template(wb, config_dir, scenario_dir) -> list[str]:
             fl = facility_limits_from_list(flim)
             sl = system_limits_from_list(slim)
         else:
-            fl, sl = load_limits(scenario_dir)
+            fl, sl = load_limits(scenario_dir, cur_control)
         if scap:
             for r in scap:
                 if r["mode"]:
@@ -380,7 +383,7 @@ def import_config_template(wb, config_dir, scenario_dir) -> list[str]:
             # alone would silently delete every standing capacity and leave the
             # facility uncapped — so keep what is on disk. A template that DOES
             # carry the sheet is authoritative and replaces them.
-            _fl0, sl0 = load_limits(scenario_dir)
+            _fl0, sl0 = load_limits(scenario_dir, cur_control)
             sl.defaults = dict(sl0.defaults)
             sl.mode_defaults = dict(sl0.mode_defaults)
         dump_scenario(scenario_dir, batches=batches, facility_limits=fl, system_limits=sl)

@@ -1093,7 +1093,11 @@ def _edit_batches():
         try:
             batches2 = batches_from_list(
                 _clean_rows(_records(edited), "batch_id", "batch"))
-            fl, sl = load_limits(SCENARIO_DIR)
+            # BOUND to Control: capacities may carry mode-specific
+            # defaults (6N purge vs production), and resolving one
+            # unbound raises. Cost of getting this wrong is a blank
+            # page, so it is bound at every call site, not most.
+            fl, sl = load_limits(SCENARIO_DIR, load_control(CONFIG_DIR))
             dump_scenario(SCENARIO_DIR, batches=batches2,
                           facility_limits=fl, system_limits=sl)
             _reset_keys("batch_df")
@@ -3141,7 +3145,7 @@ def _edit_limits():
         "at the bottom. Resolution order, highest first: per-week exception → "
         "system + mode default → system default → no cap at all."
     )
-    fl, sl = load_limits(SCENARIO_DIR)
+    fl, sl = load_limits(SCENARIO_DIR, load_control(CONFIG_DIR))
     fl_cur = {(r["week"], r["metric"]): r["value"] for r in facility_limits_to_list(fl)}
     sl_cur = {(r["week"], r["system"], r["metric"]): r["value"]
               for r in system_limits_to_list(sl)}
