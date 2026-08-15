@@ -301,6 +301,12 @@ class OptRecommendation:
     # Callers must apply/save THIS, never a by-label re-lookup, or a round-1
     # partial set can be persisted in place of the winning combination.
     overrides: dict = field(default_factory=dict)
+    # Winner-ELIGIBILITY audit (see `eligible_pool`). `guards` maps each guard
+    # to 'applied' | 'stood-down' | 'off'; `guard_notes` are the operator-facing
+    # sentences already folded into `text` (kept separately so a caller can
+    # style them). Empty = every guard passed with nothing to report.
+    guards: dict = field(default_factory=dict)
+    guard_notes: list = field(default_factory=list)
 
 
 # --------------------------------------------------------------------------- #
@@ -906,18 +912,171 @@ def score_variants(variants, weights) -> None:
         v.score = sum(weights.get(c, 0.0) * v.norm[c] for c in COMPONENTS)
 
 
+def _as_float(x):
+    """`x` as a float, or None when it isn't one (an unusable baseline)."""
+    if x is None:
+        return None
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return None
+
+
+def eligible_pool(variants, baseline_min_week=None):
+    """The variants ELIGIBLE to win, and an audit of which guards were in force.
+
+    This is Optimize's half of the winner-eligibility rules the tuned
+    tournament already applies in `tournament.pick_winner`. The predicates
+    themselves are IMPORTED from tournament, never re-implemented — two copies
+    of a business rule drift, and a drifted copy is how an exemption survives.
+
+    Applied in the operator's priority order, each STANDING DOWN rather than
+    emptying the pool (a search must still return its best, and the caller
+    reports which stood down):
+
+      1. hard gates — `variant_hard_ok`: conserves fish AND never plans an
+         empty harvest week.
+      2. `ceiling_eligible` — no week above the derived relief ceiling. The
+         objective protects the processing limit with a single term whose
+         weight is 0 in the shipped "Product quality" preset, so a weight
+         cannot be the enforcement.
+      3. `floor_eligible` — no worse leanest harvest week than
+         `baseline_min_week`. The emphasis score is statistically blind to the
+         floor (corr = -0.03 over a 40-variant pool), so it must be a rank.
+
+    An UNMEASURED metric is UNKNOWN, never a pass — that rule lives inside the
+    imported predicates.
+
+    Returns `(pool, guards)` where guards maps 'hard'/'ceiling'/'floor' to
+    'applied' (the guard chose the pool), 'stood-down' (nothing cleared it, so
+    it was dropped) or 'off' (not armed — only the floor, which needs a
+    baseline)."""
+    from . import tournament
+    guards = {"hard": "off", "ceiling": "off", "floor": "off"}
+    ok = [v for v in variants if v.conservation_ok]
+    if not ok:
+        return [], guards
+
+    full = [v for v in ok if tournament.variant_hard_ok(v) is True]
+    pool = full or ok
+    guards["hard"] = "applied" if full else "stood-down"
+
+    ceil = tournament.ceiling_eligible(pool)
+    pool = ceil or pool
+    guards["ceiling"] = "applied" if ceil else "stood-down"
+
+    base = _as_float(baseline_min_week)
+    if base is not None:
+        flr = tournament.floor_eligible(pool, base)
+        pool = flr or pool
+        guards["floor"] = "applied" if flr else "stood-down"
+    return pool, guards
+
+
+def ineligibility_reasons(v, baseline_min_week=None) -> list:
+    """Plain-language reasons `v` may not be crowned — the sentences the
+    recommendation quotes when a guard excludes the best-scoring candidate.
+    Silence about a rejected candidate is the failure mode this project keeps
+    closing, so the reason travels with the decision. Empty = eligible."""
+    from . import tournament
+    out = []
+    hard = tournament.variant_hard_ok(v)
+    if hard is False:
+        if not v.conservation_ok:
+            out.append("it does not conserve fish (dropped/over-produced, or the "
+                       "engine refused to plan it)")
+        else:
+            _z = getattr(v.metrics, "harvest_zero_weeks", None)
+            out.append(f"it plans {int(_z)} empty harvest week(s) — the "
+                       f"steady-harvest contract is a hard rule")
+    elif hard is None:
+        out.append("its empty-week count was never measured (unknown is never "
+                   "read as a pass)")
+
+    n = getattr(v.metrics, "weeks_over_relief_ceiling", None)
+    if n is None:
+        out.append("its relief-ceiling breaches were never measured (unknown is "
+                   "never read as a pass)")
+    elif int(n) > 0:
+        out.append(f"it breaches the relief ceiling in {int(n)} week(s) — over "
+                   f"the processing limit's relief band, never legal")
+
+    base = _as_float(baseline_min_week)
+    if base is not None:
+        mw = getattr(v.metrics, "harvest_min_week", None)
+        if mw is None:
+            out.append("its worst harvest week was never measured (unknown is "
+                       "never read as a pass)")
+        elif float(mw) < base:
+            out.append(f"it lowers the worst harvest week to {float(mw):,.0f} "
+                       f"fish, below baseline's {base:,.0f}")
+    return out
+
+
 def recommend(variants, emphasis=DEFAULT_EMPHASIS, weights=None) -> OptRecommendation:
+    """The Optimize winner: emphasis-best among the ELIGIBLE variants.
+
+    Selection is NOT score alone. `eligible_pool` applies the same
+    winner-eligibility guards the tuned tournament uses (conservation +
+    never-an-empty-week, then the relief ceiling, then the contract floor vs
+    the `baseline` variant), because this winner is APPLIED — the app and
+    tools/auto_optimize.py can write it straight into control.yaml, where it
+    becomes the standing config for every later run. A plan that breaks a hard
+    rule must never get there.
+
+    When a guard excludes the best-scoring candidate, or when a guard stands
+    down because nothing cleared it, `text` says so by name."""
     w = weights or weights_for(emphasis)
     score_variants(variants, w)
     ok = [v for v in variants if v.conservation_ok]
     if not ok:
         return OptRecommendation("(none)", emphasis, float("inf"), False,
                                  "No variant held conservation — investigate before optimizing.",
-                                 {})
-    best = min(ok, key=lambda v: (v.score, 0 if v.label == "baseline" else 1, v.label))
+                                 {}, {"hard": "off", "ceiling": "off", "floor": "off"}, [])
+
+    def _rank(v):
+        return (v.score, 0 if v.label == "baseline" else 1, v.label)
+
     baseline = next((v for v in variants if v.label == "baseline"), None)
-    capacity_bound = (baseline is not None and baseline.conservation_ok
-                      and best.score >= baseline.score - 1e-9)
+    # The floor guard's reference is the method's own un-tuned run. Here that
+    # is the `baseline` variant — the one `recommend` already looks up. A
+    # seeded coordinate descent labels its seed "seed" and so has none: the
+    # guard then stays OFF rather than inventing a baseline. An infeasible
+    # baseline carries the _infeasible_metrics sentinel, which is not a
+    # measurement either.
+    floor_base = (getattr(baseline.metrics, "harvest_min_week", None)
+                  if (baseline is not None and baseline.conservation_ok) else None)
+
+    pool, guards = eligible_pool(ok, floor_base)
+    top = min(ok, key=_rank)          # what score ALONE would have crowned
+    best = min(pool, key=_rank)
+
+    notes = []
+    if best is not top:
+        why = ineligibility_reasons(top, floor_base) or [
+            "it failed a winner-eligibility guard"]
+        notes.append(
+            f"⚠ The best-scoring variant `{top.label}` (score {top.score:.3f}) "
+            f"was EXCLUDED: {'; '.join(why)}.")
+    for key, msg in (
+            ("hard", "no variant avoided an empty harvest week"),
+            ("ceiling", "no variant stayed inside the relief ceiling"),
+            ("floor", "no variant held the baseline's worst harvest week")):
+        if guards.get(key) == "stood-down":
+            notes.append(f"⚠ The {key} guard STOOD DOWN — {msg}, so the winner "
+                         f"does not clear it. Read the gate checklist before "
+                         f"adopting or saving these knobs.")
+    # Is the baseline itself a legal option? If a guard threw it out, saying
+    # "baseline stands" would recommend an ineligible plan.
+    baseline_eligible = (baseline is not None and baseline.conservation_ok
+                         and any(v is baseline for v in pool))
+    if (baseline is not None and baseline.conservation_ok
+            and not baseline_eligible and baseline is not top):
+        notes.append("⚠ The baseline config itself is ineligible: "
+                     + "; ".join(ineligibility_reasons(baseline, floor_base))
+                     + ".")
+
+    capacity_bound = (baseline_eligible and best.score >= baseline.score - 1e-9)
     if capacity_bound:
         text = (f"No variant beats baseline on the '{emphasis}' objective — the "
                 "remaining lumpiness/over-cap is a stocking/capacity limit, not a "
@@ -929,8 +1088,10 @@ def recommend(variants, emphasis=DEFAULT_EMPHASIS, weights=None) -> OptRecommend
         text = (f"Best for '{emphasis}': {best.label} (score {best.score:.3f}{_vs}). "
                 f"Use the Apply & verify panel below "
                 f"to run it now (or paste the knobs into Configure → Control to keep them).")
+    if notes:
+        text = text + " " + " ".join(notes)
     return OptRecommendation(best.label, emphasis, best.score, capacity_bound, text,
-                             dict(best.overrides))
+                             dict(best.overrides), guards, notes)
 
 
 # --------------------------------------------------------------------------- #
