@@ -835,3 +835,173 @@ def rank_key(candidate: dict) -> tuple:
     score = float(candidate.get("score") if candidate.get("score") is not None
                   else 1e9)
     return (hard_fails, soft_fails, warns, round(shortfall_kg), score)
+
+
+# --------------------------------------------------------------------------- #
+# Adoption eligibility — the LAST door a plan passes on its way to config
+# --------------------------------------------------------------------------- #
+# `rank_key` above RANKS on gate failures; it does not FILTER on them. That is
+# correct for a table (every candidate must be visible and comparable) but it
+# is not a guard: the top row of a ranking is still the top row when every
+# candidate breaks a rule, and `harvest_cap` — the weekly processing limit and
+# its relief ceiling — is registered SOFT, so a ceiling breach lowers a plan's
+# rank without ever disqualifying it.
+#
+# Analyze's ✅ Adopt writes the winning knobs into control.yaml and ⭐ Promote
+# writes method + knobs into analysis_defaults.yaml (what ⚡ Quick run replays).
+# Both are the same destination `tournament.pick_winner` and `optimize.recommend`
+# already refuse to send an ineligible plan to. This section closes that third
+# door with the SAME predicates — imported, never re-implemented.
+#
+# The difference from the other two doors is deliberate: those pick a winner
+# automatically, so they exclude. This one is the operator's own decision
+# surface — they can see the plan and its checklist and may have a reason — so
+# it does not exclude, it REFUSES TO BE SILENT. See `adoption_blocked`.
+
+# Hard gates whose failure the imported predicates already report in their own
+# words (`optimize.ineligibility_reasons`). Any OTHER hard gate — including one
+# registered later — is picked up from the candidate's own checklist, so the
+# registry stays the single place a hard rule is declared.
+_PREDICATE_GATE_KEYS = frozenset({"conservation", "no_empty_week"})
+
+
+def adoption_variant(candidate: dict):
+    """Adapt a GRADED analysis candidate to the `OptVariant` shape the
+    winner-eligibility predicates read.
+
+    Analyze grades candidates into gate dicts + a `Metrics` instance; the
+    tournament grades `OptVariant`s. Rather than write a second copy of the
+    rules against the gate shape, this builds the shape the existing predicates
+    already understand — an adapter, not a rulebook.
+
+    `candidate` keys used: `metrics` (a `Metrics`, or None), and
+    `res["_score"]["verdict"]` for the conservation counts (`dropped`,
+    `overprod`) — the same two numbers the `conservation` gate judges.
+
+    An UNGRADED candidate (no metrics at all) yields a variant whose three
+    guarded measurements are explicitly None — UNKNOWN, which the predicates
+    read as "never a pass". A zeroed sentinel would read as a clean sweep."""
+    import dataclasses
+
+    from . import optimize
+    sc = (candidate.get("res") or {}).get("_score") or {}
+    verdict = sc.get("verdict") or {}
+    m = candidate.get("metrics")
+    if m is None:
+        m = sc.get("metrics")
+    if m is None:
+        m = dataclasses.replace(optimize._infeasible_metrics(),
+                                harvest_zero_weeks=None,
+                                weeks_over_relief_ceiling=None,
+                                harvest_min_week=None)
+    return optimize.OptVariant(
+        label=str(candidate.get("label") or candidate.get("key") or "candidate"),
+        overrides=dict(candidate.get("overrides") or {}),
+        metrics=m,
+        dropped=int(verdict.get("dropped") or 0),
+        overprod=int(verdict.get("overprod") or 0))
+
+
+def stock_reference_min_week(candidate: dict, candidates) -> Optional[float]:
+    """The contract-floor guard's baseline for one adoption candidate: the
+    worst planner harvest week of the SAME METHOD run at STOCK config (no knob
+    overrides) on the same board.
+
+    `floor_eligible` asks "does tuning make the leanest week worse than not
+    tuning?", so the reference must be the candidate's own un-tuned run. A
+    candidate with no overrides IS its own stock run (nothing to regress
+    against), and a tuned candidate whose stock leg isn't on the board has no
+    reference at all — both return None, which leaves the guard OFF exactly as
+    `optimize.recommend` does for a seeded search. A guard never invents a
+    baseline; an unmeasured worst week is not one either."""
+    if not candidate.get("overrides"):
+        return None
+    key = candidate.get("key")
+    for c in candidates or ():
+        if c is candidate or c.get("key") != key or c.get("overrides"):
+            continue
+        mw = getattr(c.get("metrics"), "harvest_min_week", None)
+        if mw is not None:
+            try:
+                return float(mw)
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def adoption_breaches(candidate: dict, baseline_min_week=None) -> list:
+    """Every reason this graded candidate may not be adopted or promoted
+    SILENTLY. Empty = nothing to confirm (the common case — a guard that cries
+    wolf on clean plans teaches the operator to click through it).
+
+    Two sources, each already the single copy of its own rule:
+
+      * `optimize.ineligibility_reasons` — the imported winner-eligibility
+        predicates (`tournament.variant_hard_ok`, `ceiling_eligible`,
+        `floor_eligible`): conservation, never-an-empty-week, the relief
+        ceiling, and the contract-floor no-regression when a baseline exists.
+        The ceiling is the one this door adds that the checklist cannot: its
+        gate is SOFT, so `rank_key` ranks a breach down and then adopts it.
+      * the candidate's OWN checklist for any hard gate the predicates don't
+        cover (`_PREDICATE_GATE_KEYS`). A hard rule registered tomorrow guards
+        this door the day it is registered — registry, not rewrite."""
+    from . import optimize
+    out = list(optimize.ineligibility_reasons(adoption_variant(candidate),
+                                              baseline_min_week))
+    for g in candidate.get("gates") or []:
+        if (g.get("hard") and g.get("status") == "FAIL"
+                and g.get("key") not in _PREDICATE_GATE_KEYS):
+            out.append(f"{g.get('label')} — {g.get('detail')}")
+    return out
+
+
+def adoption_blocked(breaches, acknowledged: bool) -> bool:
+    """Whether an adopt/promote must NOT write.
+
+    The operator is never LOCKED OUT of a plan they can see and understand —
+    this is their decision surface, not an automatic winner-pick, and a guard
+    they cannot override on their own judgement would be wrong here. But a
+    guard they can trip WITHOUT NOTICING is exactly what this closes: a plan
+    carrying a breach writes only after an explicit acknowledgement that names
+    the breach, and the breach is recorded with whatever is saved."""
+    return bool(breaches) and not bool(acknowledged)
+
+
+DEFAULT_ADOPTION_LOG = "adoption_history.jsonl"
+
+
+def adoption_record(candidate: dict, *, ts: str, action: str, method: str,
+                    overrides: Optional[dict] = None, breaches=None,
+                    source: str = "") -> dict:
+    """One durable record of WHAT was adopted/promoted — including any breach
+    that was knowingly accepted. Anything the tool decides silently is a defect
+    in this project; anything the OPERATOR decides silently is one too, so the
+    accepted breach travels with the decision instead of living only in the
+    session that made it."""
+    br = [str(b) for b in (breaches or [])]
+    return {
+        "ts": ts,
+        "action": action,
+        "candidate": str(candidate.get("label") or candidate.get("key") or ""),
+        "method": method,
+        "overrides": dict(overrides or {}),
+        "gates": {g["key"]: g["status"] for g in (candidate.get("gates") or [])},
+        "breaches": br,
+        "accepted_with_breach": bool(br),
+        "source": source,
+    }
+
+
+def append_adoption_log(record: dict,
+                        log_path: str = DEFAULT_ADOPTION_LOG) -> None:
+    """Append one adoption record as a JSON line. Reuses the optimizer's
+    best-effort JSONL writer: a logging failure must never break an adoption,
+    and it must never be the reason a plan cannot be saved."""
+    from . import optimize
+    optimize.append_run_log(record, log_path)
+
+
+def read_adoption_log(log_path: str = DEFAULT_ADOPTION_LOG, n: int = 20) -> list:
+    """The last `n` adoption records (oldest→newest), or [] if none yet."""
+    from . import optimize
+    return optimize.read_run_log(log_path, n)
