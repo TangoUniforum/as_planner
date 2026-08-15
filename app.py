@@ -5671,6 +5671,10 @@ def _optimizer():
                     f"🤖 Auto-optimized → **{_best0.label}** ({_knobs})"
                     + (" · **saved to config**" if _saved else " · config unchanged")
                     + ". Loaded into the **Run forecast** tabs. *(logged to history)*")
+                # Auto-optimize can WRITE to config, so never let a guard
+                # decision pass silently here.
+                for _gn in (getattr(_rec0, "guard_notes", None) or []):
+                    st.warning(_gn)
 
     results = st.session_state.get("_opt_results")
     if not results:
@@ -5705,6 +5709,11 @@ def _optimizer():
             "TranOG arrival schedule, then re-run.")
     elif rec.is_capacity_bound:
         st.warning(f"**Capacity-bound:** {rec.text}")
+    elif getattr(rec, "guard_notes", None):
+        # A winner-eligibility guard excluded the best-scoring candidate, or
+        # stood down because nothing cleared it. Never green — the operator
+        # must read WHY before applying or saving these knobs.
+        st.warning(f"**Recommendation:** {rec.text}")
     else:
         st.success(f"**Recommendation:** {rec.text}")
 
@@ -6906,6 +6915,11 @@ def _analyze():
                 st.error(f"Knob search failed: {e}")
                 st.code(traceback.format_exc())
                 return
+            # The tuned candidate can be Adopted (and its knobs saved), so say
+            # out loud when a guard excluded a better-scoring one. Outside the
+            # try: a render problem here is not a "knob search failed".
+            for _gn in (getattr(_rec, "guard_notes", None) or []):
+                st.warning(_gn)
             bar.progress((n_phases - 1) / n_phases,
                          text="Phase 3/3 — verifying the tuned winner…")
             tuned_res = None
