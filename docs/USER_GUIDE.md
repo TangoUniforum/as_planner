@@ -849,6 +849,12 @@ against field data), not a code change. The FW reconciliation (#4) surfaces when
 batch's seawater entry diverges from plan — your first signal that a `fw_correction`
 may need re-calibrating — but it can't tell you the model's *absolute* truth.
 
+**This is what §14 measures.** Every invariant above grades the tool against
+itself. The *independent* check is your own ProductionReport: last month's
+forecast made a prediction for a date, and this month's PR says what actually
+happened on it. Grading one against the other is the only measurement here that
+can call the growth model wrong — see **§14 Accuracy (forecast vs actuals)**.
+
 ---
 
 ## 7. Calibration & tuning workflow
@@ -1365,7 +1371,8 @@ Everything the app does can be run from the terminal — useful for understandin
 pipeline (a direct run **narrates every stage to the console**) and for scripting.
 
 ```powershell
-# The app (Configure / Run / Analyze / Compare & Choose / Optimize / How it works)
+# The app (Configure / Run / Analyze / Compare & Choose / Optimize /
+#          Accuracy / How it works)
 streamlit run app.py
 
 # A single forecast, directly — prints the full stage-by-stage narration
@@ -1750,3 +1757,107 @@ The old **Tune (density knobs)** mode is retired — nothing it did is gone:
   diagnosis) moved to the bottom of the Analyze board.
 - Its knob *search* was already covered by Optimize's grid and Analyze's knob
   round. The headless density sweep remains available: `python tools/tune_sweep.py`.
+
+---
+
+## 14. Accuracy (forecast vs actuals) — grading the biology
+
+Every other mode grades a **plan**. The test suite proves **bookkeeping** — no
+fish created or lost, rules respected (§6). Neither can tell you whether the
+**growth model matches your facility**. This mode can, and it is the only one
+that can.
+
+### Why it needs nothing new from you
+
+You are already generating the measurement and throwing it away:
+
+- **Each month's ProductionReport *is* the actuals** — real per-tank counts and
+  weights at a real closing date.
+- **The previous run's output workbook holds the prediction for that same
+  date** (the `BatchLocations` sheet).
+
+Because you re-anchor every month, model error never *accumulates* — but it was
+also never *measured*: each month's prediction was replaced rather than graded.
+This mode grades it. It reads two files, runs nothing, saves nothing, touches no
+config, and can never change a plan.
+
+### Using it
+
+Sidebar → **Accuracy (forecast vs actuals)**.
+
+1. Upload a forecast workbook you produced **earlier**.
+2. The actuals default to the ProductionReport already in the sidebar — upload a
+   different one only if you want to grade against another date.
+
+You get: the **typical** and **worst** batch-level weight error over the elapsed
+weeks, a **signed** bias verdict, a per-batch table, facility totals, an
+alignment-sensitivity panel, and a separately-labelled tank-adherence view.
+
+### The distinction that matters most
+
+| View | What it measures | How to read a mismatch |
+|---|---|---|
+| **Per batch** (primary) | The **biology**. Fish summed per batch across whatever tanks they ended up in. | A real prediction error. **Weight** is the growth-model score. |
+| **Per tank** (secondary) | **Plan adherence** — did the fish end up where the plan put them. | An operator **decision**, or a plan you improved on. **Not** model error. |
+
+Conflating the two would make the report worse than useless: if you moved fish
+differently from the plan, a tank mismatch says nothing about the growth model.
+
+Within the batch view, **weight** is the clean score. **Count** and **biomass**
+also move with harvest, culling, grading and transfers, so they mix model error
+with execution.
+
+### Date alignment (why this is not a footnote)
+
+The forecast produces a value once a week; a PR closes on whatever date it
+closes. On this facility the typical weight error moves **~0.8 percentage points
+per day** of gap — grading one forecast against one PR at three consecutive
+weeks returns 0.95 %, 6.36 %, 13.38 %. Grading against a snapshot up to 3.5 days
+away would therefore charge the calendar to the growth model and swamp the
+signal.
+
+So the batch view reads the prediction at the **exact** closing date, by
+interpolating between the two bracketing weekly snapshots — a value the forecast
+already implies between two points it already produced, not a growth
+assumption. The **📅 How much does the date alignment matter?** panel shows what
+the neighbouring weeks would have said, so the choice is visible rather than
+asserted. Tank occupancy is discrete and is **not** interpolated; that view
+states its own offset in days.
+
+### What it CANNOT measure
+
+- **Harvest execution.** A PR is a snapshot of what is in the water; fish
+  already sold are simply absent. A batch harvested earlier or later than
+  planned shows as a count miss that is *not* a model error.
+- **Freshwater.** `BatchLocations` snapshots seawater (OG) tanks only, and the
+  PR's FW units have no counterpart there. FW error is tracked separately by the
+  calibration history below.
+- **Anything outside the overlap.** A batch present in only one file is listed
+  under coverage and excluded from every average — never quietly averaged in.
+- **A single pair is one observation.** Grade several to see whether a bias
+  holds.
+
+### The noise floor — check this before believing a small number
+
+Two ProductionReport exports for the **same** closing date can disagree. On the
+July 2026 chain, two PRs both closing 2026-07-31 differed by a **median 3.2 %
+(max 6.2 %)** in per-batch mean weight. Below roughly that, a "model error" is
+inside the resolution of your own actuals. Use it as the floor for how finely
+this measurement can discriminate — and as a reason not to tune a plan
+difference smaller than it.
+
+### Freshwater calibration history
+
+Every run with `auto_calibrate_fw` on back-solves each freshwater batch's
+`fw_correction` and rewrites it — `B37: fw_correction 1.000 -> 0.774` means the
+model grew that batch **23 % faster than reality**. Those rewrites used to
+scroll past in the run log and land in one workbook's `ValidationLog`, so a
+correction needed every month for six months looked exactly like a one-off.
+
+They are now appended to **`fw_calibration_history.jsonl`** at the repo root,
+beside `optimize_history.jsonl` and `adoption_history.jsonl` (gitignored, and
+written best-effort so a logging failure can never break a run). The mode reads
+it back as a drift table. A batch flagged **persistent** — the applied
+correction has sat away from the configured value across at least three runs —
+is a **standing model error to fix in the biology config**, not to re-discover
+every month.
