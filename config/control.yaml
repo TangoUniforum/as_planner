@@ -30,7 +30,7 @@ rebalance_varqty_budget: 20
 rebalance_split_budget: 8
 rebalance_balance_budget: 30
 rebalance_level: true
-cap_repair_budget: 8
+cap_repair_budget: 0
 harvest_setpoint_lookahead_weeks: 0.75
 harvest_level_load: true
 harvest_smooth_lookahead_weeks: 12

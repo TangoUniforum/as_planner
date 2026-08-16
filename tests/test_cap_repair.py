@@ -361,24 +361,34 @@ def test_uncapped_systems_are_never_flagged_or_filled_past_reason():
     assert moves == 0 and events == []
 
 
-def test_the_shipped_config_value_is_the_operator_s_measured_choice():
-    """ADOPTED 2026-08-14 at 8, after the operator ran it on their own PR.
+def test_the_shipped_config_value_is_off():
+    """WITHDRAWN 2026-08-15, one day after adoption — the pass is OFF again.
 
-    It shipped at 0 because the 8-state study, while better on system balance
-    on 8 of 8, was not a STRICT improvement. The operator then measured it
-    themselves (7.29 PR + their manual window, base vs repair): cap breaches
-    29 -> 11, entry-tier feed breaches 26 -> 10, worst breach 135% -> 120% of
-    cap, and worst tank density 115.5 -> 106.1 kg/m3 — with every hard rule
-    held (0 empty weeks, 0 over the limit, 0 over the relief ceiling, moves
-    unchanged at 17/1). The only cost, 1,239 fish off the worst harvest week,
-    is ~1/20th of that metric's measured noise band.
+    It was adopted at 8 on an 8-state study (better system balance on 8 of 8,
+    floor cost "inside the noise band") plus the operator's own 7.29 PR check.
+    Then it met a NINTH starting state, their 2026-08-13 PR, and on that one it
+    is catastrophic. Same code, same config, same day, only this knob differs:
 
-    The value is pinned so a config edit that silently reverts it fails here
-    rather than quietly returning the plan to the unbalanced engine."""
+        7.29 PR   cap 0 -> 8 : worst week 19,630 -> 23,235   density 116.8 -> 102.2   GOOD
+        8.13 PR   cap 0 -> 8 : worst week 23,259 ->  4,578   density 103.7 -> 124.2   BAD
+                               and 0 -> 1 weeks past the relief ceiling
+
+    An 80% collapse of the leanest harvest week, plus a ceiling breach, on the
+    operator's hardest business rule. The system-balance gain IS robust
+    (overshoot improves on both PRs, as the study found) — it is the FLOOR
+    effect that is high-variance, and "inside the noise band" turned out to
+    mean inside the noise OF THE EIGHT STATES SAMPLED, not small. A wide
+    distribution sampled eight times reads as noise.
+
+    So this is not a default. If the balance gain is wanted on a given month,
+    run that PR both ways and compare — it costs forty seconds.
+
+    The pin is kept (not deleted) so a future re-adoption has to come here and
+    face the counter-evidence first."""
     import os
     from forecast.config_io import load_control
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    assert load_control(os.path.join(root, "config")).cap_repair_budget == 8
+    assert load_control(os.path.join(root, "config")).cap_repair_budget == 0
 
 
 def test_zero_still_means_off():
