@@ -278,15 +278,27 @@ def tune_method(method, input_path, config_dir, scenario_dir, *,
     inert and selection is emphasis-score only (the pre-2026-08-12 behaviour).
 
     Returns {method, plan, status, winner_overrides, probe, variants,
-    floor_guard}:
+    ceiling_guard, floor_guard}:
       status 'tuned'        winner_overrides = the method's best knob set
                             (its pins INCLUDED — apply as-is / promote as-is)
              'stock-only'   nothing to tune; competes at stock
              'gate-bound'   hard-gate failure no probed knob fixes
              'search-failed' no search variant conserved (engine refused all)
+      ceiling_guard  'applied' (the winner never breaches the relief ceiling)
+                     | 'stood-down' (NO candidate stayed inside it, so the
+                     winner is emphasis-best and breaches it) | 'off' (no
+                     search ran)
       floor_guard  'off' (no baseline given) | 'applied' (the winner came from
                    the no-regression pool) | 'stood-down' (nothing held the
                    floor — the winner is emphasis-best and REGRESSES it)
+
+    Both guard fields are REPORTING only — `pick_winner` owns the decision.
+    They are derived here from the same pools it uses, in the same order
+    (ceiling, then floor on what the ceiling left), so a caller can never be
+    told a guard held when the decision stood it down. A guard that stands
+    down is the one thing about a tuned winner an operator must not have to
+    infer, so callers are expected to surface these (the app's per-method
+    summary and tools/run_tuned_tournament.py both do).
     """
     from . import optimize
     if (method.knob_space or method.knob_grid) and method.engine != "controller":
@@ -300,7 +312,8 @@ def tune_method(method, input_path, config_dir, scenario_dir, *,
     plan = plan_for(list(stock_hard_fails), method.knob_space)
     out = {"method": method.key, "plan": plan, "status": plan,
            "winner_overrides": None, "probe": None, "variants": [],
-           "floor_guard": "off", "stock_min_week": stock_min_week}
+           "ceiling_guard": "off", "floor_guard": "off",
+           "stock_min_week": stock_min_week}
     if plan in ("gate-bound", "stock-only"):
         return out
 
@@ -329,10 +342,18 @@ def tune_method(method, input_path, config_dir, scenario_dir, *,
     if best is None:
         out["status"] = "search-failed"
         return out
+    # Guard REPORT, derived from pick_winner's own pools in pick_winner's own
+    # order. Computing the floor against the conserving set (rather than what
+    # the ceiling left) could report 'applied' for a decision that actually
+    # stood the floor guard down.
+    _ok = [v for v in results if v.conservation_ok]
+    _pool = [v for v in _ok if variant_hard_ok(v) is True] or _ok
+    _ceil = ceiling_eligible(_pool)
+    out["ceiling_guard"] = "applied" if _ceil else "stood-down"
+    _pool = _ceil or _pool
     if stock_min_week is not None:
-        out["floor_guard"] = ("applied" if floor_eligible(
-            [v for v in results if v.conservation_ok], stock_min_week)
-            else "stood-down")
+        out["floor_guard"] = ("applied" if floor_eligible(_pool, stock_min_week)
+                              else "stood-down")
     out["status"] = "tuned"
     out["winner_overrides"] = dict(best.overrides)
     out["winner_label"] = best.label

@@ -4279,13 +4279,32 @@ the floor nine times. Gate 3 is deliberately soft — near full utilisation
 every plan misses it sometimes, and a gate that always FAILs teaches you to
 ignore it — so use it to **compare** candidates, not to accept or reject one.
 
-**The tuned tournament cannot sell the floor to buy a better score.** The
-emphasis score has no floor term (its harvest components are a variability CV
-and an over-the-limit count), so on the 7.29 PR the knob search once chose
-settings that cut the plain controller's worst week 20,526 → 16,185 fish.
-A tuned winner is now picked only from candidates whose worst harvest week is
-**at least as good as that method's own un-tuned run**; if none is, the search
-still returns its best and says so, so you can judge the trade yourself.
+**A knob search cannot sell a rule to buy a better score.** The emphasis score
+is not a safe place to keep a constraint, and twice it was measured failing to
+hold one — so two guards now sit ABOVE the score, applied in this order and
+independent of which emphasis you pick:
+
+1. **The relief ceiling.** The weekly processing limit is represented in the
+   objective by exactly one term, and the shipped *Product quality* preset
+   weights that term **0** — so under it nothing, objective or gate, could see
+   a breach. Across 717 measured plans its winners planned 82-83k-fish weeks on
+   4 of 8 starting states: ~50% over the limit, ~37% over the ceiling the
+   config itself calls never legal. A winner must now breach it in **zero**
+   weeks.
+2. **The contract floor.** The score has no floor term at all (its harvest
+   components are a variability CV and an over-the-limit count; measured
+   correlation between the worst week and the score: −0.03). On the 7.29 PR the
+   search once chose settings that cut the plain controller's worst week
+   20,526 → 16,185 fish. A winner's worst harvest week must now be **at least
+   as good as that method's own un-tuned run**.
+
+The ceiling goes first because it is the harder rule: a week over the ceiling
+cannot be executed at all, while a lean week is a shortfall. Neither guard ever
+empties the field — if nothing clears one it **stands down**, and the tool says
+which one did, so the trade is yours to judge rather than the tool's to hide.
+The same two rules guard **Adopt** and **Promote** on this page, which are the
+other two ways a plan reaches your config: there they do not exclude, they
+require you to acknowledge the finding by name, and it is saved alongside.
 
 **Which weeks each gate judges.** Gates 2, 3 and 5 judge the **planner's**
 weeks only: weeks you scripted yourself in the manual override window are
@@ -5515,7 +5534,15 @@ def _optimizer():
         "close to their limits AND flat (no lumps, no breaches), with feed and "
         "handling minimized — gated on conservation. The transfer/density trade "
         "is real (relieving density adds transfers), so you pick the emphasis; "
-        "nothing is auto-decided. Conservation-failing variants are rejected."
+        "nothing is auto-decided. Conservation-failing variants are rejected. "
+        "The winner is **not** whatever scores best: three emphasis-independent "
+        "guards run first — never an empty harvest week, never a week above the "
+        "relief ceiling, and never a worse leanest week than the baseline "
+        "config. They exist because the score itself is blind to those "
+        "(the floor has no term at all, and the relief band is protected by a "
+        "single weight that one shipped preset sets to 0). If a guard excludes "
+        "the top-scoring variant — or has to stand down because nothing cleared "
+        "it — the recommendation below says so by name, in amber."
     )
 
     _cfg_ok = _config_ready() and _scenario_ready()
@@ -6641,10 +6668,10 @@ def _adoption_refusal(cand, acknowledged: bool):
     br = (cand or {}).get("breaches") or []
     if not _ana.adoption_blocked(br, acknowledged):
         return None
-    return ("**Nothing was saved.** This plan breaks "
-            f"{len(br)} hard rule(s): " + "; ".join(br)
-            + ". Tick the acknowledgement box to save it anyway — the breach "
-              "is recorded with it.")
+    return ("**Nothing was saved.** This plan fails "
+            f"{len(br)} of the adoption checks: " + "; ".join(br)
+            + ". Tick the acknowledgement box to save it anyway — what you "
+              "accepted is recorded with it.")
 
 
 def _adoption_gate(cand, sig: str, slot: str, box=None) -> bool:
@@ -6669,14 +6696,23 @@ def _adoption_gate(cand, sig: str, slot: str, box=None) -> bool:
         return True
     import hashlib as _hl
     box.error(
-        f"⛔ **{cand['label']} breaks {len(br)} hard rule(s)** — the tuned "
-        f"tournament and Optimize both refuse to crown a plan like this:\n\n"
+        f"⛔ **{cand['label']} fails {len(br)} adoption check(s)** — these are "
+        f"the same winner-eligibility rules the tuned tournament and Optimize "
+        f"apply before they will crown a plan, so neither of them would pick "
+        f"this one:\n\n"
         + "\n".join(f"- {b}" for b in br)
-        + "\n\nYou can still adopt or promote it on your own judgement; the "
-          "breach is then recorded with what you save.")
+        + "\n\nThe list is wider than the checklist above on purpose. It "
+          "covers the two HARD gates (conservation, never an empty week), the "
+          "**relief ceiling** — whose checklist gate is SOFT, so a breach only "
+          "ranks a plan down and would otherwise be adopted in silence — and "
+          "the contract floor against this method's own un-tuned run. An entry "
+          "reading *never measured* is not a breach but an UNKNOWN, and an "
+          "unknown is never read as a pass.\n\n"
+          "You can still adopt or promote it on your own judgement; what you "
+          "accepted is then recorded with what you save.")
     _k = _hl.md5(f"{sig}|{slot}|{cand['label']}".encode()).hexdigest()[:10]
     return bool(box.checkbox(
-        f"I have read the {len(br)} breach(es) above and accept them for "
+        f"I have read the {len(br)} finding(s) above and accept them for "
         f"**{cand['label']}**", key=f"ana_ack_{_k}"))
 
 
@@ -6951,6 +6987,12 @@ def _analyze():
                     "overrides": (dict(tr["winner_overrides"])
                                   if tr["winner_overrides"] else None),
                     "stock_hard_fails": list(_fails),
+                    # A guard that STOOD DOWN means the winner breaks the rule
+                    # it protects. The headless tournament already printed
+                    # this; the app dropped it, so the summary showed a tuned
+                    # winner with no hint that a rule had to be waived.
+                    "ceiling_guard": tr.get("ceiling_guard"),
+                    "floor_guard": tr.get("floor_guard"),
                     "n_variants": len(tr["variants"]),
                     "n_cache_reused": sum(
                         1 for v in tr["variants"]
@@ -7333,6 +7375,10 @@ def _analyze():
                 _pins = (_METHODS[_tk].overrides if _tk in _METHODS else {})
                 _chosen = {k: v for k, v in (_te.get("overrides") or {}).items()
                            if _pins.get(k) != v}
+                _waived = [n for n, _g in
+                           (("relief ceiling", _te.get("ceiling_guard")),
+                            ("contract floor", _te.get("floor_guard")))
+                           if _g == "stood-down"]
                 _tmrows.append({
                     "Method": (_METHODS[_tk].label if _tk in _METHODS else _tk),
                     "Outcome": _TM_STATUS.get(_te["status"], _te["status"]),
@@ -7341,15 +7387,25 @@ def _analyze():
                                       or "—"),
                     "Hard fails at stock": ", ".join(
                         _te.get("stock_hard_fails") or []) or "none",
+                    "Guard stood down": ("⚠ " + ", ".join(_waived)
+                                         if _waived else "—"),
                     "Variants run": _te.get("n_variants", 0),
                     "From cache": _te.get("n_cache_reused", 0),
                 })
             st.dataframe(pd.DataFrame(_tmrows), hide_index=True,
                          use_container_width=True)
-            st.caption("Winning knobs exclude the method's own pinned "
-                       "overrides (its identity). 'From cache' = search runs "
-                       "reused from earlier searches on the same PR + config — "
-                       "re-running the tournament is cheap.")
+            st.caption(
+                "Winning knobs exclude the method's own pinned overrides (its "
+                "identity). **Guard stood down** = no candidate in that "
+                "method's search cleared that rule, so the guard was dropped "
+                "rather than return nothing — the winner on that row therefore "
+                "**breaks it**: 'relief ceiling' means it plans a week the "
+                "plant cannot take, 'contract floor' means its leanest week is "
+                "worse than not tuning at all. Treat those rows as findings to "
+                "judge, not results to adopt. '—' means every guard held (or "
+                "no search ran). 'From cache' = search runs reused from earlier "
+                "searches on the same PR + config — re-running the tournament "
+                "is cheap.")
 
     # ---- Full candidate table ----
     st.subheader("All candidates")

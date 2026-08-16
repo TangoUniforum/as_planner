@@ -235,12 +235,17 @@ def main(argv=None) -> int:
                        if _opt._overrides_key(v.overrides) in pre_keys)
         msum = {"status": tr["status"], "plan": tr["plan"],
                 "stock_hard_fails": fails,
+                "ceiling_guard": tr.get("ceiling_guard"),
                 "floor_guard": tr.get("floor_guard"),
                 "stock_min_week": tr.get("stock_min_week"),
                 "n_variants": len(tr["variants"]), "n_cache_reused": n_reused,
                 "winner_overrides": tr["winner_overrides"],
                 "stock_gates": {x["key"]: x["status"] for x in g["gates"]}}
         summary["methods"][m.key] = msum
+        if tr.get("ceiling_guard") == "stood-down":
+            print("   [ceiling guard] NO candidate stayed inside the relief "
+                  "ceiling — the winner below plans a week the plant cannot "
+                  "take; review before promoting")
         if tr.get("floor_guard") == "stood-down":
             print(f"   [floor guard] NO candidate held the stock worst week "
                   f"({tr.get('stock_min_week'):,.0f} fish) — the winner below "
