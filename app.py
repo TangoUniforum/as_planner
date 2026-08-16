@@ -663,7 +663,8 @@ _CONTROL_HELP = {
         "fraction."
         + _VALIDATED,
     "density_welfare_threshold_kg_m3":
-        "The fish-welfare crowding line, BELOW the hard density cap (95): "
+        "The fish-welfare crowding line, BELOW each tank's hard density cap "
+        "(Configure → Facility): "
         "fish reared above it count as 'crowded' in the quality reports (Run "
         "KPI, Compare 'Best welfare', Optimize 'Product quality'). "
         "Reporting/scoring only — it never changes the plan. Unit: kg/m3.",
@@ -3095,8 +3096,21 @@ def _manual_window_editor(uploaded):
                             f"`{_proj_err}`"
                         )
                     elif not _breach_weeks:
-                        st.caption("✓ Every tank, system and the facility are "
-                                   "within limits across this window.")
+                        # Say WHAT was checked. The 6N depuration tanks and
+                        # systems are excluded from all three per-tank/per-
+                        # system checks here (harvest-size fish held dense and
+                        # off-feed is expected) — but 6N's own biomass cap IS
+                        # enforced on a real run's SystemLimitsAudit sheet, so
+                        # a bare "everything is within limits" would promise
+                        # more than this panel looked at.
+                        st.caption(
+                            "✓ Every grow-out tank and system, and the "
+                            "whole-facility biomass total, are within limits "
+                            "across this window. The 6N depuration tanks are "
+                            "not checked here (dense, off-feed fish awaiting "
+                            "harvest is normal); their system biomass cap is "
+                            "checked on the SystemLimitsAudit sheet after a "
+                            "run.")
                     else:
                         # Week picker: 'All weeks' collapses each distinct breach to
                         # its worst week; a specific week shows everything wrong then.
@@ -3887,7 +3901,11 @@ def _hiw_knobs():
     vals = {"min_hv": 30_000.0, "max_hv": 55_000.0, "relief_pct": 0.10,
             "min_wt": 3_500.0, "bio_cap": 3_800_000.0, "feed_cap": 34_000.0,
             "moves": 15, "min_tank": 7_000.0, "band": 0.005,
-            "prod_start": "2028-01-01", "n_entry_tanks": 2}
+            "prod_start": "2028-01-01", "n_entry_tanks": 2,
+            # The harvest guide's follow band, and the 6N tanks' own density
+            # cap — both quoted in the prose below, so both are read, never
+            # typed (the same contract `_ctl_help` follows).
+            "guide_band": 0.05, "sixn_density": 95.0}
     try:
         from forecast.config_io import load_control
         c = load_control(CONFIG_DIR)
@@ -3908,7 +3926,19 @@ def _hiw_knobs():
                            else vals["prod_start"]),
             "n_entry_tanks": int(c.tran_og_default_tanks
                                  or vals["n_entry_tanks"]),
+            "guide_band": float(getattr(c, "hybrid_follow_band", 0.0)
+                                or vals["guide_band"]),
         })
+    except Exception:  # noqa: BLE001 — static page must render regardless
+        pass
+    try:
+        # The 6N fill cap is a per-TANK facility input, not a Control knob.
+        from forecast.config_io import load_facility_config
+        from forecast.sixn import SIXN_ALL_TANKS
+        _d = [t.max_density_kg_m3 for t in load_facility_config(CONFIG_DIR).tanks
+              if t.tank_id in SIXN_ALL_TANKS and t.max_density_kg_m3]
+        if _d:
+            vals["sixn_density"] = float(max(_d))
     except Exception:  # noqa: BLE001 — static page must render regardless
         pass
     # The never-exceed ceiling is DERIVED, never stored: limit × (1 + relief).
@@ -4110,11 +4140,15 @@ and the failure message says what to do about it: **ramp harvests up
 earlier**. A plan that pins to relief every week isn't using a buffer, it's
 hiding a restructuring problem.
 
-A whole-horizon harvest envelope (the Global engine's long view) is computed
-first and fed to the weekly controller as a **target band** (±5%): it tells
-the controller to harvest *less* in fat weeks so those fish still exist for
-lean ones — the one thing a week-by-week planner cannot see. The smoother
-additionally spreads harvest early so weeks are flat, not dump-then-nothing.
+When the **harvest guide** is on (Configure → Control, `hybrid_follow` — on by
+default), a whole-horizon harvest envelope (the Global engine's long view) is
+computed first and fed to the weekly controller as a **target band**
+(±{k['guide_band'] * 100:.0f}%): it tells the controller to harvest *less* in
+fat weeks so those fish still exist for lean ones — the one thing a week-by-week
+planner cannot see. Switch the guide off and this paragraph does not apply:
+that is the plain reactive controller, which leaves empty harvest weeks. The
+smoother additionally spreads harvest early so weeks are flat, not
+dump-then-nothing.
 
 **What it may never do.** Harvest a fish under **{k['min_wt']:,.0f} g** (the
 sales gate); harvest from entry-tier tanks (R5); harvest a production tank
@@ -4139,7 +4173,8 @@ a **3-pair fallow rotation** (pairs 61/67, 63/69, 65/71, fixed order
 harvested and the resting pair refills from the oldest mature fish.
 
 **The 6N-specific rules:**
-* **Sister-first fills** — no 6N tank is stocked past **95 kg/m³**; a fill
+* **Sister-first fills** — no 6N tank is stocked past its own density cap
+  (**{k['sixn_density']:.0f} kg/m³** on this facility); a fill
   splits main-first across the pair and overflows into the idle sister. When
   the whole pair is at cap, the surplus *waits in grow-out* for the next thin
   pair (level-drains: no pair accumulates a monster dump).
@@ -4155,8 +4190,9 @@ After **{k['prod_start']}** the station switches to production mode: the main
 tanks become ordinary grow-out, and harvest-bound fish instead go off-feed
 *in place* for the starvation period before removal.
 
-**What it may never do.** Skip or shorten the hold, stock a 6N tank past 95
-kg/m³, mix batches within one tank, or transfer fish back out of depuration.
+**What it may never do.** Skip or shorten the hold, stock a 6N tank past its
+density cap ({k['sixn_density']:.0f} kg/m³), mix batches within one tank, or
+transfer fish back out of depuration.
 
 **What binds it.** The depuration-hold audit (every run reports what fraction
 of harvest left 6N early — must be the PR-hydrated exemptions only), the
@@ -4194,7 +4230,12 @@ deferring their optional quality passes, and route all harvest through 6N.
   envelope → per-batch share per system → tank placement.
 * **Global — CP-SAT optimal** — the same front end, but the grow-out tank
   layout is re-solved week by week with a constraint solver. Slowest by far;
-  tightest, most evenly balanced layouts.
+  tightest, most evenly balanced layouts. Its advantage is **not foresight** —
+  it plans one week at a time, seeded by last week's occupancy, exactly as
+  myopic as the controller — but an explicit min-max *balance* term the
+  controller has no equivalent of. Same-week tank swaps are only *softly*
+  penalised in that objective, so it buys them freely: expect a
+  transfer-heavy plan.
 
 Both Global methods conserve fish exactly and pass the tank-continuity audit —
 that part is real. **What they do not do:**
@@ -6280,9 +6321,12 @@ def _compare_and_choose():
         "forecast uses from then on. Each plan is internally consistent (0-drift, "
         "tank continuity) — you choose a whole plan, not a splice. Four badges "
         "(conserves · fully placed · no empty week · under cap) ride on every "
-        "method, so a low-transfer plan can't hide a contract breach. They are "
-        "not the whole rulebook, though — see the legend below before picking a "
-        "**Global** method.")
+        "method, so a low-transfer plan can't hide a lost batch or a harvest "
+        "crater. They are a floor, not the whole rulebook: they say nothing "
+        "about the handling budget, the tier rules or the depuration hold, and "
+        "the empty-week badge catches craters rather than the weekly contract "
+        "floor itself. Read the legend below before picking a **Global** "
+        "method, and Analyze's checklist for the rest.")
 
     _cfg_ok = _config_ready() and _scenario_ready()
     _pr_ok = pr is not None and pr["ok"]
@@ -6440,6 +6484,18 @@ def _compare_and_choose():
 
     # ---- Grading-lens cards: who wins each (conservation-passers only) ----
     st.subheader("Grading lenses — who wins each")
+    # Values the legend quotes are read from the SAME config the badges were
+    # computed against, at render time — the welfare line in this legend was
+    # written as "~80" and the config had been retuned to 85.
+    _lg_welfare, _lg_floor, _lg_dev = 80.0, 0.0, 0.005
+    try:
+        from forecast.config_io import load_control as _lc
+        _lcc = _lc(CONFIG_DIR)
+        _lg_welfare = float(_lcc.density_welfare_threshold_kg_m3 or 80.0)
+        _lg_floor = float(_lcc.min_harvest_per_week or 0.0)
+        _lg_dev = float(_lcc.facility_biomass_deviation_pct or 0.005)
+    except Exception:  # noqa: BLE001 — a legend must never break the page
+        pass
     with st.expander("ℹ️ What do the badges, metrics and lenses mean?"):
         st.markdown(
             "**Hard-gate badges** (✅ pass · ⚠️ flag) — the non-negotiables every "
@@ -6450,10 +6506,18 @@ def _compare_and_choose():
             "- **Fully placed** — every batch got tanks; none dropped for lack of "
             "space. ⚠️ also disqualifies from winning a lens: unplaced fish can't "
             "be crowded or moved, so every quality metric flatters the plan.\n"
-            "- **No empty week** — never a near-empty harvest week (meets the weekly "
-            "contract floor); ⚠️ = a crater week.\n"
-            "- **Under cap** — facility biomass stays within its cap plus the "
-            "designed deviation band; ⚠️ = a real overshoot.\n\n"
+            "- **No empty week** — no *crater* week. It flags a week only below "
+            f"a QUARTER of the weekly contract floor"
+            + (f" (under {0.25 * _lg_floor:,.0f} of {_lg_floor:,.0f} fish)"
+               if _lg_floor else "")
+            + ", which is deliberate: near full utilisation a plan often lands "
+            "a little under the floor, and a badge that reddened for that would "
+            "redden for everything. So ✅ here does **not** mean the floor was "
+            "met every week — that is the contract-floor gate in **Analyze**, "
+            "and it is the number to compare candidates on.\n"
+            "- **Under cap** — facility biomass stays within its cap plus its "
+            f"deviation band (±{_lg_dev * 100:.1f}%) plus a further 1% "
+            "measurement margin; ⚠️ = an overshoot past all of that.\n\n"
             "**Per-method metrics** (lower is better on all of these):\n"
             "- **peak % cap** — the single busiest *system-week's* biomass/feed "
             "load vs that system's cap. 100% = right at the cap; over 100% = a "
@@ -6471,7 +6535,8 @@ def _compare_and_choose():
             "- **reared … kg/m³ (…% crowded)** — the **product-quality** view: the "
             "biomass-weighted average density your fish were *reared at*, and the "
             "fraction of grow-out biomass that spent time **above the welfare line** "
-            "(~80 kg/m³, below the hard cap). Lower = gentler rearing = better "
+            f"(currently **{_lg_welfare:.0f} kg/m³**, set in Configure → Control, "
+            "below the hard cap). Lower = gentler rearing = better "
             "welfare / flesh quality — but usually means fewer fish / more tanks.\n\n"
             "**Grading lenses** — each card names the method that's best on one "
             "axis (fewest moves, steadiest harvest, most balanced, tightest "
