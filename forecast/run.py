@@ -361,6 +361,13 @@ def main(
     # on-target growth flows through the whole forecast. Clamped to a sane range
     # so the model can't silently assume absurd growth; a clamped batch is flagged.
     fw_calib_warns: list = []
+    # Same rewrites, kept as STRUCTURED records so they can outlive the run.
+    # The strings above scroll past in stdout and land in the ValidationLog of
+    # one workbook; a correction the model has needed every month for six
+    # months therefore looked exactly like a one-off. Persisted (below) it
+    # becomes a standing model error to fix at source. Purely additive: this
+    # list is read by nothing in the pipeline.
+    fw_calib_records: list = []
 
     def _apply_fw_calib(_b, _solved):
         _lo, _hi = control.auto_calibrate_fw_min, control.auto_calibrate_fw_max
@@ -369,11 +376,14 @@ def main(
             fw_calib_warns.append(
                 f"AUTO-FW-CALIB {_b.batch_id}: FW correction did not converge; "
                 f"kept configured {_prev:.3f}")
+            _record_fw_calib(_b, configured=_prev, applied=_prev, solved=None,
+                             clamped=False, converged=False, lo=_lo, hi=_hi)
             return
         _app = min(_hi, max(_lo, _solved))
         _b.fw_correction = _app
         _tgt = _b.tran_og_avg_wt_g or 0.0
-        if abs(_app - _solved) > 1e-6:
+        _clamped = abs(_app - _solved) > 1e-6
+        if _clamped:
             fw_calib_warns.append(
                 f"AUTO-FW-CALIB {_b.batch_id}: landing on {_tgt:.0f}g needs "
                 f"fw_correction {_solved:.3f} — CLAMPED to {_app:.3f} "
@@ -382,6 +392,29 @@ def main(
             fw_calib_warns.append(
                 f"AUTO-FW-CALIB {_b.batch_id}: fw_correction {_prev:.3f} -> "
                 f"{_app:.3f} to land pre-cull on {_tgt:.0f}g at transfer")
+        _record_fw_calib(_b, configured=_prev, applied=_app, solved=_solved,
+                         clamped=_clamped, converged=True, lo=_lo, hi=_hi)
+
+    # ONE timestamp for the whole run, not one per batch: the drift view counts
+    # distinct timestamps as runs, and a per-record clock ticking mid-loop would
+    # report a single run as a dozen.
+    from datetime import datetime as _dtc
+    _fw_calib_ts = _dtc.now().isoformat(timespec="seconds")
+
+    def _record_fw_calib(_b, **kw):
+        """Mirror one rewrite into the durable history. Never raises: a
+        diagnostic that can break a forecast run is worse than no diagnostic."""
+        try:
+            from .accuracy import calibration_record
+            fw_calib_records.append(calibration_record(
+                _b.batch_id,
+                ts=_fw_calib_ts,
+                target_wt_g=_b.tran_og_avg_wt_g or 0.0,
+                pr_closing=pr_closing,
+                source="run.main",
+                **kw))
+        except Exception:  # noqa: BLE001 — see docstring
+            pass
 
     if control.auto_calibrate_fw:
         from .biology import solve_fw_correction as _solve_fw
@@ -444,6 +477,15 @@ def main(
               f"to hit the pre-cull transfer target (Diagnostics residuals -> ~0):")
         for _w in fw_calib_warns:
             print(f"    {_w}")
+    if fw_calib_records:
+        # Durable history, beside optimize_history.jsonl / adoption_history.jsonl
+        # and gitignored like them. Root-anchored rather than CWD-relative so a
+        # run launched from anywhere still appends to the one true history.
+        from pathlib import Path as _PathC
+        from .accuracy import (append_calibration_log as _append_calib,
+                               DEFAULT_CALIB_LOG as _CALIB_LOG)
+        _append_calib(fw_calib_records,
+                      str(_PathC(__file__).resolve().parent.parent / _CALIB_LOG))
     in_flight_batches = sorted({s.batch_id for s in in_flight_states})
     print(f"  In-flight projection: {len(in_flight_states)} batch-week rows across "
           f"{len(in_flight_batches)} batches {in_flight_batches}")

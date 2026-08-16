@@ -31,3 +31,6 @@ _golden/
 _*_out.xlsx
 *_GLOBAL.xlsx
 Forecast_GLOBAL.xlsx
+
+# Forecast-vs-actuals FW calibration history (diagnostic, like the two above)
+fw_calibration_history.jsonl
