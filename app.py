@@ -4426,6 +4426,313 @@ lift a plan above one that beats it on an earlier tier.""")
 
 
 # ============================================================
+# Accuracy — forecast vs actuals
+# ============================================================
+
+def _acc_fmt(v, suffix="%", nd=1):
+    """None-safe number formatting: a missing measurement prints as '—', never
+    as 0.0 (a zero error and an unmeasurable one are opposite findings)."""
+    if v is None:
+        return "—"
+    return f"{v:,.{nd}f}{suffix}"
+
+
+def _forecast_vs_actuals():
+    """Grade a past forecast against the ProductionReport that followed it.
+
+    The only mode that measures the BIOLOGY. Everything else in this app
+    measures the plan; 700 tests prove the bookkeeping. This answers the
+    question none of them can: how far off is the growth model.
+    """
+    from forecast import accuracy as _acc
+
+    st.header("🎯 Accuracy — forecast vs actuals")
+    st.caption(
+        "Grades a forecast you ran **earlier** against the ProductionReport "
+        "that came **after** it. Both files are read only — nothing is run, "
+        "nothing is saved, no config is touched, and this can never change a "
+        "plan. It measures the **growth model**, which no other mode does. "
+        "What it CANNOT see: harvest execution (a PR shows what is in the "
+        "water, so fish already sold are simply absent), freshwater (it is not "
+        "in either file), and any batch that appears in only one of the two — "
+        "those are listed as coverage instead of being averaged in.")
+
+    st.subheader("1. The forecast being graded")
+    prev = st.file_uploader(
+        "A forecast output workbook you produced earlier (.xlsm / .xlsx)",
+        type=["xlsm", "xlsx"],
+        help="Any workbook this tool wrote — it needs the BatchLocations "
+             "sheet. Pick one anchored BEFORE the ProductionReport below; the "
+             "gap between the two is the horizon being graded.",
+        key="acc_prev_fc",
+    )
+
+    st.subheader("2. The actuals")
+    _pr_ok = pr is not None and pr["ok"]
+    alt = st.file_uploader(
+        "Optional — grade against a different ProductionReport",
+        type=["xlsm", "xlsx"],
+        help="Leave empty to use the ProductionReport already loaded in the "
+             "sidebar, which is the normal case: today's PR IS the actuals.",
+        key="acc_alt_pr",
+    )
+    if alt is not None:
+        st.caption(f"Using the uploaded **{alt.name}** as actuals.")
+    elif _pr_ok:
+        st.caption(f"Using the sidebar ProductionReport — closing "
+                   f"**{pr['closing']:%Y-%m-%d}**.")
+    else:
+        st.info("Upload a **ProductionReport** in the sidebar (or above) to "
+                "supply the actuals.")
+
+    if prev is None:
+        st.info("Upload a previous forecast workbook above to grade it. "
+                "Nothing else in the app is affected until you do.")
+        _acc_calibration_section()
+        return
+    if alt is None and not _pr_ok:
+        _acc_calibration_section()
+        return
+
+    # Recompute only when either input changes — a report computed from other
+    # files must never be shown as if it described these ones.
+    import hashlib
+    act_bytes = alt.getvalue() if alt is not None else uploaded.getvalue()
+    sig = hashlib.md5(prev.getvalue()).hexdigest() + "|" + \
+        hashlib.md5(act_bytes).hexdigest()
+    cached = st.session_state.get("_acc_report")
+    if not cached or cached.get("sig") != sig:
+        try:
+            rep = _acc.compare(io.BytesIO(prev.getvalue()),
+                               io.BytesIO(act_bytes))
+        except Exception as exc:  # noqa: BLE001 — a bad pair must not kill the page
+            st.error(f"Could not grade these two files: {exc}")
+            _acc_calibration_section()
+            return
+        st.session_state["_acc_report"] = {"sig": sig, "rep": rep}
+        cached = st.session_state["_acc_report"]
+    rep = cached["rep"]
+
+    _acc_render(rep)
+    _acc_calibration_section()
+
+
+def _acc_render(rep):
+    """The report itself. Leads with the number that answers 'how much should
+    I trust this forecast?' — typical and worst batch weight error, over the
+    elapsed time they accumulated across."""
+    from forecast import accuracy as _acc
+    h = _acc.headline(rep)
+
+    st.divider()
+    st.subheader("How much should I trust this forecast?")
+    if h["batches_graded"] == 0:
+        st.warning(
+            "No batch appears in **both** files, so there is nothing to "
+            "grade. That usually means the two files are from different "
+            "periods — check the dates below.")
+    else:
+        c = st.columns(4)
+        c[0].metric(
+            "Typical weight error",
+            _acc_fmt(h["typical_wt_err_pct"]),
+            help="Median across graded batches of |predicted − actual| mean "
+                 "weight, as a % of actual. THE headline: the error you "
+                 "should expect on a typical batch over the elapsed time "
+                 "shown. Read it next to that horizon — an error means "
+                 "nothing without the time it accumulated over.")
+        c[1].metric(
+            "Worst batch",
+            _acc_fmt(h["worst_wt_err_pct"]),
+            help="The largest single-batch weight error. A plan difference "
+                 "smaller than this is inside the model's own noise for at "
+                 "least one batch.")
+        c[2].metric(
+            "Signed median", _acc_fmt(h["signed_median_pct"]),
+            help="The same errors WITH their sign. Positive = the model "
+                 "predicted heavier fish than reality (runs hot). This is the "
+                 "number that matters most: a one-signed error can be "
+                 "corrected at source, while scatter both ways is noise the "
+                 "monthly re-anchor already absorbs.")
+        c[3].metric(
+            "Elapsed", f"{rep.elapsed_weeks:g} wk",
+            help="Time between the forecast's anchor and the actuals' closing "
+                 "date — the horizon these errors accumulated across.")
+
+        v = rep.bias.get("verdict", "")
+        if "Systematic" in v:
+            st.warning(f"**{v}**")
+        else:
+            st.info(f"**{v}**")
+
+    st.caption(
+        f"Forecast anchored **{rep.forecast_anchor:%Y-%m-%d}** → actuals "
+        f"closing **{rep.actual_closing:%Y-%m-%d}** "
+        f"({rep.elapsed_days} days). Prediction read "
+        + ("by interpolating between weeks "
+           f"**{'** and **'.join(rep.basis.get('weeks', []))}** so it lands on "
+           "the exact closing date."
+           if rep.basis.get("method") == "interpolated"
+           else f"from the single nearest weekly snapshot "
+                f"(**{rep.aligned_week}**, "
+                f"{rep.basis.get('offset_days', 0):+d} days off)."))
+
+    for n in rep.notes:
+        st.warning(f"⚠ {n}")
+
+    # ---- batch level: the biology ------------------------------------------
+    st.divider()
+    st.subheader("Per batch — the biology")
+    st.caption(
+        "**This is the honest model-error view.** Fish are summed per batch "
+        "over whatever tanks they ended up in, so placing fish differently "
+        "from the plan does not show up here as a bad prediction. **Weight** "
+        "is the growth-model score. **Count** and **biomass** also move with "
+        "harvest, culling, grading and transfers, so they mix model error "
+        "with execution — do not read them as pure model error.")
+    graded = rep.graded
+    if graded:
+        rows = [{
+            "Batch": b.batch_id,
+            "Pred wt (g)": round(b.pred_wt_g),
+            "Actual wt (g)": round(b.act_wt_g),
+            "Weight err %": round(b.wt_err_pct, 2) if b.wt_err_pct is not None else None,
+            "Pred count": round(b.pred_count),
+            "Actual count": round(b.act_count),
+            "Count err %": round(b.count_err_pct, 2) if b.count_err_pct is not None else None,
+            "Pred biomass (kg)": round(b.pred_biomass_kg),
+            "Actual biomass (kg)": round(b.act_biomass_kg),
+            "Biomass err %": round(b.biomass_err_pct, 2) if b.biomass_err_pct is not None else None,
+        } for b in graded]
+        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+
+        fig = px.bar(
+            pd.DataFrame([{"Batch": b.batch_id, "Weight error %": b.wt_err_pct}
+                          for b in graded if b.wt_err_pct is not None]),
+            x="Batch", y="Weight error %",
+            title="Weight error by batch (positive = model predicted heavier "
+                  "than reality)")
+        fig.add_hline(y=0, line_width=1)
+        # use_container_width, not width=: st.plotly_chart has no `width`
+        # parameter, so it would be swallowed into **kwargs and silently do
+        # nothing. This matches the convention used by every other chart here.
+        st.plotly_chart(fig, use_container_width=True)
+
+        f = rep.facility
+        st.markdown("**Facility totals** (graded batches only)")
+        fc = st.columns(3)
+        fc[0].metric("Mean weight", _acc_fmt(f["wt_err_pct"]),
+                     help="Facility mean weight: predicted vs actual, as a %. "
+                          "Signed.")
+        fc[1].metric("Total count", _acc_fmt(f["count_err_pct"]),
+                     help="Includes harvest timing, not just model error.")
+        fc[2].metric("Total biomass", _acc_fmt(f["biomass_err_pct"]),
+                     help="Count error and weight error combined.")
+
+    cov = rep.coverage
+    if cov.get("batches_forecast_only") or cov.get("batches_actual_only"):
+        st.caption(
+            f"**Not graded** — in one file only: forecast-only "
+            f"{cov.get('batches_forecast_only') or '—'}, actuals-only "
+            f"{cov.get('batches_actual_only') or '—'}. A forecast-only batch "
+            f"is usually one that was harvested out; an actuals-only batch is "
+            f"one that entered after this forecast was made. Neither is "
+            f"evidence about the growth model, so neither is averaged in.")
+
+    # ---- alignment sensitivity ---------------------------------------------
+    s = rep.sensitivity or {}
+    if s.get("graded"):
+        with st.expander("📅 How much does the date alignment matter?"):
+            st.caption(
+                "The forecast only produces a value once a week, so grading "
+                "against the wrong week charges the calendar gap to the "
+                "model. The headline above avoids that by reading the exact "
+                "closing date. This shows what the neighbouring weekly "
+                "snapshots would have said against the same actuals — the "
+                "spread is how much the question 'which week?' is worth.")
+            srows = [{"Forecast week": d["week"],
+                      "Week ends": f"{d['week_end']:%Y-%m-%d}",
+                      "Typical weight error %": round(d["typical_wt_err_pct"], 2)}
+                     for k in ("previous", "graded", "next")
+                     for d in [s.get(k)] if d]
+            st.dataframe(pd.DataFrame(srows), width="stretch", hide_index=True)
+
+    # ---- tank level: adherence, NOT model error ----------------------------
+    st.divider()
+    st.subheader("Per tank — plan adherence (NOT model error)")
+    st.caption(
+        "**Read this as a different question entirely.** It asks whether the "
+        "fish ended up where the plan put them. A mismatch is an operator "
+        "decision — or a plan you improved on — and is **not** evidence that "
+        "the growth model is wrong. Unlike the biology view above, this is a "
+        f"single weekly snapshot (**{rep.aligned_week}**, "
+        f"{rep.alignment_offset_days:+d} days from the closing date), because "
+        "tank occupancy is discrete and cannot be interpolated.")
+    adh = cov.get("tank_adherence_pct")
+    st.metric("Tank cells matching the plan", _acc_fmt(adh),
+              help="Share of (batch, tank) cells present in BOTH the plan and "
+                   "the actuals. Low is not bad in itself — it means the "
+                   "facility was run differently from this particular plan.")
+    if rep.tanks:
+        with st.expander("Per-(batch, tank) detail"):
+            st.dataframe(pd.DataFrame([{
+                "Batch": t.batch_id, "Tank": t.tank_id, "Where": t.present,
+                "Pred count": round(t.pred_count),
+                "Actual count": round(t.act_count),
+                "Diff": round(t.count_err),
+            } for t in rep.tanks]), width="stretch", hide_index=True)
+
+    st.divider()
+    with st.expander("⚠️ What this measurement cannot tell you", expanded=False):
+        for lim in rep.limits:
+            st.markdown(f"- {lim}")
+
+
+def _acc_calibration_section():
+    """Freshwater calibration drift — the model error the tool already
+    measures on every run and used to throw away."""
+    from forecast import accuracy as _acc
+
+    st.divider()
+    st.subheader("🧪 Freshwater calibration history")
+    st.caption(
+        "Every run with FW auto-calibration on back-solves each freshwater "
+        "batch's `fw_correction` — the factor that makes the model land on "
+        "the transfer target. A value of 0.77 means the model grew that batch "
+        "**23% faster than reality**. Those rewrites used to scroll past in "
+        "the run log and were never kept, so a correction needed every month "
+        "for six months looked exactly like a one-off. They are now appended "
+        "to `fw_calibration_history.jsonl` beside the optimize and adoption "
+        "logs. A batch flagged **persistent** below has needed the same "
+        "correction repeatedly — that is a standing model error to fix in the "
+        "biology config, not to re-correct every month. This is freshwater "
+        "only; it says nothing about seawater growth.")
+    recs = _acc.read_calibration_log(str(_ROOT / _acc.DEFAULT_CALIB_LOG))
+    if not recs:
+        st.info("No calibration history yet — it starts filling on your next "
+                "run with FW auto-calibration on.")
+        return
+    drift = _acc.calibration_drift(recs)
+    st.caption(f"{len(recs):,} rewrites recorded across "
+               f"{len({r.get('ts') for r in recs})} run(s).")
+    st.dataframe(pd.DataFrame([{
+        "Batch": d["batch"], "Runs": d["runs"],
+        "Configured": d["median_configured"],
+        "Applied (median)": d["median_applied"],
+        "Gap": d["gap"], "Spread": d["spread"],
+        "Clamped runs": d["clamped_runs"],
+        "Persistent?": "⚠ yes" if d["persistent"] else "",
+    } for d in drift]), width="stretch", hide_index=True)
+    persistent = [d["batch"] for d in drift if d["persistent"]]
+    if persistent:
+        st.warning(
+            f"⚠ Standing model error on {', '.join(persistent)} — the applied "
+            f"correction has sat away from the configured value across "
+            f"several runs. Fix it in the biology config rather than letting "
+            f"auto-calibration re-discover it every month.")
+
+
+# ============================================================
 # Page setup
 # ============================================================
 
@@ -4487,7 +4794,8 @@ with st.sidebar:
         "Mode",
         ["Configure (models & control)", "Run forecast",
          "Analyze (find my best plan)", "Compare & Choose (all methods)",
-         "Optimize (multi-objective)", "How it works (the rules)"],
+         "Optimize (multi-objective)", "Accuracy (forecast vs actuals)",
+         "How it works (the rules)"],
         captions=[
             "Set up once — biology curves, tanks, batches, per-week limits, "
             "control knobs, harvest targets and prices.",
@@ -4499,6 +4807,8 @@ with st.sidebar:
             "becomes the report.",
             "Sweep control knobs on ONE engine and rank the settings on an "
             "objective you choose.",
+            "“How much should I trust this?” — grades a past forecast against "
+            "the PR that followed it.",
             "The rulebook — what each layer decides, what it may never do, "
             "and the honest list of known limits.",
         ],
@@ -4555,6 +4865,14 @@ with st.sidebar:
             "knob *combinations* a one-knob-at-a-time sweep can't. It does not "
             "tune the Global engines — those have no tunable knobs (see "
             "Analyze's run-budget table).\n"
+            "- **Accuracy (forecast vs actuals)** — the only mode that grades "
+            "the *biology* rather than the plan. Upload a forecast workbook "
+            "you produced earlier plus the ProductionReport that came after "
+            "it, and it reports how far each batch's predicted weight and "
+            "count missed reality, and whether the misses lean one way. Costs "
+            "nothing to run and changes nothing: it reads two files. It cannot "
+            "grade harvest execution or freshwater — see the mode's own "
+            "limits list.\n"
             "- **How it works (the rules)** — the plain-language rulebook: "
             "every pipeline layer (inputs → manual window → freshwater → entry "
             "→ placement → harvest → depuration → audits), what each decides, "
@@ -7586,6 +7904,10 @@ def _analyze():
 
 if app_mode.startswith("Analyze"):
     _analyze()
+    st.stop()
+
+if app_mode.startswith("Accuracy"):
+    _forecast_vs_actuals()
     st.stop()
 
 if app_mode.startswith("Compare"):
