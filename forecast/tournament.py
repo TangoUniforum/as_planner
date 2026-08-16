@@ -200,6 +200,34 @@ def ceiling_eligible(variants: list) -> list:
     return out
 
 
+def guard_report(variants: list, stock_min_week=None) -> dict:
+    """Which winner-eligibility guards HELD and which had to stand down.
+
+    Reporting only — `pick_winner` makes the decision; this mirrors its pools
+    in its order so the two can never disagree. Deriving the floor status from
+    the conserving set instead of from what the ceiling left would report
+    'applied' for a decision that had in fact stood the floor guard down.
+
+    Returns {'hard'|'ceiling'|'floor': 'applied'|'stood-down'|'off'}. A guard
+    that stood down means the winner BREAKS the rule it protects, which is the
+    one thing about a tuned winner an operator must not have to infer.
+    """
+    out = {"hard": "off", "ceiling": "off", "floor": "off"}
+    ok = [v for v in variants if v.conservation_ok]
+    if not ok:
+        return out
+    full = [v for v in ok if variant_hard_ok(v) is True]
+    pool = full or ok
+    out["hard"] = "applied" if full else "stood-down"
+    ceil = ceiling_eligible(pool)
+    out["ceiling"] = "applied" if ceil else "stood-down"
+    pool = ceil or pool
+    if stock_min_week is not None:
+        out["floor"] = ("applied" if floor_eligible(pool, stock_min_week)
+                        else "stood-down")
+    return out
+
+
 def pick_winner(variants: list, weights: dict, stock_min_week=None):
     """The tuned winner among a method's evaluated variants: emphasis-best
     among those passing ALL hard gates; if none passes the empty-week rule,
@@ -342,18 +370,8 @@ def tune_method(method, input_path, config_dir, scenario_dir, *,
     if best is None:
         out["status"] = "search-failed"
         return out
-    # Guard REPORT, derived from pick_winner's own pools in pick_winner's own
-    # order. Computing the floor against the conserving set (rather than what
-    # the ceiling left) could report 'applied' for a decision that actually
-    # stood the floor guard down.
-    _ok = [v for v in results if v.conservation_ok]
-    _pool = [v for v in _ok if variant_hard_ok(v) is True] or _ok
-    _ceil = ceiling_eligible(_pool)
-    out["ceiling_guard"] = "applied" if _ceil else "stood-down"
-    _pool = _ceil or _pool
-    if stock_min_week is not None:
-        out["floor_guard"] = ("applied" if floor_eligible(_pool, stock_min_week)
-                              else "stood-down")
+    _g = guard_report(results, stock_min_week)
+    out["ceiling_guard"], out["floor_guard"] = _g["ceiling"], _g["floor"]
     out["status"] = "tuned"
     out["winner_overrides"] = dict(best.overrides)
     out["winner_label"] = best.label

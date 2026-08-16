@@ -334,6 +334,33 @@ def test_the_app_never_stops_a_clean_plan():
     assert app._adoption_refusal(c, acknowledged=True) is None
 
 
+def test_the_refusal_does_not_call_a_soft_gate_a_hard_rule():
+    """WORDING, and it matters. The findings list is deliberately WIDER than
+    the hard gates — its whole reason to exist is the relief ceiling, whose
+    checklist gate is SOFT — and it also carries 'never measured' entries,
+    which are UNKNOWNs rather than breaches. Calling all of that 'hard rules'
+    contradicts the checklist the operator is reading two inches above it."""
+    c = _cand("Controller (tuned)", metrics=_metrics(ceiling_weeks=2))
+    c["breaches"] = A.adoption_breaches(c)
+    msg = app._adoption_refusal(c, acknowledged=False)
+    assert msg and "Nothing was saved" in msg
+    assert "hard rule" not in msg.lower(), msg
+    # ...and the ceiling breach is still named, in the operator's own terms.
+    assert "relief ceiling" in msg.lower()
+
+
+def test_the_findings_panel_explains_the_soft_gate_and_the_unknowns():
+    """The panel is where an operator decides whether to overrule. It has to
+    say why this list is wider than the checklist, and that an unmeasured
+    value is never read as a pass."""
+    import inspect
+    src = inspect.getsource(app._adoption_gate)
+    low = src.lower()
+    assert "soft" in low, "must say the relief-ceiling gate is soft"
+    assert "never measured" in low or "unknown" in low
+    assert "hard rule(s)" not in low
+
+
 def test_every_write_door_in_analyze_consults_the_guard():
     """A wiring guard. The rules above are pure and well tested; what a future
     edit can still silently remove is the CALL from a button handler — and

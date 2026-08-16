@@ -355,6 +355,37 @@ def test_the_ceiling_guard_stands_down_rather_than_returning_nothing():
     assert T.pick_winner([a, b], w) is not None
 
 
+def test_the_guard_report_matches_the_decision_it_describes():
+    """A stood-down guard means the winner BREAKS the rule it protects — the
+    one thing about a tuned winner an operator must not have to infer, so
+    tune_method reports it and the app shows it. The report has to mirror
+    pick_winner's pools IN ITS ORDER: derived against the conserving set
+    instead, the floor could read 'applied' for a decision that had stood it
+    down."""
+    clean = _variant({"a": 1}, weeks_over_relief_ceiling=0,
+                     harvest_min_week=30000.0, label="clean")
+    assert T.guard_report([clean], 25000.0) == {
+        "hard": "applied", "ceiling": "applied", "floor": "applied"}
+    # No baseline -> the floor guard is OFF, not failed.
+    assert T.guard_report([clean])["floor"] == "off"
+    # Nothing conserves -> nothing was guarded at all.
+    assert T.guard_report([_variant({}, dropped=3)])["ceiling"] == "off"
+    # THE case this exists for: the only plan holding the floor is the one the
+    # ceiling threw out. The floor guard must read stood-down, because the
+    # winner pick_winner returns really does regress the floor.
+    illegal_but_full = _variant({"a": 1}, weeks_over_relief_ceiling=1,
+                                harvest_min_week=30000.0, label="illegal")
+    legal_but_lean = _variant({"a": 2}, weeks_over_relief_ceiling=0,
+                              harvest_min_week=20000.0, label="legal")
+    rep = T.guard_report([illegal_but_full, legal_but_lean], 25000.0)
+    assert rep == {"hard": "applied", "ceiling": "applied",
+                   "floor": "stood-down"}
+    w = {c: 1.0 for c in O.COMPONENTS}
+    win = T.pick_winner([illegal_but_full, legal_but_lean], w,
+                        stock_min_week=25000.0)
+    assert float(win.metrics.harvest_min_week) < 25000.0   # it DID regress
+
+
 def test_the_ceiling_outranks_the_floor():
     """Priority order: a week over the processing ceiling cannot be executed at
     all; a lean week is a shortfall. So a legal-but-leaner plan beats an

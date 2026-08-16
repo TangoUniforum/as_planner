@@ -342,6 +342,19 @@ def _system_defaults_from_records(records, metrics):
     return out
 
 
+def _mode_only_cells(defaults, mode_defaults):
+    """"SYSTEM METRIC" for every cap stated ONLY as a mode default.
+
+    Those cells render BLANK in the system-capacities grid while the system is
+    genuinely capped (today: OG6N biomass, which exists only as purge /
+    production rows). "Blank = no cap" is therefore false for exactly them, so
+    the caption names them — read from the data, never typed, so it stays true
+    if the operator fills one in or gives another system a mode row.
+    """
+    return sorted({f"{s} {m}" for (s, _mode, m) in (mode_defaults or {})
+                   if (s, m) not in (defaults or {})})
+
+
 def _mode_default_records(mode_defaults):
     """{(system, mode, metric): v} -> sorted list of editable rows."""
     return [{"system": s, "mode": mode, "metric": m, "value": v}
@@ -3293,8 +3306,7 @@ def _edit_limits():
     # below can supply one, and today exactly that is true of OG6N's biomass.
     # Name the affected cells at RENDER time rather than asserting a config
     # value in prose (app.py help-text contract, `_ctl_help`).
-    _mode_only = sorted({f"{s} {m}" for (s, _mode, m) in sl.mode_defaults
-                         if (s, m) not in sl.defaults})
+    _mode_only = _mode_only_cells(sl.defaults, sl.mode_defaults)
     st.markdown("**System capacities**")
     st.caption(
         "One row per system — change a capacity in one cell. This is the "

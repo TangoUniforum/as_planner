@@ -716,7 +716,7 @@ so you can always see the two side by side.
 | **ValidationLog** | numbered warnings (# / Category / Detail), incl. FW-calibration + bottleneck (annotated with resolution) | diagnostics |
 | **InputConservationAudit** | per batch: placed/dropped, harvested, standing, **FW reconciliation** (planned vs realized seawater entry) + **closed FW mass-balance** (`first_FW_count` vs `realized_TranOG + FW_mort + FW_cull`; §6 #6) | conservation + FW calibration gaps |
 | **TankContinuityAudit** | per-(tank, week) balance + **facility conservation summary** | 0-drift proof |
-| **ReconciliationReport / SystemLimitsAudit** | per-batch open/close balance (count reconciles **exactly** via recorded realized biology; biomass within tolerance) / per-system cap usage | deeper audits — *TankContinuityAudit is the authoritative 0-drift biomass check* |
+| **ReconciliationReport / SystemLimitsAudit** | per-batch open/close balance (count reconciles **exactly** via recorded realized biology; biomass within tolerance) / per-system realized biomass + feed vs cap, flagged `BIOMASS_OVER` / `FEED_OVER` | deeper audits — *TankContinuityAudit is the authoritative 0-drift biomass check* |
 | **Diagnostics** | FW-calibration: per batch, the target vs projected pre-cull avg weight at TranOG, the residual, and a back-solved `Suggested_FW_Correction` | tuning `fw_correction` (§7 step 2) |
 | **RunConfig** | the exact config + scenario embedded in the output | reproducibility |
 
@@ -1125,6 +1125,18 @@ optimizer still *measures* this trade via two compliance components:
 - **`system_overshoot`** — fraction of (system, week) cells over their feed *or*
   biomass cap (read from SystemLimitsAudit; the per-system cap carries the
   `global_buffer_pct` R29 headroom — distinct from the facility setpoint band).
+
+> **OG6N counts on biomass now (2026-08-14).** The audit used to exempt the
+> depuration system from *both* its caps, on the reasoning that purge is
+> "intentionally uncapped". But that cap is an operator input in
+> `limits.yaml`, and code ignoring an operator input is code overruling the
+> operator — it hid a real breach: against a 400,000 kg cap the rotation was
+> staging a **674,070 kg** peak, 68% over, on every run and visible on no
+> sheet. So `BIOMASS_OVER` can now appear on OG6N rows, and 674 t still
+> exceeds the 600 t the operator states 6N holds in purge. Its **feed** cap
+> stays exempt for a physical reason rather than a policy one: purge fish are
+> `STARVE` and eat nothing, so a feed-rate check on that system can only ever
+> report 0.
 - **`density_overshoot`** — fraction of (tank, week) cells over the per-tank
   `max_density_kg_m3` cap (the OG6N depuration pool excluded — §7.1).
 

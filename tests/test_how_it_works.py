@@ -212,6 +212,11 @@ STALE_PHRASES = [
     "consume the same inputs and obey the same rules",
     # There are five manual event types, not four.
     "four event types",
+    # CP-SAT is per-week myopic, seeded by last week's occupancy, and its
+    # same-week swaps are only softly penalised (methods.py has the evidence).
+    # Both "whole-horizon" and "0-swap" sent a placement investigation wrong.
+    "whole-horizon grow-out layout",
+    "0-swap",
 ]
 
 
@@ -252,6 +257,98 @@ def test_rulebook_documents_every_registered_gate(monkeypatch):
         # match on the distinctive head of the label, not the whole string
         head = g.label.split("(")[0].strip().lower()
         assert head in out, f"gate {g.key!r} ({g.label!r}) is not in the rulebook"
+
+
+def test_rulebook_numbers_that_are_not_control_knobs_are_still_read_not_typed(
+        monkeypatch):
+    """The page also quotes two values that do NOT live in control.yaml: the
+    harvest guide's follow band and the 6N tanks' own density cap (a per-tank
+    facility input). Both were typed into the prose; both must track the files
+    they come from, like every other number on the page."""
+    from forecast.config_io import load_control, load_facility_config
+    from forecast.sixn import SIXN_ALL_TANKS
+    cfg = os.path.join(ROOT, "config")
+    k = app._hiw_knobs()
+    assert k["guide_band"] == float(load_control(cfg).hybrid_follow_band)
+    sixn = [t.max_density_kg_m3 for t in load_facility_config(cfg).tanks
+            if t.tank_id in SIXN_ALL_TANKS and t.max_density_kg_m3]
+    assert k["sixn_density"] == float(max(sixn))
+    out = _render_rulebook(monkeypatch, flat=True)
+    assert f"±{k['guide_band'] * 100:.0f}%" in out
+    assert f"{k['sixn_density']:.0f} kg/m³" in out
+
+
+def test_rulebook_documents_BOTH_winner_eligibility_guards(monkeypatch):
+    """A knob search may not sell a rule to buy a score. Two guards enforce
+    that (forecast.tournament.ceiling_eligible / floor_eligible) and the page
+    documented only the floor one — leaving the ceiling guard, the newer and
+    HARDER of the two, undescribed anywhere an operator reads."""
+    out = _render_rulebook(monkeypatch, flat=True).lower()
+    assert "relief ceiling" in out
+    assert "contract floor" in out
+    assert "stands down" in out, (
+        "the page must say a guard can stand down — that is when the winner "
+        "breaks the rule the guard protects")
+
+
+# --------------------------------------------------------------------------- #
+# 3b. Knobs whose help must carry the COST, not only the mechanism
+# --------------------------------------------------------------------------- #
+def test_cap_repair_help_gives_both_measured_directions_and_no_bare_advice():
+    """cap_repair_budget was adopted and withdrawn within a day: its
+    system-balance gain is robust, its harvest-floor effect is high-variance
+    and both-signed. A tooltip describing only the mechanism reads as an
+    invitation to switch it on, which is how it got adopted."""
+    h = app._CONTROL_HELP["cap_repair_budget"]
+    assert "off" in h.lower(), "must say it ships off"
+    for n in ("19,630", "23,235", "23,259", "4,578"):
+        assert n in h, f"the measured worst-harvest-week figure {n} is missing"
+    assert "relief ceiling" in h.lower()
+    assert "your pr" in h.lower(), (
+        "must send the operator to verify on their own ProductionReport")
+
+
+@pytest.mark.parametrize("knob", ["harvest_setpoint_lookahead_weeks",
+                                  "harvest_grade_to_min"])
+def test_inactive_knobs_stay_labelled_inactive(knob):
+    """Neither knob is read by any engine, but `dump_config` rewrites
+    control.yaml from the ControlParams dataclass — which emits every field —
+    so both reappear in the file after any in-app Save. They may reappear; they
+    may not do so LOOKING LIVE."""
+    assert "(INACTIVE)" in app._CONTROL_LABEL[knob], (
+        f"{knob} is inert but its label no longer says so")
+    h = app._CONTROL_HELP[knob].lower()
+    assert ("does nothing" in h or "no longer controls anything" in h), h
+
+
+# --------------------------------------------------------------------------- #
+# 3c. The Limits editor's blank cells
+# --------------------------------------------------------------------------- #
+def test_a_mode_only_cap_is_named_so_blank_never_reads_as_uncapped():
+    """OG6N states its biomass ONLY as purge/production mode rows, so the
+    system-capacities grid shows it blank while the system is capped. The
+    caption names such cells from the data rather than asserting OG6N."""
+    assert app._mode_only_cells(
+        {("OG1N", "biomass"): 400000.0},
+        {("OG6N", "purge", "biomass"): 700000.0,
+         ("OG6N", "production", "biomass"): 400000.0}) == ["OG6N biomass"]
+    # A system with BOTH a standing default and mode rows is not blank.
+    assert app._mode_only_cells(
+        {("OG6N", "biomass"): 1.0},
+        {("OG6N", "purge", "biomass"): 2.0}) == []
+    assert app._mode_only_cells({}, {}) == []
+
+
+def test_the_live_scenario_mode_only_cells_match_the_limits_file():
+    """The claim in the guide ("OG6N's biomass is blank here") must be true of
+    the shipped scenario, or the guide and the app disagree."""
+    from forecast.config_io import load_control
+    from forecast.scenario_io import load_limits
+    scen = os.path.join(ROOT, "scenario")
+    if not os.path.isdir(scen):
+        pytest.skip("scenario/ not seeded")
+    _fl, sl = load_limits(scen, load_control(os.path.join(ROOT, "config")))
+    assert app._mode_only_cells(sl.defaults, sl.mode_defaults) == ["OG6N biomass"]
 
 
 # --------------------------------------------------------------------------- #
