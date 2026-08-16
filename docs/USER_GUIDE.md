@@ -152,7 +152,7 @@ Facility-wide knobs read into `ControlParams`:
 | `rebalance_level` | **load-LEVELING (ON by default)** — cap-agnostic balancer that spreads load off the hottest system onto the COLDEST (vs concentrating); levels feed+biomass+density together. Cuts per-system feed/biomass over-cap ~90% at the cost of more marginal-density tank-weeks (see §7.3). Set `false` for the old density-only behavior | **true** |
 | `rebalance_split_budget` | split over-dense batches into free tanks (moves/week) | 8 |
 | `rebalance_varqty_budget` | precise-count shaving of over-cap systems (opt-in) | 0 |
-| `cap_repair_budget` | **end-of-week cap repair (opt-in, OFF by default)** — every *other* rebalancing pass runs before the week's growth is applied, but the reports measure the state *after* it, so a system left just under its cap grows back over with nothing left to catch it. This pass runs last, on the state that is actually reported, and moves the least it can out of any system still over its feed/biomass cap into the coldest system that can legally take it. Big, clean per-system gain; costs a little handling and moves the harvest floor around (see §7.3). Try **8** | 0 (off) |
+| `cap_repair_budget` | **end-of-week cap repair (opt-in, OFF by default)** — every *other* rebalancing pass runs before the week's growth is applied, but the reports measure the state *after* it, so a system left just under its cap grows back over with nothing left to catch it. This pass runs last, on the state that is actually reported, and moves the least it can out of any system still over its feed/biomass cap into the coldest system that can legally take it. Big, clean per-system gain; the cost lands on the **harvest floor**, and it is high-variance across ProductionReports — it was adopted and then **withdrawn** within a day (see §7.3). Off is the shipped setting; if you try it, try **8** and judge it on your own PR's worst harvest week, not on the per-system numbers | 0 (off) |
 | `harvest_setpoint_lookahead_weeks` | **VESTIGIAL** — superseded by the dual-limit setpoint (§4.1/§4.3); kept for config back-compat but **not read** by the engine. Use `facility_biomass_deviation_pct` to set how close to the cap to run | 0.75 (ignored) |
 | `harvest_level_load` | **harvest smoother (ON by default)** — enforce `max_harvest_per_week` as a HARD ceiling + pre-harvest earlier so harvest is flat and biomass stays under cap. Paired with `rebalance_level`, which otherwise spikes harvest (see §4.3). Set `false` for old reactive behavior | **true** |
 | `hybrid_follow` | **L1 HARVEST GUIDE — `full` in the shipped config (§4.5).** Runs the Global engine's whole-horizon L1 harvest envelope first and feeds it to the controller as a per-week target band. The ceiling half is the point: it tells the reactive controller to harvest **less** in fat weeks so those fish are still there for lean ones — the one thing it can never decide for itself (all its own levers are `max()`). *Measured, 6 real PRs:* **totally empty harvest weeks 6 → 0**, weeks below floor 22.5 → 9.0, worst week 0 → 16,148 fish; **cost** peak biomass 102.6 → 107.1% of cap, peak density 102 → 124. `off` = old reactive-only behaviour. `floor` is **not** a no-op (that claim was retracted 2026-08-12) but it is **dominated** — measured on the 7.29 PR it produces a genuinely different plan (worst week 23,754 vs `off`'s 20,526) yet **11** weeks below the contract floor, worse than `off`'s 9 and far worse than `full`'s 3. Applying only the guide's floor half raises the lean weeks it can reach while leaving the controller free to over-harvest the fat ones; the **ceiling** half is what actually banks fish for later. Use `full` | `full` (dataclass default `off`) |
@@ -1186,10 +1186,30 @@ not by itself evidence about a knob.
 
 It is **off by default** because it is not a strict improvement: the cumulative floor
 shortfall and transfers per fish move the wrong way, and on two states the worst
-harvest week drops sharply. Turn it on when the per-system utilization maps are your
-binding problem, verify it through the optimizer / Compare on *your* PR, and read the
-harvest floor as well as the cap compliance. Budget 15 measured **identical** to 8 —
-the leftover handling budget binds first — so 8 is the setting to try.
+harvest week drops sharply. Budget 15 measured **identical** to 8 — the leftover
+handling budget binds first — so 8 is the budget to test with.
+
+> **Adopted, then withdrawn one day later (2026-08-14 → 2026-08-15).** The
+> per-system gain above held, so the knob was turned on at 8. Re-measured on the
+> operator's next ProductionReport it had to come straight back off, and the two
+> PRs disagree completely about the same setting:
+>
+> | | worst harvest week | worst per-batch density | relief-ceiling breaches |
+> |---|---|---|---|
+> | **7.29 PR**, repair 8 | 19,630 → **23,235** (better) | 116.8 → **102.2** (better) | none added |
+> | **8.13 PR**, repair 8 | 23,259 → **4,578** (collapsed) | — | **+1** ⚠ |
+>
+> Read that as the honest shape of this knob: the **system-balance effect is
+> robust** (8 of 8 states, 13× the neutral-nudge band), the **harvest-floor
+> effect is not** — it is large, both-signed, and decided by the starting state.
+> A 4,578-fish week is a contract breach, and a ceiling breach is a week the
+> plant cannot take, so neither is a cost you can average away.
+>
+> Practical rule: leave it off. If per-system utilization is genuinely your
+> binding problem, turn it on for **one PR at a time**, and accept it only after
+> Analyze's checklist shows the **contract floor** and **processing limit +
+> relief** gates no worse than with it off. Never adopt it on the cap-compliance
+> numbers alone — that is exactly the reading that got it adopted and reverted.
 
 ### 7.4 Compare & Choose — run every method, pick the plan (`Mode → Compare & Choose`)
 

@@ -181,6 +181,14 @@ def _active_config_summary(cd: dict) -> list[tuple]:
     if (g("min_transfer_count") or 0) > 0:
         rows.append(("Min transfer size", f"{g('min_transfer_count'):,.0f} fish",
             "rebalancer won't split a smaller sub-group out of a tank"))
+    if (g("cap_repair_budget") or 0) > 0:
+        rows.append(("End-of-week cap repair",
+            f"ON ({g('cap_repair_budget')} moves/wk)",
+            "a last pass moves fish out of systems still over cap AFTER the "
+            "week's growth — big, robust per-system gain; its effect on the "
+            "worst harvest week is PR-dependent (it has both helped and "
+            "collapsed it), so check the harvest floor and the relief ceiling "
+            "on this PR"))
     return rows
 
 
@@ -687,7 +695,21 @@ _CONTROL_HELP = {
         "is actually reported, and moves the least it can out of any system "
         "still over its feed or biomass cap into the coolest system that can "
         "legally take it. It never breaks a transfer rule and never exceeds "
-        "the weekly handling budget. 0 = off. Unit: moves/week.",
+        "the weekly handling budget. 0 = off. Unit: moves/week. "
+        "SHIPPED OFF, and it is NOT a recommendation to switch on. What it "
+        "buys is per-system balance, and that part is robust: measured across "
+        "8 starting states at budget 8, over-cap system-weeks fell 1,223 → 724 "
+        "and every state improved. What it costs is the harvest floor, and "
+        "that part is HIGH-VARIANCE — it swings with the ProductionReport, not "
+        "with the setting. On the 7.29 PR it made the worst harvest week "
+        "BETTER (19,630 → 23,235 fish) and worst density better (116.8 → "
+        "102.2); on the 8.13 PR the same budget COLLAPSED the worst week "
+        "(23,259 → 4,578) and added a week above the relief ceiling, which is "
+        "why it was switched back off. So: if per-system utilisation is your "
+        "binding problem, try 8 (15 measured identical — the leftover handling "
+        "budget binds first), then check the worst harvest week and the relief "
+        "ceiling on YOUR PR in Analyze before keeping it. Never adopt it on "
+        "the system-balance numbers alone.",
     "harvest_setpoint_lookahead_weeks":
         "DOES NOTHING (inactive). Superseded by the newer harvest logic — no "
         "part of the plan reads this value anymore; it remains only so older "
