@@ -189,7 +189,7 @@ it applies to every week of every horizon.
 
 | Part | What it is | When you touch it |
 |---|---|---|
-| **System capacities** | One row per system, one column per metric: `biomass` (kg of standing fish) and `feed_per_day` (kg of feed per day). Blank = that system has no cap for that metric. | Whenever a real capacity changes. This is the normal edit — one cell. |
+| **System capacities** | One row per system, one column per metric: `biomass` (kg of standing fish) and `feed_per_day` (kg of feed per day). Blank = no *standing* capacity, which means no cap at all for that metric **unless** a mode row below supplies one — which is exactly why **OG6N's biomass is blank here**. The editor names any such cell under the grid. | Whenever a real capacity changes. This is the normal edit — one cell. |
 | **Mode-specific capacities** | A capacity that depends on what the system is being *used for*. Today only **OG6N** has one: it holds more (700,000 kg) while it is the depuration station than it does (400,000 kg) once its 3 mains become grow-out. | Rarely. |
 | **Per-week system exceptions** (collapsed, advanced) | A cap for ONE unusual week — a shutdown, a trial, maintenance. Blank is the normal state. | Almost never. |
 

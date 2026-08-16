@@ -3275,9 +3275,21 @@ def _edit_limits():
     weeks = st.session_state["_lim_weeks"]
 
     # ---------------- System capacities (the common case) ----------------
+    # A blank cell here does NOT always mean "no cap": a mode-specific row
+    # below can supply one, and today exactly that is true of OG6N's biomass.
+    # Name the affected cells at RENDER time rather than asserting a config
+    # value in prose (app.py help-text contract, `_ctl_help`).
+    _mode_only = sorted({f"{s} {m}" for (s, _mode, m) in sl.mode_defaults
+                         if (s, m) not in sl.defaults})
     st.markdown("**System capacities**")
-    st.caption("One row per system — change a capacity in one cell. Blank = "
-               "that system has no cap for that metric.")
+    st.caption(
+        "One row per system — change a capacity in one cell. This is the "
+        "system's STANDING capacity, applied in every week. A blank cell means "
+        "no standing capacity is set, which leaves that system with **no cap "
+        "at all** for that metric — unless a mode-specific row below supplies "
+        "one."
+        + (f" Blank here but covered by mode: **{', '.join(_mode_only)}**."
+           if _mode_only else ""))
     sysdef_cfg = {
         "system": st.column_config.Column(
             pinned=True, disabled=True,
@@ -3340,12 +3352,18 @@ def _edit_limits():
                                 use_container_width=True)
 
     # ---------------- Facility limits ----------------
+    # Metric names must be the TOKENS the `metric` column actually shows
+    # (forecast.caps.METRIC_*), or the tooltip explains labels that appear
+    # nowhere on the grid.
     _metric_help = (
         "Which cap this row sets, for the week in each column: "
-        "biomass_kg = most standing fish weight (kg); "
-        "feed_kg_day = most feed per day (kg); "
-        "max_harvest / min_harvest = weekly harvest ceiling / floor (fish); "
-        "hog_yield = live-to-sold weight ratio for that week.")
+        "`biomass` = most standing fish weight (kg); "
+        "`feed_per_day` = most feed per day (kg/day); "
+        "`max_harvest_per_week` / `min_harvest_per_week` = that week's harvest "
+        "ceiling / floor (fish); "
+        "`hog_yield` = live-to-sold weight ratio for that week. "
+        "The per-week system grid carries the first two only — a harvest or "
+        "yield cap is a whole-facility number.")
     wk_cfg = {wk: st.column_config.NumberColumn(
         width="small",
         help=f"The cap value for ISO week {wk} (unit = whatever the row's "
