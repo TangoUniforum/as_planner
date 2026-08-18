@@ -276,8 +276,15 @@ _PR_COL = {
 class PRBatchPeriod:
     """One batch's ELAPSED-period flows from the ProductionReport.
 
-    The PR's "in period" columns cover the closing month up to its closing
-    date. When that date is mid-month the forecast starts mid-month too (it
+    The PR's "in period" columns are MONTH-TO-DATE: they cover the 1st of the
+    closing month through the closing date (operator-confirmed 2026-08-18, and
+    independently consistent with the data — 370,225 kg of feed at a
+    ~29,000 kg/day facility rate is 12.8 days, matching Aug 1-13). That is what
+    makes this a clean addition to the forecast's own figures rather than an
+    overlap: a since-last-report period would straddle two months and
+    double-count part of the previous one.
+
+    When the closing date is mid-month the forecast starts mid-month too (it
     begins the day after), so the month is split across two sources: this
     record is the part that already happened.
     """

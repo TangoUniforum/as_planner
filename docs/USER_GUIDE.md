@@ -803,11 +803,11 @@ so you can always see the two side by side.
 > identities and mask real defects. Nothing else in the tool reads these two
 > sheets, so the merge cannot reach a gate, a score, or the accuracy grader.
 >
-> One assumption, stated plainly: the PR's "in period" columns are read as
-> **month-to-date** (1st → closing date). On the 8.13 PR that checks out
-> arithmetically — 370,225 kg of feed at a ~29,000 kg/day facility rate is 12.8
-> days, matching Aug 1–13. If a site system ever emits *since-last-report*
-> instead, this merge would pull in part of the prior month.
+> The PR's "in period" columns are **month-to-date** (1st → closing date) —
+> confirmed by the operator, 2026-08-18, and independently consistent with the
+> data: 370,225 kg of feed at a ~29,000 kg/day facility rate is 12.8 days,
+> matching Aug 1–13. That is what makes the merge a clean addition rather than
+> an overlap; a *since-last-report* period would instead straddle two months.
 
 > **`Count_Check` in the ledgers is not always zero, and that is expected.**
 > The column carries the ledger's own residual, and two real movements land
