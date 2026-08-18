@@ -116,23 +116,28 @@ PURGE_TRANSFER_GROWTH_DAYS = 4
 # rotation's drain HOLDS any tank filled after the PREVIOUS rotation step
 # (fail-safe; a held tank drains on the pair's next rotation).
 SIXN_MIN_RESIDENCY_DAYS = 14
-# Rule-2 stage (operator ruling): per-tank 6N FILL density cap. Never STOCK a
-# purge tank past the structural 95 kg/m3 — overflow goes to the pair's other
-# tank (the idle sister: 67/69/71 sat empty 80-90% of purge weeks while mains
-# rode 128-141). This caps what fills PLACE; the reporting/quality line stays
-# 85 (density gate). The no-drop make-room may still overflow the LAST slot
-# when total free 6N capacity is short — losing an arrival is worse.
-SIXN_FILL_DENSITY_CAP_KG_M3 = 95.0
-
-
 def _sixn_fill_capacity_fish(state: FacilityState, tank_id: int,
                              avg_wt_g: float) -> float:
-    """Fish this 6N tank can still take before exceeding the structural
-    95 kg/m3 fill cap, judged at the given (transfer) weight."""
+    """Fish this 6N tank can still take, judged at the given transfer weight.
+
+    Rule-2 stage (operator ruling): never STOCK a purge tank past its density
+    cap — overflow goes to the pair's other tank (the idle sister: 67/69/71 sat
+    empty 80-90% of purge weeks while mains rode 128-141). This caps what fills
+    PLACE; the reporting/quality line stays the separate density gate. The
+    no-drop make-room may still overflow the LAST slot when total free 6N
+    capacity is short — losing an arrival is worse.
+
+    The cap is the tank's OWN `max_density_kg_m3` from config/facility.yaml.
+    It used to be a hardcoded 95.0 here, which overrode whatever the operator
+    had configured and violated the rule caps.py states for the whole codebase
+    ("No capacity figure lives in code"). A 6N tank is 1,720 m3, so 95 held it
+    to ~40,800 fish at 4 kg against a 48,000/week harvest floor — the cap, not
+    the fish, decided the drain.
+    """
     t = state.tanks_by_id.get(tank_id)
-    if t is None or avg_wt_g <= 0:
+    if t is None or avg_wt_g <= 0 or t.max_density_kg_m3 <= 0:
         return 0.0
-    cap_kg = t.volume_m3 * SIXN_FILL_DENSITY_CAP_KG_M3
+    cap_kg = t.volume_m3 * t.max_density_kg_m3
     held_kg = (t.count * t.avg_wt_g / 1000.0) if not t.is_empty else 0.0
     return max(0.0, (cap_kg - held_kg) * 1000.0 / avg_wt_g)
 

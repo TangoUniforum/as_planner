@@ -317,16 +317,27 @@ def schedule_harvests(
             e["biomass_kg"] -= kg
             fac_biomass -= kg
 
+        # DEMAND-STAGE shortfall, and it must say so. This runs before make-room,
+        # level-load and the 6N fallback ladder, all of which change the number:
+        # on the 8.13 PR this pass flagged 2026-W47 at 15,152 and the plan that
+        # shipped harvested 52,070 there — comfortably over the floor. Reported
+        # as "the plan is short" it was simply false, and it sent a real
+        # investigation down the wrong path. The realized-plan count is audited
+        # separately (analysis.realized_plan_audit) and THAT is the one to read
+        # for "which weeks are short".
         if weekly_count < weekly_min - 1.0:
             warnings.append(
-                f"{label}: min harvest count {weekly_min:,.0f} not met "
-                f"(actual {weekly_count:,.0f}); insufficient mature inventory"
+                f"{label}: demand pass raised only {weekly_count:,.0f} of the "
+                f"{weekly_min:,.0f} floor from mature inventory — later passes "
+                f"(make-room, level-load, 6N fallback) may still cover it; see "
+                f"the realized-plan harvest floor entries for the final answer"
             )
 
             if need > 1.0:
                 warnings.append(
-                    f"{label}: min harvest count {weekly_min:,.0f} not met "
-                    f"(actual {weekly_count:,.0f}); no batch above min harvest weight available"
+                    f"{label}: demand pass found no batch above the "
+                    f"{control.min_harvest_weight_g:,.0f} g harvest weight to "
+                    f"draw the remaining {need:,.0f} fish from"
                 )
 
     return demands, warnings

@@ -1095,6 +1095,27 @@ _LEDGER_DENSITY_LEGEND = (
     "(e.g. a freshwater week)."
 )
 
+# Count_Check is the ledger's own residual, and it is NOT always zero. Two known
+# movements are real but land outside the Mort/Cull columns, so they surface
+# here instead of being silently absorbed:
+#   * a 6N purge tank frozen by the manual override window is STARVE, so its
+#     mortality RATE is 0 by design (that zero is load-bearing elsewhere) while
+#     its count still declines;
+#   * the FW cull taken at TranOG belongs to the freshwater phase, so the
+#     seawater ledger sees the post-cull input but not the cull row.
+# Neither is a lost fish — InputConservationAudit and ReconciliationReport both
+# close — but an operator reading this sheet should know what the column is
+# carrying rather than assume a bug.
+_LEDGER_CHECK_LEGEND = (
+    "Count_Check (fish) = open - mortality - harvest - cull + input - close. "
+    "Non-zero is EXPECTED on two kinds of row and is not a lost fish: a "
+    "manual-window week whose 6N purge tanks are frozen (STARVE, so the "
+    "mortality rate is 0 while the count still falls), and the week a batch "
+    "enters seawater (the FW cull at TranOG is booked to the freshwater "
+    "phase). Bio_Check is 0 by construction. Fish conservation is proven "
+    "separately by InputConservationAudit and ReconciliationReport."
+)
+
 _LEDGER_COLS = [
     "Open_Count (fish)", "Open_AvgWt (g)", "Open_Bio (kg)",
     "Close_Count (fish)", "Close_AvgWt (g)", "Close_Bio (kg)",
@@ -1409,6 +1430,7 @@ def write_weekly_report(
     ws = wb.create_sheet(sheet_name)
     ws.append([f"{sheet_name} - populated by RunForecast"])
     ws.append([_LEDGER_DENSITY_LEGEND])
+    ws.append([_LEDGER_CHECK_LEGEND])
     ws.append([])
     ws.append(["Scenario", "Week", "Week_Start", "Batch"] + _LEDGER_COLS)
 
@@ -2387,7 +2409,26 @@ def write_tank_continuity_audit(
                 sgr = sgr_pct_day.get((bio_batch, wk), 0.0) if bio_batch else 0.0
                 growth_factor = (1.0 + sgr / 100.0) ** 7
                 growth_kg = 0.0 if is_starve else bio_full_growth * (growth_factor - 1.0)
-                mort_kg = 0.0 if is_starve else bio_full_growth * (m_pct / 100.0)
+                if is_starve:
+                    # STARVE is off-FEED depuration, not suspended biology:
+                    # growth stops, mortality does NOT. The count side has
+                    # always booked those deaths (tank continuity balances to
+                    # the fish), but the mass side booked 0, so the dead fish's
+                    # biomass stayed inside Expected_Close and every purge
+                    # tank-week drifted negative by exactly that much.
+                    # Measured on the 8.13 PR before this fix: 425 rows, ALL
+                    # negative, -20,358 kg against an implied mortality mass of
+                    # 19,892 kg (98% match). No fish were lost — the REALIZED
+                    # close is right, and BatchLocations count x avg-weight
+                    # agrees to 0.1% — but a systematic 20 t hole in the sheet
+                    # that exists to PROVE conservation is a hole a real loss
+                    # could hide in. Same open-weight basis as the recorded-
+                    # biology branch above, so the two agree.
+                    _owt_g = ((prev_biomass / prev_count * 1000.0)
+                              if prev_count > 0 else 0.0)
+                    mort_kg = rmort_tw.get((tid, wk), 0.0) * _owt_g / 1000.0
+                else:
+                    mort_kg = bio_full_growth * (m_pct / 100.0)
                 bio_after_biology = bio_full_growth + growth_kg - mort_kg
             expected_bio = bio_after_biology - g_out_kg + g_in_kg
             delta_bio = cur_biomass - expected_bio
@@ -2740,6 +2781,16 @@ def write_validation_log(
             cat = "WARNING - Manual window"
         elif w.startswith("MANUAL"):
             cat = "WARNING - Manual window"
+        elif w.startswith("HARVEST FLOOR"):
+            # Measured on the REALIZED plan (analysis.realized_plan_audit), not
+            # on a mid-plan pass. This is the answer to "which weeks are short?"
+            cat = "WARNING - Harvest floor (realized plan)"
+        elif w.startswith("HARVEST CEILING"):
+            cat = "WARNING - Harvest ceiling (realized plan)"
+        elif w.startswith("HANDLING BUDGET"):
+            # An operator rule with a configured number; over it is a breach,
+            # not a preference.
+            cat = "WARNING - Handling budget (realized plan)"
         elif w.startswith("NON-DETERMINISTIC SOLVE"):
             # The plan depended on how busy the machine was. Any comparison
             # against it is comparing noise.

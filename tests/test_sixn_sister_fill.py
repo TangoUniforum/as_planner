@@ -1,6 +1,6 @@
 """Sister-first 6N fill stage (operator rule 2, stage 1).
 
-No 6N purge tank is STOCKED past the structural 95 kg/m3 fill cap — the
+No 6N purge tank is STOCKED past its CONFIGURED density cap — the
 overflow continues into the pair's other tank (the idle sister) instead of
 overloading the main (audit: mains rode 128-141 kg/m3 while sisters sat
 empty 80-90% of purge weeks). The no-drop make-room may still overflow the
@@ -12,7 +12,6 @@ from datetime import date
 
 from forecast.models import BatchInput, ControlParams
 from forecast.placement import (
-    SIXN_FILL_DENSITY_CAP_KG_M3,
     _make_room_into_6n,
     _run_sixn_purge_week,
     _sixn_fill_capacity_fish,
@@ -20,7 +19,8 @@ from forecast.placement import (
 from forecast.state import FacilityState, TankState
 
 TODAY = date(2026, 8, 3)
-VOL = 1000.0                      # m3 -> 95t cap -> 25,000 fish at 3.8 kg
+VOL = 1000.0                      # m3
+TANK_CAP = 120.0                  # the fixture tanks' configured density
 
 
 def _mk_state():
@@ -56,17 +56,17 @@ def _dens(state, tid):
 class TestCapacityHelper:
     def test_empty_tank(self):
         s = _mk_state()
-        # 1000 m3 * 95 kg/m3 = 95,000 kg -> 25,000 fish at 3,800 g
-        assert _sixn_fill_capacity_fish(s, 61, 3800.0) == 25000.0
+        # 1000 m3 * 120 kg/m3 (the tank's CONFIG) = 120,000 kg -> 31,578 fish
+        assert round(_sixn_fill_capacity_fish(s, 61, 3800.0)) == 31579
 
     def test_partially_filled(self):
         s = _mk_state()
         s.tanks_by_id[61].assign("B50", 10000, 3800.0, 16.0, "SW")
-        assert _sixn_fill_capacity_fish(s, 61, 3800.0) == 15000.0
+        assert round(_sixn_fill_capacity_fish(s, 61, 3800.0)) == 21579
 
     def test_at_cap(self):
         s = _mk_state()
-        s.tanks_by_id[61].assign("B50", 26000, 3800.0, 16.0, "SW")
+        s.tanks_by_id[61].assign("B50", 31579, 3800.0, 16.0, "SW")
         assert _sixn_fill_capacity_fish(s, 61, 3800.0) == 0.0
 
 
@@ -92,8 +92,8 @@ class TestRotationFillSpills:
         )
         m, sis = s.tanks_by_id[61], s.tanks_by_id[67]
         assert not m.is_empty and not sis.is_empty      # sister engaged
-        assert _dens(s, 61) <= SIXN_FILL_DENSITY_CAP_KG_M3 + 0.01
-        assert _dens(s, 67) <= SIXN_FILL_DENSITY_CAP_KG_M3 + 0.01
+        assert _dens(s, 61) <= TANK_CAP + 0.01
+        assert _dens(s, 67) <= TANK_CAP + 0.01
         # everything the fill moved is in the pair (nothing lost)
         assert m.count + sis.count + s.tanks_by_id[31].count == 40000
 
@@ -118,7 +118,7 @@ class TestRotationFillSpills:
             refill=True,
         )
         assert s.tanks_by_id[31].count == 40000         # nothing moved
-        assert _dens(s, 61) <= SIXN_FILL_DENSITY_CAP_KG_M3 + 0.01
+        assert _dens(s, 61) <= TANK_CAP + 0.01
 
 
 class TestMakeRoomSplit:
@@ -132,8 +132,8 @@ class TestMakeRoomSplit:
             reason="test", is_purge=True)
         assert ok and src.is_empty
         assert not s.tanks_by_id[61].is_empty and not s.tanks_by_id[67].is_empty
-        assert _dens(s, 61) <= SIXN_FILL_DENSITY_CAP_KG_M3 + 0.01
-        assert _dens(s, 67) <= SIXN_FILL_DENSITY_CAP_KG_M3 + 0.01
+        assert _dens(s, 61) <= TANK_CAP + 0.01
+        assert _dens(s, 67) <= TANK_CAP + 0.01
         assert s.tanks_by_id[61].count + s.tanks_by_id[67].count == 33000
         # both destinations stamped for the depuration-hold guard
         assert s.sixn_fill_date.get(61) == TODAY

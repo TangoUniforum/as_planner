@@ -1005,3 +1005,130 @@ def read_adoption_log(log_path: str = DEFAULT_ADOPTION_LOG, n: int = 20) -> list
     """The last `n` adoption records (oldest→newest), or [] if none yet."""
     from . import optimize
     return optimize.read_run_log(log_path, n)
+
+
+# --------------------------------------------------------------------------- #
+# Realized-plan audit — judge the PLAN, not an intermediate pass
+# --------------------------------------------------------------------------- #
+def realized_plan_audit(
+    harvest_events,
+    transfer_events,
+    facility_limits,
+    control,
+    window_weeks=frozenset(),
+) -> list[str]:
+    """Warnings measured on the FINAL plan, for the ValidationLog.
+
+    Every other harvest-floor warning in the tool is raised mid-plan, by the
+    pass that happened to notice a shortfall — the scheduler warns from its
+    own demand pass, before make-room, level-load and the 6N fallback ladder
+    have run. Those later passes both FIX weeks it flagged and BREAK weeks it
+    did not, so the log ends up describing a plan that was never produced.
+    Measured on the 8.13 PR: 29 weeks of the realized plan were under the
+    floor, the log named 3 of them, and one of those 3 (2026-W47) was fine in
+    the plan that actually shipped. An operator reading that log to answer
+    "which weeks are short?" got the wrong answer in both directions.
+
+    This runs last, over the events that were actually emitted, and uses the
+    PER-WEEK resolved floor — `scenario/limits.yaml` overrides the Control
+    default week by week, and a check against the flat default silently passes
+    every week the operator raised.
+
+    Operator-scripted manual-window weeks are EXCLUDED, with a note saying so.
+    Those weeks execute only the script, so the planner neither chose nor can
+    fix what they harvest, and their harvests are stitched in separately (they
+    are not in `harvest_events` at all, so counting them here would report a
+    phantom zero). The MANUAL WINDOW lints already police the script itself.
+
+    Returns prefixed strings; `write_validation_log` maps the prefixes to
+    categories. Pure measurement — reads the plan, changes nothing.
+    """
+    from collections import defaultdict
+    from .caps import (METRIC_MAX_HARVEST, METRIC_MIN_HARVEST,
+                       resolve_facility_cap)
+    from .time_grid import iso_week_label
+
+    out: list[str] = []
+    window = set(window_weeks or ())
+
+    def _wk(ev):
+        d = getattr(ev, "event_date", None)
+        return iso_week_label(d) if d is not None else None
+
+    # ---- harvest floor / ceiling, on the realized events -------------------
+    hv: dict[str, float] = defaultdict(float)
+    for ev in harvest_events or ():
+        w = _wk(ev)
+        if w:
+            hv[w] += float(getattr(ev, "count", 0.0) or 0.0)
+    skipped = sorted(w for w in hv if w in window)
+    for w in sorted(hv):
+        if w in window:
+            continue
+        got = hv[w]
+        floor = resolve_facility_cap(METRIC_MIN_HARVEST, w, facility_limits, control)
+        ceil_ = resolve_facility_cap(METRIC_MAX_HARVEST, w, facility_limits, control)
+        if floor and got < floor - 1.0:
+            short = floor - got
+            # Separate a real shortfall from the known ~0.2% mortality-pad
+            # artifact: a fill sized to exactly the floor drains a few dozen
+            # fish short two weeks later. Both are reported — suppressing one
+            # would be the same sin as the old detector — but an operator
+            # scanning the category must be able to see which is which, or
+            # eight "72 fish" lines teach them to ignore all of them.
+            tag = ("  [rounding-scale: under 0.5% of the floor]"
+                   if short < max(1.0, 0.005 * floor) else "")
+            out.append(
+                f"HARVEST FLOOR - {w}: realized harvest {got:,.0f} fish is "
+                f"{short:,.0f} under the {floor:,.0f} floor in force this "
+                f"week{tag}")
+        if ceil_ and got > ceil_ + 1.0:
+            out.append(
+                f"HARVEST CEILING - {w}: realized harvest {got:,.0f} fish is "
+                f"{got - ceil_:,.0f} over the {ceil_:,.0f} weekly processing "
+                f"limit")
+
+    if window:
+        out.append(
+            f"HARVEST FLOOR - scope: {len(window)} operator-scripted manual-"
+            f"window week(s) excluded from this audit "
+            f"({', '.join(sorted(window)[:6])}"
+            f"{', ...' if len(window) > 6 else ''}) — those weeks run only your "
+            f"scripted events, so the planner did not choose their harvest; the "
+            f"MANUAL WINDOW entries police the script itself"
+            + (f". {len(skipped)} of them emitted planner harvest events."
+               if skipped else "."))
+
+    # ---- weekly handling budget, on the realized moves ---------------------
+    cap = float(getattr(control, "max_transfers_per_week", 0.0) or 0.0)
+    if cap > 0:
+        from .events import Transfer as _Transfer
+        # Same UNIT the planner clamps to (placement `_moves_left`): distinct
+        # applied (source, dest) tank pairs — one physical pumping event each.
+        # A multi-destination Transfer is as many moves as it has destinations;
+        # two legs of the same pair are one move; TranOG/Grade rows are not
+        # moves. Counting events instead would report a different number than
+        # the budget was enforced against, which is how a "breach" becomes
+        # unarguable-looking and wrong.
+        mv: dict[str, set] = defaultdict(set)
+        for ev in transfer_events or ():
+            if not isinstance(ev, _Transfer):
+                continue
+            if float(getattr(ev, "count_transferred", 0.0) or 0.0) <= 0:
+                continue          # refused/no-op events are not handling
+            w = _wk(ev)
+            if not w:
+                continue
+            for a in getattr(ev, "destinations", ()) or ():
+                if float(getattr(a, "count", 0.0) or 0.0) >= 0.5:
+                    mv[w].add((ev.source_tank_id, a.tank_id))
+        for w in sorted(mv):
+            n = len(mv[w])
+            if n > cap:
+                out.append(
+                    f"HANDLING BUDGET - {w}: {n} moves planned against the "
+                    f"{cap:,.0f}-move weekly budget (max_transfers_per_week) — "
+                    f"the deferrable quality passes clamp to this budget, so an "
+                    f"overrun means ESSENTIAL moves alone (arrival make-room, "
+                    f"rotation fills, the plan diff) exceeded it")
+    return out

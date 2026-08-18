@@ -910,6 +910,29 @@ def main(
             print(f"    {_m}")
         if len(_guide_notes) > 10:
             print(f"    ... and {len(_guide_notes) - 10} more")
+    # REALIZED-PLAN audit. Every other floor/budget warning in the log is raised
+    # mid-plan by whichever pass first noticed a shortfall; later passes then fix
+    # some of those weeks and break others, so the log describes a plan that was
+    # never produced. This one runs last, over the events actually emitted, and
+    # against the PER-WEEK resolved caps. Pure measurement — see
+    # analysis.realized_plan_audit.
+    from .analysis import realized_plan_audit
+    from .time_grid import forecast_week_labels
+    # The manual window sits BEFORE the planner's start: `control.forecast_start`
+    # has already been advanced past it, so the window is the `window_n` weeks
+    # immediately preceding it. Labelling forward from the advanced start tags
+    # the wrong weeks (it marked 2026-W37/W39 as scripted when the window was
+    # W33-W36).
+    if window_n:
+        from datetime import timedelta as _td_win
+        _win_start = fs_date - _td_win(weeks=window_n)
+        _window_labels = frozenset(forecast_week_labels(_win_start, window_n))
+    else:
+        _window_labels = frozenset()
+    _realized_warns = realized_plan_audit(
+        placement.harvest_events, placement.transfer_events,
+        facility_limits, control, window_weeks=_window_labels)
+
     write_validation_log(
         wb,
         residuals=residuals,
@@ -919,7 +942,7 @@ def main(
         density_violations=density_violations,
         invariant_warnings=(list(hydration_warns) + list(inv_warns)
                             + list(manual_warns) + list(fw_calib_warns)
-                            + _guide_notes),
+                            + _guide_notes + _realized_warns),
         placed_batches={r.batch_id for r in placement.batch_locations},
     )
     write_daily_harvest_schedule(
@@ -1041,6 +1064,18 @@ def main(
     # VBA. After a run, Control B3 == ProductionReport closing + 1, so a
     # stale B3 unambiguously means "not yet run against the current PR".
     write_forecast_start(wb, control.forecast_start)
+
+    # Presentation pass over every sheet written above. Last thing before the
+    # save so it sees the finished workbook, and isolated in its own module so
+    # a styling change can never reach a forecast number. If it raises, the
+    # run still produces a correct (if plain) workbook — an export is worth
+    # more unstyled than not at all.
+    try:
+        from .excel_format import apply_workbook_formatting
+        apply_workbook_formatting(wb)
+    except Exception as exc:                      # pragma: no cover - cosmetic
+        print(f"  NOTE: workbook formatting skipped ({exc.__class__.__name__}: {exc}); "
+              f"data is unaffected.")
 
     # Match the output extension to the workbook's actual content type: a
     # macro-enabled workbook (kept VBA from an .xlsm/template input) MUST be saved
