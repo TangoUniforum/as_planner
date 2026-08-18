@@ -116,6 +116,13 @@ def main(
     # back to the Control sheet value only when PR has no closing date.
     from datetime import datetime as _dt, timedelta as _td
     pr_closing, og_records, fw_records = read_production_report(wb)
+    # The elapsed slice of the PR's closing month. Only the two MONTH-shaped
+    # report sheets use it, and only when the PR closes mid-month; see
+    # production_report.read_pr_period.
+    from .production_report import read_pr_period as _read_pr_period
+    _pr_period = _read_pr_period(
+        wb["ProductionReport"] if "ProductionReport" in wb.sheetnames else None,
+        pr_closing)
     _control_start = control.forecast_start
     _ctrl_date = (_control_start.date() if hasattr(_control_start, "date")
                   else _control_start)
@@ -866,6 +873,7 @@ def main(
         default_hog_yield=control.default_hog_yield,
         facility_limits_hog=facility_hog_overrides,
         forecast_start=fs_date,
+        pr_period=_pr_period,
     )
     write_transfer_plan_output(
         wb, placement.transfer_events, placement.tranog_events,
@@ -981,7 +989,8 @@ def main(
         transfer_events=placement.transfer_events, batches=batch_by_id, tables=tables,
         scenario_name=control.scenario_name, hog_yield=control.default_hog_yield,
         hog_overrides=facility_hog_overrides, forecast_start=control.forecast_start,
-        sixn_move_in_feed=getattr(placement, "sixn_move_in_feed", None))
+        sixn_move_in_feed=getattr(placement, "sixn_move_in_feed", None),
+        pr_period=_pr_period)
     write_reconciliation_report(
         wb,
         placement.batch_locations,

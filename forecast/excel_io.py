@@ -491,6 +491,7 @@ def write_harvest_plan_report(
     default_hog_yield: float,
     facility_limits_hog: dict,
     forecast_start=None,
+    pr_period=None,
     sheet_name: str = "HarvestPlan Report",
 ) -> None:
     """Annual per-batch harvest summary (matches reference format).
@@ -531,6 +532,23 @@ def write_harvest_plan_report(
             e["hog_kg"] += hog_kg * frac
             years.add(yr)
             batches_by_year[yr].add(ev.batch_id)
+
+    # Elapsed part of a mid-month PR: this sheet IS the monthly sales plan, so a
+    # month that is half actuals and half forecast has to show both halves or it
+    # reads as a 48% collapse in landings that never happens (measured, 8.13 PR:
+    # 63,845 fish / 260,910 kg were already landed before the forecast begins).
+    # A PR closing on a month's last day needs nothing -- the forecast then
+    # starts on the 1st and the month is whole (operator rule).
+    if pr_period is not None and getattr(pr_period, "is_mid_month", False):
+        _yr, _mo = pr_period.closing_date.year, pr_period.closing_date.month
+        for _b, _pb in pr_period.batches.items():
+            if _pb.harv_count <= 0:
+                continue
+            e = agg[(_yr, _b, _mo)]
+            e["count"] += _pb.harv_count
+            e["hog_kg"] += _pb.harv_gross_kg * default_hog_yield
+            years.add(_yr)
+            batches_by_year[_yr].add(_b)
 
     for year in sorted(years):
         ws.append([f"{scenario_name} {year}"])
@@ -1116,6 +1134,17 @@ _LEDGER_CHECK_LEGEND = (
     "separately by InputConservationAudit and ReconciliationReport."
 )
 
+# MonthlyReport adds a third case: a month that MERGES the elapsed part of a
+# mid-month ProductionReport carries the PR's own "Deviation count/biomass in
+# period" -- the site system's reconciliation term, which is not a fish flow
+# and has no column of its own here.
+_MONTHLY_CHECK_LEGEND = (
+    _LEDGER_CHECK_LEGEND
+    + " On a month that merges a mid-month ProductionReport (its first month), "
+      "Count_Check also carries the PR's own 'Deviation count in period' -- the "
+      "site system's reconciliation figure, not a fish movement."
+)
+
 _LEDGER_COLS = [
     "Open_Count (fish)", "Open_AvgWt (g)", "Open_Bio (kg)",
     "Close_Count (fish)", "Close_AvgWt (g)", "Close_Bio (kg)",
@@ -1461,6 +1490,7 @@ def write_monthly_report(
     sixn_move_in_feed=None,
     tranog_events=None,
     og_mort_states=None,
+    pr_period=None,
     sheet_name: str = "MonthlyReport",
 ) -> None:
     """Per-(month, batch) open/close production ledger (matches reference format).
@@ -1476,6 +1506,7 @@ def write_monthly_report(
     ws.append([f"{sheet_name} - populated by RunForecast"])
     ws.append([_LEDGER_DENSITY_LEGEND + " Monthly = the max of the month's "
                "weekly peaks (a boundary week counts in both months)."])
+    ws.append([_MONTHLY_CHECK_LEGEND])
     ws.append([])
     ws.append(["Scenario", "Month", "Batch"] + _LEDGER_COLS)
 
@@ -1576,6 +1607,69 @@ def write_monthly_report(
                 cum_w += fw
         for mo, a in acc.items():
             rows_out.append((mo, b, a))
+
+    # ---- merge the ELAPSED part of a mid-month PR -------------------------
+    # A PR closing mid-month splits its month across two sources: the days
+    # already reported (the PR's own "in period" flows) and the forecast, which
+    # starts the day after. Reporting only the forecast half understates the
+    # month badly -- on the 8.13 PR, August showed 48% of its true harvest. A PR
+    # closing on the LAST day of a month needs no merge: the forecast then
+    # starts on the 1st and already covers the whole month (operator rule).
+    # Reporting layer ONLY -- the audits prove the FORECAST conserves, and
+    # feeding actuals into them would break their identities and mask defects.
+    _pr_month = None
+    if pr_period is not None and getattr(pr_period, "is_mid_month", False):
+        _pr_month = pr_period.month_label
+        _seen = set()
+        for mo, b, a in rows_out:
+            if mo != _pr_month or b not in pr_period.batches:
+                continue
+            _seen.add(b)
+            pb = pr_period.batches[b]
+            # The month now OPENS where the PR opened (day 1), not where the
+            # forecast picked up mid-month.
+            _old_oc, _old_ob = a["open_count"], a["open_bio"]
+            a["open_count"] = pb.open_count
+            a["open_bio"] = pb.open_bio_kg
+            # Keep Count_Check/Bio_Check TRUE to the columns now displayed.
+            # They are accumulated from the weekly rows, so moving Open and
+            # adding the PR's flows would leave them describing a row that is
+            # no longer on the sheet. The residual they pick up is the PR's own
+            # "Deviation count/biomass in period" -- the site system's
+            # reconciliation term, which is not a fish flow and has no column
+            # here. Surfacing it is the honest option: hiding it would put a
+            # silent ~1.7k-fish discrepancy behind a column that reads 30.
+            a["count_check"] += ((pb.open_count - _old_oc)
+                                 - (pb.mort_count + pb.harv_count + pb.cull_count))
+            a["bio_check"] += ((pb.open_bio_kg - _old_ob) + pb.growth_kg
+                               - (pb.mort_bio_kg + pb.harv_gross_kg + pb.cull_bio_kg))
+            a["harv_count"] += pb.harv_count
+            a["harv_gross"] += pb.harv_gross_kg
+            a["harv_hog"] += pb.harv_gross_kg * (hog_yield or 0.0)
+            a["feed"] += pb.feed_kg
+            a["mort_count"] += pb.mort_count
+            a["mort_bio"] += pb.mort_bio_kg
+            a["cull_count"] += pb.cull_count
+            a["cull_bio"] += pb.cull_bio_kg
+            a["gross_growth"] += pb.growth_kg
+            a["net_prod"] += pb.growth_kg - pb.mort_bio_kg
+            a["days"] = (a.get("days") or 0.0) + pr_period.closing_date.day
+        # A batch the PR reported but the forecast never carries (harvested out
+        # before the forecast starts) would otherwise vanish from its own month.
+        for b, pb in pr_period.batches.items():
+            if b in _seen or pb.harv_count <= 0:
+                continue
+            a = {k: 0.0 for k in FLOW_KEYS}
+            a["days"] = float(pr_period.closing_date.day)
+            a["peak_density"] = None
+            a["open_count"], a["open_bio"] = pb.open_count, pb.open_bio_kg
+            a["close_count"] = a["close_bio"] = 0.0
+            a["harv_count"], a["harv_gross"] = pb.harv_count, pb.harv_gross_kg
+            a["harv_hog"] = pb.harv_gross_kg * (hog_yield or 0.0)
+            a["feed"], a["gross_growth"] = pb.feed_kg, pb.growth_kg
+            a["mort_count"], a["mort_bio"] = pb.mort_count, pb.mort_bio_kg
+            a["cull_count"], a["cull_bio"] = pb.cull_count, pb.cull_bio_kg
+            rows_out.append((_pr_month, b, a))
 
     for mo, b, a in sorted(rows_out, key=lambda x: (x[0], x[1])):
         open_count, open_bio = a["open_count"], a["open_bio"]

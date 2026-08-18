@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Optional
 
 from .models import BatchInput
@@ -255,3 +255,129 @@ def summarize_hydration(state: FacilityState) -> dict:
         "by_batch_count": by_batch,
         "num_batches_in_facility": len(by_batch),
     }
+
+
+# ============================================================
+# PR period flows — the part of the closing month already ELAPSED
+# ============================================================
+
+# Zero-indexed positions in the ProductionReport row tuple. The sheet is a
+# fixed export from the site system; these mirror the header row it ships with.
+_PR_COL = {
+    "open_count": 5, "close_count": 6, "open_bio_kg": 7, "open_avg_wt_g": 9,
+    "growth_kg": 20, "feed_kg": 23,
+    "harv_count": 28, "harv_gross_kg": 29,
+    "mort_bio_kg": 33, "mort_count": 36,
+    "cull_bio_kg": 37, "cull_count": 38,
+}
+
+
+@dataclass
+class PRBatchPeriod:
+    """One batch's ELAPSED-period flows from the ProductionReport.
+
+    The PR's "in period" columns cover the closing month up to its closing
+    date. When that date is mid-month the forecast starts mid-month too (it
+    begins the day after), so the month is split across two sources: this
+    record is the part that already happened.
+    """
+    batch_id: str
+    open_count: float
+    open_bio_kg: float
+    open_avg_wt_g: float
+    growth_kg: float
+    feed_kg: float
+    harv_count: float
+    harv_gross_kg: float
+    mort_count: float
+    mort_bio_kg: float
+    cull_count: float
+    cull_bio_kg: float
+
+
+@dataclass
+class PRPeriod:
+    """The whole elapsed slice of the PR's closing month."""
+    closing_date: date
+    batches: dict[str, PRBatchPeriod]
+
+    @property
+    def month_label(self) -> str:
+        return f"{self.closing_date.year:04d}-{self.closing_date.month:02d}"
+
+    @property
+    def is_mid_month(self) -> bool:
+        """True when the PR closes part-way through its month.
+
+        A PR closing on the LAST day of a month needs no merge at all: the
+        forecast then starts on the 1st, so the forecast alone already covers
+        the whole of its first month. Operator rule, 2026-08-18.
+        """
+        d = self.closing_date
+        nxt = (d.replace(year=d.year + 1, month=1, day=1) if d.month == 12
+               else d.replace(month=d.month + 1, day=1))
+        last_day = (nxt - timedelta(days=1)).day
+        return d.day < last_day
+
+    def totals(self) -> dict[str, float]:
+        out = {k: 0.0 for k in (
+            "growth_kg", "feed_kg", "harv_count", "harv_gross_kg",
+            "mort_count", "mort_bio_kg", "cull_count", "cull_bio_kg")}
+        for b in self.batches.values():
+            for k in out:
+                out[k] += getattr(b, k)
+        return out
+
+
+def read_pr_period(ws, closing_date) -> Optional[PRPeriod]:
+    """Per-batch elapsed-period flows from a ProductionReport worksheet.
+
+    Reads the batch-level rollup rows (col 3 `Fish group name: <id>`), which
+    carry both the batch's OPENING state and its flows for the elapsed part of
+    the closing month. Returns None when the sheet has no batch rows.
+
+    Only the reporting layer uses this. The audits deliberately do NOT: they
+    prove the FORECAST conserves, and feeding actuals into them would break
+    their identities and mask real defects.
+    """
+    if ws is None or closing_date is None:
+        return None
+    batches: dict[str, PRBatchPeriod] = {}
+
+    def _num(row, key) -> float:
+        i = _PR_COL[key]
+        if i >= len(row):
+            return 0.0
+        v = row[i]
+        try:
+            return float(v or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    for row in ws.iter_rows(values_only=True):
+        if len(row) < 4:
+            continue
+        c3 = row[2]
+        if not (isinstance(c3, str) and "Fish group name" in c3):
+            continue
+        bid = c3.split(":", 1)[1].strip()
+        if not bid:
+            continue
+        batches[bid] = PRBatchPeriod(
+            batch_id=bid,
+            open_count=_num(row, "open_count"),
+            open_bio_kg=_num(row, "open_bio_kg"),
+            open_avg_wt_g=_num(row, "open_avg_wt_g"),
+            growth_kg=_num(row, "growth_kg"),
+            feed_kg=_num(row, "feed_kg"),
+            harv_count=_num(row, "harv_count"),
+            harv_gross_kg=_num(row, "harv_gross_kg"),
+            mort_count=_num(row, "mort_count"),
+            mort_bio_kg=_num(row, "mort_bio_kg"),
+            cull_count=_num(row, "cull_count"),
+            cull_bio_kg=_num(row, "cull_bio_kg"),
+        )
+    if not batches:
+        return None
+    d = closing_date.date() if hasattr(closing_date, "date") else closing_date
+    return PRPeriod(closing_date=d, batches=batches)

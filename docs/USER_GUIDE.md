@@ -776,6 +776,39 @@ so you can always see the two side by side.
 > plainly that they are a **demand-stage** observation and point here for the
 > final answer.
 
+> **A mid-month PR completes its own month.** The ProductionReport's closing
+> date is the day *before* `forecast_start`, so when it closes mid-month the
+> month is split across two sources: the days the PR already reported, and the
+> forecast that starts the next day. **MonthlyReport** and **HarvestPlan
+> Report** merge the two, so the month reads as the month rather than as the
+> tail of it. Measured on the 8.13 PR: August showed 70,444 of its 134,289
+> harvested fish — 48% of the real tonnage — on the two sheets sales planning
+> reads.
+>
+> The merge fires **only when the PR closes mid-month**. A PR closing on a
+> month's last day needs nothing: the forecast then starts on the 1st and
+> already covers the whole month (operator rule, 2026-08-18). Month-ends and
+> leap years are pinned in `tests/test_pr_month_merge.py`.
+>
+> Two consequences worth knowing:
+> * The merged month **opens where the PR opened** (day 1), not where the
+>   forecast picked up — otherwise the row shows a full month of flows against
+>   half a month's opening.
+> * Its `Count_Check` carries the PR's own **"Deviation count in period"**, the
+>   site system's reconciliation figure. That is not a fish movement and has no
+>   column here, so it surfaces in the residual rather than being hidden.
+>
+> **Reporting layer only.** The audits never see the merge: they exist to prove
+> the *forecast* conserves, and feeding actuals into them would break their
+> identities and mask real defects. Nothing else in the tool reads these two
+> sheets, so the merge cannot reach a gate, a score, or the accuracy grader.
+>
+> One assumption, stated plainly: the PR's "in period" columns are read as
+> **month-to-date** (1st → closing date). On the 8.13 PR that checks out
+> arithmetically — 370,225 kg of feed at a ~29,000 kg/day facility rate is 12.8
+> days, matching Aug 1–13. If a site system ever emits *since-last-report*
+> instead, this merge would pull in part of the prior month.
+
 > **`Count_Check` in the ledgers is not always zero, and that is expected.**
 > The column carries the ledger's own residual, and two real movements land
 > outside the Mort/Cull columns: a manual-window week whose 6N purge tanks are
