@@ -713,7 +713,7 @@ so you can always see the two side by side.
 | **Advisory** | per-week capacity table: biomass/feed vs caps + excess + OK/REDUCE | capacity headroom + over-cap weeks |
 | **FacilityMap** | tank × week grid (cell = "Batch# AvgWt/Density"); **below it**: per-system × week **feed (kg/day)** and **biomass (kg)** blocks, each with a FACILITY total row | occupancy at a glance + per-system load vs caps |
 | **BatchLocations** | per-(week, batch, tank) occupancy | raw realized placement |
-| **ValidationLog** | numbered warnings (# / Category / Detail), incl. FW-calibration + bottleneck (annotated with resolution) | diagnostics |
+| **ValidationLog** | numbered warnings (# / Category / Detail), incl. FW-calibration + bottleneck (annotated with resolution) and the **realized-plan** categories below | diagnostics — **read the `(realized plan)` categories first** |
 | **InputConservationAudit** | per batch: placed/dropped, harvested, standing, **FW reconciliation** (planned vs realized seawater entry) + **closed FW mass-balance** (`first_FW_count` vs `realized_TranOG + FW_mort + FW_cull`; §6 #6) | conservation + FW calibration gaps |
 | **TankContinuityAudit** | per-(tank, week) balance + **facility conservation summary** | 0-drift proof |
 | **ReconciliationReport / SystemLimitsAudit** | per-batch open/close balance (count reconciles **exactly** via recorded realized biology; biomass within tolerance) / per-system realized biomass + feed vs cap, flagged `BIOMASS_OVER` / `FEED_OVER` | deeper audits — *TankContinuityAudit is the authoritative 0-drift biomass check* |
@@ -746,6 +746,55 @@ so you can always see the two side by side.
 > (**Advisory**, **SystemLimitsAudit**) instead show the steady realized feed *rate*
 > vs cap, so they intentionally exclude the move-in (a total-accounting item, not a
 > per-day rate).
+
+> **`… (realized plan)` categories — judge the plan, not a pass inside it.**
+> Most ValidationLog entries are raised *mid-plan* by whichever pass first
+> noticed a problem. That is useful for tracing, but it is **not** the answer to
+> "which weeks are short?" — the passes that run afterwards (make-room,
+> level-loading, the 6N fallback ladder) both fix weeks that were flagged and
+> break weeks that were not. Measured on the 8.13 PR: the realized plan was
+> under the harvest floor in 29 weeks, the log named 3, and one of those 3 was
+> comfortably fine in the plan that actually shipped.
+>
+> Three categories are therefore measured **last, on the events the run actually
+> emitted**, against the **per-week resolved** caps (a check against the flat
+> Control default silently passes every week you raised in `scenario/limits.yaml`):
+>
+> * `WARNING - Harvest floor (realized plan)` — every week under the floor in
+>   force *that week*. Misses under 0.5% of the floor are tagged
+>   `[rounding-scale]` so a handful of "72 fish" lines cannot train you to
+>   ignore the category. Operator-scripted manual-window weeks are **excluded**
+>   with a note saying so: those weeks run only your script (the `MANUAL WINDOW`
+>   entries police that), and their harvests are stitched in separately.
+> * `WARNING - Harvest ceiling (realized plan)` — weeks over the weekly
+>   processing limit.
+> * `WARNING - Handling budget (realized plan)` — weeks over
+>   `max_transfers_per_week`, counted in the same unit the planner clamps to
+>   (distinct applied source→dest tank pairs, not sheet rows).
+>
+> The older `WARNING - Harvest Scheduler` entries remain, but they now say
+> plainly that they are a **demand-stage** observation and point here for the
+> final answer.
+
+> **`Count_Check` in the ledgers is not always zero, and that is expected.**
+> The column carries the ledger's own residual, and two real movements land
+> outside the Mort/Cull columns: a manual-window week whose 6N purge tanks are
+> frozen (STARVE — the mortality *rate* is 0 by design while the count still
+> falls), and the week a batch enters seawater (the FW cull at TranOG is booked
+> to the freshwater phase). Neither is a lost fish; `Bio_Check` is 0 by
+> construction, and conservation is proven separately by
+> **InputConservationAudit** and **ReconciliationReport**. The sheet states this
+> in its own header so nobody has to remember it.
+
+> **The workbook is formatted on the way out.** Headers are frozen and
+> filterable, numbers carry thousands separators and sensible precision, tabs
+> are colour-coded by role (plan / reports / audits / inputs), and cells the
+> **engine itself** flagged — `Bio_flag`, `Feed_flag`, `Flag`, `Advisory`,
+> excess and drift columns — turn red automatically. Density is shaded
+> relatively rather than cut at a fixed line, because per-tank caps differ by
+> tier and a flat threshold would be wrong for the smolt tanks. This is a
+> presentation pass only: it runs after every writer, touches no value, and if
+> it ever fails you get a plain workbook and a note, never a failed run.
 
 ### Knowing what the app is doing
 Run mode, the Optimize tab, and every result show a collapsible **"Active
@@ -816,13 +865,41 @@ mode (see `tests/test_coordinator_regression.py`):
    crater (a cohort-timing gap the controller fails to smooth) fails the gate
    (`test_no_harvest_craters`). PR-specific, so on most inputs it is a forward-lock.
 
-> **One benign accounting approximation (6N depuration).** Off-feed depuration
-> (STARVE) tank-weeks take real mortality, but the per-tank continuity audit
-> treats it as ~0 — a few-fish-per-week under-count that stays within the
-> 50-fish per-row tolerance (#1) and nets out facility-wide. It is deliberately
-> left as-is: "correcting" it destabilises the facility-level count balance (#3)
-> because it cancels a small opposite approximation elsewhere in the pipeline.
-> Not a leak, and harmless to plans — flagged here only for full honesty.
+> **Two biomass-accounting defects, fixed 2026-08-18.** This section used to
+> describe the first of them as a benign approximation to be left alone. It was
+> measured properly and it was neither benign nor an approximation — together
+> the two accounted for ~40 t of unexplained biomass on the 8.13 PR, which is
+> about one week of harvest.
+>
+> * **Purge mortality had no mass.** Off-feed depuration (STARVE) stops
+>   *feeding*, not biology: growth halts, mortality does not. The count side
+>   always booked those deaths — which is why continuity balanced to the fish —
+>   but `Mort_kg` was written as 0, so the dead fish's biomass stayed inside
+>   `Expected_Close`. Measured: 425 tank-weeks, **every one negative**,
+>   −20,358 kg against an implied mortality mass of 19,892 kg. A systematic hole
+>   in the sheet that exists to *prove* conservation is a hole a real loss could
+>   hide in. Now booked at the same open-weight basis the recorded-biology branch
+>   uses.
+> * **Graded splits did not conserve mass.** The graded path chooses its pickup
+>   **count** first (capped to exactly the floor shortfall, so it peels the least
+>   it can) and then took both conditional means from the harvest **weight**
+>   threshold. Those describe different partitions: when the cap bites, the
+>   heavy fish left behind sit in the retention leg while it is still priced at
+>   the full lower-tail mean, and the tank loses mass that never went anywhere.
+>   24 splits swung −6,493 to +1,546 kg. `biology.count_split_means` now derives
+>   both means from the fraction actually moved, which conserves by construction
+>   and is *identical* to the old result whenever the cap does not bite — so an
+>   uncapped split is unchanged. This was a **model** defect, not a reporting
+>   one: the understated weight became the tank's state and grew from there.
+>   Correcting it raised total harvest ~55 t on the 8.13 PR (the same fish at
+>   their true weight, plus growth on mass no longer being destroyed) and raised
+>   the reported density and biomass-cap pressure accordingly — those fish were
+>   always in the tanks.
+>
+> After both: the facility conservation summary reads **count signed-sum 0**,
+> **biomass signed-sum −474 kg** (abs 841 kg) across ~3,200 tank-weeks, the
+> ReconciliationReport biomass residual is **exactly 0**, and **no** row carries
+> a `BIO_DRIFT` flag. Before, the same run showed −38,776 kg and 5 flags.
 
 ### The negative-control policy — every alarm ships with a proof it can fire
 

@@ -232,6 +232,51 @@ def upper_truncated_split(
     return (max(0.0, upper_mean), max(0.0, lower_mean))
 
 
+def count_split_means(
+    avg_wt_g: float, cv_pct: float, upper_fraction: float,
+) -> tuple[float, float]:
+    """Conditional means when the TOP `upper_fraction` of a tank is moved.
+
+    Same distribution as `upper_truncated_split`, addressed by COUNT instead of
+    by weight: given N(mu, sigma) and a decision to take the heaviest fraction
+    p, returns (E[X | top p], E[X | bottom 1-p]).
+
+    Why this exists. The graded path picks its pickup COUNT first — capped to
+    exactly the floor shortfall so it peels the least it can — and then needs
+    the two means. Taking them from `upper_truncated_split` at the harvest
+    WEIGHT answers a different question: it is the split of the fish above
+    3.5 kg, which is only the same partition when the cap happens not to bite.
+    When it does bite, the pickup is smaller than the above-threshold group, so
+    the heavy fish left behind sit in the retention leg while it is still
+    priced at the full lower-tail mean — and the tank loses mass that never
+    went anywhere. Measured on the 8.13 PR: 24 graded splits, swinging -6,493
+    to +1,546 kg, net +5,150 kg, and the loss tail was 3 of the 4 worst
+    biomass-drift rows in the whole run.
+
+    Because p is the actual moved fraction, this conserves by construction:
+
+        p * upper + (1 - p) * lower
+          = p*mu + sigma*phi + (1-p)*mu - sigma*phi
+          = mu
+
+    Identical to `upper_truncated_split` whenever the pickup is NOT capped
+    (z = inv_cdf(1-p) is the exact inverse of p = 1 - Phi(z)), so an uncapped
+    graded split is unchanged.
+    """
+    if avg_wt_g <= 0 or cv_pct <= 0:
+        return (avg_wt_g, avg_wt_g)
+    if upper_fraction <= 1e-9 or upper_fraction >= 1 - 1e-9:
+        # Everything on one side: there is no second group to hold a mean.
+        return (avg_wt_g, avg_wt_g)
+    sigma = avg_wt_g * cv_pct / 100.0
+    nd = NormalDist()
+    z = nd.inv_cdf(1.0 - upper_fraction)
+    phi_z = math.exp(-0.5 * z * z) / math.sqrt(2 * math.pi)
+    upper_mean = avg_wt_g + sigma * phi_z / upper_fraction
+    lower_mean = avg_wt_g - sigma * phi_z / (1.0 - upper_fraction)
+    return (max(0.0, upper_mean), max(0.0, lower_mean))
+
+
 def compute_size_class_split(
     batch_id: str,
     tran_og_date,

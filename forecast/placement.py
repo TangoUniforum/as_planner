@@ -57,8 +57,8 @@ from .caps import (
     system_cap_with_buffer,
 )
 from .biology import (
-    _fcr_model_key, _feed_type_for_size, _interp, realized_feed_kg_day,
-    sgr_pct_per_day, upper_truncated_split,
+    _fcr_model_key, _feed_type_for_size, _interp, count_split_means,
+    realized_feed_kg_day, sgr_pct_per_day, upper_truncated_split,
 )
 from .events import Grade, GradedHarvest, Harvest, OG12_SYSTEMS, OG12_MOVE_LOCK_WT_G, TankAllocation, Transfer, TranOGEntry
 from .tiers import move_allowed, sixn_exit_allowed
@@ -1244,7 +1244,19 @@ def _try_graded_move_in(
     if max_count is not None and big_count > max_count:
         big_count = max(0.0, max_count)
     small_count = chosen.count - big_count
-    big_avg, small_avg = upper_truncated_split(chosen.avg_wt_g, cv, min_hv)
+    # Take the two means from the fraction actually MOVED, not from the harvest
+    # weight. The cap above is applied to the COUNT, so when it bites the pickup
+    # is a smaller, heavier group than "everything over 3.5 kg" — and the heavy
+    # fish left behind belong to the retention leg's mean. Pricing retention at
+    # the full lower-tail mean instead loses that mass outright: measured on the
+    # 8.13 PR, 24 graded splits swung -6,493 to +1,546 kg (net +5,150), and the
+    # three worst losses were three of the four largest biomass-drift rows in
+    # the run. `count_split_means` conserves by construction and is IDENTICAL to
+    # the threshold split whenever the cap does not bite, so an uncapped graded
+    # split is unchanged.
+    big_avg, small_avg = count_split_means(
+        chosen.avg_wt_g, cv,
+        (big_count / chosen.count) if chosen.count > 0 else 0.0)
 
     # Retention destination. retain_in_source (grade-to-min top-up): the small tail
     # STAYS in the SOURCE tank — same batch, no extra tank needed. Otherwise (make-
@@ -1483,7 +1495,12 @@ def _transit_entry_to_pair(
                 continue
             if small < (control.min_tank_control or 0):
                 continue   # never leave a sub-min dribble behind
-            big_avg, small_avg = upper_truncated_split(_es.avg_wt_g, cv, min_hv)
+            # `big` was capped by the floor goal above, so take the means from
+            # the fraction actually moved — the threshold split would price the
+            # retention leg as if the heavy fish it kept were not in it. See
+            # biology.count_split_means; identical when the cap does not bite.
+            big_avg, small_avg = count_split_means(
+                _es.avg_wt_g, cv, (big / _es.count) if _es.count > 0 else 0.0)
             _e_batch, _e_loc = _es.batch_id, _es.location_id
             if was_res:
                 state.reserved_tanks.discard(hop.tank_id)
@@ -4534,8 +4551,11 @@ def phase_d_emit_events(
                                     continue
                                 if _small < (control.min_tank_control or 0):
                                     continue
-                                _bavg, _savg = upper_truncated_split(
-                                    _gs.avg_wt_g, _cvg, _min_hv_p)
+                                # Capped by the floor above -> means must come
+                                # from the moved fraction, not the threshold.
+                                _bavg, _savg = count_split_means(
+                                    _gs.avg_wt_g, _cvg,
+                                    (_big / _gs.count) if _gs.count > 0 else 0.0)
                                 _g_batch, _g_loc = _gs.batch_id, _gs.location_id
                                 _gev = Grade(
                                     batch_id=_g_batch,
