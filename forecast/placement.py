@@ -532,7 +532,18 @@ def _tranog_tank_need(cohort_kg, facility, control, plan_n=0):
     floor can differ from Phase A's by the density_target_pct factor — a known,
     pre-existing behaviour preserved here, not introduced by the extraction.)
     """
-    cap = _max_kg_per_og_tank(facility) or (95.0 * 1720.0)
+    cap = _max_kg_per_og_tank(facility)
+    if cap <= 0:
+        # A density AND a tank volume used to be written here as a fallback.
+        # Sizing the no-drop TranOG invariant against numbers the operator never
+        # set means planning against a figure that appears on no sheet and in no
+        # config — the exact thing caps.py forbids ("No capacity figure lives in
+        # code"). Name the missing input instead, same contract as
+        # caps.require_system_cap.
+        raise ValueError(
+            "Cannot size a TranOG cohort: no OG tank in config/facility.yaml "
+            "carries a positive max_density_kg_m3, so there is no per-tank "
+            "capacity to divide by. Set max_density_kg_m3 on the OG tanks.")
     density_n = max(1, math.ceil(cohort_kg / cap))
     cfg_floor = max(2, (control.tran_og_default_tanks or 2) if control else 2)
     return max(plan_n, cfg_floor, density_n)

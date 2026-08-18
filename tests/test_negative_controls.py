@@ -1004,3 +1004,138 @@ def test_every_mapped_audit_writer_and_control_exists():
             f"AUDIT_CONTROLS and its negative controls together")
         assert test_cls in globals(), (
             f"control class {test_cls} for excel_io.{fn} is missing")
+
+
+# --------------------------------------------------------------------------- #
+# 8. The REALIZED-PLAN audit (forecast/analysis.realized_plan_audit)
+#
+# These three alarms exist BECAUSE the pre-existing ones could not answer the
+# question they appeared to answer. The harvest-floor warning was raised by the
+# scheduler's demand pass, which runs before make-room, level-loading and the
+# 6N fallback ladder; those later passes fix weeks it flagged and break weeks it
+# did not. On the 8.13 PR the realized plan was under the floor in 29 weeks, the
+# log named 3, and one of those 3 was comfortably fine in the plan that shipped.
+# A detector that is wrong in BOTH directions is the exact failure this suite
+# exists to prevent, so these replacements ship with their own controls.
+# --------------------------------------------------------------------------- #
+class TestRealizedPlanAudit:
+    """Each alarm fires on a plan containing exactly its defect, and stays
+    silent on a clean plan. No alarm may depend on a mid-plan pass."""
+
+    class _Ev:
+        """Minimal harvest event: the audit reads only date + count."""
+        def __init__(self, d, count):
+            self.event_date, self.count = d, count
+
+    class _Dest:
+        def __init__(self, tank_id, count):
+            self.tank_id, self.count = tank_id, count
+
+    def _control(self, floor=30_000.0, ceiling=60_000.0, moves=15):
+        return SimpleNamespace(
+            min_harvest_per_week=floor, max_harvest_per_week=ceiling,
+            max_transfers_per_week=moves,
+            facility_biomass_deviation_pct=0.0, max_biomass_kg=1e9,
+            max_feed_per_day_kg=1e9, default_hog_yield=0.81,
+            forecast_start=_MON, horizon_weeks=4)
+
+    def _run(self, harvests=(), transfers=(), control=None, limits=None,
+             window=frozenset()):
+        from forecast.analysis import realized_plan_audit
+        from forecast.caps import FacilityLimits
+        return realized_plan_audit(
+            list(harvests), list(transfers), limits or FacilityLimits(),
+            control or self._control(), window_weeks=window)
+
+    # ---- harvest floor ----------------------------------------------------
+    def test_floor_alarm_rings_on_a_short_week(self):
+        out = self._run(harvests=[self._Ev(_MON, 10_000.0)])
+        assert any("HARVEST FLOOR" in m for m in out), out
+        assert any("20,000 under" in m for m in out), out
+
+    def test_floor_alarm_stays_quiet_when_the_floor_is_met(self):
+        out = self._run(harvests=[self._Ev(_MON, 30_000.0)])
+        assert not [m for m in out if "HARVEST FLOOR" in m], out
+
+    def test_floor_uses_the_PER_WEEK_resolved_cap_not_the_control_default(self):
+        """A check against the flat default silently passes every week the
+        operator RAISED in scenario/limits.yaml — the defect that let 26 short
+        weeks go unreported."""
+        from forecast.caps import FacilityLimits, METRIC_MIN_HARVEST
+        from forecast.time_grid import iso_week_label
+        wk = iso_week_label(_MON)
+        lim = FacilityLimits(overrides={(wk, METRIC_MIN_HARVEST): 48_000.0})
+        # 40,000 clears the 30,000 default but not this week's raised floor.
+        assert not [m for m in self._run(harvests=[self._Ev(_MON, 40_000.0)])
+                    if "HARVEST FLOOR" in m]
+        out = self._run(harvests=[self._Ev(_MON, 40_000.0)], limits=lim)
+        assert any("HARVEST FLOOR" in m and "48,000" in m for m in out), out
+
+    def test_a_rounding_scale_miss_is_reported_but_marked(self):
+        """Suppressing it would repeat the old sin; leaving eight identical
+        '72 fish' lines unmarked trains the reader to ignore the category."""
+        out = [m for m in self._run(harvests=[self._Ev(_MON, 29_950.0)])
+               if "HARVEST FLOOR" in m]
+        assert out and "rounding-scale" in out[0], out
+
+    def test_a_material_miss_is_NOT_marked_rounding_scale(self):
+        out = [m for m in self._run(harvests=[self._Ev(_MON, 10_000.0)])
+               if "HARVEST FLOOR" in m]
+        assert out and "rounding-scale" not in out[0], out
+
+    def test_operator_scripted_window_weeks_are_excluded_and_say_so(self):
+        """The planner neither chose nor can fix those weeks, and their
+        harvests are stitched in separately — counting them would report a
+        phantom zero."""
+        from forecast.time_grid import iso_week_label
+        wk = iso_week_label(_MON)
+        out = self._run(harvests=[self._Ev(_MON, 1.0)], window={wk})
+        assert not [m for m in out if m.startswith(f"HARVEST FLOOR - {wk}:")], out
+        assert any("excluded from this audit" in m for m in out), out
+
+    # ---- harvest ceiling --------------------------------------------------
+    def test_ceiling_alarm_rings_when_the_week_exceeds_the_processing_limit(self):
+        out = self._run(harvests=[self._Ev(_MON, 70_000.0)])
+        assert any("HARVEST CEILING" in m for m in out), out
+
+    def test_ceiling_alarm_stays_quiet_at_the_limit(self):
+        out = self._run(harvests=[self._Ev(_MON, 60_000.0)])
+        assert not [m for m in out if "HARVEST CEILING" in m], out
+
+    # ---- handling budget --------------------------------------------------
+    def _move(self, d, pairs, applied=True):
+        from forecast.events import Transfer
+        ev = Transfer(batch_id="B1", event_date=d, source_tank_id=pairs[0][0],
+                      destinations=[self._Dest(t, 100.0) for _, t in pairs])
+        ev.count_transferred = 100.0 if applied else 0.0
+        return ev
+
+    def test_handling_alarm_rings_when_the_week_exceeds_the_budget(self):
+        moves = [self._move(_MON, [(1, 100 + i)]) for i in range(16)]
+        out = self._run(harvests=[self._Ev(_MON, 30_000.0)], transfers=moves,
+                        control=self._control(moves=15))
+        assert any("HANDLING BUDGET" in m and "16 moves" in m for m in out), out
+
+    def test_handling_alarm_stays_quiet_at_the_budget(self):
+        moves = [self._move(_MON, [(1, 100 + i)]) for i in range(15)]
+        out = self._run(harvests=[self._Ev(_MON, 30_000.0)], transfers=moves,
+                        control=self._control(moves=15))
+        assert not [m for m in out if "HANDLING BUDGET" in m], out
+
+    def test_refused_transfers_are_not_handling(self):
+        """count_transferred == 0 means the move never happened; counting it
+        would invent a breach out of a refusal."""
+        moves = [self._move(_MON, [(1, 100 + i)], applied=(i < 10))
+                 for i in range(20)]
+        out = self._run(harvests=[self._Ev(_MON, 30_000.0)], transfers=moves,
+                        control=self._control(moves=15))
+        assert not [m for m in out if "HANDLING BUDGET" in m], out
+
+    def test_a_multi_destination_move_counts_once_per_destination(self):
+        """The unit must match what placement clamps to — distinct applied
+        (source, dest) pairs. Counting EVENTS would report a different number
+        than the budget was enforced against."""
+        moves = [self._move(_MON, [(1, 200 + i) for i in range(16)])]
+        out = self._run(harvests=[self._Ev(_MON, 30_000.0)], transfers=moves,
+                        control=self._control(moves=15))
+        assert any("HANDLING BUDGET" in m and "16 moves" in m for m in out), out

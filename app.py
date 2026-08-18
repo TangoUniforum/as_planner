@@ -1015,20 +1015,22 @@ def _edit_control():
                               "config/control.yaml")
     if not _ok:
         return
+    # Knobs no engine reads. They cannot simply be deleted: `dump_config`
+    # rewrites control.yaml from the ControlParams dataclass, which emits every
+    # field, so a removed knob reappears in the file after any Save — and the
+    # field itself has to stay for configs predating the redesign to load. They
+    # are therefore kept, labelled, and (here) moved OUT of the working set so
+    # nobody tunes one expecting an effect. Derived from the label convention
+    # rather than a second hardcoded list, so marking a future knob INACTIVE
+    # moves it automatically.
+    _inactive = {k for k in d if "(INACTIVE)" in _ctl_label(k)}
     with st.form("control_form"):
         new = {}
-        for k, v in d.items():
-            if k == "forecast_start":
-                if _derived is not None:
-                    st.success(f"forecast_start = **{_derived}** — derived from "
-                               f"the uploaded ProductionReport (the stored seed "
-                               f"is ignored).")
-                else:
-                    st.info("forecast_start is derived from the ProductionReport "
-                            "at run time — upload a PR to see it. The stored "
-                            "value is an ignored seed.")
-                new[k] = v
-            elif isinstance(v, bool):
+
+        def _knob(k, v):
+            """Render one knob. EVERY key in `d` must land in `new` — a key
+            that is skipped is silently dropped from the saved config."""
+            if isinstance(v, bool):
                 new[k] = st.checkbox(_ctl_label(k), value=v,
                                      help=_ctl_help(k, v))
             elif isinstance(v, int):
@@ -1041,6 +1043,31 @@ def _edit_control():
             else:
                 new[k] = st.text_input(_ctl_label(k), value="" if v is None else str(v),
                                        help=_ctl_help(k, v)) or None
+
+        for k, v in d.items():
+            if k in _inactive:
+                continue
+            if k == "forecast_start":
+                if _derived is not None:
+                    st.success(f"forecast_start = **{_derived}** — derived from "
+                               f"the uploaded ProductionReport (the stored seed "
+                               f"is ignored).")
+                else:
+                    st.info("forecast_start is derived from the ProductionReport "
+                            "at run time — upload a PR to see it. The stored "
+                            "value is an ignored seed.")
+                new[k] = v
+            else:
+                _knob(k, v)
+        if _inactive:
+            with st.expander(f"⚪ Inactive settings ({len(_inactive)}) — kept only "
+                             f"so older configs load", expanded=False):
+                st.caption(
+                    "No engine reads these. They stay in the file because saving "
+                    "rewrites every field of the config, and older configs must "
+                    "still load — editing one has no effect on any plan.")
+                for k in _inactive:
+                    _knob(k, d[k])
         if st.form_submit_button("💾 Save Control"):
             # control_from_dict coerces to the declared types and raises on a
             # value that cannot be one (e.g. text typed into a knob that is

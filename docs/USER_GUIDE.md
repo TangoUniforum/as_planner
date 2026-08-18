@@ -942,8 +942,9 @@ report the failure it existed to catch (the zero-week counter dropped empty
 weeks by construction; the over-production alarm was structurally blind to the
 audit's own headline). The standing fix is `tests/test_negative_controls.py`:
 **every detection surface** — the analysis gate registry, the workbook audits
-above, the compare-harness verdicts, the manual-window lints, the tournament
-hard-gate predicates, the board cache-staleness checks — ships with a minimal
+above, the realized-plan audit (§5's `(realized plan)` categories), the
+compare-harness verdicts, the manual-window lints, the tournament hard-gate
+predicates, the board cache-staleness checks — ships with a minimal
 synthetic input containing exactly the defect it exists to catch, asserting the
 alarm **fires**, plus a clean-input control asserting it stays **quiet**. A
 meta-guard enumerates the gate registry and fails CI when a gate is registered
