@@ -202,6 +202,18 @@ Governed by Control R26 `6N Production Start Date`.
   computed from the source tank's distribution (avg wt + CV) — 90/10
   is one possible outcome, not a fixed split. Iterate FIFO across the
   batch's tanks until harvest demand met.
+  - **The two conditional means are sized from the COUNT actually
+    moved, not from the harvest-weight threshold**
+    (`biology.count_split_means`). The pickup count is chosen first and
+    capped to the floor shortfall so it peels the least it can; taking
+    the means from the threshold describes a DIFFERENT partition, and
+    when the cap bites the heavy fish left behind sit in the retention
+    leg while it is still priced at the full lower-tail mean. That
+    destroyed mass on every capped split — measured 2026-08-18: 24
+    splits swinging −6,493 to +1,546 kg, and the losses were 3 of the 4
+    worst biomass-drift rows in the run. Sizing from the moved fraction
+    conserves by construction and is exactly identical to the threshold
+    form whenever the cap does not bite.
 
 ### 5b. Production mode (on/after date)
 
@@ -517,7 +529,7 @@ Current modules (`forecast/`):
 | `caps.py` | Cap resolution (Control / FacilityLimits / SystemLimits) + buffer helpers |
 | `state.py` | `(batch, tank)` state container, daily mortality/growth, continuity invariant checks |
 | `events.py` | The 5 logged event types (`TranOGEntry`, `Transfer`, `Grade`, `Harvest`, `GradedHarvest`) with `.apply(state)` methods that enforce INV-3, INV-4, INV-5 at event time |
-| `biology.py` | Daily Egg→FW→SW projection, SGR/FCR interp, mortality, FW back-solve, `upper_truncated_split` for graded harvest, `compute_size_class_split` for TranOG |
+| `biology.py` | Daily Egg→FW→SW projection, SGR/FCR interp, mortality, FW back-solve, `count_split_means` for graded harvest (mass-conserving; `upper_truncated_split` is the threshold-addressed form, still used by the manual `graded_harvest` event), `compute_size_class_split` for TranOG |
 | `harvest_scheduler.py` | Layer [2]. FIFO 3-state controller; facility-cap-driven; pin-aware |
 | `precalc.py` | The coordinator. `_build_batch_week_facts`, `_build_facility_assignment_plan` (event-driven interval layout with PR_CORRECTION 2-pass evaluator hook), `_build_migration_plan` (thin diff layer), `_even_out_density` |
 | `placement.py` | Phases A-D execution. Plan-driven Phase B (no greedy fallback), sticky Phase C, Phase D event emission + per-batch even-out + density-trigger Grade + purge cascade + `_try_graded_move_in` |
