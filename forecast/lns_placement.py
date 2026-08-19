@@ -58,7 +58,7 @@ def system_loads(batch_locations, batch_by_id, tables, system_limits):
         sb[(r.week_label, r.system_id)] += r.biomass_kg
         if getattr(r, "stage", "") != "STARVE":
             sf[(r.week_label, r.system_id)] += realized_feed_kg_day(
-                r.avg_wt_g, r.biomass_kg, b, tables)
+                r.avg_wt_g, r.biomass_kg, b, tables, r.week_label)
     return sb, sf, cap
 
 
@@ -220,7 +220,8 @@ class _Segment:
         b = batch_meta.get(self.batch_id)
         for r in self.rows:
             feed = (0.0 if getattr(r, "stage", "") == "STARVE"
-                    else realized_feed_kg_day(r.avg_wt_g, r.biomass_kg, b, tables))
+                    else realized_feed_kg_day(r.avg_wt_g, r.biomass_kg, b,
+                                              tables, r.week_label))
             out[r.week_label] = (r.biomass_kg, feed, r.avg_wt_g)
         return out
 

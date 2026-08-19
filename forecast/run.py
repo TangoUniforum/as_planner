@@ -307,6 +307,24 @@ def main(
     # `control` is required: system defaults may be mode-specific (6N), and
     # the mode of a week is derived from Control's sixn fields.
     facility_limits, system_limits = load_limits(scenario_dir, control)
+    # PER-WEEK OG GROWTH FACTOR. Bound onto `tables` here, once, because tables
+    # is the object already threaded to every growth and feed call site; the
+    # alternative is a second argument on ~24 signatures where a single miss
+    # would desync the projection from the realized walk. Applied SW-only in
+    # biology.sgr_pct_per_day, so growth AND the feed derived from it move
+    # together. An empty dict (nothing configured) is exactly the old behaviour.
+    from .caps import og_sgr_factors as _og_sgr_factors
+    tables.og_sgr_by_week = _og_sgr_factors(facility_limits)
+    if tables.og_sgr_by_week:
+        _ogs = tables.og_sgr_by_week
+        _odd = {w: f for w, f in _ogs.items() if f > 1.5 or f == 0.0}
+        print(f"    OG SGR factor:            {len(_ogs)} week(s) "
+              f"(range {min(_ogs.values()):.2f}-{max(_ogs.values()):.2f})")
+        if _odd:
+            # Loud, not silent: 0 stops growth outright and >1.5 is almost
+            # certainly a percentage typed as 90 instead of 0.90.
+            print(f"      NOTE unusual value(s): {dict(sorted(_odd.items()))} "
+                  f"— 1.0 = normal growth, 0.90 = 90% of it")
     # Operator-authored starting events are applied above (manual_events); the
     # workbook upload is the ProductionReport only. The realized closed-loop
     # planner has no separate pin-ingestion path.

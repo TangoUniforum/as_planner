@@ -3280,7 +3280,7 @@ def _edit_limits():
         system_limits_to_list, facility_limits_from_list, dump_scenario,
     )
     from forecast.caps import (METRIC_BIOMASS, METRIC_FEED_DAY, METRIC_MAX_HARVEST,
-                               METRIC_MIN_HARVEST, METRIC_HOG_YIELD,
+                               METRIC_MIN_HARVEST, METRIC_HOG_YIELD, METRIC_SGR_OG,
                                SYSTEM_MODES, SystemLimits)
     st.caption(
         "Capacity limits. A capacity is a fact about the facility, so it is "
@@ -3302,7 +3302,7 @@ def _edit_limits():
     sl_cur = {(r["week"], r["system"], r["metric"]): r["value"]
               for r in system_limits_to_list(sl)}
     fl_metrics = [METRIC_BIOMASS, METRIC_FEED_DAY, METRIC_MAX_HARVEST,
-                  METRIC_MIN_HARVEST, METRIC_HOG_YIELD]
+                  METRIC_MIN_HARVEST, METRIC_HOG_YIELD, METRIC_SGR_OG]
     sl_metrics = [METRIC_BIOMASS, METRIC_FEED_DAY]
     systems = _og_systems_app()
     # Weeks drive the EXCEPTION grid only; the defaults editor needs none, so
@@ -3414,7 +3414,13 @@ def _edit_limits():
         "`feed_per_day` = most feed per day (kg/day); "
         "`max_harvest_per_week` / `min_harvest_per_week` = that week's harvest "
         "ceiling / floor (fish); "
-        "`hog_yield` = live-to-sold weight ratio for that week. "
+        "`hog_yield` = live-to-sold weight ratio for that week; "
+        "`sgr_correction_og` = growth factor for the OG (seawater) tanks that "
+        "week — 1.0 (or blank) is the modelled growth, 0.90 means you expect "
+        "only 90% of it. It multiplies ON TOP of the growth curve and each "
+        "batch's own sgr_correction, and feed follows it (feed = biomass x "
+        "SGR x FCR), so a 90% week eats 90% and grows 90%. Freshwater is "
+        "unaffected. "
         "The per-week system grid carries the first two only — a harvest or "
         "yield cap is a whole-facility number.")
     wk_cfg = {wk: st.column_config.NumberColumn(

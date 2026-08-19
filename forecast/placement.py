@@ -155,7 +155,8 @@ SIXN_DRAIN_GUARD_MIN_DAYS = 8
 
 
 def _grow_weight_days(avg_wt_g: float, batch: Optional[BatchInput],
-                      tables: BiologyTables, days: int) -> float:
+                      tables: BiologyTables, days: int,
+                      week_label: Optional[str] = None) -> float:
     """Advance an avg weight by `days` of the batch's SW daily growth.
 
     Weight only — same daily SW SGR math as `advance_tank_one_day` (SGR-curve
@@ -166,7 +167,7 @@ def _grow_weight_days(avg_wt_g: float, batch: Optional[BatchInput],
         return avg_wt_g
     w = float(avg_wt_g)
     for _ in range(days):
-        sgr_eff = sgr_pct_per_day(w, "SW", batch, tables)
+        sgr_eff = sgr_pct_per_day(w, "SW", batch, tables, week_label)
         w = w * (1.0 + sgr_eff / 100.0)
     return w
 
@@ -1297,7 +1298,7 @@ def _try_graded_move_in(
     # so this path is always purge mode.
     _bm = batch_meta.get(chosen.batch_id)
     pickup_xfer_wt = (_grow_weight_days(big_avg, _bm, tables,
-                                        PURGE_TRANSFER_GROWTH_DAYS)
+                                        PURGE_TRANSFER_GROWTH_DAYS, week_label)
                       if tables is not None else big_avg)
 
     ev = GradedHarvest(
@@ -1793,7 +1794,7 @@ def _run_sixn_purge_week(
             # the mid-week (Friday) transfer weight the fish actually land at.
             _bm = batch_meta.get(move_in_batch)
             _xfer_wt = _grow_weight_days(src.avg_wt_g, _bm, tables,
-                                         PURGE_TRANSFER_GROWTH_DAYS)
+                                         PURGE_TRANSFER_GROWTH_DAYS, week_label)
             # SISTER-FIRST FILL (rule-2 stage): allocate MAIN-first but never
             # STOCK a pair tank past the structural 95 kg/m3 fill cap —
             # overflow continues into the pair's other tank (the idle sister)
@@ -2380,6 +2381,7 @@ def _realized_facility_metrics(
     batch_meta: dict[str, BatchInput],
     tables: BiologyTables,
     min_harvest_weight_g: float,
+    week_label: Optional[str] = None,
 ) -> tuple[float, float, float, float]:
     """Realized facility totals from the LIVE state, for the closed-loop
     harvest controller.
@@ -2408,7 +2410,8 @@ def _realized_facility_metrics(
         batch = batch_meta.get(t.batch_id)
         if t.stage == "SW":
             fac_sw_bio += bio
-            sgr_eff = sgr_pct_per_day(t.avg_wt_g, "SW", batch, tables)
+            sgr_eff = sgr_pct_per_day(t.avg_wt_g, "SW", batch, tables,
+                                      week_label)
             fac_growth_kg += bio * (sgr_eff / 100.0) * 7.0
             fcr_curve = tables.fcr_by_model.get(
                 _fcr_model_key(batch.fcr_model) if batch else "", [])
@@ -2534,7 +2537,7 @@ def _rebalance_systems_realized(
         if t.is_empty or t.system_id not in og_systems:
             continue
         feed = realized_feed_kg_day(
-            t.avg_wt_g, t.biomass_kg, batch_meta.get(t.batch_id), tables)
+            t.avg_wt_g, t.biomass_kg, batch_meta.get(t.batch_id), tables, wl)
         sb[t.system_id] += t.biomass_kg
         sf[t.system_id] += feed
         occ[t.system_id] += 1
@@ -2729,7 +2732,8 @@ def _variable_quantity_rebalance(
             if t is not None and not t.is_empty:
                 bio += t.biomass_kg
                 feed += realized_feed_kg_day(
-                    t.avg_wt_g, t.biomass_kg, batch_meta.get(t.batch_id), tables)
+                    t.avg_wt_g, t.biomass_kg, batch_meta.get(t.batch_id), tables,
+                    wl)
         return bio, feed
 
     moves = 0
@@ -2765,7 +2769,7 @@ def _variable_quantity_rebalance(
             if src.biomass_kg <= 1.0 or src.avg_wt_g <= 0:
                 continue
             src_feed = realized_feed_kg_day(
-                src.avg_wt_g, src.biomass_kg, batch_meta.get(bid), tables)
+                src.avg_wt_g, src.biomass_kg, batch_meta.get(bid), tables, wl)
             intensity = src_feed / src.biomass_kg if src.biomass_kg > 0 else 0.0
             # Destinations: same batch, in an under-cap system with headroom.
             # Fill only to _VARQTY_DST_FILL of cap (NOT cap*buf) so a move never
@@ -2871,7 +2875,8 @@ def _balance_loads(
                     sb[s] += t.biomass_kg   # STARVE biomass still counts to caps
                     if t.stage != STAGE_STARVE:   # but STARVE fish eat nothing
                         sf[s] += realized_feed_kg_day(
-                            t.avg_wt_g, t.biomass_kg, batch_meta.get(t.batch_id), tables)
+                            t.avg_wt_g, t.biomass_kg, batch_meta.get(t.batch_id),
+                            tables, wl)
         return sb, sf
 
     moves = 0
@@ -2924,7 +2929,7 @@ def _balance_loads(
             stuck.add(src.tank_id)
             continue
         intensity = (realized_feed_kg_day(
-            src.avg_wt_g, src.biomass_kg, batch_meta.get(b), tables)
+            src.avg_wt_g, src.biomass_kg, batch_meta.get(b), tables, wl)
             / src.biomass_kg) if src.biomass_kg > 0 else 0.0
         surplus_kg = src.biomass_kg - src.max_biomass_kg * _BALANCE_TARGET_FRAC
         if level:
@@ -3079,7 +3084,7 @@ def _repair_over_cap_systems(
                 if t.stage != STAGE_STARVE:      # but STARVE fish eat nothing
                     sf[s] += realized_feed_kg_day(
                         t.avg_wt_g, t.biomass_kg, batch_meta.get(t.batch_id),
-                        tables)
+                        tables, wl)
         return sb, sf
 
     moves = 0
@@ -3113,7 +3118,7 @@ def _repair_over_cap_systems(
                     continue
                 b = src.batch_id
                 src_feed = realized_feed_kg_day(
-                    src.avg_wt_g, src.biomass_kg, batch_meta.get(b), tables)
+                    src.avg_wt_g, src.biomass_kg, batch_meta.get(b), tables, wl)
                 intensity = (src_feed / src.biomass_kg
                              if src.biomass_kg > 0 else 0.0)
                 want = need_bio
@@ -3398,7 +3403,8 @@ def _book_move_in_feed(accum: dict, batch_id: str, week_label: str,
     if accum is None or moved_count <= 0 or transfer_avg_wt_g <= 0:
         return
     moved_kg = moved_count * transfer_avg_wt_g / 1000.0
-    feed_kg = (realized_feed_kg_day(transfer_avg_wt_g, moved_kg, batch, tables)
+    feed_kg = (realized_feed_kg_day(transfer_avg_wt_g, moved_kg, batch, tables,
+                                    week_label)
                * PURGE_TRANSFER_GROWTH_DAYS)
     if feed_kg <= 0:
         return
@@ -3453,7 +3459,7 @@ def _make_room_into_6n(
     # SW stage — unchanged behaviour.
     _bm = (batch_meta or {}).get(src.batch_id)
     _xfer_wt = (_grow_weight_days(src.avg_wt_g, _bm, tables,
-                                  PURGE_TRANSFER_GROWTH_DAYS)
+                                  PURGE_TRANSFER_GROWTH_DAYS, week_label)
                 if (is_purge and tables is not None) else src.avg_wt_g)
     # Capture BEFORE apply: leaves_source_empty drains src, so reading
     # src.batch_id/count afterwards logs "batch None, 0 fish".
@@ -4022,7 +4028,8 @@ def phase_d_emit_events(
         #     (e.g. an unmodelled TranOG arrival) the lagged channel can't catch.
         fac_bio, fac_growth_kg, _fac_feed_kg_day, oldest_wt, _fac_sw_bio = (
             _realized_facility_metrics(
-                state, batch_meta, tables, control.min_harvest_weight_g)
+                state, batch_meta, tables, control.min_harvest_weight_g,
+                week_label)
         )
         _fw_now = 0.0   # this week's FW standing biomass (set below if available)
         # FW-INCLUSIVE cap basis (audit H1): add this week's pre-feed (EGG/FW)

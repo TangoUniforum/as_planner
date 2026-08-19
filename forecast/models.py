@@ -295,6 +295,19 @@ class BiologyTables:
     mortality_pct_weekly: list[float] = field(default_factory=list)
     # Feed-type schedule: (max_size_g, feed_name), sorted ascending by max_size.
     feed_types: list[tuple[float, str]] = field(default_factory=list)
+    # PER-WEEK OG (seawater) SGR factor, keyed by ISO week label. An operator
+    # input from `scenario/limits.yaml` (facility metric `sgr_correction_og`),
+    # NOT a biology curve: it is the weeks the site knows it cannot achieve the
+    # modelled growth — 0.90 for "90% of expected this week". Absent week = 1.0.
+    #
+    # It rides on BiologyTables because `tables` is the one object already
+    # threaded to every growth and feed call site; carrying it separately would
+    # mean a second parameter on ~24 signatures and a silent miss on any one of
+    # them would desync the projection from the realized walk. Applied in
+    # `biology.sgr_pct_per_day`, the single source for the growth rate, so
+    # growth AND the feed derived from it (biomass x SGR/100 x FCR) both move
+    # together — operator decision 2026-08-19.
+    og_sgr_by_week: dict[str, float] = field(default_factory=dict)
     # Culling schedule: (days_since_input, cull_pct), sorted ascending by day.
     culling: list[tuple[int, float]] = field(default_factory=list)
 

@@ -57,6 +57,12 @@ METRIC_FEED_DAY = "feed_per_day"
 METRIC_MAX_HARVEST = "max_harvest_per_week"
 METRIC_MIN_HARVEST = "min_harvest_per_week"
 METRIC_HOG_YIELD = "hog_yield"
+# Per-week OG (seawater) growth factor. NOT a cap — a multiplier the operator
+# sets for weeks the site knows it cannot achieve the modelled growth (0.90 =
+# "90% of expected this week"). Absent week = 1.0. Deliberately resolved by
+# `og_sgr_factors` below rather than `resolve_facility_cap`: a cap treats 0 as
+# "unset", but 0 growth is a legitimate thing to ask for here.
+METRIC_SGR_OG = "sgr_correction_og"
 
 # Operating modes a system-default may be qualified by. Today only 6N has
 # two; the dimension is general so a future mode (a system taken off-line
@@ -224,6 +230,37 @@ def resolve_facility_cap(
         return None
     val = facility_limits.get(week_label, metric, defaults[metric])
     return val if val > 0 else None
+
+
+def og_sgr_factors(facility_limits) -> dict[str, float]:
+    """`{week_label: factor}` for the per-week OG growth factor.
+
+    Layers on top of the growth curve and the batch's own `sgr_correction`
+    (see `biology.sgr_pct_per_day`) — it does not replace either. Seawater
+    only: freshwater has `fw_correction`, and this is an OG-tank input.
+
+    Unlike a cap this is NOT buffered and 0 is NOT "unset": a week set to 0
+    means no growth that week, which an operator may legitimately want.
+    Negative values are dropped — there is no such thing as negative growth
+    here, and silently treating one as a shrink factor would be inventing a
+    model nobody asked for.
+    """
+    out: dict[str, float] = {}
+    for key, val in (getattr(facility_limits, "overrides", None) or {}).items():
+        try:
+            week, metric = key
+        except (TypeError, ValueError):
+            continue
+        if metric != METRIC_SGR_OG:
+            continue
+        try:
+            f = float(val)
+        except (TypeError, ValueError):
+            continue
+        if f < 0:
+            continue
+        out[str(week)] = f
+    return out
 
 
 def apply_facility_buffer(

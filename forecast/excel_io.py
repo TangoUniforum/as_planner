@@ -606,7 +606,8 @@ def _row_feed_kg_day(r, batches, tables):
     if tables is None or getattr(r, "stage", "") == "STARVE":
         return 0.0
     return realized_feed_kg_day(
-        r.avg_wt_g, r.biomass_kg, (batches or {}).get(r.batch_id), tables)
+        r.avg_wt_g, r.biomass_kg, (batches or {}).get(r.batch_id), tables,
+        getattr(r, "week_label", None))
 
 
 def write_yearly_summary(

@@ -129,32 +129,56 @@ def _fcr_model_key(fcr_model_str: str) -> str:
     return digits
 
 
+def og_sgr_factor(tables: BiologyTables, week_label: Optional[str]) -> float:
+    """The operator's per-week OG growth factor for `week_label` (1.0 = none).
+
+    Separate from the curve and from the batch correction on purpose: those two
+    are the MODEL, this is the operator saying "we know we only get 90% of it
+    these weeks". Unknown/absent week is 1.0, so an unset config changes
+    nothing.
+    """
+    if not week_label or not tables.og_sgr_by_week:
+        return 1.0
+    try:
+        return float(tables.og_sgr_by_week.get(week_label, 1.0))
+    except (TypeError, ValueError):
+        return 1.0
+
+
 def sgr_pct_per_day(
     avg_wt_g: float, stage: str, batch: Optional[BatchInput],
-    tables: BiologyTables,
+    tables: BiologyTables, week_label: Optional[str] = None,
 ) -> float:
     """Effective SGR (%/day) at a weight: the size-interpolated FW or SW growth
     curve scaled by the batch's stage correction (`fw_correction` in FW, else
-    `sgr_correction`; 1.0 when no batch).
+    `sgr_correction`; 1.0 when no batch), and in SEAWATER by the operator's
+    per-week OG factor for `week_label`.
 
     Single source for the growth rate used by every daily projector,
     `advance_tank_one_day`, `realized_feed_kg_day`, and the placement
     growth/feed helpers — so the formula can't drift between copies. (The
     FW-correction SOLVER in `project_batch_fw_residual` uses a CANDIDATE
     correction, not the batch's, so it deliberately does not call this.)
+
+    The three multipliers LAYER — curve x batch correction x week factor — and
+    the week factor is SW-only: it is an OG-tank input, and the freshwater
+    phase has its own `fw_correction`. `week_label=None` means "no week in
+    context" and yields the pre-existing behaviour exactly, so a caller that
+    genuinely has no week (a size-curve probe) is unchanged rather than
+    silently taking someone else's week.
     """
     if stage == "FW":
         base = _interp(avg_wt_g, tables.sgr_size_g, tables.sgr_fw_pct_day)
         corr = batch.fw_correction if batch else 1.0
-    else:
-        base = _interp(avg_wt_g, tables.sgr_size_g, tables.sgr_sw_pct_day)
-        corr = batch.sgr_correction if batch else 1.0
-    return base * corr
+        return base * corr
+    base = _interp(avg_wt_g, tables.sgr_size_g, tables.sgr_sw_pct_day)
+    corr = batch.sgr_correction if batch else 1.0
+    return base * corr * og_sgr_factor(tables, week_label)
 
 
 def realized_feed_kg_day(
     avg_wt_g: float, biomass_kg: float, batch: Optional[BatchInput],
-    tables: BiologyTables,
+    tables: BiologyTables, week_label: Optional[str] = None,
 ) -> float:
     """Daily feed for a REALIZED tank state: biomass × SGR(weight)/100 × FCR.
 
@@ -166,7 +190,11 @@ def realized_feed_kg_day(
     """
     if biomass_kg <= 0 or avg_wt_g <= 0:
         return 0.0
-    sgr_eff = sgr_pct_per_day(avg_wt_g, "SW", batch, tables)
+    # Feed follows the SAME rate growth does, week factor included: this is
+    # biomass x SGR/100 x FCR, so an operator week at 90% feeds 90% and FCR is
+    # unchanged (operator decision 2026-08-19 — "they ate less, so they grew
+    # less", rather than normal ration against impaired growth).
+    sgr_eff = sgr_pct_per_day(avg_wt_g, "SW", batch, tables, week_label)
     fcr_curve = tables.fcr_by_model.get(
         _fcr_model_key(batch.fcr_model) if batch else "", [])
     fcr = _interp(avg_wt_g, tables.fcr_size_g, fcr_curve) if fcr_curve else 1.2
@@ -469,11 +497,13 @@ def project_batch(
             sgr_eff = 0.0
             fcr = 0.0
         elif stage == "FW":
-            sgr_eff = sgr_pct_per_day(cur_weight, "FW", batch, tables)
+            sgr_eff = sgr_pct_per_day(cur_weight, "FW", batch, tables,
+                                      iso_week_label(cur_date))
             fcr = _interp(cur_weight, tables.fcr_size_g, fcr_curve)
             cur_weight = cur_weight * (1.0 + sgr_eff / 100.0)
         else:  # SW
-            sgr_eff = sgr_pct_per_day(cur_weight, "SW", batch, tables)
+            sgr_eff = sgr_pct_per_day(cur_weight, "SW", batch, tables,
+                                      iso_week_label(cur_date))
             fcr = _interp(cur_weight, tables.fcr_size_g, fcr_curve)
             cur_weight = cur_weight * (1.0 + sgr_eff / 100.0)
 
@@ -701,7 +731,10 @@ def advance_tank_one_day(tank, batch: BatchInput, tables: BiologyTables, today) 
         return  # no growth for empty / pre-FW / starving tanks
 
     fcr_key = _fcr_model_key(batch.fcr_model)
-    sgr_eff = sgr_pct_per_day(tank.avg_wt_g, stage, batch, tables)
+    # `today` is the day being simulated, so the OG week factor for THIS week
+    # is unambiguous. FW days ignore it (sgr_pct_per_day applies it SW-only).
+    sgr_eff = sgr_pct_per_day(tank.avg_wt_g, stage, batch, tables,
+                              iso_week_label(today))
     tank.apply_daily_growth(sgr_eff)
 
 
@@ -749,7 +782,8 @@ def project_in_flight_batch(
         cur_count *= _daily_survival_factor(m_weekly)
         mort_count_today = _pre_mort - cur_count
 
-        sgr_eff = sgr_pct_per_day(cur_weight, "SW", batch, tables)
+        sgr_eff = sgr_pct_per_day(cur_weight, "SW", batch, tables,
+                                  iso_week_label(cur_date))
         fcr = _interp(cur_weight, tables.fcr_size_g, fcr_curve)
         cur_weight = cur_weight * (1.0 + sgr_eff / 100.0)
 
@@ -949,7 +983,8 @@ def project_in_flight_fw_batch(
         mort_count_today = _pre_mort - cur_count
 
         # Daily growth — FW vs SW SGR curve (via the shared SGR helper).
-        sgr_eff = sgr_pct_per_day(cur_weight, stage, batch, tables)
+        sgr_eff = sgr_pct_per_day(cur_weight, stage, batch, tables,
+                                  iso_week_label(cur_date))
         fcr = _interp(cur_weight, tables.fcr_size_g, fcr_curve)
         cur_weight = cur_weight * (1.0 + sgr_eff / 100.0)
 

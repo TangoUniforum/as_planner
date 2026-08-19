@@ -193,6 +193,44 @@ it applies to every week of every horizon.
 | **Mode-specific capacities** | A capacity that depends on what the system is being *used for*. Today only **OG6N** has one: it holds more (700,000 kg) while it is the depuration station than it does (400,000 kg) once its 3 mains become grow-out. | Rarely. |
 | **Per-week system exceptions** (collapsed, advanced) | A cap for ONE unusual week — a shutdown, a trial, maintenance. Blank is the normal state. | Almost never. |
 
+The **Facility limits** grid below those three carries the per-week facility
+numbers — the harvest floor/ceiling, HOG yield, and one entry that is not a cap
+at all:
+
+> **`sgr_correction_og` — the per-week OG growth factor.** The weeks you know
+> the site will not achieve the modelled growth. `1.0` (or blank) is the model;
+> `0.90` means "we expect 90% of it that week". It **layers**: effective SGR =
+> growth curve x the batch's own `sgr_correction` x this week factor — it does
+> not replace either, so a batch calibrated to 0.8 in a 0.9 week grows at 0.72
+> of curve.
+>
+> **Feed follows it.** Feed is `biomass x SGR/100 x FCR`, and the factor is
+> applied at the single source for the growth rate, so a 90% week eats 90% and
+> grows 90% and **FCR is unchanged** (measured: Bio_FCR x0.998). That is the
+> operator's choice of the two readings — "they ate less, so they grew less",
+> rather than a normal ration against impaired growth, which would instead have
+> worsened FCR by ~11%.
+>
+> **Seawater only.** Freshwater has its own `fw_correction`, and this is an
+> OG-tank input. Measured on a 3-week 0.90 test: seawater batches x0.899,
+> freshwater batches x1.0000 exactly, and the Nutra (small/FW) feeds flat while
+> only the Optimax grow-out feeds dropped.
+>
+> **What moves.** Growth, weights, biomass, density, feed and feed-type mix, and
+> facility cap pressure (biomass over-cap x0.900). **Counts never move** — SGR
+> neither kills nor creates fish. **Harvest does not move in the week you set**:
+> those fish were already in 6N purge, filled ~3 weeks earlier. It lands
+> downstream as smaller fish (whole-horizon harvest -0.4% on the 3-week test).
+>
+> **It shifts the PLAN, not only the numbers.** Smaller fish change rebalancing
+> decisions — transfers moved x0.83 in the test weeks — so tank usage and
+> harvest timing shift downstream too. Compare a before/after run rather than
+> assuming only the weeks you set are affected.
+>
+> `0` is a real answer (no growth that week), not "unset". A negative value is
+> dropped rather than applied. The run log prints the weeks it read and flags a
+> value that looks like a percentage typed as `90` instead of `0.90`.
+
 **Which weeks are which mode is derived**, not typed: a week is in `purge` mode
 while its start date is before Control's `sixn_production_start`, and
 `production` from that date on (and every week is production if *Run 6N as
@@ -1640,6 +1678,12 @@ Choose** board, or headlessly via `tools/run_global_forecast.run_global(...)`.
   constraint, plus system-load balancing.
 
 ### What they do NOT do — read this before adopting a Global plan
+
+- **They ignore the per-week OG SGR factor (§3.3a).** Its helpers carry no
+  week in scope, so a `sgr_correction_og` row changes a controller plan and
+  does nothing to a Global one — the same way the handling budget is
+  ignored. Set the factor and compare Global against controller output and
+  you are comparing two different growth assumptions.
 
 These are not caveats about polish. They are the difference between a benchmark
 and a plan the crew can execute.
