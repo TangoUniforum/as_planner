@@ -361,9 +361,16 @@ def read_biology(ws) -> BiologyTables:
     c_size = _col(h, "Size")
     c_fw = _col(h, "SGR_FW")
     c_sw = _col(h, "SGR_SW")
-    c_f121 = _col(h, "FCR_1.21")
-    c_f118 = _col(h, "FCR_1.18")
-    c_f116 = _col(h, "FCR_1.16")
+    # FCR models are DISCOVERED from the header, not hardcoded. The previous
+    # fixed list (1.21 / 1.18 / 1.16) silently dropped the workbook's populated
+    # FCR_1.15 column, which 37 of 45 batches in the Aug-2026 registry are
+    # assigned to — the run then died with an IndexError deep in biology
+    # rather than naming the missing model (2026-08-20).
+    fcr_cols = {
+        str(name)[4:].strip(): idx          # "FCR_1.15" -> "1.15"
+        for name, idx in h.items()
+        if str(name).strip().lower().startswith("fcr_")
+    }
     c_wfi = _col(h, "Week_From_Input")
     c_mort = _col(h, "Mortality_%", "Mortality_%", "Mortality")
     c_ft = _col(h, "Feed Type")
@@ -383,9 +390,16 @@ def read_biology(ws) -> BiologyTables:
 
     sgr_fw = _aligned(c_fw)
     sgr_sw = _aligned(c_sw)
-    f121 = [float(x) for x in _aligned(c_f121)]
-    f118 = [float(x) for x in _aligned(c_f118)]
-    f116 = [float(x) for x in _aligned(c_f116)]
+    fcr_by_model = {
+        key: [float(x) for x in _aligned(idx)]
+        for key, idx in sorted(fcr_cols.items())
+    }
+    if not fcr_by_model:
+        raise ValueError(
+            f"Tables sheet has no FCR_* columns (found headers: "
+            f"{sorted(str(k) for k in h)}). At least one FCR model is required."
+        )
+    print(f"  FCR models read from Tables: {sorted(fcr_by_model)}")
 
     wfi = [int(x) for x in _read_col_until_blank(ws, hdr, c_wfi)]
     mort = [float(_num(x)) for x in _read_col_until_blank(ws, hdr, c_mort)]
@@ -409,7 +423,7 @@ def read_biology(ws) -> BiologyTables:
         sgr_fw_pct_day=sgr_fw,
         sgr_sw_pct_day=sgr_sw,
         fcr_size_g=list(size),
-        fcr_by_model={"1.21": f121, "1.18": f118, "1.16": f116},
+        fcr_by_model=fcr_by_model,
         mortality_week_from_input=wfi,
         mortality_pct_weekly=mort,
         feed_types=feed_types,
@@ -430,6 +444,13 @@ _METRIC_MAP = {
     "max harvest/week": "max_harvest_per_week",
     "min harvest/week": "min_harvest_per_week",
     "hog yield": "hog_yield",
+    # FacilityLimits row 10. Python has always supported this as
+    # caps.METRIC_SGR_OG; only the label mapping was missing, so the
+    # operator's per-week growth de-rating was silently dropped on import
+    # and those weeks grew at the uncorrected rate (2026-08-20).
+    "sgr correction": "sgr_correction_og",
+    "sgr_correction": "sgr_correction_og",
+    "sgr correction og": "sgr_correction_og",
 }
 
 

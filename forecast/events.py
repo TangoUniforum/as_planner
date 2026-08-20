@@ -65,9 +65,19 @@ class TranOGEntry:
     batch_id: str
     event_date: date
     destinations: list[TankAllocation]
+    # Fish actually stocked, and fish this event planned to stock but could
+    # not. Populated by apply(). Before these existed the event had NO
+    # accounting of any kind: a refused destination silently dropped that
+    # share of the cohort while every downstream consumer went on reporting
+    # the PLANNED destination sum as delivered (reproduced 2026-08-20:
+    # 1,200,000 planned across two tanks, one refused as non-empty,
+    # 600,000 actually stocked, 1,200,000 reported).
+    count_placed: float = 0.0          # populated by apply()
+    count_refused: float = 0.0         # populated by apply()
 
     def apply(self, state: FacilityState) -> list[str]:
         warns: list[str] = []
+        placed = 0.0
         for dest in self.destinations:
             tank = state.tanks_by_id.get(dest.tank_id)
             if tank is None:
@@ -91,6 +101,17 @@ class TranOGEntry:
                 avg_wt_g=dest.avg_wt_g,
                 cv_pct=dest.cv_pct,
                 stage=STAGE_SW,
+            )
+            placed += dest.count
+
+        planned = sum(d.count for d in self.destinations)
+        self.count_placed = placed
+        self.count_refused = max(0.0, planned - placed)
+        if self.count_refused > 0:
+            warns.append(
+                f"TranOG {self.batch_id}: COHORT SHORT-STOCKED — placed "
+                f"{placed:.0f} of {planned:.0f} planned; {self.count_refused:.0f} "
+                f"fish had no tank to enter and are NOT in the facility"
             )
         return warns
 
@@ -120,6 +141,12 @@ class Transfer:
     destinations: list[TankAllocation]
     leaves_source_empty: bool = False  # True if source is fully drained
     count_transferred: float = 0.0     # populated by apply()
+    # Fish this event PLANNED to move but could not, because a destination was
+    # refused (INV-1, INV-4/R3, R4, RESERVED, unknown tank). Populated by
+    # apply(). > 0 means the event applied PARTIALLY: neither honoured nor
+    # refused. Callers that must not ship a half-applied plan should test this,
+    # not count_transferred, which is non-zero for a partial.
+    count_refused: float = 0.0         # populated by apply()
     # Source week-open avg weight (g), set only for 6N purge-mode move-ins where
     # the destination carries the GROWN (mid-week transfer) weight but the source
     # is drained by count at its week-open weight. The continuity audit debits the
@@ -227,9 +254,32 @@ class Transfer:
         # Drain source by what was ACTUALLY transferred (not what was
         # planned). leaves_source_empty applies only when transfers
         # succeeded — refused destinations don't drain the source.
+        planned_dest_count = sum(d.count for d in self.destinations)
+        self.count_refused = max(0.0, planned_dest_count - total_dest_count)
+        fully_applied = self.count_refused <= 1e-9
+
         src.count = max(0.0, src.count - total_dest_count)
-        if total_dest_count > 0 and (self.leaves_source_empty or src.count <= 0.5):
+        # leaves_source_empty is a FULL-DRAIN intent: it exists to clear the
+        # rounding residue when every destination accepted. If any destination
+        # was refused, the residue is not rounding — it is the refused
+        # destination's fish, still physically in the source tank. Emptying
+        # then DELETES them (reproduced 2026-08-20: source 100,000, one leg of
+        # two refused on INV-1, 50,000 fish annihilated, and the loss passes
+        # the hard conservation gate because that gate string-scans for
+        # "DROP"/"OVER-PRODUCED" while the continuity audit calls it
+        # COUNT_DRIFT on a sheet no gate reads). The `src.count <= 0.5` arm is
+        # the physically correct self-empty and stands on its own.
+        if total_dest_count > 0 and ((self.leaves_source_empty and fully_applied)
+                                     or src.count <= 0.5):
             src.empty(self.event_date)
+
+        if self.count_refused > 0:
+            warns.append(
+                f"Transfer {self.batch_id}: PARTIALLY APPLIED — moved "
+                f"{total_dest_count:.0f} of {planned_dest_count:.0f} planned; "
+                f"{self.count_refused:.0f} fish stayed in {src.location_id} "
+                f"because a destination was refused"
+            )
 
         self.count_transferred = total_dest_count
         return warns

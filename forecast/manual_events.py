@@ -392,9 +392,16 @@ def _apply_og_to_6n(state, ev: ManualEvent, idx: int,
         warns.append(f"{tag}: moved 0 fish (all destinations refused) — "
                      f"batch {batch_id} stays in tank #{ev.from_tank}")
     else:
+        # Freeze ONLY the tanks this transfer actually stocked. Testing
+        # `not t.is_empty` alone freezes a destination that was REFUSED
+        # because it holds a different batch (INV-1) — putting an unrelated
+        # cohort off-feed and R7-locking it (no transfer out of a STARVE
+        # tank) for the rest of the horizon. Reproduced 2026-08-20: dests
+        # [61 empty, 63 holding B48] froze B48's 30,000 fish. A tank this
+        # event stocked holds `batch_id`; a refused one does not.
         for d in ev.destinations:
             t = state.tanks_by_id.get(d.tank)
-            if t is not None and not t.is_empty:
+            if t is not None and not t.is_empty and t.batch_id == batch_id:
                 t.stage = STAGE_STARVE  # freeze: off-feed depuration
         if out_events is not None:
             out_events.append(tr)

@@ -73,9 +73,17 @@ def _as_date(d):
 # ---------- table helpers ----------
 
 def _interp(x: float, xs: list[float], ys: list[Optional[float]]) -> float:
-    """Linear interp; flat at the ends; skip None/NaN ys."""
-    pairs = [(xs[i], ys[i]) for i in range(len(xs))
-             if ys[i] is not None and not (isinstance(ys[i], float) and isnan(ys[i]))]
+    """Linear interp; flat at the ends; skip None/NaN ys.
+
+    zip() rather than range(len(xs)): a ys shorter than xs used to raise a bare
+    IndexError from inside the comprehension. That is how a MISSING FCR model
+    surfaced — `fcr_by_model.get(key, [])` returns [], and the caller then
+    interpolated an empty curve against a 62-point size axis (2026-08-20).
+    Callers that need a missing curve to be an ERROR must say so themselves;
+    see _require_fcr_models.
+    """
+    pairs = [(x_i, y_i) for x_i, y_i in zip(xs, ys)
+             if y_i is not None and not (isinstance(y_i, float) and isnan(y_i))]
     if not pairs:
         return 0.0
     if x <= pairs[0][0]:
@@ -127,6 +135,39 @@ def _fcr_model_key(fcr_model_str: str) -> str:
     if len(digits) == 3:
         return f"{digits[0]}.{digits[1:]}"
     return digits
+
+
+def _require_fcr_models(batches, tables: BiologyTables) -> None:
+    """Fail fast, by name, when a batch asks for an FCR model the tables lack.
+
+    Without this the missing curve is an empty list, `_interp` silently
+    flat-lines it (or, before the zip fix, raised a bare IndexError from a
+    comprehension), and the run either dies pointing at the wrong place or
+    quietly feeds every affected batch on a curve that does not exist.
+    Reproduced 2026-08-20: 37 of 45 batches were assigned FCR_115_Quick while
+    the config carried only 1.21 / 1.18 / 1.16.
+    """
+    available = set(tables.fcr_by_model or {})
+    missing: dict[str, list[str]] = {}
+    for b in batches or []:
+        model = getattr(b, "fcr_model", None)
+        if not model:
+            continue
+        key = _fcr_model_key(model)
+        if key not in available:
+            missing.setdefault(key, []).append(getattr(b, "batch_id", "?"))
+    if missing:
+        detail = "; ".join(
+            f"{key!r} wanted by {len(ids)} batch(es) ({', '.join(sorted(ids)[:5])}"
+            f"{', ...' if len(ids) > 5 else ''})"
+            for key, ids in sorted(missing.items())
+        )
+        raise ValueError(
+            f"BiologyTables has no FCR curve for: {detail}. "
+            f"Available models: {sorted(available) or '(none)'}. "
+            f"Add the missing FCR_<model> column to the biology tables, or "
+            f"correct the batch's FCR_Model."
+        )
 
 
 def og_sgr_factor(tables: BiologyTables, week_label: Optional[str]) -> float:
@@ -1057,6 +1098,7 @@ def project_all_batches(
     Skips batches whose TranOG_Date is at/before forecast_start — those
     are sourced from ProductionReport in a later pipeline step.
     """
+    _require_fcr_models(batches, tables)
     states: list[BatchWeekState] = []
     residuals: list[CalibrationResidual] = []
     splits: list[SizeClassSplit] = []
