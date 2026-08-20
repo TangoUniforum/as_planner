@@ -1,0 +1,88 @@
+# Forward batch schedule + batch metadata (input/TranOG dates,
+# counts, FCR model, corrections). In-flight state comes from the
+# ProductionReport; this is the planning/metadata layer.
+batches:
+- batch_id: B01
+  input_date: '2024-11-04'
+  input_count: 1400000
+  tran_sf_date: '2025-02-03'
+  tran_og_date: '2025-05-05'
+  tran_og_count: 1260000
+  tran_og_avg_wt_g: 370.0
+  tran_og_cv: 16.0
+  fcr_model: FCR_118_Quick
+  fw_correction: 1.0
+  sgr_correction: 1.0
+  notes: mature grow-out
+- batch_id: B02
+  input_date: '2024-12-30'
+  input_count: 1400000
+  tran_sf_date: '2025-03-31'
+  tran_og_date: '2025-06-30'
+  tran_og_count: 1260000
+  tran_og_avg_wt_g: 370.0
+  tran_og_cv: 16.0
+  fcr_model: FCR_118_Quick
+  fw_correction: 1.0
+  sgr_correction: 1.0
+  notes: mature grow-out
+- batch_id: B03
+  input_date: '2025-04-28'
+  input_count: 1400000
+  tran_sf_date: '2025-07-28'
+  tran_og_date: '2025-10-27'
+  tran_og_count: 1260000
+  tran_og_avg_wt_g: 370.0
+  tran_og_cv: 16.0
+  fcr_model: FCR_118_Quick
+  fw_correction: 1.0
+  sgr_correction: 1.0
+  notes: mid grow-out
+- batch_id: B04
+  input_date: '2025-08-25'
+  input_count: 1400000
+  tran_sf_date: '2025-11-24'
+  tran_og_date: '2026-02-23'
+  tran_og_count: 1260000
+  tran_og_avg_wt_g: 370.0
+  tran_og_cv: 16.0
+  fcr_model: FCR_118_Quick
+  fw_correction: 1.0
+  sgr_correction: 1.0
+  notes: entry tier
+- batch_id: B05
+  input_date: '2024-09-02'
+  input_count: 1400000
+  tran_sf_date: '2024-12-02'
+  tran_og_date: '2025-03-03'
+  tran_og_count: 1260000
+  tran_og_avg_wt_g: 370.0
+  tran_og_cv: 16.0
+  fcr_model: FCR_118_Quick
+  fw_correction: 1.0
+  sgr_correction: 1.0
+  notes: in 6N depuration
+- batch_id: B06
+  input_date: '2025-09-22'
+  input_count: 1400000
+  tran_sf_date: '2025-12-22'
+  tran_og_date: '2026-06-22'
+  tran_og_count: 1260000
+  tran_og_avg_wt_g: 370.0
+  tran_og_cv: 16.0
+  fcr_model: FCR_118_Quick
+  fw_correction: 1.0
+  sgr_correction: 1.0
+  notes: TranOG in week 4
+- batch_id: B07
+  input_date: '2025-11-17'
+  input_count: 1400000
+  tran_sf_date: '2026-02-17'
+  tran_og_date: '2026-08-17'
+  tran_og_count: 1260000
+  tran_og_avg_wt_g: 370.0
+  tran_og_cv: 16.0
+  fcr_model: FCR_118_Quick
+  fw_correction: 1.0
+  sgr_correction: 1.0
+  notes: TranOG past horizon

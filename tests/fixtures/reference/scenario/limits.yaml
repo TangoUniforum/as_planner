@@ -1,0 +1,64 @@
+# Capacity limits — OPERATOR INPUT. Capacities live here, never in code.
+#
+# A capacity is a fact about the facility: it changes rarely, so it is
+# stated ONCE and a per-week row is the exception, not the rule.
+#
+#   system_defaults: the standing capacity of each system. One block per
+#       system; each key is a metric (biomass = kg of standing fish;
+#       feed_per_day = kg of feed per day). A system whose capacity depends
+#       on its operating MODE adds a `modes:` sub-block — 6N is the one that
+#       does, because it holds more while it is the depuration station than
+#       it does from sixn_production_start (config/control.yaml), when its
+#       3 mains become grow-out and only the 3 sisters stage harvest. Which
+#       weeks are which is DERIVED from that date, so the split cannot drift
+#       away from it.
+#   system: one-off EXCEPTION rows, one per (week, system, metric). Absent
+#       is the normal case. A row here overrides the default for that week
+#       alone.
+#   facility: one row per (week, metric); absent = use the Control default.
+#
+# Precedence, highest first:
+#   per-week `system` row  >  system+mode default  >  system default  >
+#   no cap at all (an engine that needs one then names the missing input
+#   rather than inventing a number).
+#
+# Weeks are absolute ISO labels (e.g. 2028-W01).
+system_defaults:
+  OG1N:
+    biomass: 490200
+    feed_per_day: 3000
+  OG1S:
+    biomass: 490200
+    feed_per_day: 3000
+  OG2N:
+    biomass: 490200
+    feed_per_day: 3000
+  OG2S:
+    biomass: 490200
+    feed_per_day: 3000
+  OG3N:
+    biomass: 400000.0
+    feed_per_day: 3000
+  OG3S:
+    biomass: 490200
+    feed_per_day: 3000
+  OG4N:
+    biomass: 490200
+    feed_per_day: 3000
+  OG4S:
+    biomass: 490200
+    feed_per_day: 3000
+  OG5N:
+    biomass: 490200
+    feed_per_day: 3000
+  OG5S:
+    biomass: 490200
+    feed_per_day: 3000
+  OG6N:
+    biomass: 980400
+    feed_per_day: 6000
+  OG6S:
+    biomass: 490200
+    feed_per_day: 3000
+system: []
+facility: []
