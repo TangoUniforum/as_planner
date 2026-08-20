@@ -119,9 +119,22 @@ STOCK: list[tuple[str, int, int, float]] = [
     # horizon, so the lock and the forward migration both fire.
     ("B04", 11, 60_000, 900.0), ("B04", 13, 60_000, 900.0),
     ("B04", 15, 60_000, 900.0),
-    # B05 — already purging in one complete 6N pair (61 main + 67 sister), so
-    # the depuration hold is under test from week 0 rather than week 3.
+    # B05 — already purging in TWO complete 6N pairs, which is what a healthy
+    # 3-pair rotation looks like mid-cycle: two pairs in flight, one resting.
+    #
+    # TWO, not one. Measured 2026-08-20: the rotation cannot BOOTSTRAP from a
+    # single stocked pair. With one pair the first fills land in the pair that
+    # drains next, so every drain is attempted exactly 7 days after its fill,
+    # trips SIXN_DRAIN_GUARD_MIN_DAYS (8), and is held — permanently.
+    #     1 pair  ->  2 harvests / 26 weeks, 653 t stuck in 4 of 6 tanks
+    #     2 pairs -> 37 harvests, 926,114 fish
+    #     3 pairs -> 37 harvests, 954,351 fish
+    # The deadlock is silent: warnings only, status=warn, exit 0. See the
+    # engine note in the commit message — a facility that genuinely arrives at
+    # a one-pair state (restart, slow ramp) would stop harvesting and say so
+    # only in the ValidationLog.
     ("B05", 61, 20_000, 4_000.0), ("B05", 67, 20_000, 4_000.0),
+    ("B05", 63, 20_000, 4_000.0), ("B05", 69, 20_000, 4_000.0),
 ]
 # 23 of 39 OG tanks occupied; OG1S / OG2N / OG2S / OG6S left free so the
 # week-4 TranOG arrival has somewhere to land that nothing else competes for.
