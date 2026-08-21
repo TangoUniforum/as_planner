@@ -106,18 +106,61 @@ def observe(corpus: Path) -> dict[str, dict]:
     return first
 
 
-def to_batch(obs: dict) -> BatchInput:
+def load_known_calibrations(scenario_dir: Path) -> dict:
+    """Per-batch calibrations from the operator's REAL registry, by batch_id.
+
+    A Production Report carries no calibration: it reports what the fish did,
+    not what the model needed to reproduce it. So a reconstructed batch used
+    to get `sgr_correction = 1.0` and `fw_correction = 1.0`, which is not a
+    neutral choice -- the operator's real batches carry sgr_correction between
+    0.4 and 0.925, i.e. every one of them grows SLOWER than the base curve.
+    Backtesting them at 1.0 grades a model nobody runs.
+
+    Where the corpus and the live registry name the same batch, use the real
+    values. Where they do not, 1.0 remains the only honest default, and the
+    caller reports how many batches fell back so the mix is visible.
+    """
+    import yaml
+    f = Path(scenario_dir) / "batches.yaml"
+    if not f.exists():
+        return {}
+    d = yaml.safe_load(f.read_text(encoding="utf-8"))
+    rows = d.get("batches", d) if isinstance(d, dict) else d
+    out = {}
+    for b in rows or []:
+        bid = str(b.get("batch_id") or "")
+        if bid:
+            out[bid] = {
+                "sgr_correction": b.get("sgr_correction"),
+                "fw_correction": b.get("fw_correction"),
+                "fcr_model": b.get("fcr_model"),
+                "tran_og_cv": b.get("tran_og_cv"),
+            }
+    return out
+
+
+def to_batch(obs: dict, known: dict | None = None) -> BatchInput:
     og_date = obs["seen"]
     input_date = og_date - timedelta(days=LEAD_INPUT_TO_OG_DAYS)
     sf_date = input_date + timedelta(days=LEAD_INPUT_TO_SF_DAYS)
     # Input count is unobservable; the OG count grossed up by a nominal FW
     # survival is the least-bad stand-in and is never used for a batch that is
     # already in seawater at the run's start date.
+    k = (known or {}).get(obs["batch_id"]) or {}
+    _sgr = k.get("sgr_correction")
+    _fw = k.get("fw_correction")
+    _fcr = k.get("fcr_model") or DEFAULT_FCR_MODEL
+    _cv = k.get("tran_og_cv")
+    _note = ("reconstructed from PR corpus; first seen %s%s"
+             % (og_date, "" if _sgr is None else "; REAL calibration"))
     return BatchInput(
         obs["batch_id"], input_date, int(round(obs["count"] / 0.9)),
         sf_date, og_date, int(round(obs["count"])), float(obs["avg_wt_g"]),
-        DEFAULT_CV, DEFAULT_FCR_MODEL, 1.0, 1.0,
-        f"reconstructed from PR corpus; first seen {og_date}")
+        float(_cv) if _cv is not None else DEFAULT_CV,
+        _fcr,
+        float(_fw) if _fw is not None else 1.0,
+        float(_sgr) if _sgr is not None else 1.0,
+        _note)
 
 
 def main() -> int:
@@ -135,8 +178,12 @@ def main() -> int:
         print(f"no corpus months under {corpus}")
         return 1
 
+    known = load_known_calibrations(Path(args.scenario_dir))
     first = observe(corpus)
+    _hit = sum(1 for b in first if b in known)
     print(f"observed {len(first)} distinct batches across {len(months)} months")
+    print(f"  real calibrations found for {_hit}; the other "
+          f"{len(first) - _hit} fall back to 1.0 (the PR cannot supply one)")
     for bid in sorted(first, key=lambda b: (first[b]["seen"], b)):
         o = first[bid]
         print(f"   {bid:6} first OG {o['seen']}  {o['count']:>10,.0f} fish "
@@ -149,7 +196,7 @@ def main() -> int:
         # Every batch observed at or after this month. A batch that first
         # appears BEFORE it is already hydrated from the PR and does not need a
         # registry entry; including it would re-project a phantom lifecycle.
-        era = [to_batch(o) for o in first.values() if o["seen"] >= closing]
+        era = [to_batch(o, known) for o in first.values() if o["seen"] >= closing]
         era.sort(key=lambda b: (b.tran_og_date, b.batch_id))
         d = out_dir / closing.isoformat()
         d.mkdir(parents=True, exist_ok=True)

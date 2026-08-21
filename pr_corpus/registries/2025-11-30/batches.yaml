@@ -10,10 +10,10 @@ batches:
   tran_og_count: 281161
   tran_og_avg_wt_g: 450.02598937975034
   tran_og_cv: 16.0
-  fcr_model: FCR_118_Quick
+  fcr_model: FCR_116_Quick
   fw_correction: 1.0
-  sgr_correction: 1.0
-  notes: reconstructed from PR corpus; first seen 2025-11-30
+  sgr_correction: 0.85
+  notes: reconstructed from PR corpus; first seen 2025-11-30; REAL calibration
 - batch_id: B44
   input_date: '2025-05-03'
   input_count: 308507
@@ -22,10 +22,10 @@ batches:
   tran_og_count: 277656
   tran_og_avg_wt_g: 596.5631587287866
   tran_og_cv: 16.0
-  fcr_model: FCR_118_Quick
+  fcr_model: FCR_116_Quick
   fw_correction: 1.0
-  sgr_correction: 1.0
-  notes: reconstructed from PR corpus; first seen 2026-01-31
+  sgr_correction: 0.9
+  notes: reconstructed from PR corpus; first seen 2026-01-31; REAL calibration
 - batch_id: B45
   input_date: '2025-07-01'
   input_count: 325296
@@ -34,10 +34,10 @@ batches:
   tran_og_count: 292766
   tran_og_avg_wt_g: 563.0025884153214
   tran_og_cv: 16.0
-  fcr_model: FCR_118_Quick
+  fcr_model: FCR_116_Quick
   fw_correction: 1.0
-  sgr_correction: 1.0
-  notes: reconstructed from PR corpus; first seen 2026-03-31
+  sgr_correction: 0.925
+  notes: reconstructed from PR corpus; first seen 2026-03-31; REAL calibration
 - batch_id: B46
   input_date: '2025-07-31'
   input_count: 321601
@@ -46,10 +46,10 @@ batches:
   tran_og_count: 289441
   tran_og_avg_wt_g: 572.7602323098663
   tran_og_cv: 16.0
-  fcr_model: FCR_118_Quick
-  fw_correction: 1.0
-  sgr_correction: 1.0
-  notes: reconstructed from PR corpus; first seen 2026-04-30
+  fcr_model: FCR_116_Quick
+  fw_correction: 0.7152
+  sgr_correction: 0.925
+  notes: reconstructed from PR corpus; first seen 2026-04-30; REAL calibration
 - batch_id: B47
   input_date: '2025-08-31'
   input_count: 322637
@@ -58,10 +58,10 @@ batches:
   tran_og_count: 290373
   tran_og_avg_wt_g: 559.8873707266172
   tran_og_cv: 16.0
-  fcr_model: FCR_118_Quick
-  fw_correction: 1.0
-  sgr_correction: 1.0
-  notes: reconstructed from PR corpus; first seen 2026-05-31
+  fcr_model: FCR_116_Quick
+  fw_correction: 0.82
+  sgr_correction: 0.925
+  notes: reconstructed from PR corpus; first seen 2026-05-31; REAL calibration
 - batch_id: B48
   input_date: '2025-08-31'
   input_count: 322537
@@ -70,7 +70,7 @@ batches:
   tran_og_count: 290283
   tran_og_avg_wt_g: 208.01104990647056
   tran_og_cv: 16.0
-  fcr_model: FCR_118_Quick
-  fw_correction: 1.0
-  sgr_correction: 1.0
-  notes: reconstructed from PR corpus; first seen 2026-05-31
+  fcr_model: FCR_116_Quick
+  fw_correction: 0.82
+  sgr_correction: 0.925
+  notes: reconstructed from PR corpus; first seen 2026-05-31; REAL calibration
