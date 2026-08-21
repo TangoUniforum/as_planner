@@ -502,7 +502,7 @@ class TestTankContinuityAudit:
 
 
 class TestSystemLimitsAudit:
-    def _write(self, locs, caps, tables=None, **sl_kwargs):
+    def _write(self, locs, caps, tables=None, control=None, **sl_kwargs):
         # A real SystemLimits, not a duck-typed stand-in: the audit resolves
         # caps through caps.carry_forward_cap_lookup (per-week exception >
         # system+mode default > system default), so a stub carrying only
@@ -511,7 +511,7 @@ class TestSystemLimitsAudit:
         wb.remove(wb.active)
         res = excel_io.write_system_limits_audit(
             wb, locs, {}, tables, SystemLimits(caps=caps, **sl_kwargs),
-            SimpleNamespace(global_buffer_pct=0.0))
+            control or SimpleNamespace(global_buffer_pct=0.0))
         return wb, res
 
     def test_system_biomass_over_cap_fires(self):
@@ -539,19 +539,42 @@ class TestSystemLimitsAudit:
         assert nf == 1 and worst_f > 1.0
         assert "FEED_OVER" in _sheet_text(wb, "SystemLimitsAudit")
 
-    def test_og6n_biomass_cap_fires_like_any_other_system(self):
-        # SPEC CHANGED 2026-08-14. OG6N's BIOMASS cap used to be exempt on the
-        # reasoning that depuration is "intentionally uncapped" — but the cap
-        # is an operator INPUT (scenario/limits.yaml), and code that ignores an
-        # operator-set input is code overriding the operator. The exemption hid
-        # a live breach: the purge rotation peaked at 674,070 kg against a
-        # configured 400,000, on every run, flagged nowhere. Now enforced.
-        wb, (nb, nf, worst_b, _) = self._write(
-            [_loc(_W1, 61, "B1", 5000, 5000, system_id="OG6N",
-                  stage="STARVE")],
-            {(_W1, "OG6N", "biomass"): 1000.0})
-        assert nb == 1 and worst_b > 1.0
-        assert "BIOMASS_OVER" in _sheet_text(wb, "SystemLimitsAudit")
+    def test_og6n_biomass_cap_exempt_in_purge_but_fires_in_production(self):
+        # SPEC CHANGED 2026-08-20 (operator), superseding the 2026-08-14 ruling
+        # this test used to encode. 6N in PURGE mode has NO biomass cap: what
+        # bounds a depuration tank is the HARVEST SCHEDULE, not a kg figure.
+        # (The 600,000 kg that had been configured was a placeholder the
+        # operator picked "just to add a number", never a real limit.) In
+        # PRODUCTION mode 6N is an ordinary system and every cap applies.
+        #
+        # BOTH halves are pinned on purpose. An exemption that is really a
+        # check-that-can-never-fire is the exact defect class this suite
+        # exists to catch, so the production half proves the check still works
+        # and the purge half proves the carve-out is scoped to purge alone.
+        over = [_loc(_W1, 61, "B1", 5000, 5000, system_id="OG6N",
+                     stage="STARVE")]
+        caps = {(_W1, "OG6N", "biomass"): 1000.0}
+
+        # PURGE: sixn_production_start None -> purge_mode_on True. Exempt.
+        purge_ctl = SimpleNamespace(global_buffer_pct=0.0,
+                                    sixn_growth=False,
+                                    sixn_production_start=None)
+        wb, (nb, _nf, worst_b, _) = self._write(over, caps, control=purge_ctl)
+        assert nb == 0 and worst_b == 0.0
+        text = _sheet_text(wb, "SystemLimitsAudit")
+        assert "BIOMASS_OVER" not in text
+        # The tonnage and its cap are still WRITTEN — exempt from FLAGGING is
+        # not the same as hidden, and the operator must still see the number.
+        assert "OG6N" in text
+
+        # PRODUCTION: sixn_growth True -> purge_mode_on False. Cap binds.
+        prod_ctl = SimpleNamespace(global_buffer_pct=0.0,
+                                   sixn_growth=True,
+                                   sixn_production_start=None)
+        wb2, (nb2, _nf2, worst_b2, _) = self._write(over, caps,
+                                                    control=prod_ctl)
+        assert nb2 == 1 and worst_b2 > 1.0
+        assert "BIOMASS_OVER" in _sheet_text(wb2, "SystemLimitsAudit")
 
     def test_og6n_feed_stays_exempt_for_a_physical_reason(self):
         # The ONE exemption that survives, and it is physics not policy: purge

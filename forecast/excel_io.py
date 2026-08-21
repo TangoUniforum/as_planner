@@ -3099,6 +3099,25 @@ def iso_week_label(d: datetime) -> str:
     return f"{y}-W{w:02d}"
 
 
+def _purge_week(control, week_label: str) -> bool:
+    """True if `week_label` falls in 6N PURGE mode (vs production mode).
+
+    Resolves through the same `sixn.is_purge_mode` rule the engine and
+    `run.py`'s density audit use, so the three can never disagree about where
+    the purge/production boundary sits.
+    """
+    from .caps import week_label_start
+    from .sixn import purge_mode_on
+    d = week_label_start(week_label)
+    if d is None:
+        return True          # no absolute date -> pre-transition (purge)
+    # Read through getattr: this writer is also called with minimal control
+    # stubs in tests, and a missing attribute must not crash an audit sheet.
+    return bool(purge_mode_on(getattr(control, "sixn_growth", False),
+                              getattr(control, "sixn_production_start", None),
+                              d))
+
+
 def write_system_limits_audit(
     wb,
     batch_locations,
@@ -3177,12 +3196,25 @@ def write_system_limits_audit(
         # one: purge fish are STARVE, `_row_feed_kg_day` returns 0 for them, so
         # a feed-rate cap on a system that by construction eats nothing can
         # only ever report 0 — the one check here that genuinely cannot fire.
-        if bcap:
+        # PURGE-MODE CARVE-OUT (operator, 2026-08-20): 6N in PURGE has NO
+        # biomass cap — the HARVEST SCHEDULE bounds a depuration tank, not a
+        # kg figure. In PRODUCTION mode 6N is an ordinary system and the cap
+        # applies exactly as everywhere else.
+        #
+        # NOTE — this SUPERSEDES the 2026-08-14 ruling recorded above (a
+        # 600 t purge-era 6N biomass cap). That value may still sit in
+        # scenario/limits.yaml; it is still WRITTEN to this sheet so the
+        # tonnage stays auditable, it just no longer raises a breach during
+        # purge. If the 600 t limit is meant to bind again, re-enable here
+        # rather than reverting the exemption elsewhere.
+        _sixn_purge = (sysid == "OG6N"
+                       and _purge_week(control, wk))
+        if bcap and not _sixn_purge:
             worst_b = max(worst_b, bio / bcap)
             if bio > bcap * buf:
                 bflag = "BIOMASS_OVER"
                 nb += 1
-        if fcap and sysid != "OG6N":
+        if fcap and sysid != "OG6N":   # purge fish are STARVE and eat nothing
             worst_f = max(worst_f, feed / fcap)
             if feed > fcap * buf:
                 fflag = "FEED_OVER"

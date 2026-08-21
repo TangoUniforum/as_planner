@@ -74,22 +74,37 @@ def extract(path) -> dict:
     tank_weeks_over_density = 0
     peak_density = 0.0
     sys_week_bio: dict[tuple, float] = collections.defaultdict(float)
-    cap = _density_cap(wb)
+    caps_by_tank = _tank_density_caps()
     for i, row in enumerate(
             wb["BatchLocations"].iter_rows(min_row=1, max_col=9, values_only=True), 1):
         if i <= 4:
             continue
-        ws_, sysid, bio, dens = row[1], row[4], row[7], row[8]
+        ws_, tank, sysid, bio, dens = row[1], row[3], row[4], row[7], row[8]
         if not isinstance(bio, (int, float)) or not isinstance(ws_, dt.datetime):
             continue
         if isinstance(dens, (int, float)):
-            peak_density = max(peak_density, dens)
-            # Epsilon, not a bare `>`. The planner fills deliberately TO the
-            # density cap, so without it this counts float noise: the first
-            # freeze reported 182 tank-weeks "over" 95 kg/m3 while the peak
-            # rounded to exactly 95.00. Count a breach only when it is real.
-            if dens > cap + _DENSITY_EPS:
-                tank_weeks_over_density += 1
+            # PURGE-MODE 6N IS EXEMPT (operator, 2026-08-20) — the harvest
+            # schedule bounds a depuration tank, not kg/m3. run.py's own
+            # density audit already skips it; this baseline must judge by the
+            # same rule or it measures a constraint the engine does not have.
+            # The fixture horizon is entirely pre-production, so OG6N here is
+            # always purge.
+            if str(sysid) != "OG6N":
+                peak_density = max(peak_density, dens)
+                # Per-TANK cap, from the fixture facility config. This used to
+                # take one number scraped out of the RunConfig text, which
+                # matched a FRESHWATER tank at 30 kg/m3 and then judged all 39
+                # grow-out tanks (cap 95) against it — reporting 691 breaches
+                # where there was 1. A cap read from the wrong tank is not a
+                # stricter test, it is a meaningless one.
+                try:
+                    _cap = caps_by_tank.get(int(tank), 0.0)
+                except (TypeError, ValueError):
+                    _cap = 0.0
+                # Epsilon, not a bare `>`. The planner fills deliberately TO
+                # the cap, so without it this counts float noise.
+                if _cap > 0 and dens > _cap + _DENSITY_EPS:
+                    tank_weeks_over_density += 1
         sys_week_bio[(str(_monday(ws_)), str(sysid))] += bio
 
     wb.close()
@@ -111,27 +126,22 @@ def extract(path) -> dict:
     }
 
 
-def _density_cap(wb) -> float:
-    """The per-tank density ceiling the fixture facility is built on.
+def _tank_density_caps() -> dict:
+    """Per-tank `max_density_kg_m3`, from the reference fixture's own config.
 
-    Read from the RunConfig snapshot the run embeds, so the baseline judges
-    density against the same number the run planned against rather than a
-    constant that could drift away from the fixture.
+    Read from config rather than scraped out of the RunConfig sheet text: the
+    scrape took the FIRST number it found after "max_density_kg_m3", which is
+    a freshwater tank's 30, and then judged every grow-out tank against it.
+    Tank ids are unique across the fixture facility, so one flat map is enough.
     """
-    default = 95.0
-    if "RunConfig" not in wb.sheetnames:
-        return default
-    for row in wb["RunConfig"].iter_rows(min_col=1, max_col=4, values_only=True):
-        for v in row:
-            if isinstance(v, str) and "max_density_kg_m3" in v:
-                for tok in v.replace(":", " ").replace(",", " ").split():
-                    try:
-                        f = float(tok)
-                    except ValueError:
-                        continue
-                    if 10.0 <= f <= 300.0:
-                        return f
-    return default
+    import sys as _sys
+    _root = Path(__file__).resolve().parents[2]
+    if str(_root) not in _sys.path:
+        _sys.path.insert(0, str(_root))
+    from forecast.config_io import load_facility_config
+    fac = load_facility_config(Path(__file__).resolve().parent
+                               / "reference" / "config")
+    return {t.tank_id: t.max_density_kg_m3 for t in fac.tanks}
 
 
 def compare(golden: dict, actual: dict) -> list[str]:

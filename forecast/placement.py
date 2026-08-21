@@ -117,15 +117,27 @@ PURGE_TRANSFER_GROWTH_DAYS = 4
 # (fail-safe; a held tank drains on the pair's next rotation).
 SIXN_MIN_RESIDENCY_DAYS = 14
 def _sixn_fill_capacity_fish(state: FacilityState, tank_id: int,
-                             avg_wt_g: float) -> float:
+                             avg_wt_g: float, purge: bool = False) -> float:
     """Fish this 6N tank can still take, judged at the given transfer weight.
 
-    Rule-2 stage (operator ruling): never STOCK a purge tank past its density
-    cap — overflow goes to the pair's other tank (the idle sister: 67/69/71 sat
-    empty 80-90% of purge weeks while mains rode 128-141). This caps what fills
-    PLACE; the reporting/quality line stays the separate density gate. The
-    no-drop make-room may still overflow the LAST slot when total free 6N
-    capacity is short — losing an arrival is worse.
+    PURGE MODE HAS NO DENSITY CEILING (operator, 2026-08-20). What bounds a
+    purge tank is the HARVEST SCHEDULE, not kg/m3: the fish are off-feed, not
+    growing, and leave within the ~2-week rotation. `purge=True` therefore
+    returns unbounded capacity, so ONE batch fills ONE tank however dense.
+
+    This REVERSES the earlier "Rule-2 stage" ruling recorded here, which capped
+    purge fills at the tank's density cap and spilled the overflow into the
+    pair's sister. That is now a defect, not a fix: a 6N tank is 1,720 m3, so
+    95 kg/m3 held it to 163,400 kg, and a ~211,000 kg purge cohort was split
+    across BOTH tanks of a pair. The sister (67/69/71) exists ONLY so that a
+    SECOND, DIFFERENT batch needing harvest the same week is not mixed into an
+    occupied tank — mixing destroys per-batch count fidelity. Spending the
+    sister on a single batch's overflow burns the slot that separation needs
+    and exhausts the rotation. Measured: VBA splits a batch across a pair 0
+    times; this engine did it 39-60 pair-weeks and used 6x the sister capacity.
+
+    In PRODUCTION mode (`purge=False`) 6N is an ordinary production system and
+    the tank's configured density cap applies exactly as anywhere else.
 
     The cap is the tank's OWN `max_density_kg_m3` from config/facility.yaml.
     It used to be a hardcoded 95.0 here, which overrode whatever the operator
@@ -135,7 +147,12 @@ def _sixn_fill_capacity_fish(state: FacilityState, tank_id: int,
     the fish, decided the drain.
     """
     t = state.tanks_by_id.get(tank_id)
-    if t is None or avg_wt_g <= 0 or t.max_density_kg_m3 <= 0:
+    if t is None or avg_wt_g <= 0:
+        return 0.0
+    if purge:
+        # No ceiling: the harvest schedule bounds a depuration tank.
+        return float("inf")
+    if t.max_density_kg_m3 <= 0:
         return 0.0
     cap_kg = t.volume_m3 * t.max_density_kg_m3
     held_kg = (t.count * t.avg_wt_g / 1000.0) if not t.is_empty else 0.0
@@ -1810,7 +1827,12 @@ def _run_sixn_purge_week(
             _order = ((fill_pair[1], main_tank_id)
                       if (moved_this_batch == 0 and contributing_batches)
                       else (main_tank_id, fill_pair[1]))
-            _caps = [(tid, _sixn_fill_capacity_fish(state, tid, _xfer_wt))
+            # purge mode -> unbounded per-tank fill, so the FIRST tank in
+            # _order absorbs the whole take and the pair's other tank stays
+            # free for a genuinely DIFFERENT batch (count fidelity at harvest).
+            _purge_fill = is_purge_mode(control, week_start_date)
+            _caps = [(tid, _sixn_fill_capacity_fish(state, tid, _xfer_wt,
+                                                    purge=_purge_fill))
                      for tid in _order if _dest_ok(tid)]
             _caps = [(tid, c) for tid, c in _caps if c > 0]
             _cap_total = sum(c for _, c in _caps)
@@ -3334,7 +3356,8 @@ def _free_production_stage_tank(state: FacilityState, reserved=frozenset()):
 
 
 def _free_6n_slots(state: FacilityState, resting_pair,
-                   avoid=frozenset()) -> list[int]:
+                   avoid=frozenset(), same_batch=None,
+                   fill_date=None) -> list[int]:
     """6N tank ids that can ACCEPT a make-room move-in right now.
 
     A 6N tank is available if it is empty (any pair). The resting pair's
@@ -3353,6 +3376,26 @@ def _free_6n_slots(state: FacilityState, resting_pair,
     plans); when the last-resort slot IS used, the rotation's drain guard
     holds that tank through its full purge, so the hold still cannot leak.
     """
+    # TOP-UP FIRST (operator, 2026-08-20): one batch belongs in ONE tank. A
+    # 6N tank already holding THIS batch, filled THIS SAME event date, is
+    # offered ahead of any empty slot, so a second source tank of the same
+    # batch moving in the same week tops that tank up instead of consuming a
+    # fresh slot -- which was spending the pair's sister on a single batch and
+    # leaving nowhere to separate a genuinely different batch at harvest.
+    #
+    # SAME fill_date is required, never merely the same batch: a tank filled in
+    # an EARLIER week is partway through its ~2-week purge, and adding fish to
+    # it would hand the newcomers a short clock when that tank drains. Same-day
+    # top-up gives both tranches the identical purge window.
+    topup: list[int] = []
+    if same_batch is not None and fill_date is not None:
+        _fd = getattr(state, "sixn_fill_date", {}) or {}
+        for tid in sorted(SIXN_MAIN_TANKS | SIXN_SISTER_TANKS):
+            t = state.tanks_by_id.get(tid)
+            if (t is not None and not t.is_empty and tid not in avoid
+                    and t.batch_id == same_batch
+                    and _fd.get(tid) == fill_date):
+                topup.append(tid)
     pref: list[int] = []
     last: list[int] = []
     for tid in list(resting_pair or ()):
@@ -3363,7 +3406,7 @@ def _free_6n_slots(state: FacilityState, resting_pair,
         t = state.tanks_by_id.get(tid)
         if t is not None and t.is_empty and tid not in pref and tid not in last:
             (last if tid in avoid else pref).append(tid)
-    return pref + last
+    return topup + pref + last
 
 
 def _freeze_6n_dest(state: FacilityState, dest_tank_id: int,
@@ -3444,7 +3487,9 @@ def _make_room_into_6n(
     rotation's drain guard holds the tank through its full purge.
     """
     _usable = []
-    for _tid in _free_6n_slots(state, resting_pair, avoid):
+    for _tid in _free_6n_slots(state, resting_pair, avoid,
+                               same_batch=(src.batch_id if is_purge else None),
+                               fill_date=(event_date if is_purge else None)):
         _tk = state.tanks_by_id.get(_tid)
         # Empty slot, OR a 6N tank already holding this same batch (top-up,
         # INV-1-safe). Empty is the common case here.
@@ -3475,7 +3520,8 @@ def _make_room_into_6n(
     for _i, _tk in enumerate(_usable):
         if _rem <= 0:
             break
-        _cap = _sixn_fill_capacity_fish(state, _tk.tank_id, _xfer_wt)
+        _cap = _sixn_fill_capacity_fish(state, _tk.tank_id, _xfer_wt,
+                                        purge=is_purge)
         _a = _rem if _i == len(_usable) - 1 else min(_rem, _cap)
         if _a <= 0:
             continue

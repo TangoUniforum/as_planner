@@ -1,10 +1,17 @@
-"""Sister-first 6N fill stage (operator rule 2, stage 1).
+"""6N purge fill: ONE BATCH, ONE TANK (operator, 2026-08-20).
 
-No 6N purge tank is STOCKED past its CONFIGURED density cap — the
-overflow continues into the pair's other tank (the idle sister) instead of
-overloading the main (audit: mains rode 128-141 kg/m3 while sisters sat
-empty 80-90% of purge weeks). The no-drop make-room may still overflow the
-LAST slot when total free 6N capacity is short — losing an arrival is worse.
+PURGE mode has NO density ceiling — the harvest schedule bounds a depuration
+tank, not kg/m3 (off-feed fish, not growing, gone within the ~2-week
+rotation). So a purge fill lands ENTIRELY in one tank however dense it gets.
+
+The sister (67/69/71) is NOT overflow capacity. It exists solely so a SECOND,
+DIFFERENT batch needing harvest the same week is not mixed into an occupied
+tank, because mixing destroys per-batch count fidelity at harvest. Spending
+the sister on one batch's overflow burns the slot that separation needs.
+
+This SUPERSEDES the earlier "sister-first / spill at the density cap" stage
+these tests used to pin. In PRODUCTION mode 6N is an ordinary system and its
+configured density cap applies normally — pinned below on both sides.
 """
 from __future__ import annotations
 
@@ -69,12 +76,28 @@ class TestCapacityHelper:
         s.tanks_by_id[61].assign("B50", 31579, 3800.0, 16.0, "SW")
         assert _sixn_fill_capacity_fish(s, 61, 3800.0) == 0.0
 
+    def test_purge_mode_has_no_ceiling(self):
+        """purge=True -> unbounded, even on a tank already past its cap.
+
+        The production-mode cases above keep the configured cap; this is the
+        whole behavioural difference between the two modes in one assertion.
+        """
+        s = _mk_state()
+        s.tanks_by_id[61].assign("B50", 31579, 3800.0, 16.0, "SW")
+        assert _sixn_fill_capacity_fish(s, 61, 3800.0) == 0.0
+        assert _sixn_fill_capacity_fish(s, 61, 3800.0, purge=True) == float("inf")
+
 
 class TestRotationFillSpills:
-    def test_fill_spills_into_sister_at_95(self):
-        """One batch, one big source: the fill lands main-first, tops the
-        main at the 95 cap, and the overflow continues into the SISTER —
-        neither tank over 95."""
+    def test_fill_keeps_one_batch_in_one_tank(self):
+        """One batch, one big source: the whole fill lands in the MAIN and
+        the sister stays EMPTY, reserved for a different batch.
+
+        40,000 fish at 3,800 g is 152,000 kg in a 1,000 m3 tank = 152 kg/m3,
+        well past the fixture's 120 configured cap. That is CORRECT in purge:
+        the cap does not apply, and splitting to hold 120 would spend the
+        sister that a genuinely different batch needs at harvest.
+        """
         s = _mk_state()
         s.tanks_by_id[31].assign("B50", 40000, 3800.0, 16.0, "SW")
         meta = {"B50": BatchInput(
@@ -91,15 +114,21 @@ class TestRotationFillSpills:
             refill=True,
         )
         m, sis = s.tanks_by_id[61], s.tanks_by_id[67]
-        assert not m.is_empty and not sis.is_empty      # sister engaged
-        assert _dens(s, 61) <= TANK_CAP + 0.01
-        assert _dens(s, 67) <= TANK_CAP + 0.01
-        # everything the fill moved is in the pair (nothing lost)
-        assert m.count + sis.count + s.tanks_by_id[31].count == 40000
+        assert not m.is_empty
+        assert sis.is_empty, "sister must stay free for a DIFFERENT batch"
+        assert _dens(s, 61) > TANK_CAP          # no ceiling in purge
+        # nothing lost: every fish is in the main or still in grow-out
+        assert m.count + s.tanks_by_id[31].count == 40000
 
-    def test_fill_stops_when_pair_at_cap(self):
-        """Both pair tanks at the 95 cap: the fill moves nothing (surplus
-        waits in grow-out) — never an overload."""
+    def test_fill_stops_when_pair_holds_a_foreign_batch(self):
+        """Both pair tanks hold a DIFFERENT batch: the fill moves nothing.
+
+        Renamed 2026-08-20 — this never tested the density cap. It passes
+        because B49 occupies both tanks and a B50 fill may not mix into
+        them, which is the count-fidelity rule, not a capacity limit. With
+        purge uncapped the old name asserted a mechanism that no longer
+        exists, while the behaviour it actually pins matters MORE now.
+        """
         s = _mk_state()
         s.tanks_by_id[61].assign("B49", 25000, 3800.0, 16.0, "SW")
         s.tanks_by_id[67].assign("B49", 25000, 3800.0, 16.0, "SW")
@@ -122,7 +151,13 @@ class TestRotationFillSpills:
 
 
 class TestMakeRoomSplit:
-    def test_dump_splits_across_pair(self):
+    def test_dump_keeps_one_batch_in_one_tank(self):
+        """A whole-tank make-room dump lands in ONE 6N tank, sister untouched.
+
+        33,000 at 3,800 g = 125,400 kg in 1,000 m3 = 125 kg/m3, past the 120
+        configured cap and correct in purge. Previously this split across the
+        pair to stay under the cap, which is what burned sister capacity.
+        """
         s = _mk_state()
         src = s.tanks_by_id[31]
         src.assign("B50", 33000, 3800.0, 16.0, "SW")
@@ -131,13 +166,13 @@ class TestMakeRoomSplit:
             s, src, TODAY, (61, 67), [], warns, "2026-W40",
             reason="test", is_purge=True)
         assert ok and src.is_empty
-        assert not s.tanks_by_id[61].is_empty and not s.tanks_by_id[67].is_empty
-        assert _dens(s, 61) <= TANK_CAP + 0.01
-        assert _dens(s, 67) <= TANK_CAP + 0.01
-        assert s.tanks_by_id[61].count + s.tanks_by_id[67].count == 33000
-        # both destinations stamped for the depuration-hold guard
+        assert not s.tanks_by_id[61].is_empty
+        assert s.tanks_by_id[67].is_empty, "sister reserved for another batch"
+        assert s.tanks_by_id[61].count == 33000
+        assert _dens(s, 61) > TANK_CAP          # no ceiling in purge
+        # the filled destination is stamped for the depuration-hold guard
         assert s.sixn_fill_date.get(61) == TODAY
-        assert s.sixn_fill_date.get(67) == TODAY
+        assert 67 not in s.sixn_fill_date
 
     def test_no_drop_overflow_when_capacity_short(self):
         """Only one usable slot and the dump exceeds its 95-capacity: the
