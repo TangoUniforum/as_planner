@@ -63,6 +63,7 @@ def main(
     config_dir: str | Path | None = None,
     scenario_dir: str | Path | None = None,
     advance_weeks: int = 0,
+    calib_log_path: str | Path | None = None,
 ) -> int:
     """Run the full forecast pipeline.
 
@@ -506,11 +507,27 @@ def main(
         # Durable history, beside optimize_history.jsonl / adoption_history.jsonl
         # and gitignored like them. Root-anchored rather than CWD-relative so a
         # run launched from anywhere still appends to the one true history.
+        #
+        # `calib_log_path` exists so a NON-OPERATIONAL run cannot contaminate
+        # that history. This is not hypothetical: on 2026-08-20 a synthetic test
+        # fixture wrote 83 records into it under a pr_closing that collides with
+        # a real one, and they had to be identified and removed by hand. Any
+        # caller that is not a real forecast of the real facility — the backtest
+        # driver, the reference fixture, a sweep — must pass its own path, or
+        # "" to record nothing. Explicit at the call site, so the separation is
+        # visible in the code rather than assumed.
         from pathlib import Path as _PathC
         from .accuracy import (append_calibration_log as _append_calib,
                                DEFAULT_CALIB_LOG as _CALIB_LOG)
-        _append_calib(fw_calib_records,
-                      str(_PathC(__file__).resolve().parent.parent / _CALIB_LOG))
+        if calib_log_path is None:
+            _target = str(_PathC(__file__).resolve().parent.parent / _CALIB_LOG)
+        else:
+            _target = str(calib_log_path)
+        if _target:
+            _append_calib(fw_calib_records, _target)
+        else:
+            print(f"  FW calibration history: NOT recorded "
+                  f"({len(fw_calib_records)} records suppressed — non-operational run)")
     in_flight_batches = sorted({s.batch_id for s in in_flight_states})
     print(f"  In-flight projection: {len(in_flight_states)} batch-week rows across "
           f"{len(in_flight_batches)} batches {in_flight_batches}")

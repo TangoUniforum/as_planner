@@ -38,8 +38,14 @@ def run_reference(out_dir: Path) -> Path:
     """Run the pipeline on the fixture; return the produced workbook path."""
     from forecast.run import main as run_main
     out = Path(out_dir) / "reference_out.xlsx"
+    # calib_log_path="" — the fixture is synthetic. Without this every run of
+    # it appended to the live fw_calibration_history.jsonl; on 2026-08-20 that
+    # put 83 fake records into the operator's real FW history, under a
+    # pr_closing date that collides with a real one. Test artifacts never write
+    # to operational history.
     run_main(str(REF / "production_report.xlsx"), str(out),
-             config_dir=str(REF / "config"), scenario_dir=str(REF / "scenario"))
+             config_dir=str(REF / "config"), scenario_dir=str(REF / "scenario"),
+             calib_log_path="")
     # run.main may rename the extension to .xlsm when the source carries VBA.
     if not out.exists():
         alt = out.with_suffix(".xlsm")
