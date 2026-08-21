@@ -938,7 +938,28 @@ def pick_tanks(
 
                 _six = sorted((t for t in old_tanks if t in sixn_set),
                               key=lambda t: (-_residency(t), t))
-                starve_first = _six + [t for t in old_tanks if t not in sixn_set]
+                # 6N-ONLY DRAW IN PURGE MODE (operator rule, absolute): fish are
+                # harvested out of DEPURATION, never straight out of a
+                # production tank. The draw used to fall through to non-6N
+                # tanks whenever 6N could not cover the week, which silently
+                # broke the rule instead of reporting that the pipeline was
+                # short -- 39,094 fish over the run, 99.96% of them in the very
+                # first forecast week.
+                #
+                # Refusing the fallthrough turns a silent violation into a
+                # visible harvest shortfall, which is this module's own stated
+                # philosophy elsewhere: _make_room_into_6n returns False as "a
+                # real 6N-capacity signal, never a bypass".
+                #
+                # It does NOT fix the underlying gap. Harvest demand comes from
+                # L1's `harvest_by_bw`; 6N parking comes from L1's separate
+                # `purge_rows` (section 2 above). Nothing reconciles the two, so
+                # L1 can schedule a harvest for a batch that was never parked
+                # into 6N -- most visibly in week 1, where there is no purge
+                # history to have parked anything from and the PR's 6N stock
+                # belongs to other batches. Closing THAT is step 2.
+                _nonsix = [t for t in old_tanks if t not in sixn_set]
+                starve_first = _six if _purge_wk else _six + _nonsix
                 drawn_c = 0.0
                 _from6n = 0.0
                 for t in starve_first:
@@ -947,11 +968,36 @@ def pick_tanks(
                     take_c = min(avail[t], h_cnt - drawn_c)
                     if take_c <= 1e-9:
                         continue
-                    take_kg = h_kg * (take_c / h_cnt) if h_cnt > 0 else 0.0
+                    # PRICE THE DRAW AT THE TANK'S OWN WEIGHT.
+                    #
+                    # This used to apportion the BATCH's planned harvest mass
+                    # `h_kg` pro-rata by count:
+                    #     take_kg = h_kg * (take_c / h_cnt)
+                    # The COUNT is capped by `avail[t]` (what the tank actually
+                    # holds) but the KILOGRAMS came from the plan, so a tank was
+                    # emptied of the right FISH priced at the wrong WEIGHT. That
+                    # is why the per-tank audit read TANK_DRIFT=0 (counts exact)
+                    # with BIO_DRIFT on 35 rows, and why tanks closed NEGATIVE:
+                    #     2028-W06 tank 11: opens 129,362 kg, grows 52 kg,
+                    #                       harvests 136,102 kg -> -6,740 kg
+                    # Measured across the run, 205 harvest rows were priced more
+                    # than 2% off the tank's real average and ALWAYS high
+                    # (ratios 1.03 - 1.37), so the Global arms' harvest tonnage
+                    # was systematically overstated. Batch-level reconciliation
+                    # still read "CONSERVES" because one tank's over-draw netted
+                    # against another's in the same batch.
+                    #
+                    # prev_state[t].avg_wt_g is the same basis the TRANSFER path
+                    # a few lines below already uses (`supply` at ~line 983), so
+                    # harvest and transfer now price a tank identically.
+                    _twt = prev_state[t].avg_wt_g
+                    if _twt <= 0:
+                        _twt = h_wt
+                    take_kg = take_c * _twt / 1000.0
                     harvest_events.append(TankHarvest(
                         batch_id=batch_id, event_date=ws, source_tank_id=t,
                         count=take_c,
-                        avg_wt_g=(take_kg * 1000.0 / take_c) if take_c > 0 else h_wt))
+                        avg_wt_g=_twt))
                     h_out_kg[t] = h_out_kg.get(t, 0.0) + take_kg
                     avail[t] -= take_c
                     drawn_c += take_c
