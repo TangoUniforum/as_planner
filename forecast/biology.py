@@ -271,8 +271,45 @@ def _apply_bottom_cull(
     return new_count, new_avg, culled_count, culled_biomass_kg
 
 
+def apply_grade_efficiency(mean_g: float, upper_g: float, lower_g: float,
+                           efficiency: float) -> tuple[float, float]:
+    """Shrink a perfect size split toward the tank mean — an imperfect grader.
+
+    A real grader does NOT cut the population cleanly at the threshold. Fish
+    near the cut line go both ways, so the two resulting populations OVERLAP:
+    the "big" side keeps some small fish and the "small" side keeps some big
+    ones. The conditional means of a clean truncated-normal split are therefore
+    further apart than reality (operator, 2026-08-21).
+
+    First-moment model, matching the VBA verbatim
+    (ForecastSim_V2.bas:705-709, ForecastEngine_V2.bas:3074-3075):
+
+        big   = mean + (big_perfect   - mean) * efficiency
+        small = mean + (small_perfect - mean) * efficiency
+
+    efficiency = 1.0 is a perfect grader (no change); 0.5 halves the
+    separation; 0.0 would collapse both to the mean.
+
+    MASS IS CONSERVED for any efficiency, because the split FRACTIONS are
+    untouched and the shrink is affine about the mean:
+        p*(m + e*(U-m)) + (1-p)*(m + e*(L-m))
+      = m + e*(p*U + (1-p)*L - m) = m,   since p*U + (1-p)*L = m.
+    So this cannot introduce or destroy biomass; it only moves weight between
+    the two legs.
+
+    Values outside (0, 1) mean "perfect grader, do not shrink". That includes
+    0.0, matching the VBA's `If gradeEfficiency > 0 Then` guard, where 0 reads
+    as "feature off" rather than "collapse everything to the mean".
+    """
+    if not (0.0 < efficiency < 1.0):
+        return upper_g, lower_g
+    return (mean_g + (upper_g - mean_g) * efficiency,
+            mean_g + (lower_g - mean_g) * efficiency)
+
+
 def upper_truncated_split(
     avg_wt_g: float, cv_pct: float, threshold_g: float,
+    grade_efficiency: float = 1.0,
 ) -> tuple[float, float]:
     """Split a normal distribution at `threshold_g`, return conditional means.
 
@@ -298,11 +335,14 @@ def upper_truncated_split(
     phi_z = math.exp(-0.5 * z * z) / math.sqrt(2 * math.pi)
     upper_mean = avg_wt_g + sigma * phi_z / (1 - Phi_z)
     lower_mean = avg_wt_g - sigma * phi_z / Phi_z
+    upper_mean, lower_mean = apply_grade_efficiency(
+        avg_wt_g, upper_mean, lower_mean, grade_efficiency)
     return (max(0.0, upper_mean), max(0.0, lower_mean))
 
 
 def count_split_means(
     avg_wt_g: float, cv_pct: float, upper_fraction: float,
+    grade_efficiency: float = 1.0,
 ) -> tuple[float, float]:
     """Conditional means when the TOP `upper_fraction` of a tank is moved.
 
@@ -343,6 +383,11 @@ def count_split_means(
     phi_z = math.exp(-0.5 * z * z) / math.sqrt(2 * math.pi)
     upper_mean = avg_wt_g + sigma * phi_z / upper_fraction
     lower_mean = avg_wt_g - sigma * phi_z / (1.0 - upper_fraction)
+    # Imperfect grader: shrink the separation toward the mean. Conserves mass
+    # (see apply_grade_efficiency) so this path stays "conserving by
+    # construction" exactly as the docstring above promises.
+    upper_mean, lower_mean = apply_grade_efficiency(
+        avg_wt_g, upper_mean, lower_mean, grade_efficiency)
     return (max(0.0, upper_mean), max(0.0, lower_mean))
 
 

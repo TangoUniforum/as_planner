@@ -640,7 +640,13 @@ def _apply_graded_harvest(state, ev: ManualEvent, idx: int, event_date=None,
         big_avg = small_avg = mu
     else:
         z = NormalDist().inv_cdf(1.0 - p)
-        big_avg, small_avg = upper_truncated_split(mu, cv, mu + sigma * z)
+        # Imperfect grader (see biology.apply_grade_efficiency). Read off
+        # `state`, which every handler already receives -- _apply_graded_harvest
+        # has no `control` parameter and threading one through two call chains
+        # to reach a single multiplication is not worth the churn.
+        big_avg, small_avg = upper_truncated_split(
+            mu, cv, mu + sigma * z,
+            grade_efficiency=float(getattr(state, "grade_efficiency", 1.0)))
     big_count = float(K)
     small_count = n - big_count
 

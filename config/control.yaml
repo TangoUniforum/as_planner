@@ -2,7 +2,7 @@
 # forecast_start is derived from the ProductionReport at run time;
 # the value here is only a seed.
 forecast_start: '2026-05-15'
-horizon_weeks: 130
+horizon_weeks: 85
 scenario_name: Forecast
 max_feed_per_day_kg: 34000.0
 max_biomass_kg: 3800000.0
@@ -18,12 +18,16 @@ sixn_production_start: '2028-01-01'
 sixn_transition_weeks: 0
 tran_og_default_tanks: 2
 global_buffer_pct: 0.05
+# How cleanly a real grader separates sizes, 0-1. 1.0 = a perfect cut at the
+# threshold; lower leaves the two graded populations OVERLAPPING near the cut
+# line, which is what actually happens on a transfer grade. VBA default 0.85.
+grade_efficiency: 0.85
 starvation_period_days: 7
 harvest_relief_pct: 0.1
 max_transfers_per_week: 15
 min_transfer_count: 7000.0
-harvest_grade_to_min: false
-sixn_level_drains: true
+harvest_grade_to_min: true
+sixn_level_drains: false
 density_target_pct: 0.9
 density_welfare_threshold_kg_m3: 85.0
 rebalance_varqty_budget: 20
@@ -44,5 +48,5 @@ hybrid_follow: full
 hybrid_follow_band: 0.05
 hybrid_guide_min_frac: 0.25
 hybrid_guide_smooth_weeks: 0
-hybrid_purge_lever: true
-hybrid_production_lever: true
+hybrid_purge_lever: false
+hybrid_production_lever: false

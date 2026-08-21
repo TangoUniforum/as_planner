@@ -1311,7 +1311,8 @@ def _try_graded_move_in(
     # split is unchanged.
     big_avg, small_avg = count_split_means(
         chosen.avg_wt_g, cv,
-        (big_count / chosen.count) if chosen.count > 0 else 0.0)
+        (big_count / chosen.count) if chosen.count > 0 else 0.0,
+        grade_efficiency=float(getattr(control, "grade_efficiency", 1.0)))
 
     # Retention destination. retain_in_source (grade-to-min top-up): the small tail
     # STAYS in the SOURCE tank — same batch, no extra tank needed. Otherwise (make-

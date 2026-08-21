@@ -30,6 +30,11 @@ class ControlParams:
     # R28-R30 (added 2026-05).
     tran_og_default_tanks: int = 3
     global_buffer_pct: float = 0.05      # R29: system-limits symmetric buffer
+    # R-GE: how cleanly a real grader separates sizes, 0-1. 1.0 = perfect cut
+    # at the threshold; lower leaves the two populations OVERLAPPING near the
+    # cut line, which is what actually happens. VBA default 0.85
+    # (ForecastEngine_V2.bas:1662). Values outside (0,1) mean "perfect".
+    grade_efficiency: float = 0.85
     starvation_period_days: int = 7      # R30: in-place purge length (production mode); 7d = one weekly step (single-cohort pipeline)
     # HARVEST PRESSURE RELIEF (operator semantic correction 2026-08-09,
     # replacing the short-lived target/ceiling pair — the removed

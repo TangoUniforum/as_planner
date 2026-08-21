@@ -644,6 +644,15 @@ _CONTROL_HELP = {
         "the report. ONE-SIDED: it only allows a system to read over its cap; "
         "being under a cap is never a problem. UNIT: raw fraction — 0.05 = "
         "5%. Separate from the facility biomass band above.",
+    "grade_efficiency":
+        "How cleanly a real grader separates sizes, 0-1. A grader does NOT cut "
+        "the population neatly at the threshold: fish near the cut line go both "
+        "ways, so the two graded populations OVERLAP — the 'big' side keeps "
+        "some small fish and vice versa. 1.0 models a perfect grader (the two "
+        "sides as far apart as the maths allows); 0.85 (the default, matching "
+        "the VBA) narrows that separation by 15%. Lower = more overlap. Total "
+        "biomass is unchanged at any setting — only how it splits between the "
+        "two legs. 0 means 'off' and behaves as perfect. Unit: fraction 0-1.",
     "starvation_period_days":
         "Only for 6N grow-out mode (after the production start date): "
         "harvest-bound fish stop being fed IN PLACE for this many days before "
@@ -846,6 +855,7 @@ _CONTROL_LABEL = {
     "tran_og_default_tanks": "TranOG default tanks",
     "global_buffer_pct": "System-cap buffer (R29)",
     "starvation_period_days": "In-place purge length (days)",
+    "grade_efficiency": "Grader efficiency (0-1)",
     "density_target_pct": "Density target (% of cap)",
     "density_welfare_threshold_kg_m3": "Welfare density line (kg/m³)",
     "rebalance_balance_budget": "Rebalancer moves / week",

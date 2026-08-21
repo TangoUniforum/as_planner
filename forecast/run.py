@@ -165,6 +165,13 @@ def main(
     # pr_closing == forecast_start - 1, so no alignment warning is needed.
     state = FacilityState.from_facility_config(facility, today=control.forecast_start.date())
     hydration_warns = hydrate_facility_state(state, og_records, batches)
+    # GRADE EFFICIENCY on the state, so the manual-event handlers and the
+    # automatic graded-split path both see one value without either having to
+    # thread it through. A real grader does not cut cleanly at the threshold --
+    # the two populations overlap near the cut line -- so the clean
+    # truncated-normal conditional means are further apart than reality.
+    state.grade_efficiency = float(
+        getattr(control, "grade_efficiency", 1.0) or 1.0)
     summary = summarize_hydration(state)
     print(f"\n  ProductionReport: closing {pr_closing}, "
           f"{len(og_records)} OG (batch, tank) rows + {len(fw_records)} FW physical-unit rows")
