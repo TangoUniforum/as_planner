@@ -1,0 +1,266 @@
+# Capacity limits — OPERATOR INPUT. Capacities live here, never in code.
+#
+# A capacity is a fact about the facility: it changes rarely, so it is
+# stated ONCE and a per-week row is the exception, not the rule.
+#
+#   system_defaults: the standing capacity of each system. One block per
+#       system; each key is a metric (biomass = kg of standing fish;
+#       feed_per_day = kg of feed per day). A system whose capacity depends
+#       on its operating MODE adds a `modes:` sub-block — 6N is the one that
+#       does, because it holds more while it is the depuration station than
+#       it does from sixn_production_start (config/control.yaml), when its
+#       3 mains become grow-out and only the 3 sisters stage harvest. Which
+#       weeks are which is DERIVED from that date, so the split cannot drift
+#       away from it.
+#   system: one-off EXCEPTION rows, one per (week, system, metric). Absent
+#       is the normal case. A row here overrides the default for that week
+#       alone.
+#   facility: one row per (week, metric); absent = use the Control default.
+#
+# Precedence, highest first:
+#   per-week `system` row  >  system+mode default  >  system default  >
+#   no cap at all (an engine that needs one then names the missing input
+#   rather than inventing a number).
+#
+# Weeks are absolute ISO labels (e.g. 2028-W01).
+system_defaults:
+  OG1N:
+    biomass: 400000.0
+    feed_per_day: 3000.0
+  OG1S:
+    biomass: 400000.0
+    feed_per_day: 3000.0
+  OG2N:
+    biomass: 400000.0
+    feed_per_day: 3000.0
+  OG2S:
+    biomass: 400000.0
+    feed_per_day: 3000.0
+  OG3N:
+    biomass: 400000.0
+    feed_per_day: 3000.0
+  OG3S:
+    biomass: 400000.0
+    feed_per_day: 3000.0
+  OG4N:
+    biomass: 400000.0
+    feed_per_day: 3000.0
+  OG4S:
+    biomass: 400000.0
+    feed_per_day: 3000.0
+  OG5N:
+    biomass: 400000.0
+    feed_per_day: 3000.0
+  OG5S:
+    biomass: 400000.0
+    feed_per_day: 3000.0
+  OG6N:
+    feed_per_day: 3000.0
+    modes:
+      production:
+        biomass: 400000.0
+      purge:
+        biomass: 700000.0
+  OG6S:
+    biomass: 400000.0
+    feed_per_day: 3000.0
+system: []
+facility:
+- week: 2026-W33
+  metric: sgr_correction_og
+  value: 0.9
+- week: 2026-W34
+  metric: sgr_correction_og
+  value: 0.9
+- week: 2026-W35
+  metric: sgr_correction_og
+  value: 0.9
+- week: 2026-W36
+  metric: sgr_correction_og
+  value: 0.9
+- week: 2026-W37
+  metric: biomass
+  value: 3650000.0
+- week: 2026-W37
+  metric: feed_per_day
+  value: 27500.0
+- week: 2026-W37
+  metric: sgr_correction_og
+  value: 0.95
+- week: 2026-W38
+  metric: biomass
+  value: 3650000.0
+- week: 2026-W38
+  metric: feed_per_day
+  value: 27500.0
+- week: 2026-W38
+  metric: min_harvest_per_week
+  value: 46000.0
+- week: 2026-W38
+  metric: sgr_correction_og
+  value: 0.97
+- week: 2026-W39
+  metric: biomass
+  value: 3650000.0
+- week: 2026-W39
+  metric: feed_per_day
+  value: 27500.0
+- week: 2026-W39
+  metric: min_harvest_per_week
+  value: 48000.0
+- week: 2026-W40
+  metric: biomass
+  value: 3650000.0
+- week: 2026-W40
+  metric: feed_per_day
+  value: 27500.0
+- week: 2026-W40
+  metric: min_harvest_per_week
+  value: 50000.0
+- week: 2026-W41
+  metric: biomass
+  value: 3650000.0
+- week: 2026-W41
+  metric: feed_per_day
+  value: 27500.0
+- week: 2026-W41
+  metric: min_harvest_per_week
+  value: 50000.0
+- week: 2026-W42
+  metric: biomass
+  value: 3650000.0
+- week: 2026-W42
+  metric: feed_per_day
+  value: 27500.0
+- week: 2026-W42
+  metric: min_harvest_per_week
+  value: 50000.0
+- week: 2026-W43
+  metric: biomass
+  value: 3650000.0
+- week: 2026-W43
+  metric: feed_per_day
+  value: 27500.0
+- week: 2026-W43
+  metric: min_harvest_per_week
+  value: 51000.0
+- week: 2026-W44
+  metric: biomass
+  value: 3650000.0
+- week: 2026-W44
+  metric: feed_per_day
+  value: 27500.0
+- week: 2026-W44
+  metric: min_harvest_per_week
+  value: 51000.0
+- week: 2026-W44
+  metric: sgr_correction_og
+  value: 1.02
+- week: 2026-W45
+  metric: biomass
+  value: 3650000.0
+- week: 2026-W45
+  metric: feed_per_day
+  value: 27500.0
+- week: 2026-W45
+  metric: min_harvest_per_week
+  value: 51000.0
+- week: 2026-W45
+  metric: sgr_correction_og
+  value: 1.02
+- week: 2026-W46
+  metric: biomass
+  value: 3650000.0
+- week: 2026-W46
+  metric: feed_per_day
+  value: 27500.0
+- week: 2026-W46
+  metric: min_harvest_per_week
+  value: 52000.0
+- week: 2026-W46
+  metric: sgr_correction_og
+  value: 1.03
+- week: 2026-W47
+  metric: biomass
+  value: 3650000.0
+- week: 2026-W47
+  metric: feed_per_day
+  value: 27500.0
+- week: 2026-W47
+  metric: min_harvest_per_week
+  value: 53000.0
+- week: 2026-W47
+  metric: sgr_correction_og
+  value: 1.03
+- week: 2026-W48
+  metric: biomass
+  value: 3650000.0
+- week: 2026-W48
+  metric: feed_per_day
+  value: 27500.0
+- week: 2026-W48
+  metric: min_harvest_per_week
+  value: 50000.0
+- week: 2026-W48
+  metric: sgr_correction_og
+  value: 1.03
+- week: 2026-W49
+  metric: biomass
+  value: 3650000.0
+- week: 2026-W49
+  metric: feed_per_day
+  value: 27500.0
+- week: 2026-W49
+  metric: min_harvest_per_week
+  value: 50000.0
+- week: 2026-W49
+  metric: sgr_correction_og
+  value: 1.03
+- week: 2026-W50
+  metric: biomass
+  value: 3650000.0
+- week: 2026-W50
+  metric: feed_per_day
+  value: 27500.0
+- week: 2026-W50
+  metric: min_harvest_per_week
+  value: 50000.0
+- week: 2026-W50
+  metric: sgr_correction_og
+  value: 1.05
+- week: 2026-W51
+  metric: biomass
+  value: 3650000.0
+- week: 2026-W51
+  metric: feed_per_day
+  value: 27500.0
+- week: 2026-W51
+  metric: min_harvest_per_week
+  value: 50000.0
+- week: 2026-W51
+  metric: sgr_correction_og
+  value: 1.05
+- week: 2026-W52
+  metric: biomass
+  value: 3650000.0
+- week: 2026-W52
+  metric: feed_per_day
+  value: 27500.0
+- week: 2026-W52
+  metric: min_harvest_per_week
+  value: 50000.0
+- week: 2026-W52
+  metric: sgr_correction_og
+  value: 1.05
+- week: 2026-W53
+  metric: biomass
+  value: 3650000.0
+- week: 2026-W53
+  metric: feed_per_day
+  value: 27500.0
+- week: 2026-W53
+  metric: min_harvest_per_week
+  value: 50000.0
+- week: 2026-W53
+  metric: sgr_correction_og
+  value: 1.05

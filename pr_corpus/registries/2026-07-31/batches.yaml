@@ -1,0 +1,4 @@
+# Forward batch schedule + batch metadata (input/TranOG dates,
+# counts, FCR model, corrections). In-flight state comes from the
+# ProductionReport; this is the planning/metadata layer.
+batches: []

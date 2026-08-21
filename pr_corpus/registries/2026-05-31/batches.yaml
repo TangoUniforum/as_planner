@@ -1,0 +1,28 @@
+# Forward batch schedule + batch metadata (input/TranOG dates,
+# counts, FCR model, corrections). In-flight state comes from the
+# ProductionReport; this is the planning/metadata layer.
+batches:
+- batch_id: B47
+  input_date: '2025-08-31'
+  input_count: 322637
+  tran_sf_date: '2025-11-30'
+  tran_og_date: '2026-05-31'
+  tran_og_count: 290373
+  tran_og_avg_wt_g: 559.8873707266172
+  tran_og_cv: 16.0
+  fcr_model: FCR_118_Quick
+  fw_correction: 1.0
+  sgr_correction: 1.0
+  notes: reconstructed from PR corpus; first seen 2026-05-31
+- batch_id: B48
+  input_date: '2025-08-31'
+  input_count: 322537
+  tran_sf_date: '2025-11-30'
+  tran_og_date: '2026-05-31'
+  tran_og_count: 290283
+  tran_og_avg_wt_g: 208.01104990647056
+  tran_og_cv: 16.0
+  fcr_model: FCR_118_Quick
+  fw_correction: 1.0
+  sgr_correction: 1.0
+  notes: reconstructed from PR corpus; first seen 2026-05-31
