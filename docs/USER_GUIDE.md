@@ -140,7 +140,15 @@ Facility-wide knobs read into `ControlParams`:
 | `scenario_name` | label for the run (reports + RunConfig) | Forecast |
 | `facility_biomass_deviation_pct` | **FACILITY** setpoint band — the soft band below the (FW-inclusive) facility biomass/feed cap the harvest controller runs at; the one knob for how close to the *facility* cap to run (§4.3) | (config default) |
 | `global_buffer_pct` | **SYSTEM-limits** buffer (R29) — a *separate* symmetric ±% applied to per-**system** feed/biomass caps (the rebalancer headroom + SystemLimitsAudit, `caps.py`); does **not** touch the facility setpoint above | (config default) |
-| `handling_mortality_pct` | mortality applied per transfer | small |
+| `handling_mortality_pct` | mortality charged on **every tank-to-tank deposit** (2026-08-21) — rebalances, consolidation, relief moves, 6N move-ins and the TranOG entry alike, not TranOG only as before. Accounting is **gross-out / net-in**: the source is drained by the full amount, the destination keeps `(1 - rate)`, and the difference is booked as mortality so the tank audit still balances. **Untunable** (a physical fact, not a lever) | `0.01` = 0.01%, i.e. a 0.0001 fraction |
+| `grade_efficiency` | how cleanly a real grader separates sizes, 0-1. `1.0` = a perfect cut at the threshold; lower leaves the two graded populations OVERLAPPING near the cut line, so the big leg comes out lighter and the small leg heavier. Total biomass is unchanged at any setting — only how it splits. `0` means "off" and behaves as perfect. **Untunable** (describes your grader, not policy) | **0.85** (matches the VBA) |
+| `chronic_pressure_frac` | an OG1/2 tank at or above this fraction of its density cap for `chronic_pressure_weeks` running is treated as STRUCTURALLY short of tanks — it gets another tank once instead of being shaved weekly. Keep it CLEAR of `density_relief_pct`: when the two were equal, relieved tanks landed exactly on the trigger and flipped on rounding noise | 0.92 (fraction, not %) |
+| `chronic_pressure_weeks` | consecutive weeks above that level before a tank counts as chronic | 4 |
+| `chronic_relief_pct` | a chronic tank is emptied down to this fraction of cap — deeper than the ordinary target, since trimming a tank that has sat at 91% back to 90% moves almost nothing | 0.80 |
+| `chronic_max_frees_per_week` | cap on tanks the ANTICIPATORY pass may free per week. Consolidation and 6N harvest staging share one weekly transfer budget, so an unbounded sweep starves harvest and misses the sales floor. Tanks ALREADY over cap are urgent and ignore this. `0` stops the anticipatory freeing only — chronic tanks are still detected and still shed deeper | 1 |
+| `density_relief_pct` | an over-cap OG1/2 tank is relieved down to this fraction of cap. NOT 1.0: relieving to exactly the cap leaves no margin and one week of growth puts it straight back over — which is what made the same tanks breach every week for months | 0.90 |
+| `consolidation_fill_pct` | when a batch's grow-out tanks are consolidated to free one, the keepers fill to this fraction of cap. 0.80 not 0.90, for the same growth-margin reason | 0.80 |
+| `global_assume_primed_6n` | GLOBAL engines (and the Controller's hybrid harvest guide, which runs the same L1 planner). `false` (default) models the REAL 6N handover — L1 primes only from the fish actually in 6N at forecast start, so expect a genuine startup ramp over the first ~2 purge-hold weeks. `true` restores the older idealisation that assumed a steady-state-full 6N; it scores smoother but the tank picker cannot execute it. **Untunable** (a modelling assumption, not a lever) | false |
 | `sixn_growth` | 6N runs as growout (vs purge) for the whole horizon | false |
 | `sixn_production_start` | date 6N flips purge → production | e.g. 2028-01-01 |
 | `sixn_transition_weeks` | empty/fallow window at the 6N transition (0 = none) | 0 |
@@ -583,9 +591,14 @@ pairs **61/67, 63/69, 65/71**:
 - **Fixed cyclic order 61 → 63 → 65**, entered just *after* the empty (resting) pair —
   the empty slot marks where the rotation sits, so no fish-age data is needed. Two pairs
   purge while one rests; each week the front pair is harvested and the resting pair is
-  restocked from the oldest mature production fish (Wed-fill / Fri-harvest).
-- **Same batch mixes** across a pair's two tanks; **different batches** use the main +
-  sister tank so they never mix. The harvest limit applies to the pair's **combined** drain.
+  restocked from the oldest mature production fish (Thu-fill / Fri-harvest).
+- **One batch, one tank.** A purge cohort fills a SINGLE 6N tank however dense it gets —
+  purge has no density or biomass cap (§3.3a, §7.1, §7.3), so nothing forces a split.
+  The sister (67/69/71) is used ONLY when a SECOND, DIFFERENT batch needs harvest the
+  same week and would otherwise be mixed into an occupied tank; mixing destroys per-batch
+  count fidelity at harvest. Spending a sister on one batch's overflow burns the slot
+  that separation needs — that was a real defect, fixed 2026-08-20. The harvest limit
+  applies to the pair's **combined** drain.
 - **Make-room routes through 6N too.** When a TranOG arrival needs an empty OG tank, the
   freed tank's fish are **moved into 6N to purge** — freeing the tank *and* staging them
   for harvest — never harvested in place. If 6N has no room, the run **warns** (a real
@@ -780,7 +793,8 @@ so you can always see the two side by side.
 > **Total feed is one number:** the **FeedForecast** sheets, the **WeeklyReport/
 > MonthlyReport** Feed column, and the **YearlySummary** Feed total all sum the same
 > three sources — OG/SW realized feed + FW (hatchery) projected feed + the 6N purge
-> move-in's 4-day pre-transfer feed — so they reconcile. The per-day cap-check sheets
+> move-in's **3-day** pre-transfer feed (Mon->Thu, the actual move day) — so they
+> reconcile. The per-day cap-check sheets
 > (**Advisory**, **SystemLimitsAudit**) instead show the steady realized feed *rate*
 > vs cap, so they intentionally exclude the move-in (a total-accounting item, not a
 > per-day rate).
@@ -1043,8 +1057,11 @@ can call the growth model wrong — see **§14 Accuracy (forecast vs actuals)**.
 ### 7.1 Tuning per-batch density over-cap (the Plan tab)
 
 The Plan tab flags every batch whose **peak tank density** exceeds its tank's
-`max_density_kg_m3` cap. The **OG6N depuration/purge pool is excluded** from this
-peak (and from the app's density alert and the optimizer's `density_overshoot`):
+`max_density_kg_m3` cap. **Fish preparing for harvest are excluded** from this
+peak (and from the app's density alert and the optimizer's `density_overshoot`) —
+judged on STAGE (`STARVE`, rule **R8** in `forecast/tiers.py`), NOT on which system
+the tank is in. That covers both 6N depuration tanks in purge mode and, after the
+6N production switch, in-place starvation in an ordinary grow-out tank:
 harvest-size fish held off-feed at high density just before shipping is expected, not
 a stocking problem — counting it buried the real grow-out signal. Do **not** chase the
 raw "OVER CAP" count to zero — read the *distribution*:
@@ -1281,13 +1298,16 @@ optimizer still *measures* this trade via two compliance components:
   biomass cap (read from SystemLimitsAudit; the per-system cap carries the
   `global_buffer_pct` R29 headroom — distinct from the facility setpoint band).
 
-> **OG6N counts on biomass now (2026-08-14).** The audit used to exempt the
-> depuration system from *both* its caps, on the reasoning that purge is
-> "intentionally uncapped". But that cap is an operator input in
-> `limits.yaml`, and code ignoring an operator input is code overruling the
-> operator — it hid a real breach: against a 400,000 kg cap the rotation was
-> staging a **674,070 kg** peak, 68% over, on every run and visible on no
-> sheet. So `BIOMASS_OVER` can now appear on OG6N rows, and 674 t still
+> **OG6N in PURGE mode is exempt from BOTH caps (operator, 2026-08-20 —
+> this SUPERSEDES the 2026-08-14 ruling that reinstated the biomass cap).**
+> What bounds a depuration tank is the HARVEST SCHEDULE, not a kg figure: the
+> fish are off feed, not growing, and gone within the ~2-week rotation, so the
+> water-quality reasoning behind both caps does not apply to them. The 600 t
+> figure previously quoted here was, in the operator's words, a placeholder
+> "just to add a number", never a real limit. In PRODUCTION mode 6N is an
+> ordinary system and every cap applies again. The tonnage is still WRITTEN to
+> SystemLimitsAudit so it stays auditable — exempt from FLAGGING is not the
+> same as hidden. Superseded text, kept for history: 674 t still
 > exceeds the 600 t the operator states 6N holds in purge. Its **feed** cap
 > stays exempt for a physical reason rather than a policy one: purge fish are
 > `STARVE` and eat nothing, so a feed-rate check on that system can only ever
@@ -1668,8 +1688,11 @@ Choose** board, or headlessly via `tools/run_global_forecast.run_global(...)`.
 - **One batch per tank**, structurally, in both arms.
 - **Mode-aware 6N.** 33 production tanks in the purge era, 36 after the
   production start date — the three 6N *mains* become grow-out then, while the
-  three *sisters* are harvest-staging in both modes and are never production
-  tanks (`global_planner_l3_poc.production_tanks_per_system`).
+  three *sisters* (67/69/71) are **not production capacity at all** and are
+  unavailable in production mode (operator, 2026-08-21). In the purge era they
+  exist only to hold a SECOND, DIFFERENT batch needing harvest the same week
+  (`global_planner_l3_poc.production_tanks_per_system`,
+  `placement.py:_free_growout_tank`).
 - **The weekly harvest limit binds the 6N release.** A cohort whose release
   would exceed `max_harvest_per_week` is split pro-rata and the remainder
   deferred to the following week (`release_due_capped`).
@@ -1789,7 +1812,14 @@ that whole composition in one flow and ends in a single recommendation card:
      Business constants (`min_harvest_weight_g`, stocking) and the
      operational rules (`max_harvest_per_week`, `harvest_relief_pct`,
      `min_harvest_per_week`, `max_transfers_per_week`) are **untunable by
-     anyone** — the registry rejects a space that touches them. A **run budget** expander shows the
+     anyone** — the registry rejects a space that touches them. So are three
+     knobs that are not policy at all: `grade_efficiency` and
+     `handling_mortality_pct` describe **physical facts** — your grader and
+     your losses — and `global_assume_primed_6n` is a **modelling
+     assumption**. A search that pushed the grader to 1.0, dropped the
+     handling loss, or switched the 6N prime back on would score better by
+     redefining the facility rather than by planning it better, which is the
+     one thing a search must never be able to buy. A **run budget** expander shows the
      estimated engine runs per method (and how much the variant cache already
      paid for) before you press go; the headless twin is
      `python -m tools.run_tuned_tournament --workbook <PR>`.
@@ -1916,6 +1946,32 @@ The old **Tune (density knobs)** mode is retired — nothing it did is gone:
 ---
 
 ## 14. Accuracy (forecast vs actuals) — grading the biology
+
+> **Measurement tooling (2026-08-21).** Four CLI tools now grade the model
+> against the operator's own history, and `pr_corpus/` (21 monthly Production
+> Reports, 2024-11 .. 2026-07, plus per-era batch registries) is committed to
+> the repo so any of them reproduces from a clean clone.
+>
+> - `python tools/growth_check.py --corpus pr_corpus` — grades the SW growth
+>   curve **alone**: one batch across two consecutive reports, no planner, no
+>   placement, no harvest, no alignment. A miss here is the curve's, with
+>   nothing else to blame. Currently **-1.4% median, 4.0% typical**.
+> - `python tools/backtest.py --corpus pr_corpus --out backtest --registries pr_corpus/registries`
+>   — replays the WHOLE pipeline from each historical month and grades it
+>   against what actually happened.
+> - `python tools/error_model.py --results backtest/backtest_results.jsonl`
+>   — turns that into forecast error BY HORIZON. Currently **1m -0.2% median /
+>   4.4% typical, 2m -3.2% / 6.1%, 3m -5.4% / 7.2%**.
+> - `python tools/forecast_bands.py --forecast out.xlsm --model backtest/error_model.json`
+>   — puts a confidence band on a live plan's monthly tonnage.
+>
+> **Read the horizon limit.** Only 1-3 months are quotable; 4-6 still carry
+> harvest-execution contamination and print as INDICATIVE. And a whole-pipeline
+> backtest cannot ATTRIBUTE a bias — it grades planner, placement, harvest,
+> registries, alignment and growth at once. When one appears, isolate the
+> component and grade it alone (that is what `growth_check.py` exists for); a
+> -15% "model bias" chased through the harness in Aug 2026 turned out to be a
+> reconstruction artifact, not biology.
 
 Every other mode grades a **plan**. The test suite proves **bookkeeping** — no
 fish created or lost, rules respected (§6). Neither can tell you whether the

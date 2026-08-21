@@ -5,10 +5,22 @@ Every method consumes the SAME inputs — the PR workbook + the app's config
 and produces a full forecast workbook at a caller-chosen output path. Because
 the methods share the config + scenario (including scenario/manual_events.yaml,
 the manual override window that BOTH engines apply identically), the runs are
-apples-to-apples: the SAME "manual entries are law" starting state and the SAME
-control rules; only the PLANNING METHOD differs. That is the whole point — it
-lets the operator run several methods and compare the results to be confident
-the plan they select is the best available, not just the first one produced.
+apples-to-apples on the INPUTS: the SAME "manual entries are law" starting
+state and the SAME control rules. That is the point — it lets the operator run
+several methods and compare the results to be confident the plan they select is
+the best available, not just the first one produced.
+
+THEY ARE NOT IDENTICAL MODELS, and since 2026-08-21 the gap is material. The
+Controller family runs forecast/placement.py, which charges handling mortality
+on every tank-to-tank deposit and carries the OG1/2 density relief,
+consolidation and chronic-pressure work. The Global family runs its own
+placement and none of that: its transfers are FREE and it has no density-relief
+policy. Both families DO share the biology (forecast/biology.py, including the
+imperfect grader) and the R8 density exemption (forecast/tiers.py).
+
+So: compare harvest SHAPE and contract compliance across families, but compare
+transfer counts and density-relief behaviour only WITHIN a family. A
+transfer-heavy Global plan is not being taxed the way a Controller plan is.
 
 This is the extension point: a newly-available method (a new placement backend,
 a new solver) becomes comparable by adding ONE `register(...)` call here — the
@@ -58,6 +70,13 @@ from .optimize import CD_KNOB_SPACE, OPT_FULL_GRID
 #     just relaxing the rule. (harvest_target_per_week is DELETED from config
 #     but stays listed so no space can ever resurrect it.)
 # register() enforces this structurally — an illegal space cannot register.
+#
+# NOTE, because "the plan must respect them" is only true of one family: the
+# Global engine reads max_harvest_per_week and min_harvest_per_week but NEVER
+# reads harvest_relief_pct or max_transfers_per_week. So a Global plan carries
+# no handling budget and no relief-band semantics at all — if a Global column
+# fails one of those gates on the board, that is a MODELLING GAP in the Global
+# path, not a knob the operator can turn.
 UNTUNABLE_KNOBS = frozenset({
     "min_harvest_weight_g",
     "max_harvest_per_week",
@@ -255,10 +274,16 @@ register(Method(
     overrides={"hybrid_follow": "off"},
     knob_grid=CONTROLLER_KNOB_GRID,
     knob_space=CONTROLLER_KNOB_SPACE,
-    blurb="Reactive week-by-week planner: greedy placement + multi-objective "
-          "rebalancer. The long-standing production engine and the greedy "
-          "baseline — but it leaves a totally empty harvest week on 5 of 6 real "
-          "PRs, so it no longer meets the steady-harvest contract rule.",
+    blurb="Reactive week-by-week planner: greedy placement, a multi-objective "
+          "rebalancer, and the 2026-08-21 density policy — OG1/2 relief, "
+          "chronic-pressure anticipation, and consolidation that frees a tank "
+          "by packing a batch into fewer of its own. Handling mortality is "
+          "charged on every deposit here; it is NOT on the Global arms. "
+          "The long-standing production engine and the greedy baseline — but "
+          "as measured on 2026-08-03 (before the 2026-08-20/21 handling-"
+          "mortality, grade-efficiency and 6N-purge changes) it left a totally "
+          "empty harvest week on 5 of 6 real PRs, so it did not meet the "
+          "steady-harvest contract rule. NOT re-measured since.",
 ))
 register(Method(
     key="controller-lns",
@@ -269,8 +294,11 @@ register(Method(
     overrides={"placement_method": "lns", "hybrid_follow": "off"},
     knob_grid=CONTROLLER_KNOB_GRID,
     knob_space=CONTROLLER_KNOB_SPACE,
-    blurb="Controller with a large-neighborhood-search pass that relocates / "
-          "swaps grow-out occupancy off the hottest systems (audit-gated).",
+    blurb="Controller with a large-neighborhood-search pass that RE-LABELS "
+          "which grow-out tank each occupancy segment sits in, moving load off "
+          "the hottest systems (audit-gated). It emits no extra Transfers, so "
+          "unlike a real move it costs neither handling mortality nor handling "
+          "budget — its transfer count is comparable with the plain controller.",
 ))
 register(Method(
     key="global-lp",
@@ -283,7 +311,17 @@ register(Method(
     knob_grid=GLOBAL_KNOB_GRID,
     knob_space=GLOBAL_KNOB_SPACE,
     blurb="Precalculated cascade: tankless harvest (L1) -> per-batch facility "
-          "share -> lexicographic LP placement (L3) -> continuity tank pick.",
+          "share -> lexicographic LP placement (L3) -> continuity tank pick. "
+          "Runs its OWN placement — NOT forecast/placement.py — so none of the "
+          "controller's 2026-08-21 density work applies here: no OG1/2 "
+          "density relief, no consolidation-to-free-tanks, no chronic-"
+          "pressure anticipation, and NO handling mortality on its "
+          "transfers (its moves are FREE, so its transfer count is not "
+          "comparable with a Controller arm's). It DOES share the R8 "
+          "density exemption and the biology, incl. grade_efficiency. "
+          "Since 2026-08-21 it models the REAL 6N handover "
+          "(global_assume_primed_6n=false): expect a genuine startup ramp "
+          "over the first ~2 purge-hold weeks rather than a smooth week 1.",
 ))
 register(Method(
     key="global-milp",
@@ -318,7 +356,17 @@ register(Method(
           "advantage is not foresight but an explicit min-max balance term in "
           "the objective, which holds the hottest system's biomass/feed down. "
           "Same-week tank swaps are only softly penalised, so it buys them "
-          "freely: expect a transfer-heavy plan.",
+          "freely: expect a transfer-heavy plan. "
+          "Runs its OWN placement — NOT forecast/placement.py — so none of the "
+          "controller's 2026-08-21 density work applies here: no OG1/2 "
+          "density relief, no consolidation-to-free-tanks, no chronic-"
+          "pressure anticipation, and NO handling mortality on its "
+          "transfers (its moves are FREE, so its transfer count is not "
+          "comparable with a Controller arm's). It DOES share the R8 "
+          "density exemption and the biology, incl. grade_efficiency. "
+          "Since 2026-08-21 it models the REAL 6N handover "
+          "(global_assume_primed_6n=false): expect a genuine startup ramp "
+          "over the first ~2 purge-hold weeks rather than a smooth week 1.",
 ))
 register(Method(
     key="controller-hybrid",
@@ -334,13 +382,24 @@ register(Method(
     blurb="The validated controller with the Global engine's L1 harvest "
           "envelope fed in as a per-week target band. Meets the never-an-empty-"
           "week contract rule; the plain controller does NOT. Measured across "
-          "6 real July-2026 PRs (2026-08-03, fixed harvest metric): 0 zero-"
-          "harvest weeks vs the controller's 6, weeks under the contract floor "
-          "22.5 -> 9.0, worst week 0 -> 16,148 fish. Costs peak biomass 102.6 "
-          "-> 107.1% of cap and peak density 102 -> 124: holding fish back for "
-          "a lean week means they are still in the water. Every knob that "
-          "shrinks that peak (wider deviation band, guide smoothing) puts empty "
-          "weeks back — the spike IS the reserve. Chosen over band 0.10 and "
+          "6 real July-2026 PRs (2026-08-03, fixed harvest metric — BEFORE the "
+          "2026-08-20/21 changes: handling mortality per deposit, "
+          "grade_efficiency 0.85, purge move-in Thursday, 6N one-batch-one-"
+          "tank. All four move the weekly harvest series, so re-measure before "
+          "relying on these deltas): 0 zero-harvest weeks vs the controller's "
+          "6, weeks under the contract floor 22.5 -> 9.0, worst week 0 -> "
+          "16,148 fish. Costs peak biomass 102.6 -> 107.1% of cap: holding "
+          "fish back for a lean week means they are still in the water. (A "
+          "peak-density figure sat here too; it was measured BEFORE R8 removed "
+          "the cap from purge and harvest-prep tanks — it counted tanks that no "
+          "longer have one, so it has been withdrawn rather than restated.) "
+          "Its L1 envelope comes from the same planner as the Global arms, so "
+          "global_assume_primed_6n shapes this arm's first ~2 weeks too. "
+          "Every HARVEST-side knob that shrinks that peak (wider deviation "
+          "band, guide smoothing) puts empty weeks back — the spike IS the "
+          "reserve; the 2026-08-21 DENSITY knobs are a different lever that "
+          "sheds density by consolidating a batch into fewer of its own tanks "
+          "and costs no harvest weeks. Chosen over band 0.10 and "
           "over deviation 0.025 by a 90-cell paired sweep: it is also the most "
           "STABLE arm, holding 0-1 blackout weeks under neutral perturbation "
           "where the alternatives drift to 3-4.",

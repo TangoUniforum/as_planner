@@ -31,6 +31,7 @@ from collections import defaultdict
 from datetime import timedelta
 
 from .biology import realized_feed_kg_day
+from .tiers import effective_density_cap as _eff_density_cap
 from .caps import carry_forward_cap_lookup
 from .tiers import ENTRY_SYSTEMS as OG12_SYSTEMS  # entry tier — source of truth in tiers.py
 from .time_grid import iso_week_label
@@ -332,13 +333,30 @@ def _invert(relmap):
 def _density_legal(seg, tank_id, tank_by_id, batch_meta, tables):
     """True if `seg`'s biomass respects `tank_id`'s per-tank density cap on every
     week of the segment (a no-volume tank cannot be checked — treat as legal,
-    matching _best_target)."""
+    matching _best_target).
+
+    Judged through tiers.effective_density_cap — the SAME rule run.py's audit,
+    placement.py's fill sizing and the Global tank picker use. This was the last
+    density test in the codebase applying the raw per-tank cap directly, which
+    made it the one place that could reject a move R8 permits: a segment whose
+    fish are PREPARING FOR HARVEST (stage STARVE) carries no density constraint
+    at all, because they are off feed, not growing, and gone within the hold.
+    Extracting one definition of a rule is pointless if a copy survives.
+    """
     tk = tank_by_id[tank_id]
     if not tk.volume_m3:
         return True
+    # A segment is harvest-prep if ANY of its weeks is frozen; such a segment is
+    # exempt for its whole span rather than week-by-week, because the tank is
+    # committed to the purge for the duration.
+    _stage = ("STARVE" if any(getattr(r, "stage", "") == "STARVE"
+                              for r in seg.rows) else "")
+    cap = _eff_density_cap(tk.max_density_kg_m3,
+                           getattr(tk, "system_id", ""), _stage, True)
+    if cap == float("inf"):
+        return True
     load = seg.bio(batch_meta, tables)
-    return all(load[w][0] / tk.volume_m3 <= tk.max_density_kg_m3
-               for w in seg.week_labels)
+    return all(load[w][0] / tk.volume_m3 <= cap for w in seg.week_labels)
 
 
 # --------------------------------------------------------------------------- #

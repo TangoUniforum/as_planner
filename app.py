@@ -4080,7 +4080,7 @@ the **6N depuration station** — and decides each week's **transfers** and
 (the contract floor — never an empty week), the facility never exceeds
 **{k['bio_cap']:,.0f} kg** of standing fish or **{k['feed_cap']:,.0f} kg/day**
 of feed, fish move only along the physically legal routes (the tier rules
-R1-R7 below), and every fish is accounted for from stocking to harvest. Layers
+R1-R8 below), and every fish is accounted for from stocking to harvest. Layers
 that *decide* are separated from checks that *audit* — a plan is never trusted
 because the planner says so, only because the independent audits reconcile it.""")
 
@@ -4143,7 +4143,7 @@ that break the tier rules are hard-blocked in the editor; events conserve
 fish exactly (a refused move leaves the source untouched).
 
 **What binds it.** Per-event validation against the hydrated PR, the tier
-rules R1-R7, and the **dark-handoff lint**: if your window drains 6N without
+rules R1-R8, and the **dark-handoff lint**: if your window drains 6N without
 restaging, the editor warns you *which* handoff weeks will have nothing
 harvestable under the 2-week depuration hold — a warning, not a block,
 because you may intend a dark week.""")
@@ -4185,7 +4185,7 @@ sub-minimum leftovers are folded forward first.
 **What binds it.** The input-conservation gate (0 dropped batches), the tier
 rules, and the remnant floor (layer 5).""")
 
-    with st.expander("5 · Grow-out placement, the tier rules R1-R7, and the "
+    with st.expander("5 · Grow-out placement, the tier rules R1-R8, and the "
                      "handling budget"):
         st.markdown(f"""
 **What it decides.** Week by week, which tank each group occupies: forward
@@ -4204,6 +4204,15 @@ quality passes that level crowding, feed and biomass across systems
 | **R5** | **No harvest and no 6N staging from entry-tier tanks** — fish route forward first. |
 | **R6** | Fish ≥ 1 kg *may stay* in an entry tank (stuck-in-place is legal and measured-necessary — never force-evicted). |
 | **R7** | **6N is one-way**: fish moved into depuration leave only by harvest, never by transfer. |
+| **R8** | **Fish preparing for harvest carry no density cap** — judged on stage (`STARVE`), so it covers both 6N depuration and, after the 6N production switch, in-place starvation in an ordinary grow-out tank. They are off feed, not growing, and gone within the hold, so the feed-loading reason for the cap does not apply. It is also what makes harvest-prep consolidation legal: the whole group fits in one tank and the rest go back to the rotation. |
+
+**Moving fish costs fish.** Every tank-to-tank deposit is charged
+`handling_mortality_pct` (2026-08-21) — rebalances, consolidation, relief
+moves, 6N move-ins, the TranOG entry. The source tank is drained by the full
+amount, the destination keeps the rest, and the difference is booked as
+mortality so the tank audit still balances to zero. The handling budget below
+is therefore not only a crew-capacity limit: a plan that shuffles more fish
+also kills more of them.
 
 **What it may never do.** Exceed **{k['moves']} transfer moves per week** —
 the handling budget. Deferrable quality passes simply stop and wait for a
@@ -4298,6 +4307,8 @@ harvested and the resting pair refills from the oldest mature fish.
   fixed and audited). Fish hydrated from the PR already mid-purge are the one
   exemption — their residency clock predates the forecast.
 * **R7 one-way** — once in depuration, fish leave only by harvest.
+* **R8 no density cap on harvest-prep** — a purging tank is bounded by the
+  harvest schedule, not by kg/m³.
 * Make-room routes through 6N too: a tank freed for an arrival sends its
   fish to purge, staging them for harvest — never harvested in place.
 
@@ -4345,7 +4356,7 @@ rather than smoothed over.
   changes anything when there are free tanks to relocate into, so on a
   capacity-bound facility it usually matches the plain controller exactly.
 
-All three enforce the tier rules R1-R7 *while planning* (an illegal move is
+All three enforce the tier rules R1-R8 *while planning* (an illegal move is
 refused, not logged), respect the **{k['moves']}-move handling budget** by
 deferring their optional quality passes, and route all harvest through 6N.
 
@@ -6990,7 +7001,7 @@ def _compare_and_choose():
             "this plan** (which also becomes the method ▶ Run forecast uses "
             "from then on).\n\n"
             "⚠️ **These four badges are not the whole rulebook.** They do not "
-            "check the handling budget, the tier rules R1-R7, or the "
+            "check the handling budget, the tier rules R1-R8, or the "
             "depuration hold. That matters most for the two **Global** "
             "methods: they plan the horizon as independent weekly problems, "
             "never read the handling budget, and do not enforce R1, R5 or R7 "
@@ -8117,11 +8128,20 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
         st.subheader("Summary")
         k1, k2, k3, k4, k5 = st.columns(5)
         k1.metric("Violations", r["violations"],
-                  help="Tanks where realized density exceeds that tank's own "
-                       "density cap (per-tank, from facility config; the OG6N "
-                       "depuration pool is excluded).")
+                  help="Tank-weeks where realized density exceeds that tank's "
+                       "own cap (per-tank, from facility config). Fish "
+                       "PREPARING FOR HARVEST are excluded — judged on stage "
+                       "(STARVE, rule R8), so it covers both 6N depuration and "
+                       "in-place starvation in an ordinary grow-out tank after "
+                       "the 6N production switch. Those tanks have no density "
+                       "cap at all: the fish are off feed, not growing, and "
+                       "gone within the hold.")
         k2.metric("Worst density", f"{r['worst_density']:.1f} kg/m³",
-                  help="Highest per-tank density across the horizon")
+                  help="Worst density among the tanks COUNTED ABOVE — i.e. the "
+                       "deepest breach, not the highest density in the plan. "
+                       "Harvest-prep tanks legitimately run far denser and are "
+                       "excluded; 0.0 here means no tank breached its cap, not "
+                       "that no tank was dense.")
         _wl = r.get("welfare_density", 80)
         k3.metric("Reared density",
                   f"{r.get('mean_rearing_density', 0):.0f} kg/m³",

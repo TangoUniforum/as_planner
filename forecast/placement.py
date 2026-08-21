@@ -188,7 +188,7 @@ def _sixn_fill_capacity_fish(state: FacilityState, tank_id: int,
 # Drain-guard threshold in EVENT-DATE days: a next-rotation drain is at most 7
 # calendar days after its fill (week_starts are 7 apart; the ragged partial
 # FIRST forecast week makes it shorter, never longer), while the legal
-# 2nd-rotation drain — the standard Wed-fill -> Fri-harvest two-week purge —
+# 2nd-rotation drain — the standard Thu-fill -> Fri-harvest two-week purge —
 # is at least 8 (7 + the >=1-day first week). 8 therefore separates the two
 # in every calendar. A raw 14-day floor was measured to misfire on the first
 # forecast week (fills dated at the mid-week forecast start reached their
@@ -1658,9 +1658,9 @@ def _run_sixn_purge_week(
             if resting_pair is not None:
                 warnings.append(
                     f"{week_label}: 6N rotation RE-ENTERED the 3-pair fallow "
-                    f"cycle — pair {resting_pair} is empty, so the Wed-fill/"
+                    f"cycle — pair {resting_pair} is empty, so the Thu-fill/"
                     f"Fri-harvest split resumes (was refill-in-place)")
-        # Wed-fill / Fri-harvest: the move-in fills the RESTING pair, never the pair
+        # Thu-fill / Fri-harvest: the move-in fills the RESTING pair, never the pair
         # harvested this week. Degenerate fallback (no resting pair — e.g. all pairs
         # stocked at start, no fallow slot) refills the harvested pair as before.
         fill_pair = resting_pair if resting_pair is not None else harvest_pair
@@ -3616,7 +3616,7 @@ def _free_6n_slots(state: FacilityState, resting_pair,
     """6N tank ids that can ACCEPT a make-room move-in right now.
 
     A 6N tank is available if it is empty (any pair). The resting pair's
-    main/sister come first (the Wed-fill slot the rotation refills), then
+    main/sister come first (the Thu-fill slot the rotation refills), then
     any other empty 6N tank — so a make-room move-in prefers the slot the
     pipeline is about to fill anyway, and only spills onto extra empties
     when that one is taken.
@@ -3979,7 +3979,7 @@ def phase_d_emit_events(
         sixn_pair_queue = []
     # 3-pair fallow rotation: the resting (fallow) pair is the one NOT stocked at
     # forecast start — it takes the first move-in while the stocked pairs purge.
-    # The Wed-fill/Fri-harvest rule needs exactly one fallow pair (2 purge + 1
+    # The Thu-fill/Fri-harvest rule needs exactly one fallow pair (2 purge + 1
     # rest). If none is empty the handler degrades to refill-in-place.
     _stocked_pairs = set(sixn_pair_queue)
     _empty_pairs = [p for p in SIXN_PAIRS if p not in _stocked_pairs]
@@ -4005,7 +4005,7 @@ def phase_d_emit_events(
         # (9b8aa17) and the operator should know the run STARTS in that shape.
         warnings.append(
             "6N: all 3 purge pairs are stocked at forecast start — no fallow "
-            "pair, so the Wed-fill/Fri-harvest rotation degrades to "
+            "pair, so the Thu-fill/Fri-harvest rotation degrades to "
             "refill-in-place until a pair empties")
 
     # Compute forecast_start once for day-by-day biology.
