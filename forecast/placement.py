@@ -1802,7 +1802,28 @@ def _run_sixn_purge_week(
         ]
         # Biggest avg_wt first: prefer to move the largest fish into the
         # pair (they'll be harvested in 2 weeks; we want big fish out).
-        src_tanks.sort(key=lambda t: t.avg_wt_g, reverse=True)
+        # VACATE-AWARE DRAW (operator, 2026-08-21). The priority order the
+        # operator specified, outermost first:
+        #   1. BATCH FIFO      — the enclosing `for move_in_batch` loop, fed by
+        #                        _pick_fifo_move_in_batches. Untouched here;
+        #                        this sort only ever orders ONE batch's tanks.
+        #   2. HEAVIEST FIRST  — big fish out first; feeds the harvest weight
+        #                        profile and the sales contract. Not negotiable.
+        #   3. VACATE          — among tanks holding EFFECTIVELY THE SAME fish
+        #                        (one 100 g band), draw the SMALLEST tank first
+        #                        so it empties completely instead of leaving two
+        #                        part-full tanks.
+        # FIFO is broken only to MEET HARVEST CONSTRAINTS, and only by the
+        # enclosing loop, which cascades to the next FIFO batch when the
+        # oldest cannot fill the target.
+        #
+        # The handling is already paid for: these fish are moving to purge
+        # regardless, so vacating a growout tank on the way costs nothing and
+        # creates the headroom an over-dense OG1/2 tank needs. Same fish, same
+        # week, same harvest — one more free tank.
+        _BAND_G = 100.0
+        src_tanks.sort(key=lambda t: (-int(t.avg_wt_g // _BAND_G), t.count,
+                                      t.tank_id))
         moved_this_batch = 0
         for src in src_tanks:
             if count_moved >= target:
@@ -2251,6 +2272,96 @@ def _emit_transfers_for_batch_diff(
     return  # All cases handled by rebalance.
 
 
+def _consolidate_growout_to_free_tanks(
+    state: FacilityState,
+    event_date: date,
+    transfer_events: list,
+    warnings: list[str],
+    need_tanks: int,
+    max_moves: int,
+    target_pct: float = 0.80,
+) -> int:
+    """VACATE growout tanks by consolidating each batch into fewer of its OWN
+    tanks. Returns the number of tanks freed.
+
+    WHY THIS AND NOT A REALLOCATION. An over-dense OG1/2 tank has a legal
+    forward move (R2, any weight) but nowhere durable to put the fish: the
+    facility runs at ~90% TANK occupancy (35.1 of 39 tanks, only 3.9 free in an
+    average week, minimum 1) while sitting at ~62% of its water. Five measured
+    attempts to relieve OG1/2 by moving fish into existing or empty growout
+    tanks all RELOCATED the crowding instead of clearing it -- non-6N breaches
+    56 -> 53 / 57 / 63 / 81. Taking one of the scarce free tanks simply denies
+    it to whoever needed it a few weeks later; it is zero-sum.
+
+    Consolidation is not zero-sum: batches run 4.95 growout tanks each, and
+    packing one batch's own fish into fewer of its own tanks CREATES a free
+    tank. Measured on the 8.13.26 workbook, in the 31 weeks with an OG1/2
+    breach, consolidating to 80% of cap frees 2-6 tanks in 29 of them.
+
+    80%, not 90%: a tank filled to its cap is back over within one week of
+    growth (~4%/wk at 2-4 kg) -- the same defect this whole pass exists to fix.
+    80% grows to ~83% and holds.
+
+    LEGALITY. Growout->growout is unrestricted (R2/tiers.move_allowed), the
+    move is within ONE batch so INV-1 cannot be violated, 6N is excluded
+    (purge pipeline owns it), and STARVE tanks are never touched. Every move
+    is a real `Transfer` applied to state and appended to `transfer_events`,
+    so Transfer_Out/Transfer_In book and TankContinuityAudit reconciles --
+    fish never change tanks without a recorded transfer.
+
+    Only whole-tank vacates count: a partial move leaves the tank occupied and
+    frees nothing, so it is skipped rather than emitted (handling for nothing).
+    """
+    if need_tanks <= 0 or max_moves <= 0:
+        return 0
+    bybatch: dict[str, list] = {}
+    for t in state.tanks_by_id.values():
+        if (not t.is_empty and t.type == "OG"
+                and t.system_id not in OG12_SYSTEMS
+                and t.system_id != "OG6N"
+                and t.stage != STAGE_STARVE
+                and t.max_density_kg_m3 > 0 and t.avg_wt_g > 0):
+            bybatch.setdefault(t.batch_id, []).append(t)
+
+    def _cap_fish(tk, wt):
+        return tk.max_density_kg_m3 * tk.volume_m3 * 1000.0 / wt
+
+    freed = 0
+    moves = int(max_moves)
+    # Widest-spread batches first: they hold the most redundant tanks.
+    for bid, tanks in sorted(bybatch.items(), key=lambda kv: (-len(kv[1]), kv[0])):
+        if freed >= need_tanks or moves <= 0:
+            break
+        if len(tanks) < 2:
+            continue
+        tanks.sort(key=lambda t: (t.count, t.tank_id))
+        src, others = tanks[0], tanks[1:]
+        if src.tank_id in getattr(state, "reserved_tanks", ()):
+            continue
+        allocs, rem = [], src.count
+        for d in others:
+            if rem <= 0.5:
+                break
+            take = min(rem, max(0.0, _cap_fish(d, d.avg_wt_g) * target_pct - d.count))
+            if take <= 0.5:
+                continue
+            allocs.append(TankAllocation(tank_id=d.tank_id, count=take,
+                                         avg_wt_g=src.avg_wt_g,
+                                         cv_pct=src.cv_pct))
+            rem -= take
+        if rem > 0.5 or not allocs or len(allocs) > moves:
+            continue                     # cannot FULLY vacate -> frees nothing
+        ev = Transfer(batch_id=bid, event_date=event_date,
+                      source_tank_id=src.tank_id, destinations=allocs,
+                      leaves_source_empty=True)
+        warnings.extend(ev.apply(state))
+        transfer_events.append(ev)
+        if ev.count_transferred > 0:
+            freed += 1
+            moves -= len(allocs)
+    return freed
+
+
 def _even_out_density(
     state: FacilityState,
     batch_id: str,
@@ -2364,17 +2475,36 @@ def _even_out_density(
     # new destination — that would spawn extra grade events and could
     # cascade-violate other tanks.
     HEADROOM_PCT = 0.90
+    # RELIEF MARGIN: shed to 90% of cap, not to exactly 100%. Relieving to the
+    # cap left zero headroom and the tank re-breached within one week of growth
+    # -- instrumented on the 8.13.26 workbook, this pass drove OG1S-12 /
+    # OG1N-15 / OG2N-25 to exactly 95.0 and they reported 98.6-98.8 at week
+    # close, every week for months (B48 over cap 2026-11 -> 2027-03 while
+    # growing 1.92 -> 3.53 kg). Moving fish that are under the cap is
+    # legitimate when it makes room for what is coming (operator, 2026-08-21).
+    RELIEF_PCT = 0.90
+    # A tank freed by _consolidate_growout_to_free_tanks is EMPTY, so it is
+    # available to ANY batch and is INV-1-safe by construction. Offered after
+    # same-batch tanks (consolidating into an existing tank is cheaper
+    # handling than opening a new one).
+    _empty_go = [t for t in state.tanks_by_id.values()
+                 if t.is_empty and t.type == "OG"
+                 and t.system_id not in OG12_SYSTEMS
+                 and t.system_id != "OG6N"
+                 and t.max_density_kg_m3 > 0
+                 and t.tank_id not in getattr(state, "reserved_tanks", ())]
     for src in og12_over:
         if src.avg_wt_g <= 0:
             continue
-        for dst in og36_under:
-            if dst.avg_wt_g <= 0:
+        for dst in list(og36_under) + sorted(_empty_go, key=lambda t: t.tank_id):
+            _dst_wt = dst.avg_wt_g if not dst.is_empty else src.avg_wt_g
+            if _dst_wt <= 0:
                 continue
             src_cap_fish = (src.max_density_kg_m3 * src.volume_m3
                             * 1000.0 / src.avg_wt_g)
             dst_cap_fish = (dst.max_density_kg_m3 * dst.volume_m3
-                            * 1000.0 / dst.avg_wt_g)
-            shed = src.count - src_cap_fish
+                            * 1000.0 / _dst_wt)
+            shed = src.count - src_cap_fish * RELIEF_PCT
             room = dst_cap_fish * HEADROOM_PCT - dst.count
             take = min(shed, room)
             if take <= 0.5:
@@ -2394,7 +2524,7 @@ def _even_out_density(
             transfer_events.append(ev)
             if ev.count_transferred > 0:
                 _mv_left[0] -= 1
-            if src.count <= src_cap_fish + 0.5:
+            if src.count <= src_cap_fish * RELIEF_PCT + 0.5:
                 break
 
 
@@ -4747,6 +4877,24 @@ def phase_d_emit_events(
             # leveling fish across each batch's tanks where a tank is
             # over density cap and the moves are legal. Runs for ALL
             # active batches (including unchanged sets the diff skipped).
+            # FUND THE RELIEF FIRST. An over-cap OG1/2 tank has a legal
+            # forward move but nowhere durable to put the fish at ~90% tank
+            # occupancy. Consolidating some batch's own growout tanks CREATES
+            # a free tank rather than competing for one of the ~3.9 free in an
+            # average week. Fires only when an entry tank is actually over cap,
+            # and frees at most as many tanks as there are over-cap tanks.
+            _over_entry = [t for t in state.tanks_by_id.values()
+                           if not t.is_empty and t.type == "OG"
+                           and t.system_id in OG12_SYSTEMS
+                           and t.stage != STAGE_STARVE
+                           and t.max_density_kg_m3 > 0
+                           and t.density_kg_m3 > t.max_density_kg_m3]
+            if _over_entry and _moves_left_quality() > 0:
+                _consolidate_growout_to_free_tanks(
+                    state, transfer_date, transfer_events, warnings,
+                    need_tanks=len(_over_entry),
+                    max_moves=_moves_left_quality(),
+                )
             for b in sorted(set(prev_by_batch) | set(this_by_batch)):
                 if _moves_left_quality() <= 0:
                     break             # handling budget spent — deferrable pass
