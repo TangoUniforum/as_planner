@@ -35,6 +35,36 @@ class ControlParams:
     # cut line, which is what actually happens. VBA default 0.85
     # (ForecastEngine_V2.bas:1662). Values outside (0,1) mean "perfect".
     grade_efficiency: float = 0.85
+    # ---- Density relief / consolidation policy (was hard-coded in placement.py).
+    # Promoted to knobs 2026-08-21: these were HAND-TUNED on one workbook, and
+    # the reference fixture and the real workbook disagreed about the best
+    # values, so they belong in the optimizer's search space rather than in a
+    # developer's judgement. Defaults are the hand-tuned values, so promoting
+    # them changes no plan.
+    #
+    # An entry tank at or above this fraction of its density cap for
+    # `chronic_pressure_weeks` consecutive weeks is STRUCTURALLY short of
+    # capacity and gets a tank, not weekly shaving. MUST stay clear of
+    # density_relief_pct: when the trigger sat exactly on the level relief
+    # drives tanks TO, relieved tanks piled up on it and flipped in and out of
+    # "chronic" on a 0.01% perturbation.
+    chronic_pressure_frac: float = 0.92
+    chronic_pressure_weeks: int = 4
+    # Chronic tanks are shed DEEPER than the ordinary target — trimming a tank
+    # that has sat at 91% for a month to 90% moves nothing.
+    chronic_relief_pct: float = 0.80
+    # Anticipatory work is BOUNDED: consolidation and the 6N harvest move-in
+    # share one weekly handling budget, so an unbounded chronic sweep starves
+    # harvest staging (measured: weeks under the sales floor 13 -> 20). Tanks
+    # already OVER cap are urgent and exempt from this cap.
+    chronic_max_frees_per_week: int = 1
+    # An over-cap OG1/2 tank is shed to this fraction of its cap. Relieving to
+    # exactly the cap left zero margin and the tank re-breached within one week
+    # of growth.
+    density_relief_pct: float = 0.90
+    # Consolidating a batch's growout tanks fills the keepers to this fraction.
+    # 0.80, not 0.90: a tank filled to its cap re-breaches within a week.
+    consolidation_fill_pct: float = 0.80
     starvation_period_days: int = 7      # R30: in-place purge length (production mode); 7d = one weekly step (single-cohort pipeline)
     # HARVEST PRESSURE RELIEF (operator semantic correction 2026-08-09,
     # replacing the short-lived target/ceiling pair — the removed

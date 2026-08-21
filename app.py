@@ -644,6 +644,40 @@ _CONTROL_HELP = {
         "the report. ONE-SIDED: it only allows a system to read over its cap; "
         "being under a cap is never a problem. UNIT: raw fraction — 0.05 = "
         "5%. Separate from the facility biomass band above.",
+    "chronic_pressure_frac":
+        "An entry-tier (OG1/2) tank sitting at or above this share of its "
+        "density cap for 'Chronic pressure weeks' running is treated as "
+        "STRUCTURALLY short of tanks — it gets another tank once, instead of "
+        "being shaved every week forever. Keep it CLEAR of 'Density relief "
+        "target': when the two were equal, relieved tanks landed exactly on "
+        "the trigger and flipped in and out of 'chronic' on rounding noise. "
+        "Unit: fraction 0-1.",
+    "chronic_pressure_weeks":
+        "How many consecutive weeks a tank must sit above 'Chronic pressure "
+        "level' before it counts as chronic. Shorter reacts sooner and spends "
+        "more handling; longer waits for a clearer signal. Unit: weeks.",
+    "chronic_relief_pct":
+        "A chronic tank is emptied down to this share of its cap — deeper than "
+        "the ordinary relief target, because trimming a tank that has sat at "
+        "91% for a month back to 90% moves almost nothing and it is chronic "
+        "again next week. Unit: fraction 0-1.",
+    "chronic_max_frees_per_week":
+        "Cap on how many tanks the ANTICIPATORY pass may free per week. "
+        "Consolidation and 6N harvest staging draw on the same weekly transfer "
+        "budget, so an unbounded sweep starves harvest and misses the sales "
+        "floor. Tanks ALREADY over cap are urgent and ignore this cap. 0 turns "
+        "anticipation off entirely. Unit: tanks per week.",
+    "density_relief_pct":
+        "When an over-cap OG1/2 tank is relieved, fish are moved out until it "
+        "sits at this share of its cap. NOT 1.0: relieving to exactly the cap "
+        "leaves no margin and one week of growth puts the tank straight back "
+        "over — which is what made the same tanks breach every week for "
+        "months. Unit: fraction 0-1.",
+    "consolidation_fill_pct":
+        "When a batch's grow-out tanks are consolidated to free one, the "
+        "keepers are filled to this share of their cap. 0.80 rather than 0.90 "
+        "for the same reason as above — a tank packed to its cap re-breaches "
+        "within a week of growth. Unit: fraction 0-1.",
     "grade_efficiency":
         "How cleanly a real grader separates sizes, 0-1. A grader does NOT cut "
         "the population neatly at the threshold: fish near the cut line go both "
@@ -856,6 +890,12 @@ _CONTROL_LABEL = {
     "global_buffer_pct": "System-cap buffer (R29)",
     "starvation_period_days": "In-place purge length (days)",
     "grade_efficiency": "Grader efficiency (0-1)",
+    "chronic_pressure_frac": "Chronic pressure level (% of cap)",
+    "chronic_pressure_weeks": "Chronic pressure weeks",
+    "chronic_relief_pct": "Chronic relief target (% of cap)",
+    "chronic_max_frees_per_week": "Anticipatory frees per week",
+    "density_relief_pct": "Density relief target (% of cap)",
+    "consolidation_fill_pct": "Consolidation fill (% of cap)",
     "density_target_pct": "Density target (% of cap)",
     "density_welfare_threshold_kg_m3": "Welfare density line (kg/m³)",
     "rebalance_balance_budget": "Rebalancer moves / week",

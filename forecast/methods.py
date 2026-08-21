@@ -65,6 +65,16 @@ UNTUNABLE_KNOBS = frozenset({
     "harvest_target_per_week",     # deleted knob — kept unresurrectable
     "min_harvest_per_week",
     "max_transfers_per_week",
+    # PHYSICAL FACTS, not levers. A search is free to trade policy; it is not
+    # free to redefine the equipment or the biology to improve its own score.
+    # grade_efficiency describes how cleanly the GRADER separates sizes —
+    # letting the optimizer push it to 1.0 would inflate the big leg of every
+    # graded harvest and score better for it, which is fitting the model to the
+    # objective. handling_mortality_pct is the same: a measured loss per
+    # deposit, and a search that lowered it would "win" by not killing fish it
+    # actually kills.
+    "grade_efficiency",
+    "handling_mortality_pct",
 })
 
 # Controller-family space: the existing full optimizer space — the broad grid

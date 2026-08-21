@@ -82,6 +82,31 @@ OPT_FULL_GRID = [
     ("dev=0.005 (tight)", {"facility_biomass_deviation_pct": 0.005}),
     ("dev=0.02 (loose)", {"facility_biomass_deviation_pct": 0.02}),
     ("smooth:K12", {"harvest_smooth_lookahead_weeks": 12}),
+    # ---- density relief / consolidation policy -------------------------------
+    # Added 2026-08-21. These were hand-tuned on ONE workbook and the reference
+    # fixture disagreed with the real workbook about the best values, so they
+    # were promoted from module constants to knobs precisely so the search — not
+    # a developer's judgement — settles them. Both endpoints are set explicitly,
+    # per the convention above, so a lever is not invisible when the live config
+    # already sits at one end.
+    #
+    # chronic_pressure_frac must stay CLEAR of density_relief_pct: when the
+    # trigger sat exactly on the level relief drives tanks to, relieved tanks
+    # piled up on it and flipped on a 0.01% perturbation. The 0.88 row probes
+    # below the relief target on purpose — if it wins, that interaction is
+    # worth a second look rather than a straight adoption.
+    ("chronic=0.88", {"chronic_pressure_frac": 0.88}),
+    ("chronic=0.95", {"chronic_pressure_frac": 0.95}),
+    ("chronic_wk=3", {"chronic_pressure_weeks": 3}),
+    ("chronic_wk=6", {"chronic_pressure_weeks": 6}),
+    # 0 disables anticipatory freeing entirely (urgent over-cap tanks still act)
+    # — the honest "is the chronic trigger worth its handling?" control.
+    ("chronic_frees=0", {"chronic_max_frees_per_week": 0}),
+    ("chronic_frees=2", {"chronic_max_frees_per_week": 2}),
+    ("relief=0.85", {"density_relief_pct": 0.85}),
+    ("relief=0.95", {"density_relief_pct": 0.95}),
+    ("consol=0.75", {"consolidation_fill_pct": 0.75}),
+    ("consol=0.85", {"consolidation_fill_pct": 0.85}),
     # rebalancer effort. Both of these are DEFERRABLE-pass budgets, clamped to
     # min(knob, quality budget <= max_transfers_per_week) — so every value at or
     # above 15 produces the identical plan. "balance=60" was therefore a no-op

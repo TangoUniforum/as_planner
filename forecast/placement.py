@@ -128,21 +128,17 @@ PURGE_TRANSFER_GROWTH_DAYS = 3
 # (fail-safe; a held tank drains on the pair's next rotation).
 SIXN_MIN_RESIDENCY_DAYS = 14
 
-# CHRONIC ENTRY-TIER PRESSURE. A tank at or above _CHRONIC_FRAC of its density
-# cap for _CHRONIC_WEEKS consecutive weeks is structurally short of capacity,
-# not merely having a bad week. 85%/3wk was measured to capture ALL 16 residual
-# breaches on the 8.13.26 workbook while the spells still had consolidation
-# slack at their start. Raising the fraction or the run length trades recall for
-# handling; lowering either fires on tanks that were about to be harvested.
-_CHRONIC_FRAC = 0.92
-_CHRONIC_WEEKS = 4
-# Chronic tanks are shed BELOW the ordinary relief target: relieving a tank that
-# has been at 87% for a month to 90% would move nothing at all.
-_CHRONIC_RELIEF_PCT = 0.80
-# Anticipatory work is BOUNDED: consolidation shares the weekly handling budget
-# with the 6N harvest move-in, so an unbounded chronic sweep starves harvest
-# staging and misses the sales floor. Over-cap tanks are urgent and exempt.
-_CHRONIC_MAX_FREES_PER_WEEK = 1
+# CHRONIC ENTRY-TIER PRESSURE and the density-relief / consolidation targets
+# used to be module constants here. They are now CONTROL KNOBS (see
+# models.py ControlParams and config/control.yaml):
+#     chronic_pressure_frac      chronic_pressure_weeks
+#     chronic_relief_pct         chronic_max_frees_per_week
+#     density_relief_pct         consolidation_fill_pct
+# Promoted 2026-08-21 because they were HAND-TUNED on a single workbook and the
+# reference fixture disagreed with the real workbook about the best values —
+# that is a search problem, not a judgement call, so they belong in the
+# optimizer's grid. Defaults are the hand-tuned values, so the promotion moved
+# no plan. The rationale for each lives with its field in models.py.
 def _sixn_fill_capacity_fish(state: FacilityState, tank_id: int,
                              avg_wt_g: float, purge: bool = False) -> float:
     """Fish this 6N tank can still take, judged at the given transfer weight.
@@ -2485,6 +2481,8 @@ def _even_out_density(
     transfer_events: list,
     warnings: list[str],
     max_moves: Optional[int] = None,
+    relief_pct: float = 0.90,
+    chronic_relief_pct: float = 0.80,
 ) -> None:
     """Even fish across a batch's tanks when any tank is over density cap.
 
@@ -2581,7 +2579,7 @@ def _even_out_density(
     # restricted to OG1/2-over-cap tanks (so we never push OG3-6 fish
     # back into OG1/2 — that would be operationally backwards).
     # Sources: tanks ALREADY over cap, plus tanks under CHRONIC pressure (near
-    # the cap for weeks -- see _CHRONIC_FRAC). The chronic ones are the whole
+    # the cap for weeks -- see control.chronic_pressure_frac). The chronic
     # point of acting early: they are not over cap yet, so a breach-triggered
     # pass would ignore them until the facility is full and relief is dear.
     _chronic = getattr(state, "entry_chronic", ()) or ()
@@ -2604,7 +2602,7 @@ def _even_out_density(
     # close, every week for months (B48 over cap 2026-11 -> 2027-03 while
     # growing 1.92 -> 3.53 kg). Moving fish that are under the cap is
     # legitimate when it makes room for what is coming (operator, 2026-08-21).
-    RELIEF_PCT = 0.90
+    RELIEF_PCT = float(relief_pct)
     # A tank freed by _consolidate_growout_to_free_tanks is EMPTY, so it is
     # available to ANY batch and is INV-1-safe by construction. Offered after
     # same-batch tanks (consolidating into an existing tank is cheaper
@@ -2626,10 +2624,10 @@ def _even_out_density(
                             * 1000.0 / src.avg_wt_g)
             dst_cap_fish = (dst.max_density_kg_m3 * dst.volume_m3
                             * 1000.0 / _dst_wt)
-            # A chronic tank is shed deeper (_CHRONIC_RELIEF_PCT): it has sat
+            # A chronic tank is shed deeper (control.chronic_relief_pct): it has sat
             # near the cap for weeks, so trimming it to the ordinary 90% target
             # would move nothing and it would be chronic again next week.
-            _relief = (_CHRONIC_RELIEF_PCT if src.tank_id in _chronic
+            _relief = (float(chronic_relief_pct) if src.tank_id in _chronic
                        else RELIEF_PCT)
             shed = src.count - src_cap_fish * _relief
             room = dst_cap_fish * HEADROOM_PCT - dst.count
@@ -5040,6 +5038,9 @@ def phase_d_emit_events(
             # a spell (100% recall), and the spells are long -- OG1N-13/B55
             # rides >=85% for 28 consecutive weeks -- so the lead time is
             # months, and consolidation slack exists at the spell's start.
+            # Tuning policy off control (was hard-coded; see models.py).
+            _chr_frac = float(getattr(control, "chronic_pressure_frac", 0.92))
+            _chr_weeks = int(getattr(control, "chronic_pressure_weeks", 4))
             _press = getattr(state, "entry_pressure_runs", None)
             if _press is None:
                 _press = {}
@@ -5052,11 +5053,11 @@ def phase_d_emit_events(
                         or _t.stage == STAGE_STARVE
                         or _t.max_density_kg_m3 <= 0):
                     continue
-                if _t.density_kg_m3 >= _t.max_density_kg_m3 * _CHRONIC_FRAC:
+                if _t.density_kg_m3 >= _t.max_density_kg_m3 * _chr_frac:
                     _k = (_t.tank_id, _t.batch_id)
                     _press[_k] = _press.get(_k, 0) + 1
                     _still.add(_k)
-                    if _press[_k] >= _CHRONIC_WEEKS:
+                    if _press[_k] >= _chr_weeks:
                         _chronic.add(_t.tank_id)
             # Drop runs for tanks that fell back, emptied, or changed batch --
             # the counter must measure ONE cohort's continuous pressure.
@@ -5079,16 +5080,19 @@ def phase_d_emit_events(
                 # floor -- measured: freeing a tank per over-pressure tank took
                 # weeks-under-floor from 13 to 20. Tanks ALREADY over cap are
                 # urgent and uncapped; CHRONIC ones are anticipatory and take
-                # at most _CHRONIC_MAX_FREES_PER_WEEK, so acting early can
+                # at most control.chronic_max_frees_per_week, so acting early can
                 # never cost the contract it exists to protect.
                 _urgent = sum(1 for t in _over_entry
                               if t.density_kg_m3 > t.max_density_kg_m3)
-                _need = _urgent + min(len(_over_entry) - _urgent,
-                                      _CHRONIC_MAX_FREES_PER_WEEK)
+                _need = _urgent + min(
+                    len(_over_entry) - _urgent,
+                    int(getattr(control, "chronic_max_frees_per_week", 1)))
                 _consolidate_growout_to_free_tanks(
                     state, transfer_date, transfer_events, warnings,
                     need_tanks=_need,
                     max_moves=_moves_left_quality(),
+                    target_pct=float(getattr(control,
+                                             "consolidation_fill_pct", 0.80)),
                 )
             # HARVEST-PREP CONSOLIDATION. Fish preparing for harvest carry no
             # density constraint, so a batch's in-place purge tanks all fit in
@@ -5108,6 +5112,9 @@ def phase_d_emit_events(
                 _even_out_density(
                     state, b, transfer_date, transfer_events, warnings,
                     max_moves=_moves_left_quality(),
+                    relief_pct=float(getattr(control, "density_relief_pct", 0.90)),
+                    chronic_relief_pct=float(getattr(control,
+                                                     "chronic_relief_pct", 0.80)),
                 )
 
             # Multi-objective balancer: relieve any tank still over density cap

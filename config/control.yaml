@@ -22,6 +22,19 @@ global_buffer_pct: 0.05
 # threshold; lower leaves the two graded populations OVERLAPPING near the cut
 # line, which is what actually happens on a transfer grade. VBA default 0.85.
 grade_efficiency: 0.85
+
+# --- Density relief / consolidation policy -----------------------------------
+# Hand-tuned on one workbook (2026-08-21) and NOT proven optimal — the reference
+# fixture and the real workbook disagreed about the best values. Swept by the
+# optimizer; these defaults are the hand-tuned values.
+# chronic_pressure_frac MUST stay clear of density_relief_pct: a trigger sitting
+# exactly on the level relief drives tanks TO makes them flip on noise.
+chronic_pressure_frac: 0.92
+chronic_pressure_weeks: 4
+chronic_relief_pct: 0.80
+chronic_max_frees_per_week: 1
+density_relief_pct: 0.90
+consolidation_fill_pct: 0.80
 starvation_period_days: 7
 harvest_relief_pct: 0.1
 max_transfers_per_week: 15
