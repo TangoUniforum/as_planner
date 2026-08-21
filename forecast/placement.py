@@ -2299,6 +2299,91 @@ def _emit_transfers_for_batch_diff(
     return  # All cases handled by rebalance.
 
 
+def _consolidate_harvest_prep(
+    state: FacilityState,
+    event_date: date,
+    transfer_events: list,
+    warnings: list[str],
+    max_moves: int,
+) -> int:
+    """Merge a batch's IN-PLACE harvest-prep tanks into its fullest one.
+
+    Operator, 2026-08-21: "the planner can move the fish that need to be
+    harvested into the one tank with the most biomass of the group that needs
+    to be harvested and they can sit there preparing to harvest and freeing up
+    space else where."
+
+    In production mode there is no separate depuration tank, so harvest-bound
+    fish come off feed IN PLACE and their growout tank is frozen (STARVE) for
+    control.starvation_period_days. Staged tank-by-tank that pins one growout
+    tank per cohort for the whole purge window, at whatever density each
+    happened to hold. Since fish preparing for harvest carry NO density
+    constraint, the same fish fit in ONE tank -- so every other tank of that
+    group is handed straight back to the rotation.
+
+    Destination is the tank with the MOST BIOMASS of the group: it moves the
+    fewest fish for the same number of tanks freed.
+
+    NOT 6N. R7 is absolute -- fish in a 6N depuration tank may never transfer
+    out, only harvest empties it (events.Transfer refuses it anyway). This pass
+    is for production-mode in-place purge in ordinary growout tanks.
+
+    The merged tank keeps the LONGEST remaining purge clock of everything in
+    it, so a fish moved in on its first purge day can never be harvested early
+    on a nearly-finished tank's clock.
+
+    Returns the number of tanks freed. Every move is a real Transfer applied to
+    state and appended to transfer_events, so Transfer_Out/In book and the
+    continuity audit reconciles.
+    """
+    if max_moves <= 0:
+        return 0
+    groups: dict[str, list] = {}
+    for t in state.tanks_by_id.values():
+        if (not t.is_empty and t.type == "OG"
+                and t.stage == STAGE_STARVE
+                and t.system_id not in _SIXN_SYSTEMS      # R7
+                and t.system_id not in OG12_SYSTEMS       # R5
+                and t.avg_wt_g > 0):
+            groups.setdefault(t.batch_id, []).append(t)
+
+    freed = 0
+    moves = int(max_moves)
+    for bid, tanks in sorted(groups.items()):
+        if len(tanks) < 2 or moves <= 0:
+            continue
+        tanks.sort(key=lambda t: (-t.biomass_kg, t.tank_id))
+        dst, srcs = tanks[0], tanks[1:]
+        _clock = max(getattr(t, "starvation_days_remaining", 0) or 0
+                     for t in tanks)
+        for src in srcs:
+            if moves <= 0:
+                break
+            ev = Transfer(
+                batch_id=bid, event_date=event_date,
+                source_tank_id=src.tank_id,
+                destinations=[TankAllocation(
+                    tank_id=dst.tank_id, count=src.count,
+                    avg_wt_g=src.avg_wt_g, cv_pct=src.cv_pct)],
+                leaves_source_empty=True,
+            )
+            warnings.extend(ev.apply(state))
+            transfer_events.append(ev)
+            if ev.count_transferred > 0:
+                freed += 1
+                moves -= 1
+        # Destination stays frozen, on the longest clock in the merged group.
+        dst.stage = STAGE_STARVE
+        dst.starvation_days_remaining = _clock
+        if freed:
+            warnings.append(
+                f"HARVEST-PREP CONSOLIDATION: batch {bid} merged into "
+                f"{dst.location_id} ({dst.count:,.0f} fish, "
+                f"{dst.density_kg_m3:.0f} kg/m3 -- no density cap on fish "
+                f"preparing for harvest); freed {freed} growout tank(s)")
+    return freed
+
+
 def _consolidate_growout_to_free_tanks(
     state: FacilityState,
     event_date: date,
@@ -5001,6 +5086,18 @@ def phase_d_emit_events(
                     need_tanks=_need,
                     max_moves=_moves_left_quality(),
                 )
+            # HARVEST-PREP CONSOLIDATION. Fish preparing for harvest carry no
+            # density constraint, so a batch's in-place purge tanks all fit in
+            # ONE of them -- freeing the rest for the rotation instead of
+            # pinning a growout tank per cohort for the whole purge window.
+            # No-op in purge mode by construction: there are no non-6N STARVE
+            # tanks then, because purge-bound fish move into 6N instead.
+            if _moves_left_quality() > 0:
+                _consolidate_harvest_prep(
+                    state, transfer_date, transfer_events, warnings,
+                    max_moves=_moves_left_quality(),
+                )
+
             for b in sorted(set(prev_by_batch) | set(this_by_batch)):
                 if _moves_left_quality() <= 0:
                     break             # handling budget spent — deferrable pass

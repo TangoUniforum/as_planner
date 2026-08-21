@@ -76,7 +76,7 @@ def extract(path) -> dict:
     sys_week_bio: dict[tuple, float] = collections.defaultdict(float)
     caps_by_tank = _tank_density_caps()
     for i, row in enumerate(
-            wb["BatchLocations"].iter_rows(min_row=1, max_col=9, values_only=True), 1):
+            wb["BatchLocations"].iter_rows(min_row=1, max_col=10, values_only=True), 1):
         if i <= 4:
             continue
         ws_, tank, sysid, bio, dens = row[1], row[3], row[4], row[7], row[8]
@@ -89,7 +89,12 @@ def extract(path) -> dict:
             # same rule or it measures a constraint the engine does not have.
             # The fixture horizon is entirely pre-production, so OG6N here is
             # always purge.
-            if str(sysid) != "OG6N":
+            # Fish PREPARING FOR HARVEST carry no density constraint
+            # (operator 2026-08-21) -- off feed, not growing, leaving. Same
+            # rule run.py's own audit applies; judged on STAGE so it covers
+            # both 6N purge and production-mode in-place starvation.
+            _stage = str(row[9]) if len(row) > 9 and row[9] is not None else ""
+            if str(sysid) != "OG6N" and _stage.upper() != "STARVE":
                 peak_density = max(peak_density, dens)
                 # Per-TANK cap, from the fixture facility config. This used to
                 # take one number scraped out of the RunConfig text, which

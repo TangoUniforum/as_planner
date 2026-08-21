@@ -880,8 +880,23 @@ def main(
     # Write the plan outputs from Stage 2 placement.
     write_batch_locations(wb, placement.batch_locations)
     # Density violations enumerated from BatchLocations vs per-tank cap.
-    # OG6N is excluded in purge mode (no biomass cap on depuration tanks).
+    #
+    # NO DENSITY CONSTRAINT ON FISH PREPARING FOR HARVEST (operator,
+    # 2026-08-21): "purge tanks or tanks preparing for harvest do not have a
+    # density constraint". Those fish are off feed, not growing, and leave
+    # within the purge window, so the water-quality reasoning behind the cap
+    # (feed load -> TAN/CO2) does not apply to them.
+    #
+    # The test is the STAGE, not the system. STARVE covers BOTH regimes:
+    #   * purge mode  -- fish moved into a 6N depuration tank, and
+    #   * production mode (from control.sixn_production_start) -- where there
+    #     is no separate depuration tank and fish purge IN PLACE in their own
+    #     growout tank for control.starvation_period_days before harvest.
+    # Keying on "system == OG6N and purge mode" missed the second case
+    # entirely and reported in-place harvest-prep tanks as violations (one
+    # OG4N tank at 118.8 kg/m3 in the 2028 tail).
     from .sixn import is_purge_mode as _is_purge_mode
+    from .state import STAGE_STARVE as _STARVE
     tank_cap_by_id = {t.tank_id: t.max_density_kg_m3 for t in facility.tanks}
     tank_sys_by_id = {t.tank_id: t.system_id for t in facility.tanks}
     density_violations = []
@@ -889,8 +904,12 @@ def main(
         cap = tank_cap_by_id.get(r.tank_id, 0.0)
         if cap <= 0:
             continue
+        # Preparing for harvest: off feed, not growing, leaving. Exempt.
+        if getattr(r, "stage", "") == _STARVE:
+            continue
         # OG6N skipped when that week is in purge mode (state.check_invariants
-        # mirrors this carve-out at hydration time).
+        # mirrors this carve-out at hydration time). Kept alongside the STARVE
+        # test: a 6N tank mid-rotation can be reported before it is frozen.
         if (tank_sys_by_id.get(r.tank_id) == "OG6N"
                 and _is_purge_mode(control, r.week_start)):
             continue
