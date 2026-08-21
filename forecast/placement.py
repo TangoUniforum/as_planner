@@ -81,6 +81,7 @@ from .sixn import (
     pair_combined_count,
 )
 from .state import FacilityState, TankState, STAGE_STARVE
+from .tiers import effective_density_cap as _eff_density_cap
 from .time_grid import (
     forecast_week_labels,
     iso_week_label,
@@ -175,12 +176,15 @@ def _sixn_fill_capacity_fish(state: FacilityState, tank_id: int,
     t = state.tanks_by_id.get(tank_id)
     if t is None or avg_wt_g <= 0:
         return 0.0
-    if purge:
-        # No ceiling: the harvest schedule bounds a depuration tank.
+    # R8 via tiers — the SAME rule run.py's audit and the Global arms' tank
+    # picker apply. In purge the cap is +inf (the harvest schedule bounds a
+    # depuration tank, not kg/m3), so the arithmetic below needs no branch.
+    _cap = _eff_density_cap(t.max_density_kg_m3, t.system_id, t.stage, purge)
+    if _cap == float("inf"):
         return float("inf")
-    if t.max_density_kg_m3 <= 0:
+    if _cap <= 0:
         return 0.0
-    cap_kg = t.volume_m3 * t.max_density_kg_m3
+    cap_kg = t.volume_m3 * _cap
     held_kg = (t.count * t.avg_wt_g / 1000.0) if not t.is_empty else 0.0
     return max(0.0, (cap_kg - held_kg) * 1000.0 / avg_wt_g)
 

@@ -89,12 +89,14 @@ def extract(path) -> dict:
             # same rule or it measures a constraint the engine does not have.
             # The fixture horizon is entirely pre-production, so OG6N here is
             # always purge.
-            # Fish PREPARING FOR HARVEST carry no density constraint
-            # (operator 2026-08-21) -- off feed, not growing, leaving. Same
-            # rule run.py's own audit applies; judged on STAGE so it covers
-            # both 6N purge and production-mode in-place starvation.
+            # R8 via forecast.tiers — the SAME function the engine judges
+            # with, not a copy. A baseline that applies its own density rule
+            # measures a constraint the engine does not have; this file has
+            # already made that mistake once (it scraped a FRESHWATER 30 kg/m3
+            # cap and reported 691 breaches where there was 1).
+            from forecast.tiers import density_exempt as _exempt
             _stage = str(row[9]) if len(row) > 9 and row[9] is not None else ""
-            if str(sysid) != "OG6N" and _stage.upper() != "STARVE":
+            if not _exempt(str(sysid), _stage, True):
                 peak_density = max(peak_density, dens)
                 # Per-TANK cap, from the fixture facility config. This used to
                 # take one number scraped out of the RunConfig text, which

@@ -86,6 +86,7 @@ from .global_planner_l3_poc import L3Result, smallest_og_tank_kg
 from .global_planner_poc import PlannerResult
 from .models import ControlParams, FacilityConfig
 from .sixn import SIXN_PAIRS, is_purge_mode
+from .tiers import effective_density_cap as _density_cap_for
 from .tiers import SIXN_SYSTEM, is_entry, move_allowed
 from .time_grid import parse_iso_label
 
@@ -840,12 +841,27 @@ def pick_tanks(
             dens = (occ.biomass_kg / vol) if vol > 0 else 0.0
             system = tank_sys.get(tid, "OG6N")
             stage = "STARVE" if tid in _depurating else ""
+            # R8 (tiers.density_exempt): fish PREPARING FOR HARVEST carry no
+            # density constraint. Re-judged HERE rather than trusting the
+            # placement-time `occ.oversub` from the CP-SAT/LP split, for two
+            # reasons: that check applies the raw per-tank cap with no
+            # exemption at all, and it runs BEFORE `_depurating` is populated
+            # for this week, so it cannot know the stage even in principle.
+            #
+            # Routing through tiers keeps the Global arms and the controller on
+            # ONE definition. They judge density in completely separate code
+            # (this module vs placement.py + the run.py audit), so a
+            # hand-copied rule is exactly how the two drift apart and the
+            # Compare & Choose board stops being apples-to-apples.
+            _cap = _density_cap_for(tank_maxd.get(tid, 0.0), system, stage,
+                                    is_purge_mode(control, ws))
+            oversub = bool(occ.oversub) and dens > _cap
             batch_locations.append(TankLocRow(
                 week_label=wl, week_start=ws, batch_id=occ.batch_id,
                 tank_id=tid, location_id=f"{system}-{tid}", system_id=system,
                 count=occ.count, avg_wt_g=occ.avg_wt_g,
                 biomass_kg=occ.biomass_kg,
-                density_kg_m3=dens, stage=stage, oversub=occ.oversub))
+                density_kg_m3=dens, stage=stage, oversub=oversub))
 
         # =============================================================
         # 4) Per-batch event flow: MORTALITY -> HARVEST -> TRANSFERS / TranOG.

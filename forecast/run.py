@@ -896,7 +896,7 @@ def main(
     # entirely and reported in-place harvest-prep tanks as violations (one
     # OG4N tank at 118.8 kg/m3 in the 2028 tail).
     from .sixn import is_purge_mode as _is_purge_mode
-    from .state import STAGE_STARVE as _STARVE
+    from .tiers import effective_density_cap as _eff_cap
     tank_cap_by_id = {t.tank_id: t.max_density_kg_m3 for t in facility.tanks}
     tank_sys_by_id = {t.tank_id: t.system_id for t in facility.tanks}
     density_violations = []
@@ -904,15 +904,12 @@ def main(
         cap = tank_cap_by_id.get(r.tank_id, 0.0)
         if cap <= 0:
             continue
-        # Preparing for harvest: off feed, not growing, leaving. Exempt.
-        if getattr(r, "stage", "") == _STARVE:
-            continue
-        # OG6N skipped when that week is in purge mode (state.check_invariants
-        # mirrors this carve-out at hydration time). Kept alongside the STARVE
-        # test: a 6N tank mid-rotation can be reported before it is frozen.
-        if (tank_sys_by_id.get(r.tank_id) == "OG6N"
-                and _is_purge_mode(control, r.week_start)):
-            continue
+        # R8 (tiers.effective_density_cap) — ONE definition, shared with
+        # placement.py and the Global arms' tank picker. Returns +inf for a
+        # tank preparing for harvest, so the comparison below needs no branch.
+        cap = _eff_cap(cap, tank_sys_by_id.get(r.tank_id, ""),
+                       getattr(r, "stage", ""),
+                       _is_purge_mode(control, r.week_start))
         if r.density_kg_m3 > cap:
             density_violations.append(
                 (r.week_label, r.location_id, r.batch_id, r.density_kg_m3, cap)

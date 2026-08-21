@@ -89,3 +89,56 @@ def sixn_exit_allowed(src_system: str, src_stage: str) -> bool:
     grow-out (stage SW) and every non-6N tank move freely.
     """
     return not (src_system == SIXN_SYSTEM and src_stage == _STAGE_STARVE)
+
+# ============================================================
+# R8: DENSITY EXEMPTION FOR FISH PREPARING FOR HARVEST
+# ============================================================
+
+def density_exempt(system_id: str, stage: str, purge_mode: bool = True) -> bool:
+    """Is this tank exempt from its density cap this week?
+
+    Operator, 2026-08-21: "purge tanks or tanks preparing for harvest do not
+    have a density constraint." Those fish are OFF FEED, not growing, and leave
+    within the purge window, so the water-quality reasoning behind the cap
+    (feed load -> TAN / CO2) does not apply to them. It is also what makes
+    harvest-prep consolidation legal: the whole group fits in one tank, and
+    every other tank goes back to the rotation.
+
+    Judged on STAGE first, because there are TWO ways fish prepare for harvest
+    and only one of them is a 6N tank:
+      * PURGE mode      -- fish move into a 6N depuration tank (stage STARVE).
+      * PRODUCTION mode -- from control.sixn_production_start there is no
+                           separate depuration tank, so fish come off feed IN
+                           PLACE in their own growout tank (also stage STARVE)
+                           for control.starvation_period_days.
+    A system-only test ("OG6N and purge mode") silently misses the second and
+    reports in-place harvest-prep tanks as violations.
+
+    `purge_mode` covers the window where a 6N tank is pipeline-owned but not
+    yet frozen. In PRODUCTION mode 6N is an ordinary growout system and its cap
+    applies exactly as anywhere else, so pass purge_mode=False then.
+
+    THIS IS THE ONE DEFINITION. It lives here, dependency-free, because the two
+    engine families judge density independently -- the controller through
+    placement.py and the audits, the Global arms through
+    global_tank_pick_poc -- and hand-copying the rule into each is how they
+    drift apart. Every density judgement in the codebase should route here.
+    """
+    if str(stage).upper() == _STAGE_STARVE:
+        return True
+    return bool(purge_mode) and system_id == SIXN_SYSTEM
+
+
+def effective_density_cap(cap_kg_m3: float, system_id: str, stage: str,
+                          purge_mode: bool = True) -> float:
+    """`cap_kg_m3`, or +inf when the tank is exempt (see `density_exempt`).
+
+    Returning infinity rather than a flag lets a caller keep one comparison
+    (`density > cap`) and one sizing expression (`cap * volume`) instead of
+    branching around the exemption at every site.
+    """
+    if cap_kg_m3 is None or cap_kg_m3 <= 0:
+        return float("inf")
+    return (float("inf")
+            if density_exempt(system_id, stage, purge_mode)
+            else float(cap_kg_m3))
