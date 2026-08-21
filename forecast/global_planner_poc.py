@@ -935,7 +935,18 @@ def plan(
     # happened), so the prime is an implicit unscripted staging — it must not
     # run. The first plannable staging is then week 0 (the handoff), and the
     # earliest unscripted release is week _PURGE_HOLD_WEEKS.
+    # OFF BY DEFAULT (operator 2026-08-21): model the REAL handover instead.
+    # The prime below conserves inside L1 -- it only MOVES fish already in the
+    # seeds -- but the tank picker cannot realise it: six 6N tanks, already
+    # filled by the ProductionReport with other batches. The "staged" fish then
+    # get harvested straight out of production tanks, which IS the 6N-only-rule
+    # violation (39,094 fish, 99.96% in week 1). Enforcing the rule at the draw
+    # while this ran deleted 39,077 fish, because the plan had already spent
+    # them. Priming only from the real handover costs a startup ramp in the
+    # first _PURGE_HOLD_WEEKS; that ramp is true, and a plan that cannot be
+    # executed is not a plan.
     if (model_purge_hold and manual_window_weeks == 0
+            and getattr(control, "global_assume_primed_6n", False)
             and is_purge_mode(control, fs)):
         _first_label = iso_week_label(fs)
         # Per-slot prime target = one harvest-tank (og_ceiling) PLUS a share of any

@@ -21,6 +21,12 @@ global_buffer_pct: 0.05
 # How cleanly a real grader separates sizes, 0-1. 1.0 = a perfect cut at the
 # threshold; lower leaves the two graded populations OVERLAPPING near the cut
 # line, which is what actually happens on a transfer grade. VBA default 0.85.
+# GLOBAL engine only. false = model the REAL 6N handover (L1 primes only from
+# the fish actually in 6N at forecast start). true = the older idealisation that
+# assumed a steady-state-full 6N by drawing harvest-ready fish out of grow-out --
+# smooth from week 1, but the tank picker cannot physically realise it, which is
+# what produced the 39,094-fish 6N-rule violation.
+global_assume_primed_6n: false
 grade_efficiency: 0.85
 
 # --- Density relief / consolidation policy -----------------------------------

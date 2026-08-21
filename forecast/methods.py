@@ -75,6 +75,11 @@ UNTUNABLE_KNOBS = frozenset({
     # actually kills.
     "grade_efficiency",
     "handling_mortality_pct",
+    # A MODELLING ASSUMPTION, not a lever. Letting a search turn the 6N prime
+    # back on would let it buy a smoother harvest score with a plan the tank
+    # picker cannot execute — choosing fiction because fiction scores better,
+    # which is the same failure mode as tuning the grader.
+    "global_assume_primed_6n",
 })
 
 # Controller-family space: the existing full optimizer space — the broad grid

@@ -155,9 +155,15 @@ def grade(forecast_wb: Path, actual_wb: Path) -> dict | None:
         "bias": bias,
         "n_batches": len(graded),
         "batches": [
+            # exec_confounded: the model harvested this batch over the graded
+            # interval, so its weight error carries a GRADING decision (a
+            # partial harvest takes the biggest fish) rather than pure biology.
+            # Stored per batch so a later error model can filter on it instead
+            # of trusting the run-level summary alone.
             {k: getattr(b, k, None) for k in
              ("batch_id", "present", "pred_wt_g", "act_wt_g",
-              "pred_count", "act_count", "pred_biomass_kg", "act_biomass_kg")}
+              "pred_count", "act_count", "pred_biomass_kg", "act_biomass_kg",
+              "exec_confounded")}
             for b in graded
         ],
     }

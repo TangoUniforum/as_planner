@@ -22,6 +22,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from dataclasses import replace as dc_replace
 
 from forecast import global_planner_poc as gpp
 from forecast.config_io import load_config
@@ -74,9 +75,46 @@ class TestGlobalWindowPurity:
         """Baseline: WITHOUT a window the steady-fill prime releases harvest in
         the first hold weeks (the modeled pre-start staging). This is the
         behavior the window flag must switch OFF — if this stops holding, the
-        purity test below stops meaning anything."""
-        hv = _harvest_by_week(_plan(cfg))
+        purity test below stops meaning anything.
+
+        The prime is OFF by default from 2026-08-21 (control
+        `global_assume_primed_6n`, operator ruling: model the REAL handover),
+        so this control must now switch it ON explicitly. Left implicit, this
+        test would fail while the window-purity test below passed VACUOUSLY —
+        nothing to switch off means nothing to prove.
+        """
+        control, tables, facility, batches = cfg
+        # dataclasses.replace, NOT mutation: `cfg` is a MODULE-scoped fixture,
+        # so setting the flag on it leaks into every later test in the file.
+        _on = dc_replace(control, global_assume_primed_6n=True)
+        hv = _harvest_by_week(_plan((_on, tables, facility, batches)))
         assert all(hv.get(w, 0.0) > 0 for w in range(_PURGE_HOLD_WEEKS))
+
+    def test_prime_is_off_by_default(self, cfg):
+        """The DEFAULT models the real handover: no steady-fill prime.
+
+        Pins the operator ruling of 2026-08-21. The prime conserves inside L1
+        (it only moves fish already in the seeds) but the tank picker cannot
+        realise it — six 6N tanks, already filled by the ProductionReport — so
+        the "staged" fish get harvested straight out of production tanks. That
+        is the 6N-only-rule violation, and enforcing the rule while the prime
+        ran DELETED 39,077 fish because the plan had already spent them.
+
+        Asserted against the SAME cfg the control above uses, so the pair
+        brackets the flag: on -> primes, off -> does not.
+        """
+        control, tables, facility, batches = cfg
+        _off = dc_replace(control, global_assume_primed_6n=False)
+        _on = dc_replace(control, global_assume_primed_6n=True)
+        assert getattr(control, "global_assume_primed_6n", False) is False, (
+            "ControlParams should ship with the prime OFF (real handover)")
+        hv_off = _harvest_by_week(_plan((_off, tables, facility, batches)))
+        hv_on = _harvest_by_week(_plan((_on, tables, facility, batches)))
+        early_off = sum(hv_off.get(w, 0.0) for w in range(_PURGE_HOLD_WEEKS))
+        early_on = sum(hv_on.get(w, 0.0) for w in range(_PURGE_HOLD_WEEKS))
+        assert early_on > early_off, (
+            f"the prime must ADD early harvest: off={early_off:,.0f} "
+            f"on={early_on:,.0f}")
 
     def test_window_yields_no_staging_during_window_weeks(self, cfg):
         """After a manual window, nothing releases before the purge hold has

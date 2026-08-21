@@ -678,6 +678,16 @@ _CONTROL_HELP = {
         "keepers are filled to this share of their cap. 0.80 rather than 0.90 "
         "for the same reason as above — a tank packed to its cap re-breaches "
         "within a week of growth. Unit: fraction 0-1.",
+    "global_assume_primed_6n":
+        "GLOBAL methods only. OFF (default) models the REAL 6N handover: the "
+        "planner starts its depuration pipeline from the fish actually in 6N "
+        "on the ProductionReport, so the first couple of weeks harvest less "
+        "while the pipeline fills — a real startup ramp. ON assumes 6N is "
+        "already full at steady state, which gives a smooth harvest from week "
+        "1 but is not physically realisable: there are only six 6N tanks and "
+        "the report has already filled them, so those fish end up harvested "
+        "straight out of production tanks. Leave OFF unless you specifically "
+        "want the idealised envelope.",
     "grade_efficiency":
         "How cleanly a real grader separates sizes, 0-1. A grader does NOT cut "
         "the population neatly at the threshold: fish near the cut line go both "
@@ -890,6 +900,7 @@ _CONTROL_LABEL = {
     "global_buffer_pct": "System-cap buffer (R29)",
     "starvation_period_days": "In-place purge length (days)",
     "grade_efficiency": "Grader efficiency (0-1)",
+    "global_assume_primed_6n": "Global: assume 6N primed at start",
     "chronic_pressure_frac": "Chronic pressure level (% of cap)",
     "chronic_pressure_weeks": "Chronic pressure weeks",
     "chronic_relief_pct": "Chronic relief target (% of cap)",
