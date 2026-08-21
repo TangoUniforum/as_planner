@@ -135,27 +135,70 @@ def load_known_calibrations(scenario_dir: Path) -> dict:
                 "fw_correction": b.get("fw_correction"),
                 "fcr_model": b.get("fcr_model"),
                 "tran_og_cv": b.get("tran_og_cv"),
+                # The operator's OWN record of when the batch actually
+                # transferred, to the DAY. The corpus can only place an arrival
+                # in the month it first shows up in OG, which is both coarse and
+                # sometimes early -- a batch can appear in a report while still
+                # PENDING transfer. B48 is the worked example: it shows in OG on
+                # 2026-05-31 at 208 g, then 363 g, then 558 g, while the
+                # registry records its formal TranOG as 2026-07-09 at 370 g --
+                # matching its JUNE weight. The May sighting is pre-transfer
+                # standing stock, not an arrival.
+                "tran_og_date": b.get("tran_og_date"),
+                "tran_og_count": b.get("tran_og_count"),
+                "tran_og_avg_wt_g": b.get("tran_og_avg_wt_g"),
             }
     return out
 
 
+def _as_date(v):
+    """YAML gives a date, a datetime or an ISO string depending on the writer."""
+    if v is None:
+        return None
+    if isinstance(v, date):
+        return v
+    if hasattr(v, "date"):
+        return v.date()
+    try:
+        return date.fromisoformat(str(v)[:10])
+    except ValueError:
+        return None
+
+
 def to_batch(obs: dict, known: dict | None = None) -> BatchInput:
-    og_date = obs["seen"]
+    k0 = (known or {}).get(obs["batch_id"]) or {}
+    # PREFER THE REAL ARRIVAL DATE. Inferring it from the first month a batch
+    # shows up in OG puts every arrival on that month's CLOSING day, which
+    # collides batches that arrived weeks apart: B47 (2026-05-02) and B48
+    # (2026-07-09) both landed on 2026-05-31, scheduling ~580,000 fish into one
+    # week. The entry tier holds 12 tanks and R1 admits arrivals ONLY there, so
+    # the run died with "CANNOT be placed — needs 2 entry-tier tank(s), 0 free"
+    # and two backtest eras produced nothing. The collision was an artifact of
+    # month resolution, not a real capacity limit.
+    _real_og = _as_date(k0.get("tran_og_date"))
+    og_date = _real_og or obs["seen"]
     input_date = og_date - timedelta(days=LEAD_INPUT_TO_OG_DAYS)
     sf_date = input_date + timedelta(days=LEAD_INPUT_TO_SF_DAYS)
     # Input count is unobservable; the OG count grossed up by a nominal FW
     # survival is the least-bad stand-in and is never used for a batch that is
     # already in seawater at the run's start date.
-    k = (known or {}).get(obs["batch_id"]) or {}
+    k = k0
     _sgr = k.get("sgr_correction")
     _fw = k.get("fw_correction")
     _fcr = k.get("fcr_model") or DEFAULT_FCR_MODEL
     _cv = k.get("tran_og_cv")
     _note = ("reconstructed from PR corpus; first seen %s%s"
              % (og_date, "" if _sgr is None else "; REAL calibration"))
+    # Count and weight likewise come from the operator's record when it has
+    # them; the corpus observation is a snapshot AFTER arrival (grown, and
+    # thinned by mortality), not the arrival itself.
+    _cnt = k.get("tran_og_count")
+    _wt = k.get("tran_og_avg_wt_g")
+    _og_count = int(round(float(_cnt))) if _cnt else int(round(obs["count"]))
+    _og_wt = float(_wt) if _wt else float(obs["avg_wt_g"])
     return BatchInput(
-        obs["batch_id"], input_date, int(round(obs["count"] / 0.9)),
-        sf_date, og_date, int(round(obs["count"])), float(obs["avg_wt_g"]),
+        obs["batch_id"], input_date, int(round(_og_count / 0.9)),
+        sf_date, og_date, _og_count, _og_wt,
         float(_cv) if _cv is not None else DEFAULT_CV,
         _fcr,
         float(_fw) if _fw is not None else 1.0,

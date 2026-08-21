@@ -87,146 +87,146 @@ batches:
   sgr_correction: 1.0
   notes: reconstructed from PR corpus; first seen 2024-11-30
 - batch_id: B37
-  input_date: '2024-05-31'
-  input_count: 286629
-  tran_sf_date: '2024-08-30'
-  tran_og_date: '2025-02-28'
-  tran_og_count: 257966
-  tran_og_avg_wt_g: 443.4673801973903
+  input_date: '2024-05-13'
+  input_count: 287294
+  tran_sf_date: '2024-08-12'
+  tran_og_date: '2025-02-10'
+  tran_og_count: 258565
+  tran_og_avg_wt_g: 340.26
   tran_og_cv: 16.0
   fcr_model: FCR_116_Quick
   fw_correction: 1.0
   sgr_correction: 0.73
-  notes: reconstructed from PR corpus; first seen 2025-02-28; REAL calibration
+  notes: reconstructed from PR corpus; first seen 2025-02-10; REAL calibration
 - batch_id: B38
-  input_date: '2024-07-01'
-  input_count: 282937
-  tran_sf_date: '2024-09-30'
-  tran_og_date: '2025-03-31'
-  tran_og_count: 254643
-  tran_og_avg_wt_g: 573.154283840514
+  input_date: '2024-06-18'
+  input_count: 283424
+  tran_sf_date: '2024-09-17'
+  tran_og_date: '2025-03-18'
+  tran_og_count: 255082
+  tran_og_avg_wt_g: 455.03
   tran_og_cv: 16.0
   fcr_model: FCR_116_Quick
   fw_correction: 1.0
   sgr_correction: 0.75
-  notes: reconstructed from PR corpus; first seen 2025-03-31; REAL calibration
+  notes: reconstructed from PR corpus; first seen 2025-03-18; REAL calibration
 - batch_id: B39
-  input_date: '2024-08-31'
-  input_count: 287799
-  tran_sf_date: '2024-11-30'
-  tran_og_date: '2025-05-31'
-  tran_og_count: 259019
-  tran_og_avg_wt_g: 656.5834622170574
+  input_date: '2024-08-10'
+  input_count: 288372
+  tran_sf_date: '2024-11-09'
+  tran_og_date: '2025-05-10'
+  tran_og_count: 259535
+  tran_og_avg_wt_g: 457.97
   tran_og_cv: 16.0
   fcr_model: FCR_116_Quick
   fw_correction: 1.0
   sgr_correction: 0.75
-  notes: reconstructed from PR corpus; first seen 2025-05-31; REAL calibration
+  notes: reconstructed from PR corpus; first seen 2025-05-10; REAL calibration
 - batch_id: B40
-  input_date: '2024-09-30'
-  input_count: 197262
-  tran_sf_date: '2024-12-30'
-  tran_og_date: '2025-06-30'
-  tran_og_count: 177536
-  tran_og_avg_wt_g: 624.8305999909878
+  input_date: '2024-10-04'
+  input_count: 299264
+  tran_sf_date: '2025-01-03'
+  tran_og_date: '2025-07-04'
+  tran_og_count: 269338
+  tran_og_avg_wt_g: 498.59
   tran_og_cv: 16.0
   fcr_model: FCR_116_Quick
   fw_correction: 1.0
   sgr_correction: 0.85
-  notes: reconstructed from PR corpus; first seen 2025-06-30; REAL calibration
+  notes: reconstructed from PR corpus; first seen 2025-07-04; REAL calibration
 - batch_id: B41
-  input_date: '2024-10-31'
-  input_count: 100061
-  tran_sf_date: '2025-01-30'
-  tran_og_date: '2025-07-31'
-  tran_og_count: 90055
-  tran_og_avg_wt_g: 488.3634123591139
+  input_date: '2024-11-06'
+  input_count: 296651
+  tran_sf_date: '2025-02-05'
+  tran_og_date: '2025-08-06'
+  tran_og_count: 266986
+  tran_og_avg_wt_g: 445.88
   tran_og_cv: 16.0
   fcr_model: FCR_121_Quick
   fw_correction: 1.0
   sgr_correction: 0.4
-  notes: reconstructed from PR corpus; first seen 2025-07-31; REAL calibration
+  notes: reconstructed from PR corpus; first seen 2025-08-06; REAL calibration
 - batch_id: B42
-  input_date: '2024-12-31'
-  input_count: 106994
-  tran_sf_date: '2025-04-01'
-  tran_og_date: '2025-09-30'
-  tran_og_count: 96295
-  tran_og_avg_wt_g: 455.323095695519
+  input_date: '2025-01-04'
+  input_count: 307519
+  tran_sf_date: '2025-04-05'
+  tran_og_date: '2025-10-04'
+  tran_og_count: 276767
+  tran_og_avg_wt_g: 433.67
   tran_og_cv: 16.0
   fcr_model: FCR_118_Quick
   fw_correction: 1.0
   sgr_correction: 0.827
-  notes: reconstructed from PR corpus; first seen 2025-09-30; REAL calibration
+  notes: reconstructed from PR corpus; first seen 2025-10-04; REAL calibration
 - batch_id: B43
-  input_date: '2025-03-02'
-  input_count: 312401
-  tran_sf_date: '2025-06-01'
-  tran_og_date: '2025-11-30'
-  tran_og_count: 281161
-  tran_og_avg_wt_g: 450.02598937975034
+  input_date: '2025-02-13'
+  input_count: 312819
+  tran_sf_date: '2025-05-15'
+  tran_og_date: '2025-11-13'
+  tran_og_count: 281537
+  tran_og_avg_wt_g: 335.86
   tran_og_cv: 16.0
   fcr_model: FCR_116_Quick
   fw_correction: 1.0
   sgr_correction: 0.85
-  notes: reconstructed from PR corpus; first seen 2025-11-30; REAL calibration
+  notes: reconstructed from PR corpus; first seen 2025-11-13; REAL calibration
 - batch_id: B44
-  input_date: '2025-05-03'
-  input_count: 308507
-  tran_sf_date: '2025-08-02'
-  tran_og_date: '2026-01-31'
-  tran_og_count: 277656
-  tran_og_avg_wt_g: 596.5631587287866
+  input_date: '2025-04-08'
+  input_count: 322222
+  tran_sf_date: '2025-07-08'
+  tran_og_date: '2026-01-06'
+  tran_og_count: 290000
+  tran_og_avg_wt_g: 350.0
   tran_og_cv: 16.0
   fcr_model: FCR_116_Quick
   fw_correction: 1.0
   sgr_correction: 0.9
-  notes: reconstructed from PR corpus; first seen 2026-01-31; REAL calibration
+  notes: reconstructed from PR corpus; first seen 2026-01-06; REAL calibration
 - batch_id: B45
-  input_date: '2025-07-01'
-  input_count: 325296
-  tran_sf_date: '2025-09-30'
-  tran_og_date: '2026-03-31'
-  tran_og_count: 292766
-  tran_og_avg_wt_g: 563.0025884153214
+  input_date: '2025-05-22'
+  input_count: 322222
+  tran_sf_date: '2025-08-21'
+  tran_og_date: '2026-02-19'
+  tran_og_count: 290000
+  tran_og_avg_wt_g: 350.0
   tran_og_cv: 16.0
   fcr_model: FCR_116_Quick
   fw_correction: 1.0
   sgr_correction: 0.925
-  notes: reconstructed from PR corpus; first seen 2026-03-31; REAL calibration
+  notes: reconstructed from PR corpus; first seen 2026-02-19; REAL calibration
 - batch_id: B46
-  input_date: '2025-07-31'
-  input_count: 321601
-  tran_sf_date: '2025-10-30'
-  tran_og_date: '2026-04-30'
-  tran_og_count: 289441
-  tran_og_avg_wt_g: 572.7602323098663
+  input_date: '2025-07-04'
+  input_count: 322222
+  tran_sf_date: '2025-10-03'
+  tran_og_date: '2026-04-03'
+  tran_og_count: 290000
+  tran_og_avg_wt_g: 370.0
   tran_og_cv: 16.0
   fcr_model: FCR_116_Quick
   fw_correction: 0.7152
   sgr_correction: 0.925
-  notes: reconstructed from PR corpus; first seen 2026-04-30; REAL calibration
+  notes: reconstructed from PR corpus; first seen 2026-04-03; REAL calibration
 - batch_id: B47
-  input_date: '2025-08-31'
-  input_count: 322637
-  tran_sf_date: '2025-11-30'
-  tran_og_date: '2026-05-31'
-  tran_og_count: 290373
-  tran_og_avg_wt_g: 559.8873707266172
+  input_date: '2025-08-02'
+  input_count: 322222
+  tran_sf_date: '2025-11-01'
+  tran_og_date: '2026-05-02'
+  tran_og_count: 290000
+  tran_og_avg_wt_g: 370.0
   tran_og_cv: 16.0
   fcr_model: FCR_116_Quick
   fw_correction: 0.82
   sgr_correction: 0.925
-  notes: reconstructed from PR corpus; first seen 2026-05-31; REAL calibration
+  notes: reconstructed from PR corpus; first seen 2026-05-02; REAL calibration
 - batch_id: B48
-  input_date: '2025-08-31'
-  input_count: 322537
-  tran_sf_date: '2025-11-30'
-  tran_og_date: '2026-05-31'
-  tran_og_count: 290283
-  tran_og_avg_wt_g: 208.01104990647056
+  input_date: '2025-10-09'
+  input_count: 322222
+  tran_sf_date: '2026-01-08'
+  tran_og_date: '2026-07-09'
+  tran_og_count: 290000
+  tran_og_avg_wt_g: 370.0
   tran_og_cv: 16.0
   fcr_model: FCR_116_Quick
   fw_correction: 0.82
   sgr_correction: 0.925
-  notes: reconstructed from PR corpus; first seen 2026-05-31; REAL calibration
+  notes: reconstructed from PR corpus; first seen 2026-07-09; REAL calibration
