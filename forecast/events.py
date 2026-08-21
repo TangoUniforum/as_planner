@@ -124,8 +124,33 @@ class TranOGEntry:
 class Transfer:
     """Move fish from one tank to one or more tanks.
 
-    Handling mortality is applied to each destination's count
-    (caller pre-multiplies count by (1 - handling_frac)).
+    HANDLING MORTALITY (operator, 2026-08-21: "we need to add handling
+    mortality to python"). Every DEPOSIT costs `state.handling_frac` of the
+    fish landed — the VBA charges it on every tank-to-tank move, while Python
+    used to charge it only on the FW->OG (TranOG) transition, so every
+    automatic Transfer, Grade and rebalance move was free.
+
+    It is read off `state`, not passed per event, so the ~30 Transfer
+    construction sites in placement.py need no change and none can forget it.
+    `state.handling_frac` is 0.0 unless a caller sets it, so tests and the
+    manual paths are unaffected until they opt in.
+
+    The accounting is GROSS-OUT / NET-IN, which is what keeps the continuity
+    audit balanced:
+      * the source is drained by the full `dest.count` (gross),
+      * the destination keeps `dest.count * (1 - handling_frac)`,
+      * the difference is recorded in `handling_mort_by_tank` so the caller
+        can book it as MORTALITY on the destination.
+    The audit derives transfer_in from count_transferred (gross), so without
+    that mortality entry the destination would show count drift. See
+    write_tank_continuity_audit:
+        open - mortality - harvest_out - transfer_out + transfer_in ... = close
+
+    The older contract line said the CALLER pre-multiplies each destination by
+    (1 - handling_frac). That is right for a TranOG entry, where the fish come
+    from outside the tank system, but wrong for a tank-to-tank move: shrinking
+    the destination there just leaves the fish in the SOURCE instead of
+    killing them, so the facility loses nothing and the mortality is fiction.
 
     INV-4 enforcement: refuses any source-destination pair where both
     tanks are in OG1/OG2 and source avg_wt >= 1 kg.
@@ -153,6 +178,9 @@ class Transfer:
     # source at THIS weight (not the grown dest avg) so the source balances; the
     # 4-day growth then shows as real injected biomass on the frozen 6N tank.
     source_avg_wt_g: Optional[float] = None
+    # Handling mortality charged on deposit, per destination tank id.
+    # Populated by apply(); the caller folds it into realized mortality.
+    handling_mort_by_tank: dict = field(default_factory=dict)
 
     def apply(self, state: FacilityState) -> list[str]:
         """Atomic: source is drained ONLY by the count of destinations that
@@ -185,6 +213,10 @@ class Transfer:
 
         src_in_og12 = src.system_id in OG12_SYSTEMS
         src_above_lock = src.avg_wt_g >= OG12_MOVE_LOCK_WT_G
+        # Fraction of every DEPOSIT lost to handling. Off unless set.
+        _hf = float(getattr(state, "handling_frac", 0.0) or 0.0)
+        if _hf < 0.0:
+            _hf = 0.0
 
         total_dest_count = 0.0
         for dest in self.destinations:
@@ -248,6 +280,16 @@ class Transfer:
                 if new_count > 0:
                     tgt.avg_wt_g = (tgt.count * tgt.avg_wt_g + dest.count * dest.avg_wt_g) / new_count
                 tgt.count = new_count
+
+            # HANDLING MORTALITY on the deposit. Charged AFTER the gross
+            # landing so the source is still drained by the full amount and
+            # the loss is a real facility loss, not fish left behind. Mean
+            # weight is unchanged: killing a uniform fraction does not move it.
+            if _hf > 0.0 and dest.count > 0.0:
+                _killed = dest.count * _hf
+                tgt.count = max(0.0, tgt.count - _killed)
+                self.handling_mort_by_tank[dest.tank_id] = (
+                    self.handling_mort_by_tank.get(dest.tank_id, 0.0) + _killed)
 
             total_dest_count += dest.count
 

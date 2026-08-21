@@ -99,14 +99,24 @@ _SIXN_SYSTEMS = frozenset({"OG6N"})
 # 6N depuration tank mid-week (~Friday) and then held OFF-FEED for the rest of
 # the ~2-week purge (no growth, no feed) before harvest. Two consequences:
 #   1) The weight placed into 6N is the source tank's week-open avg grown by the
-#      4 days (Mon→Fri) it kept growing in the source before the transfer.
+#      3 days (Mon→THU) it kept growing in the source before the transfer.
+#      THURSDAY, per the operator (2026-08-21): fish move to purge on Thursday,
+#      not at week open, and the point of this constant is to carry those days
+#      of growth so the FROZEN harvest weight is right. It read 4 (Mon→Fri) and
+#      so charged one day too many: measured on the 8.13.26 workbook that
+#      overstated average gross harvest weight by 10 g/fish (3.9184 -> 3.9084)
+#      and the horizon's HOG by ~21.8 t (0.19%).
+#      This is NOT the VBA knob of the same intent. VBA ships a configurable
+#      Control fraction defaulting to 0 (no pre-transfer growth at all); Python
+#      models the actual move day. Keep the day count honest and it stays more
+#      accurate than VBA rather than merely different.
 #   2) On entry the 6N tank is FROZEN (stage=STARVE): the daily biology loop then
 #      neither grows nor feeds it, so it is harvested at the frozen entry weight
 #      and eats nothing during depuration.
-# The 4 pre-transfer days of feed are still real and are recorded as an explicit
+# The 3 pre-transfer days of feed are still real and are recorded as an explicit
 # move-in feed entry (see PlacementResult.sixn_move_in_feed) the feed reports add
 # in; the STARVE purge weeks themselves are excluded from realized feed.
-PURGE_TRANSFER_GROWTH_DAYS = 4
+PURGE_TRANSFER_GROWTH_DAYS = 3
 
 # DEPURATION HOLD (operator rule): fish moved into a 6N purge tank must sit the
 # full ~2-week purge before that tank may be drained. Enforced in BOTH
@@ -123,11 +133,15 @@ SIXN_MIN_RESIDENCY_DAYS = 14
 # breaches on the 8.13.26 workbook while the spells still had consolidation
 # slack at their start. Raising the fraction or the run length trades recall for
 # handling; lowering either fires on tanks that were about to be harvested.
-_CHRONIC_FRAC = 0.90
+_CHRONIC_FRAC = 0.92
 _CHRONIC_WEEKS = 4
 # Chronic tanks are shed BELOW the ordinary relief target: relieving a tank that
 # has been at 87% for a month to 90% would move nothing at all.
 _CHRONIC_RELIEF_PCT = 0.80
+# Anticipatory work is BOUNDED: consolidation shares the weekly handling budget
+# with the 6N harvest move-in, so an unbounded chronic sweep starves harvest
+# staging and misses the sales floor. Over-cap tanks are urgent and exempt.
+_CHRONIC_MAX_FREES_PER_WEEK = 1
 def _sixn_fill_capacity_fish(state: FacilityState, tank_id: int,
                              avg_wt_g: float, purge: bool = False) -> float:
     """Fish this 6N tank can still take, judged at the given transfer weight.
@@ -1887,7 +1901,7 @@ def _run_sixn_purge_week(
                 continue
             # Split the take across the pair, capped per tank; FREEZE each
             # destination (STARVE, no feed/growth for the rest of the purge)
-            # and book the 4 pre-transfer feed-days once for the whole take.
+            # and book the 3 pre-transfer feed-days once for the whole take.
             _allocs = []
             _rem = take
             for _tid, _c in _caps:
@@ -3929,6 +3943,16 @@ def phase_d_emit_events(
             continue
         week_ranges[label] = (wload.week_start, wload.week_start + timedelta(days=7))
 
+    # HANDLING MORTALITY (operator, 2026-08-21). Armed once, on the state every
+    # event applies to, so every Transfer pays it without ~30 construction
+    # sites having to remember. VBA charges this on every tank-to-tank deposit;
+    # Python charged it only on the FW->OG transition, so the entire automatic
+    # placement path -- rebalances, consolidation, 6N move-ins, relief moves --
+    # moved fish for free. control.handling_mortality_pct is a PERCENT
+    # (0.01 = 0.01%), hence the /100.
+    state.handling_frac = float(
+        getattr(control, "handling_mortality_pct", 0.0) or 0.0) / 100.0
+
     # Level-load: fish over the hard weekly harvest cap that a single make-room
     # week was forced to take (conservation > cap) are borrowed from next week's
     # ceiling, so the multi-week total stays <= cap x weeks. 0.0 unless ON.
@@ -4958,9 +4982,22 @@ def phase_d_emit_events(
                            and (t.density_kg_m3 > t.max_density_kg_m3
                                 or t.tank_id in _chronic)]
             if _over_entry and _moves_left_quality() > 0:
+                # BOUND THE ANTICIPATORY WORK. Consolidation and the 6N harvest
+                # move-in draw on the SAME weekly handling budget
+                # (max_transfers_per_week), so an unbounded chronic sweep
+                # starves harvest staging and pushes weeks under the sales
+                # floor -- measured: freeing a tank per over-pressure tank took
+                # weeks-under-floor from 13 to 20. Tanks ALREADY over cap are
+                # urgent and uncapped; CHRONIC ones are anticipatory and take
+                # at most _CHRONIC_MAX_FREES_PER_WEEK, so acting early can
+                # never cost the contract it exists to protect.
+                _urgent = sum(1 for t in _over_entry
+                              if t.density_kg_m3 > t.max_density_kg_m3)
+                _need = _urgent + min(len(_over_entry) - _urgent,
+                                      _CHRONIC_MAX_FREES_PER_WEEK)
                 _consolidate_growout_to_free_tanks(
                     state, transfer_date, transfer_events, warnings,
-                    need_tanks=len(_over_entry),
+                    need_tanks=_need,
                     max_moves=_moves_left_quality(),
                 )
             for b in sorted(set(prev_by_batch) | set(this_by_batch)):
@@ -5831,6 +5868,30 @@ def phase_d_emit_events(
         # force-empty) from next week's ceiling, so the multi-week harvest total
         # stays within cap x weeks. 0.0 in the common case.
         _carry_debt = _budget.overdraw
+
+    # Book handling mortality as MORTALITY on the destination tank-week.
+    # The continuity audit derives transfer_in from count_transferred (GROSS),
+    # so the fish killed on landing must appear in the mortality term or the
+    # destination shows count drift:
+    #     open - mortality - harvest_out - transfer_out + transfer_in = close
+    # Done in ONE sweep here rather than at each emit site: every Transfer is
+    # already in `transfer_events`, and a single fold cannot be half-applied.
+    if getattr(state, "handling_frac", 0.0):
+        # iso_week_label(event_date) -- the SAME rule write_tank_continuity_audit
+        # uses to bucket a transfer (`wk = iso_week_label(ev.event_date)`).
+        # A week_ranges lookup is NOT equivalent: the ragged first forecast week
+        # spans [start, start+7) and therefore OVERLAPS the following Monday
+        # week, so a date in the overlap booked the mortality one week early and
+        # left 4-5 fish of drift in each of the two weeks. Bucket it the way the
+        # auditor does and the two cannot disagree.
+        for _ev in transfer_events:
+            _hm = getattr(_ev, "handling_mort_by_tank", None)
+            if not _hm:
+                continue
+            _lbl = iso_week_label(_ev.event_date)
+            for _tid, _killed in _hm.items():
+                if _killed > 0:
+                    realized_biology[(_tid, _lbl, _ev.batch_id)][1] += _killed
 
     return (state, tranog_events, transfer_events, harvest_events,
             grade_events, locations, warnings, sixn_move_in_feed,
