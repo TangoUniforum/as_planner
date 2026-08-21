@@ -116,6 +116,18 @@ PURGE_TRANSFER_GROWTH_DAYS = 4
 # rotation's drain HOLDS any tank filled after the PREVIOUS rotation step
 # (fail-safe; a held tank drains on the pair's next rotation).
 SIXN_MIN_RESIDENCY_DAYS = 14
+
+# CHRONIC ENTRY-TIER PRESSURE. A tank at or above _CHRONIC_FRAC of its density
+# cap for _CHRONIC_WEEKS consecutive weeks is structurally short of capacity,
+# not merely having a bad week. 85%/3wk was measured to capture ALL 16 residual
+# breaches on the 8.13.26 workbook while the spells still had consolidation
+# slack at their start. Raising the fraction or the run length trades recall for
+# handling; lowering either fires on tanks that were about to be harvested.
+_CHRONIC_FRAC = 0.90
+_CHRONIC_WEEKS = 4
+# Chronic tanks are shed BELOW the ordinary relief target: relieving a tank that
+# has been at 87% for a month to 90% would move nothing at all.
+_CHRONIC_RELIEF_PCT = 0.80
 def _sixn_fill_capacity_fish(state: FacilityState, tank_id: int,
                              avg_wt_g: float, purge: bool = False) -> float:
     """Fish this 6N tank can still take, judged at the given transfer weight.
@@ -2464,9 +2476,15 @@ def _even_out_density(
     # under-cap OG3-6 tank, equalize across the boundary. Source pool is
     # restricted to OG1/2-over-cap tanks (so we never push OG3-6 fish
     # back into OG1/2 — that would be operationally backwards).
+    # Sources: tanks ALREADY over cap, plus tanks under CHRONIC pressure (near
+    # the cap for weeks -- see _CHRONIC_FRAC). The chronic ones are the whole
+    # point of acting early: they are not over cap yet, so a breach-triggered
+    # pass would ignore them until the facility is full and relief is dear.
+    _chronic = getattr(state, "entry_chronic", ()) or ()
     og12_over = [t for t in og12_all
                  if t.max_density_kg_m3 > 0
-                 and t.density_kg_m3 > t.max_density_kg_m3]
+                 and (t.density_kg_m3 > t.max_density_kg_m3
+                      or t.tank_id in _chronic)]
     og36_under = [t for t in og36
                   if t.max_density_kg_m3 > 0
                   and t.density_kg_m3 < t.max_density_kg_m3]
@@ -2504,7 +2522,12 @@ def _even_out_density(
                             * 1000.0 / src.avg_wt_g)
             dst_cap_fish = (dst.max_density_kg_m3 * dst.volume_m3
                             * 1000.0 / _dst_wt)
-            shed = src.count - src_cap_fish * RELIEF_PCT
+            # A chronic tank is shed deeper (_CHRONIC_RELIEF_PCT): it has sat
+            # near the cap for weeks, so trimming it to the ordinary 90% target
+            # would move nothing and it would be chronic again next week.
+            _relief = (_CHRONIC_RELIEF_PCT if src.tank_id in _chronic
+                       else RELIEF_PCT)
+            shed = src.count - src_cap_fish * _relief
             room = dst_cap_fish * HEADROOM_PCT - dst.count
             take = min(shed, room)
             if take <= 0.5:
@@ -2524,7 +2547,7 @@ def _even_out_density(
             transfer_events.append(ev)
             if ev.count_transferred > 0:
                 _mv_left[0] -= 1
-            if src.count <= src_cap_fish * RELIEF_PCT + 0.5:
+            if src.count <= src_cap_fish * _relief + 0.5:
                 break
 
 
@@ -4883,12 +4906,57 @@ def phase_d_emit_events(
             # a free tank rather than competing for one of the ~3.9 free in an
             # average week. Fires only when an entry tank is actually over cap,
             # and frees at most as many tanks as there are over-cap tanks.
+            #
+            # CHRONIC PRESSURE (operator 2026-08-21: "anticipate needs and work
+            # to those"). Reacting to a breach is too late -- by then the
+            # facility is at ~90% tank occupancy and relief is expensive.
+            #
+            # The naive anticipation, "project growth and act before the tank
+            # crosses its cap", does NOT work here: measured on the 8.13.26
+            # workbook, entry-tank density does not climb toward the cap, it
+            # SAWTOOTHS around it (OG2S-22/B52 ran 92.1, 96.5, 89.5, 93.5,
+            # 97.7) because the relief pass shaves it every week. A crossing
+            # predictor would fire every week on every one of those tanks.
+            #
+            # The real signal is CHRONIC pressure: a tank riding near its cap
+            # week after week is STRUCTURALLY short of capacity -- its batch
+            # holds more biomass than its tank allocation supports -- and no
+            # amount of weekly shaving fixes that. It needs another tank, once.
+            # Measured: every one of the 16 remaining breaches sits inside such
+            # a spell (100% recall), and the spells are long -- OG1N-13/B55
+            # rides >=85% for 28 consecutive weeks -- so the lead time is
+            # months, and consolidation slack exists at the spell's start.
+            _press = getattr(state, "entry_pressure_runs", None)
+            if _press is None:
+                _press = {}
+                state.entry_pressure_runs = _press
+            _chronic: set[int] = set()
+            _still = set()
+            for _t in state.tanks_by_id.values():
+                if (_t.is_empty or _t.type != "OG"
+                        or _t.system_id not in OG12_SYSTEMS
+                        or _t.stage == STAGE_STARVE
+                        or _t.max_density_kg_m3 <= 0):
+                    continue
+                if _t.density_kg_m3 >= _t.max_density_kg_m3 * _CHRONIC_FRAC:
+                    _k = (_t.tank_id, _t.batch_id)
+                    _press[_k] = _press.get(_k, 0) + 1
+                    _still.add(_k)
+                    if _press[_k] >= _CHRONIC_WEEKS:
+                        _chronic.add(_t.tank_id)
+            # Drop runs for tanks that fell back, emptied, or changed batch --
+            # the counter must measure ONE cohort's continuous pressure.
+            for _k in [k for k in _press if k not in _still]:
+                del _press[_k]
+            state.entry_chronic = _chronic
+
             _over_entry = [t for t in state.tanks_by_id.values()
                            if not t.is_empty and t.type == "OG"
                            and t.system_id in OG12_SYSTEMS
                            and t.stage != STAGE_STARVE
                            and t.max_density_kg_m3 > 0
-                           and t.density_kg_m3 > t.max_density_kg_m3]
+                           and (t.density_kg_m3 > t.max_density_kg_m3
+                                or t.tank_id in _chronic)]
             if _over_entry and _moves_left_quality() > 0:
                 _consolidate_growout_to_free_tanks(
                     state, transfer_date, transfer_events, warnings,
