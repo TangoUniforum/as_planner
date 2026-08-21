@@ -373,6 +373,15 @@ class BatchAccuracy:
     """
     batch_id: str
     present: str = "both"           # "both" | "forecast-only" | "actual-only"
+    # True when the FORECAST removed a material share of this batch between the
+    # anchor week and the graded week — i.e. the model harvested (or culled) it
+    # over the interval. Such a batch is EXECUTION-CONFOUNDED and its weight
+    # error is not a clean biology score: a partial harvest takes the BIGGEST
+    # fish, so the survivors' mean weight drops for reasons that have nothing
+    # to do with the growth model, and the actual facility almost never
+    # harvested the same slice on the same day. See summarize_bias, which
+    # reports the clean subset alongside the all-batch figure.
+    exec_confounded: bool = False
     pred_count: float = 0.0
     act_count: float = 0.0
     pred_biomass_kg: float = 0.0
@@ -472,6 +481,13 @@ LIMITS = [
 ]
 
 
+# A batch whose forecast count falls by more than this over the graded interval
+# was HARVESTED or culled by the model, not merely thinned by mortality.
+# Weekly mortality runs well under 1%, so a few percent over a multi-week
+# interval is comfortably above the noise while still catching a real draw.
+_EXEC_DRAW_PCT = 0.05
+
+
 def compare(forecast_src, actual_src) -> AccuracyReport:
     """Grade the forecast in `forecast_src` against the actuals in `actual_src`.
 
@@ -487,11 +503,25 @@ def compare(forecast_src, actual_src) -> AccuracyReport:
             "there is no date to grade the forecast at.")
 
     weeks = forecast_weeks(fc_rows)
+    # Per-batch forecast counts at the FIRST week and at the graded week. Their
+    # difference is how much the MODEL took out over the interval, which is the
+    # execution-confound detector (see BatchAccuracy.exec_confounded). Read off
+    # the forecast alone, so it needs no second ProductionReport and works for
+    # any caller of compare(), not just the backtest driver.
+    _fc_anchor_count: dict[str, float] = {}
+    _fc_aligned_count: dict[str, float] = {}
+    _anchor_wk = weeks[0]["week"] if weeks else None
     anchor = weeks[0]["start"] if weeks else None
     horizon_end = weeks[-1]["end"] if weeks else None
     aligned = align_week(fc_rows, closing)
     if aligned is None:
         raise ValueError("That forecast workbook has no dated weeks to grade.")
+    for _r in fc_rows:
+        _w, _b, _c = _r.get("week"), _r.get("batch"), _r.get("count") or 0.0
+        if _w == _anchor_wk:
+            _fc_anchor_count[_b] = _fc_anchor_count.get(_b, 0.0) + _c
+        if _w == aligned["week"]:
+            _fc_aligned_count[_b] = _fc_aligned_count.get(_b, 0.0) + _c
 
     rep = AccuracyReport(
         actual_closing=closing,
@@ -533,8 +563,11 @@ def compare(forecast_src, actual_src) -> AccuracyReport:
         ac, ab = a_batch.get(bid, [0.0, 0.0])
         present = ("both" if p is not None and bid in a_batch
                    else "forecast-only" if p is not None else "actual-only")
+        _a0 = _fc_anchor_count.get(bid, 0.0)
+        _a1 = _fc_aligned_count.get(bid, 0.0)
+        _drew = (_a0 > 0.0) and ((_a0 - _a1) / _a0) > _EXEC_DRAW_PCT
         rep.batches.append(BatchAccuracy(
-            batch_id=bid, present=present,
+            batch_id=bid, present=present, exec_confounded=_drew,
             pred_count=(p or {}).get("count", 0.0),
             act_count=ac,
             pred_biomass_kg=(p or {}).get("biomass_kg", 0.0),
@@ -674,10 +707,25 @@ def summarize_bias(graded: list) -> dict:
     re-anchor already absorbs. So this reports the SIGNED median alongside the
     typical magnitude, and how lopsided the signs are.
     """
-    wt = [b.wt_err_pct for b in graded if b.wt_err_pct is not None]
+    wt_all = [b.wt_err_pct for b in graded if b.wt_err_pct is not None]
     cn = [b.count_err_pct for b in graded if b.count_err_pct is not None]
-    if not wt:
+    if not wt_all:
         return {"n": 0, "verdict": "Not enough overlap to judge bias."}
+
+    # EXECUTION CONFOUND. A batch the model harvested over the interval is not
+    # a clean biology score: a partial harvest takes the BIGGEST fish, so the
+    # survivors' mean weight falls for reasons unrelated to growth, and the
+    # real facility almost never took the same slice on the same day. Judge the
+    # bias on the batches the model did NOT draw from, and report both so the
+    # gap between them is visible rather than hidden.
+    wt_clean = [b.wt_err_pct for b in graded
+                if b.wt_err_pct is not None
+                and not getattr(b, "exec_confounded", False)]
+    _n_conf = len(wt_all) - len(wt_clean)
+    # Fall back to the full set only when the clean subset is too small to say
+    # anything — and label it, so a confounded number is never read as clean.
+    _using_clean = len(wt_clean) >= 3
+    wt = wt_clean if _using_clean else wt_all
 
     med = statistics.median(wt)
     typical = statistics.median([abs(x) for x in wt])
@@ -712,6 +760,15 @@ def summarize_bias(graded: list) -> dict:
         "count_median_signed_pct": statistics.median(cn) if cn else None,
         "count_typical_abs_pct": (statistics.median([abs(x) for x in cn])
                                   if cn else None),
+        # Provenance of the number above, so a confounded reading cannot be
+        # mistaken for a clean one.
+        "n_all": len(wt_all),
+        "n_exec_confounded": _n_conf,
+        "bias_basis": ("clean (batches the model did not harvest)"
+                       if _using_clean else
+                       "ALL batches — too few unharvested to judge separately; "
+                       "this figure carries harvest-execution error"),
+        "wt_median_signed_pct_all": statistics.median(wt_all),
         "verdict": verdict,
     }
 
@@ -731,6 +788,11 @@ def headline(rep: AccuracyReport) -> dict:
         "typical_wt_err_pct": b.get("wt_typical_abs_pct"),
         "worst_wt_err_pct": b.get("wt_max_abs_pct"),
         "signed_median_pct": b.get("wt_median_signed_pct"),
+        # Which batches the headline is computed over. A bias quoted without
+        # this is not safe to act on: batches the model harvested carry the
+        # grading decision, not the growth model.
+        "bias_basis": b.get("bias_basis"),
+        "n_exec_confounded": b.get("n_exec_confounded"),
         "verdict": b.get("verdict", ""),
     }
 
