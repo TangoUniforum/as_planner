@@ -938,28 +938,38 @@ def pick_tanks(
 
                 _six = sorted((t for t in old_tanks if t in sixn_set),
                               key=lambda t: (-_residency(t), t))
-                # 6N-ONLY DRAW IN PURGE MODE (operator rule, absolute): fish are
-                # harvested out of DEPURATION, never straight out of a
-                # production tank. The draw used to fall through to non-6N
-                # tanks whenever 6N could not cover the week, which silently
-                # broke the rule instead of reporting that the pipeline was
-                # short -- 39,094 fish over the run, 99.96% of them in the very
-                # first forecast week.
+                # THE FALLTHROUGH TO PRODUCTION TANKS IS A KNOWN RULE
+                # VIOLATION, AND IT IS DELIBERATE UNTIL STEP 2 LANDS.
                 #
-                # Refusing the fallthrough turns a silent violation into a
-                # visible harvest shortfall, which is this module's own stated
-                # philosophy elsewhere: _make_room_into_6n returns False as "a
-                # real 6N-capacity signal, never a bypass".
+                # In purge mode fish are harvested out of DEPURATION, never
+                # straight out of a production tank. This draw takes 6N first
+                # (longest residency) and then falls through to non-6N tanks
+                # whenever 6N cannot cover the week -- 39,094 fish over the run,
+                # 99.96% of them in the FIRST forecast week.
                 #
-                # It does NOT fix the underlying gap. Harvest demand comes from
-                # L1's `harvest_by_bw`; 6N parking comes from L1's separate
-                # `purge_rows` (section 2 above). Nothing reconciles the two, so
-                # L1 can schedule a harvest for a batch that was never parked
-                # into 6N -- most visibly in week 1, where there is no purge
-                # history to have parked anything from and the PR's 6N stock
-                # belongs to other batches. Closing THAT is step 2.
+                # MEASURED 2026-08-21: simply refusing the fallthrough
+                # (`starve_first = _six` in purge weeks) enforces the rule --
+                # the probe goes to 100% from 6N, 0 overflow -- and BREAKS
+                # CONSERVATION: TANK_DRIFT 0 -> 3 and the facility loses
+                # 39,077 fish, exactly the fish that used to overflow. They do
+                # not stay in their tanks; they VANISH, because `new_state` was
+                # built by the placement passes assuming L1's harvest executes,
+                # so there is no allocated home for a fish the draw declines to
+                # take. A silent rule break that conserves is less dangerous
+                # than an enforced rule that loses 39,000 fish, so the
+                # fallthrough stays until the fish have somewhere to go.
+                #
+                # That is the real shape of the defect: harvest demand comes
+                # from L1's `harvest_by_bw`, 6N parking from L1's separate
+                # `purge_rows` (section 2 above), and NOTHING reconciles them.
+                # L1 can schedule a harvest for a batch never parked into 6N --
+                # most visibly in week 1, where there is no purge history to
+                # have parked from and the PR's 78,148 fish in 6N belong to
+                # other batches. Enforcement and reconciliation are ONE job,
+                # not two: fix `purge_rows` vs `harvest_by_bw` first, then the
+                # fallthrough can be deleted and will cost nothing.
                 _nonsix = [t for t in old_tanks if t not in sixn_set]
-                starve_first = _six if _purge_wk else _six + _nonsix
+                starve_first = _six + _nonsix
                 drawn_c = 0.0
                 _from6n = 0.0
                 for t in starve_first:
