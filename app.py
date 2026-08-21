@@ -665,8 +665,10 @@ _CONTROL_HELP = {
         "Cap on how many tanks the ANTICIPATORY pass may free per week. "
         "Consolidation and 6N harvest staging draw on the same weekly transfer "
         "budget, so an unbounded sweep starves harvest and misses the sales "
-        "floor. Tanks ALREADY over cap are urgent and ignore this cap. 0 turns "
-        "anticipation off entirely. Unit: tanks per week.",
+        "floor. Tanks ALREADY over cap are urgent and ignore this cap. "
+        "0 stops the anticipatory tank-FREEING only — chronic tanks are still "
+        "detected, and still shed to the deeper 'Chronic relief target' by the "
+        "weekly even-out pass. Unit: tanks per week.",
     "density_relief_pct":
         "When an over-cap OG1/2 tank is relieved, fish are moved out until it "
         "sits at this share of its cap. NOT 1.0: relieving to exactly the cap "
@@ -679,7 +681,10 @@ _CONTROL_HELP = {
         "for the same reason as above — a tank packed to its cap re-breaches "
         "within a week of growth. Unit: fraction 0-1.",
     "global_assume_primed_6n":
-        "GLOBAL methods only. OFF (default) models the REAL 6N handover: the "
+        "Applies to the GLOBAL methods AND to the Controller's long-horizon "
+        "harvest guide (any 'Harvest guide (hybrid)' setting other than off), "
+        "which runs the same L1 planner as a pre-pass and reads this flag "
+        "there. OFF (default) models the REAL 6N handover: the "
         "planner starts its depuration pipeline from the fish actually in 6N "
         "on the ProductionReport, so the first couple of weeks harvest less "
         "while the pipeline fills — a real startup ramp. ON assumes 6N is "
@@ -900,14 +905,14 @@ _CONTROL_LABEL = {
     "global_buffer_pct": "System-cap buffer (R29)",
     "starvation_period_days": "In-place purge length (days)",
     "grade_efficiency": "Grader efficiency (0-1)",
-    "global_assume_primed_6n": "Global: assume 6N primed at start",
-    "chronic_pressure_frac": "Chronic pressure level (% of cap)",
+    "global_assume_primed_6n": "6N handover: assume primed at start",
+    "chronic_pressure_frac": "Chronic pressure level (fraction of cap)",
     "chronic_pressure_weeks": "Chronic pressure weeks",
-    "chronic_relief_pct": "Chronic relief target (% of cap)",
+    "chronic_relief_pct": "Chronic relief target (fraction of cap)",
     "chronic_max_frees_per_week": "Anticipatory frees per week",
-    "density_relief_pct": "Density relief target (% of cap)",
-    "consolidation_fill_pct": "Consolidation fill (% of cap)",
-    "density_target_pct": "Density target (% of cap)",
+    "density_relief_pct": "Density relief target (fraction of cap)",
+    "consolidation_fill_pct": "Consolidation fill (fraction of cap)",
+    "density_target_pct": "Density target (fraction of cap)",
     "density_welfare_threshold_kg_m3": "Welfare density line (kg/m³)",
     "rebalance_balance_budget": "Rebalancer moves / week",
     "rebalance_split_budget": "Split-pass moves / week",
@@ -4279,11 +4284,15 @@ a **3-pair fallow rotation** (pairs 61/67, 63/69, 65/71, fixed order
 harvested and the resting pair refills from the oldest mature fish.
 
 **The 6N-specific rules:**
-* **Sister-first fills** — no 6N tank is stocked past its own density cap
-  (**{k['sixn_density']:.0f} kg/m³** on this facility); a fill
-  splits main-first across the pair and overflows into the idle sister. When
-  the whole pair is at cap, the surplus *waits in grow-out* for the next thin
-  pair (level-drains: no pair accumulates a monster dump).
+* **One batch, one tank** — a purge tank has **no density cap at all**
+  (operator rule, 2026-08-21): the fish are off feed, not growing, and gone
+  within the hold, so what bounds the tank is the *harvest schedule*, not
+  kg/m³. A whole batch therefore fills ONE tank however dense it gets.
+  The sister (67/69/71) is **not overflow capacity** — it exists so a
+  *second, different* batch needing harvest the same week is not mixed into
+  an occupied tank, because mixing destroys per-batch count fidelity at
+  harvest. Spending a sister on one batch's overflow burns the slot that
+  separation needs.
 * **The hold is real** — a tank may **not** be drained on the rotation right
   after its fill (that leak shipped fish with 1 week of purge instead of 2;
   fixed and audited). Fish hydrated from the PR already mid-purge are the one
@@ -4292,18 +4301,28 @@ harvested and the resting pair refills from the oldest mature fish.
 * Make-room routes through 6N too: a tank freed for an arrival sends its
   fish to purge, staging them for harvest — never harvested in place.
 
-After **{k['prod_start']}** the station switches to production mode: the main
-tanks become ordinary grow-out, and harvest-bound fish instead go off-feed
-*in place* for the starvation period before removal.
+After **{k['prod_start']}** the station switches to production mode: the
+**main** tanks (61/63/65) become ordinary grow-out and every cap applies to
+them again — including their configured
+**{k['sixn_density']:.0f} kg/m³** density cap, which does NOT bind while they
+are purging — while the three **sisters** (67/69/71) are not production capacity
+at all. Harvest-bound fish instead go off feed *in place* in their own
+grow-out tank for the starvation period — and while they do, that tank is
+density-exempt under R8 exactly as a purge tank is, and a batch's in-place
+purge tanks are consolidated into one to hand the rest back to the rotation.
 
-**What it may never do.** Skip or shorten the hold, stock a 6N tank past its
-density cap ({k['sixn_density']:.0f} kg/m³), mix batches within one tank, or
-transfer fish back out of depuration.
+**What it may never do.** Skip or shorten the hold, mix batches within one
+tank, or transfer fish back out of depuration. (Stocking a purge tank "past
+its density cap" is **not** on this list any more — there is no such cap
+while fish are preparing for harvest.)
 
 **What binds it.** The depuration-hold audit (every run reports what fraction
-of harvest left 6N early — must be the PR-hydrated exemptions only), the
-sister-fill density cap, R7 enforcement in the event layer, and the pair
-rotation's own continuity in the tank audit.""")
+of harvest left 6N early — must be the PR-hydrated exemptions only), R7
+enforcement in the event layer, and the pair rotation's own continuity in the
+tank audit. Density does **not** bind here: rule **R8**
+(`tiers.density_exempt`) exempts any tank whose fish are preparing for
+harvest — both 6N depuration and, after the production switch, in-place
+starvation in an ordinary grow-out tank.""")
 
     with st.expander("8 · The engines — two families, and how far you can "
                      "trust each"):
@@ -6096,7 +6115,7 @@ def _optimizer():
          "Grid + Deep (best of both)"],
         horizontal=True,
         help="TWO search algorithms, offered as FOUR choices. GRID (Quick = 4 configs, "
-             "Full = 14) enumerates a hand-picked list — fast and broad, but mostly one "
+             "Full = 28) enumerates a hand-picked list — fast and broad, but mostly one "
              "knob at a time, so it misses COMBINATIONS. DEEP SEARCH is a coordinate "
              "descent that tunes one knob at a time and FINDS combinations (~15–30 runs). "
              "GRID + DEEP runs the full grid, then deep-searches FROM the grid's best and "
