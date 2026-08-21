@@ -169,6 +169,13 @@ def main() -> int:
     ap.add_argument("--out", required=True, help="results dir (backtest-only)")
     ap.add_argument("--config-dir", default=str(_ROOT / "config"))
     ap.add_argument("--scenario-dir", default=str(_ROOT / "scenario"))
+    ap.add_argument("--registries", default=None,
+                    help="dir of per-era registries (tools/reconstruct_registry.py). "
+                         "Each month uses ITS OWN era. Without this a historical "
+                         "run is handed today's batch schedule, which anchors the "
+                         "forecast at today's first TranOG and makes the grading "
+                         "meaningless — the artifact that produced a phantom 17% "
+                         "cold bias on the first backtest.")
     ap.add_argument("--horizon-weeks", type=int, default=30)
     ap.add_argument("--max-horizon-months", type=int, default=6)
     ap.add_argument("--keep-runs", action="store_true",
@@ -209,10 +216,17 @@ def main() -> int:
                        if 0 < _months_between(run_date, d) <= args.max_horizon_months]
             if not targets:
                 continue
+            era_scn = Path(args.scenario_dir)
+            if args.registries:
+                cand = Path(args.registries) / run_date.isoformat()
+                if cand.is_dir():
+                    era_scn = cand
+                else:
+                    print(f"  {run_date}  SKIPPED (no era registry at {cand.name})")
+                    continue
             with tempfile.TemporaryDirectory() as td:
                 produced = run_one(src, Path(td), Path(args.config_dir),
-                                   Path(args.scenario_dir), args.horizon_weeks,
-                                   calib_log)
+                                   era_scn, args.horizon_weeks, calib_log)
                 if produced is None:
                     print(f"  {run_date}  RUN FAILED")
                     continue
@@ -238,11 +252,13 @@ def main() -> int:
                         **g,
                     }
                     fh.write(json.dumps(rec) + "\n")
+                    rec["scenario"] = "era" if args.registries else "today"
                     hl = g.get("headline") or {}
+                    med = hl.get("signed_median_pct")
+                    ed = hl.get("elapsed_days")
                     line.append(f"{rec['horizon_months']}m:"
-                                f"{hl.get('signed_median_pct', '?'):.1f}%"
-                                if isinstance(hl.get('signed_median_pct'), (int, float))
-                                else f"{rec['horizon_months']}m:?")
+                                + (f"{med:+.1f}%@{ed}d" if isinstance(med, (int, float))
+                                   else "?"))
                 print(f"  {run_date}  graded {len(targets)}  " + "  ".join(str(x) for x in line))
 
     print(f"\n{n_runs} runs, {n_grades} graded comparisons -> {results_path}")
