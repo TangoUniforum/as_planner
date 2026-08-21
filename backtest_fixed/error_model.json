@@ -1,0 +1,62 @@
+{
+  "source": "backtest (mode=backtest), mean weight per batch, execution-confounded batches excluded",
+  "batches_used": 378,
+  "batches_excluded_exec_confounded": 94,
+  "min_n_for_confidence": 5,
+  "horizons_months": {
+    "1": {
+      "n": 70,
+      "weak": false,
+      "median_signed_pct": 0.9,
+      "typical_abs_pct": 4.789,
+      "p10_pct": -9.552,
+      "p90_pct": 8.137,
+      "worst_abs_pct": 19.979
+    },
+    "2": {
+      "n": 66,
+      "weak": false,
+      "median_signed_pct": -1.058,
+      "typical_abs_pct": 6.45,
+      "p10_pct": -12.645,
+      "p90_pct": 9.909,
+      "worst_abs_pct": 30.891
+    },
+    "3": {
+      "n": 62,
+      "weak": false,
+      "median_signed_pct": -4.218,
+      "typical_abs_pct": 8.686,
+      "p10_pct": -16.806,
+      "p90_pct": 11.588,
+      "worst_abs_pct": 36.874
+    },
+    "4": {
+      "n": 59,
+      "weak": false,
+      "median_signed_pct": -6.621,
+      "typical_abs_pct": 10.486,
+      "p10_pct": -20.627,
+      "p90_pct": 12.023,
+      "worst_abs_pct": 41.265
+    },
+    "5": {
+      "n": 60,
+      "weak": false,
+      "median_signed_pct": -9.23,
+      "typical_abs_pct": 12.076,
+      "p10_pct": -24.865,
+      "p90_pct": 15.744,
+      "worst_abs_pct": 44.065
+    },
+    "6": {
+      "n": 61,
+      "weak": false,
+      "median_signed_pct": -10.439,
+      "typical_abs_pct": 12.332,
+      "p10_pct": -26.163,
+      "p90_pct": 12.089,
+      "worst_abs_pct": 48.25
+    }
+  }
+}
