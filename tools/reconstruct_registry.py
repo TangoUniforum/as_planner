@@ -193,17 +193,41 @@ def main() -> int:
 
     print()
     for closing, _p in months:
-        # Every batch observed at or after this month. A batch that first
-        # appears BEFORE it is already hydrated from the PR and does not need a
-        # registry entry; including it would re-project a phantom lifecycle.
-        era = [to_batch(o, known) for o in first.values() if o["seen"] >= closing]
+        # EVERY batch the corpus ever observed, not just the forward ones.
+        #
+        # This used to emit only batches first seen AT OR AFTER `closing`, on
+        # the reasoning that an earlier batch "is already hydrated from the PR
+        # and does not need a registry entry". That reasoning is wrong, and it
+        # was the single largest defect in the backtest. The registry is not
+        # only a schedule of ARRIVALS -- it is where the engine reads a batch's
+        # BIOLOGY (fcr_model, sgr_correction, fw_correction, cv). A hydrated
+        # batch with no registry entry loads into its tanks and then sits
+        # FROZEN; the run says so out loud:
+        #
+        #     WARN: PR: batch B30 has no Batches-sheet metadata — its tank(s)
+        #     hydrate but biology will NOT advance them (no growth/mortality)
+        #
+        # For a run at 2024-12-31, nearly every fish in the facility was first
+        # observed 2024-11-30, so nearly the whole facility stopped growing.
+        # That is a forecast which under-predicts weight at every horizon by a
+        # margin that grows with time -- exactly the -15% to -29% "model bias"
+        # the error model was reporting, and invisible to a hydration check
+        # because week 0 is loaded correctly and only the WALK FORWARD is dead.
+        #
+        # The phantom-lifecycle worry the old comment raises is real but is
+        # handled elsewhere: a batch whose tran_og_date has already passed is
+        # in-flight, hydrated from the PR, and not re-seeded from its input
+        # date. Including it supplies biology without re-creating fish.
+        era = [to_batch(o, known) for o in first.values()]
         era.sort(key=lambda b: (b.tran_og_date, b.batch_id))
         d = out_dir / closing.isoformat()
         d.mkdir(parents=True, exist_ok=True)
         dump_scenario(d, batches=era, facility_limits=fac_lim, system_limits=sys_lim)
+        _fwd = sum(1 for o in first.values() if o["seen"] >= closing)
         span = (f"{era[0].tran_og_date:%Y-%m-%d} .. {era[-1].tran_og_date:%Y-%m-%d}"
                 if era else "none")
-        print(f"  {closing}  {len(era):>2} forward batches  ({span})")
+        print(f"  {closing}  {len(era):>2} batches "
+              f"({_fwd} arriving, {len(era) - _fwd} already in-flight)  ({span})")
 
     print(f"\nwrote {len(months)} era registries -> {out_dir}")
     return 0
