@@ -190,7 +190,20 @@ class Method:
 def _run_engine(engine: str, inp, out, cdir, sdir, engine_kwargs: dict) -> int:
     if engine == "controller":
         from forecast import run as _run
-        return _run.main(inp, out, config_dir=cdir, scenario_dir=sdir)
+        # calib_log_path="" — RECORD NOTHING. This harness isolates config and
+        # scenario into a tempdir but used to leave the FW calibration log
+        # pointing at the operational fw_calibration_history.jsonl, so every
+        # Compare-board run, every tuning trial and every tournament arm
+        # appended to it. That file exists to expose a STANDING model error
+        # across months of real runs ("a correction the model has needed every
+        # month for six months looked exactly like a one-off", accuracy.py);
+        # measured 2026-08-21, 51% of its 30,712 records had been written that
+        # single day by exploratory runs, and since every record carries
+        # source="run.main" there is no way to filter them out afterwards.
+        # tools/backtest.py and tests/fixtures/freeze_golden.py both already
+        # guard this; the method runner is the one path that did not.
+        return _run.main(inp, out, config_dir=cdir, scenario_dir=sdir,
+                         calib_log_path="")
     if engine == "global":
         from tools.run_global_forecast import run_global
         return run_global(inp, out, config_dir=cdir, scenario_dir=sdir,
