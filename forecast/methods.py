@@ -279,11 +279,13 @@ register(Method(
           "chronic-pressure anticipation, and consolidation that frees a tank "
           "by packing a batch into fewer of its own. Handling mortality is "
           "charged on every deposit here; it is NOT on the Global arms. "
-          "The long-standing production engine and the greedy baseline — but "
-          "as measured on 2026-08-03 (before the 2026-08-20/21 handling-"
-          "mortality, grade-efficiency and 6N-purge changes) it left a totally "
-          "empty harvest week on 5 of 6 real PRs, so it did not meet the "
-          "steady-harvest contract rule. NOT re-measured since.",
+          "The long-standing production engine and the greedy baseline. "
+          "RE-MEASURED 2026-08-21 across all 21 PRs in pr_corpus (era "
+          "registries, current code): it leaves at least one COMPLETELY EMPTY "
+          "harvest week on 10 of 21 PRs, averaging 4.6 empty weeks per plan, "
+          "with 25.0 weeks per plan under the contract floor and a worst "
+          "non-empty week of 7,129 fish. So it still does not meet the "
+          "steady-harvest contract rule.",
 ))
 register(Method(
     key="controller-lns",
@@ -380,9 +382,20 @@ register(Method(
     knob_grid=CONTROLLER_KNOB_GRID,
     knob_space=CONTROLLER_KNOB_SPACE,
     blurb="The validated controller with the Global engine's L1 harvest "
-          "envelope fed in as a per-week target band. Meets the never-an-empty-"
-          "week contract rule; the plain controller does NOT. Measured across "
-          "6 real July-2026 PRs (2026-08-03, fixed harvest metric — BEFORE the "
+          "envelope fed in as a per-week target band. "
+          "*** AS SHIPPED THIS ARM IS INERT: it overrides hybrid_follow but NOT "
+          "hybrid_purge_lever / hybrid_production_lever, and config/control.yaml "
+          "ships BOTH false — so the guide is computed and then steers nothing. "
+          "Re-measured 2026-08-21 across all 21 PRs in pr_corpus, it is "
+          "BYTE-IDENTICAL to the plain controller on every metric: 4.6 empty "
+          "harvest weeks per plan, 10 of 21 plans with at least one, 25.0 weeks "
+          "under floor, worst week 7,129 fish. Choosing it on the board today "
+          "gets you the plain controller. Forcing the production lever on does "
+          "make the plans differ, but on the PRs tested it was not better. "
+          "Enable the levers (and sixn_level_drains, which force-refuses the "
+          "purge lever) before believing anything below. *** "
+          "The figures that follow were measured across "
+          "6 real July-2026 PRs on 2026-08-03 WITH THE LEVERS ON — BEFORE the "
           "2026-08-20/21 changes: handling mortality per deposit, "
           "grade_efficiency 0.85, purge move-in Thursday, 6N one-batch-one-"
           "tank. All four move the weekly harvest series, so re-measure before "
