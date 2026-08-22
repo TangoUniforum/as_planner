@@ -24,7 +24,7 @@ Two stages under the hood:
   emits real events (TranOG entries, transfers, harvests, grades) into a tank-level
   `FacilityState`, and runs the closed-loop harvest controller.
 
-The input workbook is **never modified**; output is written to a new file.
+The **app** never modifies your input workbook — it works on a copy and writes a fresh output file. The **CLI** writes the report sheets back into the input workbook unless `--output` names a different path (§2).
 
 ---
 
@@ -38,9 +38,10 @@ streamlit run app.py
 Opens `localhost:8501`. Flow: **upload** a Production Report → **▶ Run forecast**
 → review KPIs + tabs → **download** the output workbook.
 
-The sidebar **Mode** selector lists six windows, in the order you normally work
+The sidebar **Mode** selector lists seven windows, in the order you normally work
 in them. Each carries a one-line caption in the app itself; the same list, with
-pointers into this guide:
+pointers into this guide (the seventh, **Accuracy (forecast vs actuals)** — which
+grades a past forecast against the ProductionReport that followed it — is §14):
 
 | Mode | What it is for | Section |
 |---|---|---|
@@ -86,8 +87,13 @@ set, that's usually the reason — not a broken setting.
 Lower in the sidebar (visible in every mode, but it governs **▶ Run forecast**)
 the app shows **which planning method is currently picked**, and — when it is
 the default — why. You change it on **Compare & Choose** (§7.4), not here. The
-shipped default is **Controller — hybrid (L1-guided harvest)**: the only method
-measured to harvest something every single week (§4.5).
+shipped default is **Controller — hybrid (L1-guided harvest)** — but note that
+`config/control.yaml` ships **both of its guide levers off**
+(`hybrid_purge_lever`, `hybrid_production_lever`), so the L1 guide is computed
+and then steers nothing: as shipped this arm plans exactly what the plain
+Controller plans. Turn the levers on to get the harvest-shaping described in
+§4.5 — the purge lever additionally needs `sixn_level_drains`, or the guide
+refuses it.
 
 ### CLI
 ```
@@ -152,7 +158,7 @@ Facility-wide knobs read into `ControlParams`:
 | `sixn_growth` | 6N runs as growout (vs purge) for the whole horizon | false |
 | `sixn_production_start` | date 6N flips purge → production | e.g. 2028-01-01 |
 | `sixn_transition_weeks` | empty/fallow window at the 6N transition (0 = none) | 0 |
-| `sixn_level_drains` | **ON by default.** 6N PURGE mode only. Caps how full a 6N purge pair may get (at `max_harvest_per_week`) so weekly fills don't **accumulate** into one pair across its rotation residency — the root cause of the 90–113k drain spikes that starve other pairs into sub-`min_harvest_per_week` troughs. Surplus stays in grow-out and becomes the move-in for the next thin pair, lifting its drain toward the floor so every week meets the harvest minimum (the steady-weekly-harvest contract). *Verified vs OFF:* 6N drain peak 110k→68k (−38%), CV 0.46→0.32, weeks-below-min 38→27, fish conserved. Joins `rebalance_level` + `harvest_level_load` as a leveling default; set `false` for the old accumulate-then-dump behavior. No effect in 6N production mode | true |
+| `sixn_level_drains` | **ON in the dataclass, but the shipped `config/control.yaml` sets it `false`** — as delivered, no run has it on. 6N PURGE mode only. Caps how full a 6N purge pair may get (at `max_harvest_per_week`) so weekly fills don't **accumulate** into one pair across its rotation residency — the root cause of the 90–113k drain spikes that starve other pairs into sub-`min_harvest_per_week` troughs. Surplus stays in grow-out and becomes the move-in for the next thin pair, lifting its drain toward the floor so every week meets the harvest minimum (the steady-weekly-harvest contract). *Verified ON vs OFF:* 6N drain peak 110k→68k (−38%), CV 0.46→0.32, weeks-below-min 38→27, fish conserved. It is a **safety guard, not a lever** (`methods.py` UNTUNABLE_KNOBS): while it is off, `hybrid_guide.py` **refuses the hybrid's 6N purge lever** outright rather than steer around it — and the shipped config runs `hybrid_follow: full` with `hybrid_purge_lever: false`, so that steering is off twice over today. Set `true` to get the leveled behaviour, joining `rebalance_level` + `harvest_level_load` (which the shipped config *does* leave on); `false` is the old accumulate-then-dump behavior. No effect in 6N production mode | `true` dataclass default; **`false` in the shipped config** |
 | `starvation_period_days` | in-place purge length in 6N production mode | **7** (= one weekly step; clean single-cohort pipeline) |
 | `tran_og_default_tanks` | min tanks a TranOG arrival gets | 2–3 |
 | `density_target_pct` | per-tank density target as a fraction of cap | 0.85–0.99 |
@@ -163,7 +169,7 @@ Facility-wide knobs read into `ControlParams`:
 | `cap_repair_budget` | **end-of-week cap repair (opt-in, OFF by default)** — every *other* rebalancing pass runs before the week's growth is applied, but the reports measure the state *after* it, so a system left just under its cap grows back over with nothing left to catch it. This pass runs last, on the state that is actually reported, and moves the least it can out of any system still over its feed/biomass cap into the coldest system that can legally take it. Big, clean per-system gain; the cost lands on the **harvest floor**, and it is high-variance across ProductionReports — it was adopted and then **withdrawn** within a day (see §7.3). Off is the shipped setting; if you try it, try **8** and judge it on your own PR's worst harvest week, not on the per-system numbers | 0 (off) |
 | `harvest_setpoint_lookahead_weeks` | **VESTIGIAL** — superseded by the dual-limit setpoint (§4.1/§4.3); kept for config back-compat but **not read** by the engine. Use `facility_biomass_deviation_pct` to set how close to the cap to run | 0.75 (ignored) |
 | `harvest_level_load` | **harvest smoother (ON by default)** — enforce `max_harvest_per_week` as a HARD ceiling + pre-harvest earlier so harvest is flat and biomass stays under cap. Paired with `rebalance_level`, which otherwise spikes harvest (see §4.3). Set `false` for old reactive behavior | **true** |
-| `hybrid_follow` | **L1 HARVEST GUIDE — `full` in the shipped config (§4.5).** Runs the Global engine's whole-horizon L1 harvest envelope first and feeds it to the controller as a per-week target band. The ceiling half is the point: it tells the reactive controller to harvest **less** in fat weeks so those fish are still there for lean ones — the one thing it can never decide for itself (all its own levers are `max()`). *Measured, 6 real PRs:* **totally empty harvest weeks 6 → 0**, weeks below floor 22.5 → 9.0, worst week 0 → 16,148 fish; **cost** peak biomass 102.6 → 107.1% of cap, peak density 102 → 124. `off` = old reactive-only behaviour. `floor` is **not** a no-op (that claim was retracted 2026-08-12) but it is **dominated** — measured on the 7.29 PR it produces a genuinely different plan (worst week 23,754 vs `off`'s 20,526) yet **11** weeks below the contract floor, worse than `off`'s 9 and far worse than `full`'s 3. Applying only the guide's floor half raises the lean weeks it can reach while leaving the controller free to over-harvest the fat ones; the **ceiling** half is what actually banks fish for later. Use `full` | `full` (dataclass default `off`) |
+| `hybrid_follow` | **L1 HARVEST GUIDE — `full` in the shipped config, but INERT as shipped: both guide levers (`hybrid_purge_lever` / `hybrid_production_lever`) are `false`, so the envelope is computed and then ignored — the plan you get is the plain controller's (§4.5).** Runs the Global engine's whole-horizon L1 harvest envelope first and, once a lever is on, feeds it to the controller as a per-week target band. To make it steer, turn on **`hybrid_production_lever`** — measured best alone on the real workbook (weeks under the contract floor 20 → 14, vs 20 → 16 with both). `hybrid_purge_lever` also needs `sixn_level_drains: true` (which likewise ships `false`) or the guide refuses it outright, since level drains are the guard against over-filling one 6N pair. The ceiling half is the point: it tells the reactive controller to harvest **less** in fat weeks so those fish are still there for lean ones — the one thing it can never decide for itself (all its own levers are `max()`). *Measured, 6 real PRs:* **totally empty harvest weeks 6 → 0**, weeks below floor 22.5 → 9.0, worst week 0 → 16,148 fish; **cost** peak biomass 102.6 → 107.1% of cap, peak density 102 → 124. `off` = old reactive-only behaviour. `floor` is **not** a no-op (that claim was retracted 2026-08-12) but it is **dominated** — measured on the 7.29 PR it produces a genuinely different plan (worst week 23,754 vs `off`'s 20,526) yet **11** weeks below the contract floor, worse than `off`'s 9 and far worse than `full`'s 3. Applying only the guide's floor half raises the lean weeks it can reach while leaving the controller free to over-harvest the fat ones; the **ceiling** half is what actually banks fish for later. Use `full` | `full` (dataclass default `off`) |
 | `hybrid_follow_band` | how tightly the controller tracks the guide (± fraction). Chosen by a 90-cell paired sweep as the most **stable** setting: holds 0–1 empty weeks under neutral perturbation where wider bands drift to 3–4 | **0.05** |
 | `harvest_smooth_lookahead_weeks` | level-load window K — weeks of coming-due biomass to spread the pre-harvest over | 6 |
 | `harvest_level_target` | flat fish/week floor when level-loading (unset/null = auto from realized growth) | null |
@@ -546,8 +552,8 @@ uploaded PR."*
   the whole horizon is rejected (the planner needs weeks left to plan).
 - Conservation is enforced end-to-end: every event is counted in the audits, and
   a mis-stated `fw_to_og` cull would now **breach** the FW mass-balance gate.
-  *(One benign known approximation: 6N depuration mortality is slightly
-  under-counted in the per-tank continuity audit — within the 50-fish tolerance;
+  *(6N depuration mortality is no longer approximated: the continuity audit takes it
+  from the recorded realized biology, and since 2026-08-18 its mass is booked too;
   see §6.)*
 
 ---
@@ -696,8 +702,13 @@ matters.
 
 ### 4.5 The L1 harvest guide (the hybrid — **ON by default**): `hybrid_follow`
 
-This is the answer to *"never an empty harvest week."* It is on by default because
-without it the plain controller **leaves a totally empty week on 5 of 6 real PRs.**
+This is the *intended* answer to *"never an empty harvest week"* — but **as shipped it
+is inert.** `hybrid_follow: full` is on in `config/control.yaml`, so the L1 guide is
+computed; both levers that let it steer are shipped **off** (`hybrid_purge_lever: false`,
+`hybrid_production_lever: false`), and the purge lever is refused outright while
+`sixn_level_drains: false`. A default run therefore plans as the plain controller. To get
+the behaviour described below, set `hybrid_production_lever: true` for the production path,
+and `hybrid_purge_lever: true` **plus** `sixn_level_drains: true` for the purge path.
 
 **Why the reactive controller can't fix this itself.** Every lever it owns is a
 `max()` — it can always harvest *more*, never less. So when a fat week arrives it
@@ -716,7 +727,18 @@ a command** — the controller's own cap-shedding always wins, and the ceiling i
 never allowed below `min_harvest_per_week`.
 
 **Measured across 6 real July-2026 PRs** (2026-08-03, after the zero-harvest-week
-metric fix):
+metric fix) — **with `hybrid_purge_lever` and `hybrid_production_lever` both ON.
+`config/control.yaml` now ships both `false`**, and the guide is acted on in exactly
+three places (`forecast/placement.py`), every one of which tests a lever — so on the
+shipped config the L1 envelope is computed and then steers nothing, and a default run
+plans identically to the plain controller. The **hybrid (default)** column below is
+therefore *not* what the shipped config produces; turn the two levers on to get the
+behaviour described above. The figures also predate the 2026-08-20/21 changes
+(handling mortality on every deposit, `grade_efficiency` 0.85, Thursday purge move-in,
+6N one-batch-one-tank), all of which move the weekly harvest series, and have not been
+reproduced since. The `peak tank density` row was measured before **R8** stopped
+capping purge and harvest-prep (`STARVE`) tanks, so it counts tanks that no longer
+have a cap:
 
 | | plain controller | **hybrid (default)** |
 |---|---|---|
@@ -1147,7 +1169,7 @@ limit AND flat, not minimized:
 | `feed_var` | feed CV + swing | flat |
 | `transfers_per_fish` | avg tank-to-tank moves a fish sees | minimize handling |
 | `system_overshoot` | per-system feed+biomass over-cap fraction (compliance, §7.3) | no breach |
-| `density_overshoot` | per-tank density over-cap fraction, **OG6N purge excluded** (compliance, §7.3) | no breach |
+| `density_overshoot` | per-tank density over-cap fraction, **off-feed harvest-prep (STARVE) tanks excluded wherever they sit** (compliance, §7.3) | no breach |
 | `system_peak` | the single **hottest** (system, week) load — biomass *or* feed, as a fraction of cap | **no hot spots** |
 | `crowded_biomass_fraction` | share of grow-out biomass reared above the welfare line (§7.4) | gentler rearing / product quality |
 
@@ -1313,7 +1335,9 @@ optimizer still *measures* this trade via two compliance components:
 > `STARVE` and eat nothing, so a feed-rate check on that system can only ever
 > report 0.
 - **`density_overshoot`** — fraction of (tank, week) cells over the per-tank
-  `max_density_kg_m3` cap (the OG6N depuration pool excluded — §7.1).
+  `max_density_kg_m3` cap (every off-feed harvest-prep tank excluded — judged on
+  stage `STARVE`, not on system, so it covers 6N depuration *and* in-place
+  starvation in an ordinary grow-out tank after the 6N production switch — §7.1).
 
 Leveling is on by default, so the optimizer grid carries the **`density-only`**
 control (`rebalance_level: false`) instead — the sweep runs *both* and scores the
@@ -1467,7 +1491,7 @@ you choose a *whole* plan — never a splice.
   more tanks). It shows on the board (a lens + the per-method line), on every **Run**
   (the *Reared density* KPI), and as an **Optimize** objective — pick the *"Product
   quality"* emphasis preset to have the optimizer trade packing for gentler rearing.
-- **Stocking-for-quality frontier** (`Mode → Tune`, below the density-knob sweep). On a
+- **Stocking-for-quality frontier** (`Mode → Analyze`, at the bottom of the Analyze board). On a
   tank-full facility the density knobs can't lower density — the real quality lever is
   stocking **fewer fish**. This sweeps a stocking cut across your **future** batches
   (fish already in the facility are fixed) and plots the trade: fewer fish rear gentler
@@ -1492,8 +1516,16 @@ you choose a *whole* plan — never a splice.
 > holds 30–47k at the exact weeks the controller drops to a few hundred. It is a pacing
 > gap, not a shortage, and it is **PR-specific** (the reference PR does not exhibit it).
 > Until an anti-crater fix lands, if steady weekly harvest is critical for such a PR,
-> pick the **Global** plan on the board — it paces the whole horizon and holds the
-> floor. The regression `test_no_harvest_craters` guards this invariant.
+> **don't** reach for a Global arm: both (lexicographic LP and CP-SAT) currently
+> hard-fail the board's own **No empty week** gate, and while their L1 harvest
+> envelope is whole-horizon, their *placement* solves ONE WEEK AT A TIME seeded by
+> last week's occupancy — no more foresight than the controller. The lever that
+> actually measured is the L1 guide's steering flags: `config/control.yaml` ships
+> `hybrid_purge_lever` and `hybrid_production_lever` **false**, so the
+> `controller-hybrid` arm computes the guide and then steers nothing; turning the
+> production lever on took weeks under the contract floor 20 → 14 on the real
+> workbook with **zero** empty harvest weeks (re-measured 2026-08-21). The
+> regression `test_no_harvest_craters` guards this invariant.
 
 ---
 
@@ -1503,12 +1535,18 @@ you choose a *whole* plan — never a splice.
 - The harvest spike and the biomass overage are **two symptoms of one cause** — the
   stocking plan vs the facility's combined hold (cap) + process (55k/week) capacity.
   You can trade one for the other; eliminating both needs a stocking change.
-- **The default planning method is the L1-guided hybrid (§4.5), not the plain
-  controller.** The reactive controller leaves a *totally empty* harvest week on
-  5 of 6 real PRs — it can only ever harvest *more*, never less, so it cannot save
-  fish for a lean week it has no way of seeing. The hybrid gives it a forward
-  harvest envelope to track. This is a hard contract rule, so it outranks the
-  higher biomass peak the hybrid runs at.
+- **The default planning method is the L1-guided hybrid (§4.5) — but as shipped it
+  steers nothing.** `hybrid_follow: full` builds the L1 harvest envelope, yet the two
+  levers that apply it, `hybrid_purge_lever` and `hybrid_production_lever`, both ship
+  `false`, and `placement.py` reads the guide only behind those gates. A default run
+  therefore plans identically to the plain controller, and you get the reactive
+  behaviour: it can only ever harvest *more*, never less, so it cannot save fish for a
+  lean week it has no way of seeing. Turn both levers on to actually buy the envelope —
+  the purge one also needs `sixn_level_drains`, which ships `false` too. Measured on the
+  real workbook with the live scenario, that takes weeks under the contract floor from
+  20 → 16 with both levers, or 20 → 14 with the production lever alone, with zero empty
+  harvest weeks either way. The older "empty week on 5 of 6 PRs" and biomass-peak
+  figures predate the 2026-08-20/21 changes and have not been reproduced.
 - **The biomass peak is the reserve, not waste.** Every knob that shrinks it —
   wider deviation band, guide smoothing, a more aggressive grading trigger —
   puts empty harvest weeks back. All measured across 6 real PRs; none is a
@@ -1632,12 +1670,17 @@ it on (`placement_method: lns`) never changes a greedy run's result unless it fi
 **What it does.** After the normal (greedy) plan is realized, LNS looks at the hottest
 grow-out **(system, week)** and **relocates** a feed/biomass-heavy tank's worth of fish
 to a free tank in a cooler system — or, when the facility is full, tries to **swap** it
-with a lighter batch in a cooler system. Each move is emitted as a normal, conserved
-`Transfer`.
+with a lighter batch in a cooler system. Each move is a **relabel** of an existing occupancy segment — the batch's location rows
+and its existing arrival/exit events are re-pointed at the new tank — so **no new
+`Transfer` is emitted**. It therefore costs neither handling mortality nor handling
+budget, and an `lns` run's transfer count is comparable with the plain controller's.
 
 **Why it's safe (the floor is greedy).** Every candidate move is checked against the
 **real continuity audit** (0 drift), input conservation (0 dropped batches), and must
-**strictly lower the hot-spot peak** — otherwise it's reverted. Any error falls back to
+**never raise the hot-spot peak** while strictly improving the lexicographic
+(peak, over-cap area, balance CV) objective — so a peak-neutral move that cuts the
+total over-cap area, or evens the load between systems, is kept, while a move that
+lowers the peak by pushing *more* total area over cap is not. Anything else is reverted. Any error falls back to
 greedy. So it can never make a run worse or break conservation. Knob `lns_max_moves`
 (default 30) caps how many moves it will make.
 
@@ -1716,8 +1759,15 @@ and a plan the crew can execute.
   objective, but nothing caps a week, so expect weeks well over the budget. The
   handling-budget gate in Analyze will show it — and that gate is soft, so it
   will not stop the plan being recommended.
-- **They enforce only part of the tier rulebook.** The Global pick imports only
-  `SIXN_SYSTEM`, `is_entry` and `move_allowed` from `forecast/tiers.py`. R2, R3
+- **They enforce only part of the tier rulebook.** - **They enforce only part of the tier rulebook.** The Global pick imports only
+  `SIXN_SYSTEM`, `is_entry`, `move_allowed` and `effective_density_cap` (R8)
+  from `forecast/tiers.py` — and the last of those only to *label* rows: it
+  clears an already-flagged `oversub` when R8 exempts the tank, and never
+  rejects a placement. R2, R3 and R4 are checked when a move is paired up, and
+  CP-SAT respects R6. **R1, R5 and R7 are not checked at all.** Worse, when no
+  legal source exists for a move the pick **emits the move anyway** and logs a
+  `TOPOLOGY VIOLATION` row — the controller would have refused it and left
+  state unchanged. R2, R3
   and R4 are checked when a move is paired up, and CP-SAT respects R6. **R1, R5
   and R7 are not checked at all.** Worse, when no legal source exists for a move
   the pick **emits the move anyway** and logs a `TOPOLOGY VIOLATION` row — the
@@ -1812,11 +1862,14 @@ that whole composition in one flow and ends in a single recommendation card:
      Business constants (`min_harvest_weight_g`, stocking) and the
      operational rules (`max_harvest_per_week`, `harvest_relief_pct`,
      `min_harvest_per_week`, `max_transfers_per_week`) are **untunable by
-     anyone** — the registry rejects a space that touches them. So are three
+     anyone** — the registry rejects a space that touches them. So are five
      knobs that are not policy at all: `grade_efficiency` and
      `handling_mortality_pct` describe **physical facts** — your grader and
-     your losses — and `global_assume_primed_6n` is a **modelling
-     assumption**. A search that pushed the grader to 1.0, dropped the
+     your losses — `global_assume_primed_6n` is a **modelling assumption**,
+     `sixn_level_drains` is a **safety guard** (it is what stops a raised
+     move-in accumulating into one 6N pair), and `hybrid_follow` is the
+     **arm's identity** — a space containing it could turn `controller` into
+     `controller-hybrid` and have the board compare a method with itself. A search that pushed the grader to 1.0, dropped the
      handling loss, or switched the 6N prime back on would score better by
      redefining the facility rather than by planning it better, which is the
      one thing a search must never be able to buy. A **run budget** expander shows the
@@ -2061,7 +2114,7 @@ difference smaller than it.
 
 Every run with `auto_calibrate_fw` on back-solves each freshwater batch's
 `fw_correction` and rewrites it — `B37: fw_correction 1.000 -> 0.774` means the
-model grew that batch **23 % faster than reality**. Those rewrites used to
+model grew that batch **29 % faster than reality**. Those rewrites used to
 scroll past in the run log and land in one workbook's `ValidationLog`, so a
 correction needed every month for six months looked exactly like a one-off.
 

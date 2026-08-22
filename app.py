@@ -715,8 +715,8 @@ _CONTROL_HELP = {
         "UNCONDITIONALLY, because leaving it off produced empty harvest weeks "
         "and that breaks the steady-harvest contract. Flipping this box "
         "changes only a line in the run summary. Kept so older configs still "
-        "load."
-        + _VALIDATED,
+        "load. Nothing to tune: no Analyze/Optimize search touches it, and no "
+        "setting of it changes a plan.",
     "sixn_level_drains":
         "Levels the flow through depuration: caps how full one 6N pair may "
         "get (at the weekly harvest limit) so weekly fills don't pile into a "
@@ -724,8 +724,9 @@ _CONTROL_HELP = {
         "harvests (measured: biggest weekly drain 110k -> 68k fish, more "
         "weeks meeting the floor). Only affects depuration mode — but note "
         "that turning it OFF also disables the harvest guide's 6N staging "
-        "lever, whatever that checkbox says."
-        + _VALIDATED,
+        "lever, whatever that checkbox says. Validated by measurement — and "
+        "held OUT of every Analyze/Optimize search as a safety guard, so this "
+        "one you do set by hand.",
     "density_target_pct":
         "How full to pack each tank when placing fish, as a fraction of that "
         "tank's density cap. 0.90 = fill to 90%, leaving 10% headroom for "
@@ -839,11 +840,22 @@ _CONTROL_HELP = {
     "hybrid_follow":
         "The long-horizon harvest guide (the 'hybrid'). 'full': before "
         "planning, the app computes a whole-horizon harvest "
-        "plan and the weekly controller must follow it as a target band — it "
+        "plan and the weekly controller aims at it as a target band — it "
         "is told to harvest LESS in fat weeks so those fish are still there "
         "for the lean ones, the one thing a week-by-week planner cannot see "
-        "for itself. Measured on 6 real PRs: totally empty harvest weeks 6 → "
-        "0; the cost is a higher biomass peak (the held-back fish are still "
+        "for itself. IT STEERS ONLY THROUGH THE TWO LEVERS BELOW ('guide "
+        "lever: 6N staging (purge)' and 'guide lever: harvest cap "
+        "(production)'): this install ships BOTH OFF, so the guide is "
+        "computed and then IGNORED and 'full' produces the same plan as "
+        "'off' — measured byte-identical to the plain controller across 21 "
+        "PRs on 2026-08-21. The purge lever is refused outright whenever "
+        "'Level 6N purge drains' is off (it is, here). Switching the levers "
+        "on does work: on the real workbook weeks under the harvest floor "
+        "fall 20 → 16 with both, 20 → 14 with the production lever alone, "
+        "with no empty harvest weeks. Measured on 6 real PRs on 2026-08-03 "
+        "WITH THE LEVERS ON, before four 2026-08-20/21 changes and not "
+        "reproduced since: totally empty harvest weeks 6 → 0; the cost is a "
+        "higher biomass peak (the held-back fish are still "
         "in the water). 'off' = old reactive-only planning (leaves empty "
         "weeks). 'floor' = only lifts short weeks (a no-op in practice)."
         + _VALIDATED,
@@ -6237,7 +6249,7 @@ def _optimizer():
          "Grid + Deep (best of both)"],
         horizontal=True,
         help="TWO search algorithms, offered as FOUR choices. GRID (Quick = 4 configs, "
-             "Full = 28) enumerates a hand-picked list — fast and broad, but mostly one "
+             "Full = 31) enumerates a hand-picked list — fast and broad, but mostly one "
              "knob at a time, so it misses COMBINATIONS. DEEP SEARCH is a coordinate "
              "descent that tunes one knob at a time and FINDS combinations (~15–30 runs). "
              "GRID + DEEP runs the full grid, then deep-searches FROM the grid's best and "
