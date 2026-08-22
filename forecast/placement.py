@@ -2483,6 +2483,7 @@ def _even_out_density(
     max_moves: Optional[int] = None,
     relief_pct: float = 0.90,
     chronic_relief_pct: float = 0.80,
+    headroom_pct: float = 0.90,
 ) -> None:
     """Even fish across a batch's tanks when any tank is over density cap.
 
@@ -2594,7 +2595,11 @@ def _even_out_density(
     # density-trigger Grade (also runs in this week) doesn't fire on the
     # new destination — that would spawn extra grade events and could
     # cascade-violate other tanks.
-    HEADROOM_PCT = 0.90
+    # R31 density_target_pct, threaded in like relief_pct beside it --
+    # `control` is NOT in scope here. Was a bare 0.90 that happened to
+    # equal the shipped value, so retuning density_target_pct moved
+    # every other sizing decision but not this relief headroom.
+    HEADROOM_PCT = float(headroom_pct or 0.90)
     # RELIEF MARGIN: shed to 90% of cap, not to exactly 100%. Relieving to the
     # cap left zero headroom and the tank re-breached within one week of growth
     # -- instrumented on the 8.13.26 workbook, this pass drove OG1S-12 /
@@ -5115,6 +5120,8 @@ def phase_d_emit_events(
                     relief_pct=float(getattr(control, "density_relief_pct", 0.90)),
                     chronic_relief_pct=float(getattr(control,
                                                      "chronic_relief_pct", 0.80)),
+                    headroom_pct=float(getattr(control,
+                                               "density_target_pct", 0.90)),
                 )
 
             # Multi-objective balancer: relieve any tank still over density cap

@@ -300,7 +300,10 @@ def sixn_outbound_transfers(out_path, production_start_iso: str = ""
     Returns the violation count, or None when the sheet is absent (the gate
     reports N/A, never a false verdict)."""
     import openpyxl
-    sixn = {"61", "63", "65", "67", "69", "71"}
+    # The 6N tank ids have ONE definition (sixn.SIXN_PAIRS -> SIXN_ALL_TANKS).
+    # A literal set here silently disagrees the day a pair changes.
+    from .sixn import SIXN_ALL_TANKS
+    sixn = {str(t) for t in SIXN_ALL_TANKS}
     cutoff = ""
     if production_start_iso:
         try:
