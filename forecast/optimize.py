@@ -82,6 +82,17 @@ OPT_FULL_GRID = [
     ("dev=0.005 (tight)", {"facility_biomass_deviation_pct": 0.005}),
     ("dev=0.02 (loose)", {"facility_biomass_deviation_pct": 0.02}),
     ("smooth:K12", {"harvest_smooth_lookahead_weeks": 12}),
+    # ---- hybrid levers ------------------------------------------------------
+    # Only meaningful on an arm whose hybrid_follow is not "off" (run_method
+    # applies a method's own overrides LAST, so the `controller` arm keeps
+    # hybrid_follow: off and these rows are inert there — by design: the grid is
+    # shared across the family). Measured on the real workbook: weeks under the
+    # contract floor 20 -> 16 (both) and 20 -> 14 (production only).
+    ("hybrid:prod-lever", {"hybrid_production_lever": True}),
+    ("hybrid:both-levers", {"hybrid_production_lever": True,
+                            "hybrid_purge_lever": True}),
+    ("hybrid:levers-off", {"hybrid_production_lever": False,
+                           "hybrid_purge_lever": False}),
     # ---- density relief / consolidation policy -------------------------------
     # Added 2026-08-21. These were hand-tuned on ONE workbook and the reference
     # fixture disagreed with the real workbook about the best values, so they
@@ -1540,6 +1551,26 @@ def sweep(input_path, config_dir, scenario_dir, grid=None, progress=None,
 # loss either side (3500 -> 10,450 worst week), so a descent axis would only
 # rediscover it at the cost of runs.
 CD_KNOB_SPACE = [
+    # THE HYBRID LEVERS (added 2026-08-21). These gate whether the L1 harvest
+    # guide actually steers: placement.py acts on the guide in exactly three
+    # places and all three test a lever, so with both false the guide is built
+    # and then ignored — which is how controller-hybrid came to be BYTE-
+    # IDENTICAL to the plain controller on the shipped config, unnoticed,
+    # while its blurb claimed it met a contract rule the controller failed.
+    #
+    # They belong in the search because the choice is genuinely empirical and a
+    # human picking it got it wrong: on the real workbook, weeks under the
+    # contract floor go 20 -> 16 with both levers and 20 -> 14 with the
+    # production lever ALONE. Nothing about that is obvious from the code.
+    #
+    # NOT here: `hybrid_follow` (it DEFINES which arm you are running — a search
+    # free to set it could turn `controller` into `controller-hybrid` and make
+    # the board compare a method with itself) and `sixn_level_drains` (a safety
+    # guard, see UNTUNABLE_KNOBS). `hybrid_purge_lever` is refused outright
+    # while that guard is off, so on the shipped config this axis is a no-op —
+    # it is included so the search still explores it wherever the guard is on.
+    ("hybrid_production_lever", [False, True]),
+    ("hybrid_purge_lever", [False, True]),
     ("tran_og_default_tanks", [2, 3]),
     ("facility_biomass_deviation_pct", [0.005, 0.01, 0.02]),
     ("harvest_smooth_lookahead_weeks", [6, 12]),

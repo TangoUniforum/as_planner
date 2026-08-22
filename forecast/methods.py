@@ -99,6 +99,20 @@ UNTUNABLE_KNOBS = frozenset({
     # picker cannot execute — choosing fiction because fiction scores better,
     # which is the same failure mode as tuning the grader.
     "global_assume_primed_6n",
+    # A SAFETY GUARD, not a lever (2026-08-21). sixn_level_drains is what stops
+    # a raised move-in accumulating into ONE 6N pair and starving the others —
+    # the documented 90-113k drain-spike backfire — and hybrid_guide.py refuses
+    # the purge lever outright while it is off rather than steering around it.
+    # A search that could switch a guard off to score better is a search that
+    # sells a rule to buy a number.
+    "sixn_level_drains",
+    # DEFINES WHICH ARM YOU ARE RUNNING, so it is not the search's to set: a
+    # space containing it could turn `controller` into `controller-hybrid` and
+    # have the Compare board unknowingly compare a method with itself. The
+    # levers above ARE tunable — they are policy WITHIN an arm; this is the
+    # arm's identity. (hybrid_follow_band stays tunable for the same reason:
+    # band width is policy, not identity.)
+    "hybrid_follow",
 })
 
 # Controller-family space: the existing full optimizer space — the broad grid

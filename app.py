@@ -867,17 +867,24 @@ _CONTROL_HELP = {
         "the fat-week/lean-week signal the guide exists to carry). Unit: "
         "weeks. Default: 0.",
     "hybrid_purge_lever":
-        "Diagnostic kill switch: allows the harvest guide to steer how much "
-        "is staged into 6N depuration each week. On by default; turn off only "
-        "to isolate a suspected guide misbehaviour to one mechanism (this one "
-        "or the production lever) without a code change. Forced off whenever "
-        "'Level 6N purge drains' is off, regardless of this box.",
+        "Lets the harvest guide steer how much is staged into 6N depuration "
+        "each week. NOT a diagnostic switch — it is one of the two gates that "
+        "decide whether the guide does anything at all: with BOTH levers off "
+        "the guide is computed and then ignored, which made the "
+        "'Controller — hybrid' method byte-identical to the plain controller. "
+        "Default is ON in code, but this install ships it OFF — check the box "
+        "below rather than assuming. Forced off whenever 'Level 6N purge "
+        "drains' is off (that is a safety guard against over-filling one 6N "
+        "pair, and the guide is not allowed to remove it). Now part of the "
+        "optimizer's search space, so a tuned run can settle it for you.",
     "hybrid_production_lever":
-        "Diagnostic kill switch: allows the harvest guide to steer the weekly "
-        "harvest ceiling and off-feed entry once 6N is in grow-out mode. On "
-        "by default; turn off only to isolate a suspected guide misbehavior "
-        "to one mechanism (this one or the purge lever) without a code "
-        "change.",
+        "Lets the harvest guide steer the weekly harvest ceiling and off-feed "
+        "entry once 6N is in grow-out mode. NOT a diagnostic switch — see the "
+        "purge lever above: with both off the guide steers nothing. Default is "
+        "ON in code, but this install ships it OFF. Measured on the real "
+        "workbook (2026-08-21): turning THIS lever on alone took weeks under "
+        "the contract floor from 20 to 14, better than turning both on (16). "
+        "Now part of the optimizer's search space.",
 }
 
 # Friendly display labels for the Control editor (the raw field name stays the key).
