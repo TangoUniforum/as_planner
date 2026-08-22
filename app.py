@@ -3244,9 +3244,12 @@ def _manual_window_editor(uploaded):
                         st.caption(
                             "✓ Every grow-out tank and system, and the "
                             "whole-facility biomass total, are within limits "
-                            "across this window. The 6N depuration tanks are "
-                            "not checked here (dense, off-feed fish awaiting "
-                            "harvest is normal); their system biomass cap is "
+                            "across this window. Tanks whose fish are off "
+                            "feed for harvest carry NO density cap (rule R8) "
+                            "— 6N while it purges, and ANY tank starving in "
+                            "place — so they are not flagged here (dense, "
+                            "off-feed fish awaiting harvest is normal). 6N's "
+                            "system biomass cap is still "
                             "checked on the SystemLimitsAudit sheet after a "
                             "run.")
                     else:
@@ -4620,10 +4623,13 @@ lift a plan above one that beats it on an earlier tier.""")
   the crew execute this". Layer 8 has the full list — read it before
   adopting a Global plan.
 * **Only two gates can actually sink a plan.** Conservation and
-  never-an-empty-week are the hard ones. Two more can never even reach FAIL
-  by design — harvest targets and per-batch density stop at WARN. The
-  remaining four (biomass cap, processing limit, R7, handling budget) *can*
-  read FAIL but are soft: they rank a plan down, they do not disqualify it.
+  never-an-empty-week are the hard ones. THREE more can never even reach
+  FAIL by design — the weekly contract floor, harvest targets and
+  per-batch density stop at WARN. (The floor still binds, just not here:
+  a tuned tournament will not promote a variant that starves its lean
+  weeks.) The remaining three (biomass cap, processing limit, handling
+  budget) *can* read FAIL but are soft: they rank a plan down, they do
+  not disqualify it.
   So a plan can be recommended with a red handling gate — the checklist
   shows it, and it is your call, not the tool's.
 * **Severe per-batch density clusters are a stocking problem.** When a
@@ -6551,8 +6557,13 @@ def _optimizer():
     with c2:
         st.subheader("Transfers by type — recommended")
         tt = best.metrics.transfers_by_type
-        st.caption("TranOG + Transfer are structural; Grade is the discretionary "
-                   "part the rebalancer budgets add (the handling/density trade).")
+        st.caption("TranOG is the FW→SW arrival (From_Tank reads 'FW'). "
+                   "TRANSFER rows are the real "
+                   "tank-to-tank moves — structural progression PLUS whatever "
+                   "the rebalancer's budgeted relief passes add — and they "
+                   "alone spend the weekly handling budget. Grade legs "
+                   "re-split a tank's own fish and are not moves between "
+                   "tanks.")
         st.dataframe(pd.DataFrame([{"Type": k, "Fish moved": round(v)} for k, v in tt.items()]),
                      use_container_width=True, hide_index=True)
 
@@ -7099,10 +7110,14 @@ def _compare_and_choose():
             "- **peak % cap** — the single busiest *system-week's* biomass/feed "
             "load vs that system's cap. 100% = right at the cap; over 100% = a "
             "system runs hot that week.\n"
-            "- **moves/fish** — tank-to-tank transfers ÷ fish placed. Lower = less "
+            "- **moves/fish** — fish handled (TranOG arrivals + tank-to-tank "
+            "transfers + grading legs) ÷ fish stocked. Lower = less "
             "handling, stress and labour.\n"
-            "- **density** — the worst per-tank density (kg/m³) reached "
-            "anywhere; compare it to that tank's own cap in Configure → "
+            "- **density** — the worst per-tank density (kg/m³) among "
+            "tanks still REARING fish. Harvest-prep tanks are excluded, "
+            "judged on STAGE (`STARVE`, rule R8), so it covers 6N "
+            "depuration AND in-place starvation in an ordinary grow-out "
+            "tank. Compare it to that tank's own cap in Configure → "
             "Facility (grow-out tanks ship at 95). Lower = more headroom.\n"
             "- **between-sys CV** — how *evenly* biomass is spread **system-to-"
             "system**. 0 = perfectly balanced; higher = some systems packed while "
@@ -8270,9 +8285,11 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
                   f"{r.get('mean_rearing_density', 0):.0f} kg/m³",
                   help=f"Product-quality view: the biomass-weighted average density "
                        f"your fish were REARED at over grow-out (lower = gentler = "
-                       f"better welfare / flesh quality). The delta shows the share "
-                       f"of biomass that spent time above the {_wl:.0f} kg/m³ "
-                       f"welfare line.",
+                       f"better welfare / flesh quality). The delta is the "
+                       f"share of grow-out biomass-WEEKS spent above the "
+                       f"{_wl:.0f} kg/m³ welfare line — time-weighted "
+                       f"exposure, NOT the share of biomass that was ever "
+                       f"crowded.",
                   delta=f"{r.get('crowded_biomass_fraction', 0) * 100:.0f}% crowded",
                   delta_color="inverse")
         if r.get("welfare_density_note"):
@@ -8512,8 +8529,9 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
                     "fed plan (after harvest + FIFO), the exact series the feed "
                     "caps are checked against. NOT the unharvested biology "
                     "projection (which ignores harvest and spikes well past the "
-                    "cap). Each dashed line is the cap for the system(s) named on "
-                    "it — OG1/2 and OG3-6 do not share a feed cap. Lines riding "
+                    "cap). Each dashed line is the cap for the system(s) named "
+                    "on it; as shipped EVERY OG system carries the same "
+                    "3,000 kg/day cap, so they collapse to one line. Lines riding "
                     "just under their own cap = leveled correctly; brief "
                     "crossings are the residual over-cap weeks."
                 )
@@ -8609,9 +8627,20 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
                     _dcap = float(r.get("growout_density_cap") or 95.0)
                     fig.add_hline(y=_dcap, line_dash="dash", line_color="red",
                                   annotation_text="cap")
-                    fig.add_hline(y=_dcap * 0.85, line_dash="dot",
+                    # R31 `density_target_pct` is what the planner actually
+                    # aims at (precalc sizing, placement sizing, the Phase D
+                    # grade trigger). Read it from the config rather than
+                    # hard-coding 85%, which was never this target.
+                    _dt = 0.90
+                    try:
+                        from forecast.config_io import load_control as _lc
+                        _dt = float(getattr(_lc(CONFIG_DIR),
+                                            "density_target_pct", 0.90) or 0.90)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    fig.add_hline(y=_dcap * _dt, line_dash="dot",
                                   line_color="orange",
-                                  annotation_text="85% target")
+                                  annotation_text=f"{_dt * 100:.0f}% target")
                     fig.update_layout(height=350, yaxis_title="kg/m³")
                     st.plotly_chart(fig, use_container_width=True)
                 with c4:
@@ -9007,8 +9036,10 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
             bp = next((p for p in bplans if p["Batch"] == pick), bplans[0])
             m1, m2, m3, m4 = st.columns(4)
             m1.metric("SW entry", bp["SW_entry"],
-                      help="The week this batch enters seawater (its FW→OG / "
-                           "TranOG transfer).")
+                      help="The FIRST week this batch appears in seawater — "
+                           "its FW→OG / TranOG transfer, or the forecast "
+                           "start week for a batch already in seawater "
+                           "(marked 'In-flight at forecast start' below).")
             m2.metric("Peak tanks", bp["Peak_tanks"],
                       help="The most grow-out tanks this batch occupies at once — "
                            "its peak facility footprint.")

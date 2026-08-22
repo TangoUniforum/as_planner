@@ -15,8 +15,10 @@ Controller family runs forecast/placement.py, which charges handling mortality
 on every tank-to-tank deposit and carries the OG1/2 density relief,
 consolidation and chronic-pressure work. The Global family runs its own
 placement and none of that: its transfers are FREE and it has no density-relief
-policy. Both families DO share the biology (forecast/biology.py, including the
-imperfect grader) and the R8 density exemption (forecast/tiers.py).
+policy. Both families DO share the R8 density exemption (forecast/tiers.py) and the
+core biology (forecast/biology.py) -- but NOT the imperfect grader:
+`grade_efficiency` is read only in placement.py and manual_events.py, so a
+Global arm grades perfectly at the cut line while a Controller arm does not.
 
 So: compare harvest SHAPE and contract compliance across families, but compare
 transfer counts and density-relief behaviour only WITHIN a family. A
@@ -347,7 +349,11 @@ register(Method(
           "pressure anticipation, and NO handling mortality on its "
           "transfers (its moves are FREE, so its transfer count is not "
           "comparable with a Controller arm's). It DOES share the R8 "
-          "density exemption and the biology, incl. grade_efficiency. "
+          "density exemption and the core biology, but NOT the "
+          "imperfect grader: grade_efficiency is read only in "
+          "placement.py and manual_events.py (off control/state), so a "
+          "Global arm grades PERFECTLY at the cut line and its size "
+          "splits are cleaner than any Controller arm's. "
           "Since 2026-08-21 it models the REAL 6N handover "
           "(global_assume_primed_6n=false): expect a genuine startup ramp "
           "over the first ~2 purge-hold weeks rather than a smooth week 1.",
@@ -392,7 +398,11 @@ register(Method(
           "pressure anticipation, and NO handling mortality on its "
           "transfers (its moves are FREE, so its transfer count is not "
           "comparable with a Controller arm's). It DOES share the R8 "
-          "density exemption and the biology, incl. grade_efficiency. "
+          "density exemption and the core biology, but NOT the "
+          "imperfect grader: grade_efficiency is read only in "
+          "placement.py and manual_events.py (off control/state), so a "
+          "Global arm grades PERFECTLY at the cut line and its size "
+          "splits are cleaner than any Controller arm's. "
           "Since 2026-08-21 it models the REAL 6N handover "
           "(global_assume_primed_6n=false): expect a genuine startup ramp "
           "over the first ~2 purge-hold weeks rather than a smooth week 1.",
@@ -426,10 +436,11 @@ register(Method(
           "registries carry 7 of 19 batches with no real calibration and "
           "inferred arrival dates, and they produce 4.6 empty weeks per plan "
           "where the real workbook produces NONE. Do not compare methods on "
-          "reconstructed corpus registries.) The levers are NOT reachable by "
-          "the optimizer: they appear in neither CONTROLLER_KNOB_SPACE nor "
-          "CONTROLLER_KNOB_GRID, so a tuned tournament leaves this arm inert "
-          "and reports it tying with the controller on every configuration. "
+          "reconstructed corpus registries.) The levers ARE now reachable "
+          "by the optimizer -- both sit in CONTROLLER_KNOB_SPACE and the "
+          "grid carries hybrid:prod-lever / both-levers / levers-off -- so "
+          "a TUNED tournament can switch them on. Only the STOCK arm is "
+          "inert and ties with the plain controller. "
           "The 2026-08-03 figures below predate four changes and have not been "
           "reproduced. *** "
           "The figures that follow were measured across "
