@@ -4011,6 +4011,70 @@ def _config_editor():
 # How it works — the plain-language rulebook (operator request)
 # ============================================================
 
+def _hv_error_model():
+    """The measured forecast-error model, or None when there isn't one.
+
+    Absence is the normal state of a fresh clone (no backtest has been run), and
+    the caller must then show plan numbers with NO band rather than inventing
+    one. Cached per session: it is a small static JSON.
+    """
+    key = "_hv_error_model_cache"
+    if key not in st.session_state:
+        from forecast.error_bands import load_error_model
+        st.session_state[key] = load_error_model(_ROOT)
+    return st.session_state[key]
+
+
+def _hv_month_bands(months, values, model):
+    """Per-month (low_t, high_t), or None for months that must not be banded.
+
+    Horizon is counted from the FIRST harvest month in the plan, which is the
+    forecast's own start — the same clock the error model was measured on. A
+    month outside the quotable window, or one the model rates too thin, returns
+    None so the chart draws no whisker there at all.
+    """
+    from forecast.error_bands import apply_band, band_for_horizon, months_between
+    import datetime as _d
+    out = []
+    if not months:
+        return out
+    def _first(m):
+        return _d.date(int(str(m)[:4]), int(str(m)[5:7]), 1)
+    start = _first(min(months))
+    for m, v in zip(months, values):
+        try:
+            h = months_between(start, _first(m))
+        except (ValueError, TypeError):
+            out.append(None)
+            continue
+        out.append(apply_band(float(v), band_for_horizon(model, h)))
+    return out
+
+
+def _hv_band_caption(model, bands) -> str:
+    """One honest sentence under the chart. Says what the whiskers mean, what
+    they do NOT cover, and why some months have none."""
+    from forecast.error_bands import QUOTABLE_MAX_MONTHS, describe
+    if not model:
+        return ("Bars are the planned tonnage. " + describe(None) +
+                " Run `tools/backtest.py` then `tools/error_model.py` to "
+                "measure one from your own Production Reports.")
+    n_banded = sum(1 for b in bands if b)
+    n_plain = len(bands) - n_banded
+    msg = ("Whiskers show where past forecasts of THIS facility actually "
+           "landed at the same distance ahead — not a modelling assumption. "
+           + describe(model))
+    if n_plain:
+        msg += (f" {n_plain} later month(s) carry no whisker: beyond "
+                f"{QUOTABLE_MAX_MONTHS} months the measurement is still "
+                f"distorted by harvest timing, so a band there would look "
+                f"more certain than it is.")
+    msg += (" The band covers BIOLOGY (how fast fish grow). It does NOT cover "
+            "execution: harvest COUNT is your plan, so harvesting a different "
+            "number of fish moves tonnage for reasons no growth model can see.")
+    return msg
+
+
 def _hiw_knobs():
     """Live Control values for the How-it-works page, with dataclass fallbacks
     — so the page shows the numbers THIS install actually runs with and never
@@ -8720,10 +8784,30 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
                     Count=("Count", "sum"),
                 ).reset_index()
                 st.markdown("**Monthly harvest (sales planning)**")
+
+                # CONFIDENCE BAND on the tonnage, from measured history. The
+                # whiskers are not a model assumption: they are where past
+                # forecasts of this facility actually landed at the same
+                # horizon (tools/backtest.py -> tools/error_model.py). Months
+                # with no sound measurement get NO whisker rather than a
+                # made-up one — see forecast/error_bands.py.
+                _emodel = _hv_error_model()
+                _bands = _hv_month_bands(mo["Month"].tolist(),
+                                         mo["HOG_t"].tolist(), _emodel)
+                st.caption(_hv_band_caption(_emodel, _bands))
+
                 cc1, cc2 = st.columns(2)
                 with cc1:
                     fig = px.bar(mo, x="Month", y="HOG_t", text_auto=".0f",
                                  title="HOG tonnes harvested per month")
+                    if any(b is not None for b in _bands):
+                        fig.update_traces(error_y=dict(
+                            type="data", symmetric=False,
+                            array=[(b[1] - v) if b else 0.0
+                                   for b, v in zip(_bands, mo["HOG_t"])],
+                            arrayminus=[(v - b[0]) if b else 0.0
+                                        for b, v in zip(_bands, mo["HOG_t"])],
+                            color="#444", thickness=1.4, width=6))
                     fig.update_layout(height=320, yaxis_title="t HOG", xaxis_title="")
                     st.plotly_chart(fig, use_container_width=True)
                 with cc2:

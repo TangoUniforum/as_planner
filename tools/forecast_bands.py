@@ -50,12 +50,20 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import sys
 from pathlib import Path
 
-import openpyxl
+_ROOT = Path(__file__).resolve().parent.parent
+if str(_ROOT) not in sys.path:                 # so it runs from any cwd
+    sys.path.insert(0, str(_ROOT))
 
-# Horizons the operator has accepted as sound enough to quote (2026-08-21).
-QUOTABLE_MAX_MONTHS = 3
+import openpyxl                                                  # noqa: E402
+
+# Band arithmetic lives in forecast/error_bands.py — the SAME module the app
+# renders from, so a number on screen and a number here cannot disagree. This
+# file is the CLI around it, not a second implementation.
+from forecast.error_bands import (QUOTABLE_MAX_MONTHS, apply_band,   # noqa: E402
+                                  band_for_horizon, describe)
 
 
 def _months_between(a: dt.date, b: dt.date) -> int:
@@ -108,15 +116,6 @@ def read_harvest_months(path: Path):
     return sorted((m, v[0], v[1]) for m, v in agg.items())
 
 
-def band_for(model: dict, horizon: int):
-    """(median, p10, p90, n) for a horizon, or None when not quotable."""
-    h = (model.get("horizons_months") or {}).get(str(horizon))
-    if not h or h.get("weak"):
-        return None
-    return (h.get("median_signed_pct"), h.get("p10_pct"),
-            h.get("p90_pct"), h.get("n"))
-
-
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--forecast", required=True)
@@ -131,25 +130,24 @@ def main() -> int:
         return 1
 
     start = months[0][0]
-    print(f"forecast starts {start}; error model from "
-          f"{model.get('batches_used')} graded batch reads\n")
+    print(f"forecast starts {start}. " + describe(model) + "\n")
     print(f"{'month':>10}{'horizon':>9}{'plan HOG t':>12}"
           f"{'low t':>10}{'high t':>10}{'band':>18}   basis")
     tot_p = tot_lo = tot_hi = 0.0
     for m, _cnt, hog in months:
         h = _months_between(start, m)
         t = hog / 1000.0
-        b = band_for(model, h) if 1 <= h <= args.max_horizon else None
+        b = band_for_horizon(model, h, args.max_horizon)
         if b is None:
             why = ("in-month" if h < 1 else
                    f"beyond {args.max_horizon}m — INDICATIVE, not a band")
             print(f"{m:%Y-%m}{h:>9}{t:>12,.0f}{'—':>10}{'—':>10}{'—':>18}   {why}")
             continue
-        med, p10, p90, n = b
-        # actual = predicted / (1 + err). A HIGH error means the model ran hot,
-        # so the p90 error gives the LOW tonnage edge. The bounds cross over.
-        lo = t / (1.0 + p90 / 100.0)
-        hi = t / (1.0 + p10 / 100.0)
+        med, p10, p90, n = (b["median_pct"], b["p10_pct"], b["p90_pct"], b["n"])
+        _ap = apply_band(t, b)      # the inversion lives in error_bands
+        if _ap is None:
+            continue
+        lo, hi = _ap
         tot_p += t
         tot_lo += lo
         tot_hi += hi
