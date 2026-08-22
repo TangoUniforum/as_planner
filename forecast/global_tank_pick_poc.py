@@ -545,9 +545,14 @@ def pick_tanks(
         #   * system load: destination biomass + feed kept under cap (checked)
         #   * tanks:      free_clean only -> never over-subscribes, 0-drift
         BIO_CAP, FEED_CAP = 400000.0, 3000.0
-        # Relieve toward 0.97 of the HARD cap (not the softer operating target),
-        # so ONLY genuinely over-cap tanks get spread — fixing the real >95
-        # breaches while leaving acceptable 85-95 tanks alone (minimize transfers).
+        # Relieve toward 0.97 of each tank's HARD cap (not the softer operating
+        # target), so ONLY genuinely over-cap tanks get spread and the transfer
+        # count stays minimal. NOTE: this is deliberately NOT
+        # density_target_pct -- that knob is the fill TARGET, this is the
+        # "already breaching" line. The 85-95 band this comment used to call
+        # acceptable no longer exists: config/facility.yaml now caps OG tanks at
+        # 85 (6N at 120) per the operator ruling of 2026-08-22, so 85-95 is
+        # entirely over cap.
         op_per_tank = smallest_og_tank_kg(facility) * 0.97
         batch_feed: dict[str, float] = {}
         for p in plist:

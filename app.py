@@ -2269,7 +2269,17 @@ def _mw_cut_weights(avg_wt_g, cv_pct, count, k):
     if sigma <= 0:
         return avg_wt_g, avg_wt_g
     z = NormalDist().inv_cdf(1.0 - k / count)
-    return upper_truncated_split(avg_wt_g, cv, avg_wt_g + sigma * z)
+    # Same imperfect grader the engine applies (control.grade_efficiency).
+    # Omitting it took upper_truncated_split's 1.0 default -- a PERFECT cut --
+    # so this preview promised a cleaner split than the run would deliver.
+    _ge = 1.0
+    try:
+        from forecast.config_io import load_control as _lc
+        _ge = float(getattr(_lc(CONFIG_DIR), "grade_efficiency", 1.0) or 1.0)
+    except Exception:  # noqa: BLE001
+        pass
+    return upper_truncated_split(avg_wt_g, cv, avg_wt_g + sigma * z,
+                                 grade_efficiency=_ge)
 
 
 def _mw_occ_at(rows, wlabel):
@@ -6450,9 +6460,14 @@ def _optimizer():
                         result["_run_label"] = ("Optimized — "
                             + optimize.overrides_yaml(best.overrides).replace("\n", " · "))
                         st.session_state.result = result  # lights up Run-forecast tabs
+                        # welfare_density: without it this one path scored
+                        # crowding against the 80.0 module default while the
+                        # rest of the app uses the configured welfare line.
                         m, dropped, overprod = optimize.metrics_from_workbook(
                             result["output_path"],
-                            optimize._harvest_cap(str(CONFIG_DIR), best.overrides))
+                            optimize._harvest_cap(str(CONFIG_DIR), best.overrides),
+                            welfare_density=optimize._welfare_density(
+                                str(CONFIG_DIR), best.overrides))
                         st.session_state["_opt_run"] = {
                             "dropped": dropped, "overprod": overprod,
                             "cv": m.harvest_var, "over": m.weeks_over_harvest_cap,

@@ -42,7 +42,11 @@ def _run_method(method: str):
     with contextlib.redirect_stdout(buf):
         rc = run_mod.main(str(tmp_in), str(out), config_dir=cdir, scenario_dir=str(SCN))
     cap = optimize._harvest_cap(str(CFG), {})
-    m, dropped, overprod = optimize.metrics_from_workbook(str(out), cap)
+    # welfare_density: omitting it took the 80.0 module default while the
+    # operator's density_welfare_threshold_kg_m3 is what every other caller
+    # (tournament, compare, robustness) resolves and passes.
+    m, dropped, overprod = optimize.metrics_from_workbook(
+        str(out), cap, welfare_density=optimize._welfare_density(str(CFG), {}))
     return rc, m, dropped, overprod, out
 
 

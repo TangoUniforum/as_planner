@@ -1555,8 +1555,14 @@ def _transit_entry_to_pair(
             # the fraction actually moved — the threshold split would price the
             # retention leg as if the heavy fish it kept were not in it. See
             # biology.count_split_means; identical when the cap does not bite.
+            # grade_efficiency: a real grader does NOT cut cleanly, so the two
+            # populations overlap at the line. Omitting it took
+            # count_split_means' signature default of 1.0 -- a PERFECT grader --
+            # while the operator ships 0.85, so this split priced its legs
+            # further apart than reality and editing the knob moved nothing here.
             big_avg, small_avg = count_split_means(
-                _es.avg_wt_g, cv, (big / _es.count) if _es.count > 0 else 0.0)
+                _es.avg_wt_g, cv, (big / _es.count) if _es.count > 0 else 0.0,
+                grade_efficiency=float(getattr(control, "grade_efficiency", 1.0)))
             _e_batch, _e_loc = _es.batch_id, _es.location_id
             if was_res:
                 state.reserved_tanks.discard(hop.tank_id)
@@ -4887,9 +4893,14 @@ def phase_d_emit_events(
                                     continue
                                 # Capped by the floor above -> means must come
                                 # from the moved fraction, not the threshold.
+                                # grade_efficiency, as above -- this took the
+                                # 1.0 signature default (perfect grader) while
+                                # the operator ships 0.85.
                                 _bavg, _savg = count_split_means(
                                     _gs.avg_wt_g, _cvg,
-                                    (_big / _gs.count) if _gs.count > 0 else 0.0)
+                                    (_big / _gs.count) if _gs.count > 0 else 0.0,
+                                    grade_efficiency=float(
+                                        getattr(control, "grade_efficiency", 1.0)))
                                 _g_batch, _g_loc = _gs.batch_id, _gs.location_id
                                 _gev = Grade(
                                     batch_id=_g_batch,
@@ -5850,12 +5861,25 @@ def phase_d_emit_events(
         # before the Transfer diff. See above.)
 
         # ---- Density-trigger Grade events ----
-        # Split any high-density tank (density > 85% of cap). Reserve
-        # TRANOG_RESERVE OG3+ tanks for upcoming TranOG arrivals (which
-        # need N=4 tanks for size-class allocation). Grade only fires
-        # while OG3+ free pool remains above the reserve threshold.
+        # Split any high-density tank (density > density_target_pct of cap).
+        # Reserve enough OG tanks for an upcoming TranOG arrival; Grade only
+        # fires while the free pool stays above that reserve.
+        #
+        # The reserve was a hard-coded 4 -- the PRE-CONFIG arrival size, kept
+        # after Phase A lowered the real need to `max(2, tran_og_default_tanks)`
+        # (see the "Lowered 4 -> 2 to free transition tanks" note above, and the
+        # warning beside the fallback path about not silently re-imposing the
+        # old 4-tank reservation). This site WAS that re-imposition: it pinned 4
+        # in both directions, so editing tran_og_default_tanks moved every other
+        # sizing decision but not this gate. With only ~3.9 free tanks in an
+        # average week, a reserve of 4 disabled the density-trigger Grade on
+        # most weeks -- the pass that exists to relieve exactly that pressure.
+        # The genuinely anticipatory reservation is applied separately via
+        # `_reserved_og` (built from _tranog_tank_need), which the destination
+        # pool below already excludes; this is a second buffer on top of it.
         DENSITY_TRIGGER_PCT = control.density_target_pct
-        TRANOG_RESERVE = 4
+        TRANOG_RESERVE = max(2, int(getattr(control, "tran_og_default_tanks", 2)
+                                    or 2))
         grade_dest_pool = sorted(
             [t for t in state.tanks_by_id.values()
              if t.is_empty and t.type == "OG"
