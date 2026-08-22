@@ -80,6 +80,22 @@ from .optimize import CD_KNOB_SPACE, OPT_FULL_GRID
 # fails one of those gates on the board, that is a MODELLING GAP in the Global
 # path, not a knob the operator can turn.
 UNTUNABLE_KNOBS = frozenset({
+    # OPERATOR INPUTS, not levers (operator ruling 2026-08-22). A tuner may
+    # change HOW the model plans; it may not change WHAT the facility is or
+    # WHAT the business requires. These three describe the operation itself:
+    #   min_tank_control      the minimum fish you will operate a tank with
+    #   tran_og_default_tanks how many tanks a TranOG arrival needs
+    #   density_target_pct    how full you are willing to run a tank
+    # Moving them does not find a better plan for THIS facility, it finds a
+    # plan for a different one -- and the 2026-08-22 tournament did exactly
+    # that, pinning min_tank_control 7000 -> 12000 in every tuned winner and
+    # claiming a 2.6% score gain partly bought by redefining the input.
+    # density_target_pct is the direct expression of the operator's
+    # minimise-density stance; a search free to raise it (it reached 0.95)
+    # optimises against the very preference it is meant to serve.
+    "min_tank_control",
+    "tran_og_default_tanks",
+    "density_target_pct",
     "min_harvest_weight_g",
     "max_harvest_per_week",
     "harvest_relief_pct",

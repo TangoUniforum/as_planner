@@ -60,21 +60,10 @@ METRICS_SCHEMA = "metrics-v3-harvest-floor"
 # no-op duplicate of baseline). baseline = "where your config is now".
 OPT_QUICK_GRID = [
     ("baseline", {}),
-    ("tran_og=2", {"tran_og_default_tanks": 2}),   # harvest-favoring end
-    ("tran_og=3", {"tran_og_default_tanks": 3}),   # feed-favoring end
     ("density-only", {"rebalance_level": False}),
 ]
 OPT_FULL_GRID = [
     ("baseline", {}),
-    # tran_og — the strongest feed<->harvest lever; test BOTH ends explicitly,
-    # plus 3 paired with a tighter cap band to try to claw harvest back.
-    ("tran_og=2", {"tran_og_default_tanks": 2}),
-    ("tran_og=3", {"tran_og_default_tanks": 3}),
-    ("tran_og=3,dev=0.005", {"tran_og_default_tanks": 3,
-                             "facility_biomass_deviation_pct": 0.005}),
-    # packing density
-    ("density=0.85", {"density_target_pct": 0.85}),
-    ("density=0.95", {"density_target_pct": 0.95}),
     # harvest controller — facility_biomass_deviation_pct is now THE "how close to the
     # cap" knob (the dual-limit setpoint runs one band below the binding cap): a TIGHT
     # band runs closer to the cap (more breach risk), a LOOSE one keeps more headroom.
@@ -1557,6 +1546,10 @@ def sweep(input_path, config_dir, scenario_dir, grid=None, progress=None,
 # `min_transfer_count` stays OUT: 7000 measured as a genuine optimum with sharp
 # loss either side (3500 -> 10,450 worst week), so a descent axis would only
 # rediscover it at the cost of runs.
+# NOT here, and NOT in OPT_FULL_GRID: min_tank_control, tran_og_default_tanks
+# and density_target_pct. They are OPERATOR INPUTS (ruling 2026-08-22) -- what
+# the facility is and what the operator is willing to run, not how the model
+# plans. See UNTUNABLE_KNOBS in methods.py; register() enforces it.
 CD_KNOB_SPACE = [
     # THE HYBRID LEVERS (added 2026-08-21). These gate whether the L1 harvest
     # guide actually steers: placement.py acts on the guide in exactly three
@@ -1578,12 +1571,9 @@ CD_KNOB_SPACE = [
     # it is included so the search still explores it wherever the guard is on.
     ("hybrid_production_lever", [False, True]),
     ("hybrid_purge_lever", [False, True]),
-    ("tran_og_default_tanks", [2, 3]),
     ("facility_biomass_deviation_pct", [0.005, 0.01, 0.02]),
     ("harvest_smooth_lookahead_weeks", [6, 12]),
-    ("density_target_pct", [0.85, 0.90, 0.95]),
     ("global_buffer_pct", [0.0, 0.05, 0.10]),
-    ("min_tank_control", [7000, 12000]),
     # 2026-08-13: the de-duplication above was left half-done. A deferrable
     # pass gets min(knob, quality budget) and the quality budget can never
     # exceed max_transfers_per_week (15), so 15 and 30 are the SAME plan —
