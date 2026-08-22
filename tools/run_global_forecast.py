@@ -411,6 +411,11 @@ def run_global(input_path, output_path, config_dir, scenario_dir, *,
         _engine_warns.extend(list(_l3.SOLVER_WARNINGS))
         _engine_warns.extend(getattr(gft, "topology_warnings", []) or [])
         _engine_warns.extend(getattr(gft, "depuration_warnings", []) or [])
+        # L1 scheduled a harvest the pick could not draw. The fish are
+        # NOT lost -- they stay in their tanks and harvest later -- but
+        # the week reads as empty/short and fails no_empty_week, so it
+        # must be a visible row rather than an unexplained gap.
+        _engine_warns.extend(getattr(gft, "unmet_harvest_warnings", []) or [])
         _engine_warns.extend(placement_gap_warnings(gft))
         cons = gf.conservation_summary(gft)
         _mw_states = (_build_manual_week_states(

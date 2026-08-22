@@ -89,6 +89,7 @@ class GlobalForecastTables:
     unplaced_warnings: list = field(default_factory=list)  # LOUD never-drop misses
     topology_warnings: list = field(default_factory=list)  # R1-R7 breaches
     depuration_warnings: list = field(default_factory=list)  # purge-hold breaches
+    unmet_harvest_warnings: list = field(default_factory=list)  # L1 harvest the pick could not realise
 
 
 def build_tables(
@@ -145,6 +146,7 @@ def build_tables(
         unplaced_warnings=list(getattr(pick, 'unplaced_warnings', []) or []),
         topology_warnings=list(getattr(pick, 'topology_warnings', []) or []),
         depuration_warnings=list(getattr(pick, 'depuration_warnings', []) or []),
+        unmet_harvest_warnings=list(getattr(pick, 'unmet_harvest_warnings', []) or []),
     )
 
 

@@ -186,6 +186,7 @@ class TankPickResult:
     unplaced_warnings: list = field(default_factory=list)   # LOUD never-drop misses
     topology_warnings: list = field(default_factory=list)   # R1-R7 breaches emitted
     depuration_warnings: list = field(default_factory=list) # purge-hold breaches
+    unmet_harvest_warnings: list = field(default_factory=list)  # L1 harvest the pick could not realise
 
 
 # ---------------------------------------------------------------------------
@@ -378,6 +379,12 @@ def pick_tanks(
     depuration_warnings: list[str] = []
     # Emitted transfers that break the R1-R7 conveyor topology.
     topology_warnings: list[str] = []
+    # UNMET HARVEST: L1 scheduled a harvest this pick could not draw.
+    # Silent until 2026-08-22 -- the draw below is guarded by an `if`
+    # with no `else`, so an unrealisable harvest simply produced no
+    # rows and the week read as a planning choice rather than a miss.
+    unmet_harvest: list[str] = []
+    _unmet_fish = 0.0
 
     sixn_cap = smallest_og_tank_kg(facility) * 1.25  # 6N staged density
 
@@ -919,6 +926,22 @@ def pick_tanks(
             # ---- (c) HARVEST: draw from survivors (6N STARVE tanks first — the
             # just-released depuration pairs). Empties those tanks; the audit
             # zeroes them via harvest_out.
+            if h_cnt > 1e-9 and not old_tanks:
+                # L1 wants a harvest from a batch this pick has NOWHERE to
+                # draw from: the batch held no tank last week. The dominant
+                # case is the OPENING week, where `state` starts EMPTY (no
+                # manual window => initial_tank_state is None), so no batch
+                # has prior occupancy and NOTHING can be harvested however
+                # much L1 released. That is one guaranteed empty harvest week
+                # at the start of every global run, and it is what fails the
+                # no_empty_week gate -- not an inability to hold a harvest.
+                _unmet_fish += h_cnt
+                unmet_harvest.append(
+                    f"{wl} {batch_id}: L1 scheduled {h_cnt:,.0f} fish but the "
+                    f"batch held no tank last week"
+                    + (" (OPENING WEEK: the pick starts from an empty "
+                       "facility -- the PR's tank occupancy is not seeded)"
+                       if wl == label_for_week.get(weeks[0]) else ""))
             if h_cnt > 1e-9 and old_tanks:
                 _ws_date = ws.date() if hasattr(ws, "date") else ws
                 _purge_wk = is_purge_mode(control, _ws_date)
@@ -1031,6 +1054,15 @@ def pick_tanks(
                     _purge_h_demand += drawn_c
                     _purge_h_from6n += _from6n
                     _purge_h_shortfall += max(0.0, drawn_c - _from6n)
+                # PARTIAL draw: survivors ran out before L1's demand was met.
+                # Also silent before 2026-08-22.
+                if h_cnt - drawn_c > 1.0:
+                    _unmet_fish += (h_cnt - drawn_c)
+                    unmet_harvest.append(
+                        f"{wl} {batch_id}: L1 scheduled {h_cnt:,.0f} fish, "
+                        f"pick drew {drawn_c:,.0f} -- short "
+                        f"{h_cnt - drawn_c:,.0f} (survivors exhausted across "
+                        f"{len(old_tanks)} prior tank(s))")
 
             # ---- (d) TRANSFERS: match remaining survivors (supply) to this
             # week's per-tank demand. Self-match a retained tank first (no
@@ -1189,6 +1221,16 @@ def pick_tanks(
               f"transfer(s) break the R1-R7 conveyor rules (see ValidationLog).")
         for _t in topology_warnings[:3]:
             print(f"     {_t}")
+    if unmet_harvest:
+        print(f"  !! UNMET HARVEST DEMAND: {len(unmet_harvest)} batch-week(s), "
+              f"{_unmet_fish:,.0f} fish L1 scheduled that this pick could NOT "
+              f"realise. Those fish are NOT lost -- they stay in their tanks "
+              f"and harvest later -- but the week reads as an empty/short "
+              f"harvest and will fail the no_empty_week gate.")
+        for _u in unmet_harvest[:5]:
+            print(f"     {_u}")
+        if len(unmet_harvest) > 5:
+            print(f"     ... and {len(unmet_harvest) - 5} more (see ValidationLog)")
     if _purge_h_demand > 0:
         print(f"  [6N-RULE PROBE] purge-mode harvest: {_purge_h_demand:,.0f} fish "
               f"demanded; {_purge_h_from6n:,.0f} from 6N ({100*_purge_h_from6n/_purge_h_demand:.0f}%); "
@@ -1197,6 +1239,7 @@ def pick_tanks(
               f"the 6N-only-rule violation; should be ~0).")
 
     return TankPickResult(
+        unmet_harvest_warnings=unmet_harvest,
         batch_locations=batch_locations,
         transfers=transfers,
         tranog_events=tranog_events,
