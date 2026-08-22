@@ -1,0 +1,19 @@
+{
+  "workbook": "probe_global.xlsx",
+  "tank_week_rows": 2777,
+  "count_drift_rows": 0,
+  "count_drift_fish": 0.0,
+  "bio_drift_rows": 31,
+  "fish_at_risk": 0.0,
+  "batch_status": {
+    "pre-start": 4,
+    "PLACED": 20,
+    "future (TranOG beyond horizon)": 21
+  },
+  "horizon_weeks": 85,
+  "harvest_fish": 3548489.0,
+  "empty_weeks": 1,
+  "empty_week_labels": [
+    "2026-W33"
+  ]
+}
