@@ -2076,6 +2076,8 @@ def _mw_recommendations(state, rows, labels, ctx, view="open"):
     from collections import defaultdict
     from forecast.biology import realized_feed_kg_day
     from forecast.sixn import SIXN_ALL_TANKS
+    from forecast.sixn import is_purge_mode as _is_purge_mode
+    from forecast.tiers import effective_density_cap as _eff_cap
     control, tables = ctx.get("control"), ctx.get("tables")
     batch_by_id = ctx.get("batch_by_id") or {}
     min_hg = float(getattr(control, "min_harvest_weight_g", 0) or 0)
@@ -2151,11 +2153,22 @@ def _mw_recommendations(state, rows, labels, ctx, view="open"):
         if s not in sixn_systems and cap > 0 and used > cap:
             breaches.append(("sysbio", s, wk, used, cap))
     for r in rows:
-        if r.count <= 0 or r.tank_id in SIXN_ALL_TANKS:
+        if r.count <= 0:
             continue
-        cap = tank_cap.get(r.tank_id, 0.0)
-        if cap > 0 and r.density_kg_m3 > cap:
-            breaches.append(("dens", r.tank_id, r.week_label, r.density_kg_m3, cap))
+        # R8 (tiers.effective_density_cap) -- the SAME rule as the engine and
+        # run.py's audit, so a tank called legal there is never called a
+        # breach here. This replaced `r.tank_id in SIXN_ALL_TANKS`, a
+        # membership test that got the ADVICE wrong, not merely the number: a
+        # harvest-prep tank outside 6N is deliberately consolidated and
+        # deliberately dense, and flagging it made this panel recommend
+        # SPLITTING it -- undoing the consolidation on purpose. The same test
+        # also hid real breaches once 6N runs as a PRODUCTION system.
+        cap = _eff_cap(tank_cap.get(r.tank_id, 0.0), r.system_id,
+                       getattr(r, "stage", ""),
+                       _is_purge_mode(control, r.week_start))
+        if cap > 0 and cap != float("inf") and r.density_kg_m3 > cap:
+            breaches.append(("dens", r.tank_id, r.week_label,
+                             r.density_kg_m3, cap))
     # FACILITY biomass must be FW-INCLUSIVE to match the cap it is judged against.
     # `rows` are TANK rows, so they cover OG + 6N only; the freshwater cohorts are
     # tracked separately and were simply missing here. The engine's setpoint counts
@@ -5425,6 +5438,28 @@ def _parse_output_workbook(path: Path) -> dict:
               f"density KPI/heatmap judged against the {growout_cap:g} kg/m³ "
               f"default cap")
 
+    # R8 needs the purge/production boundary, which lives in Control. If
+    # Control is unreadable, fall back to PURGE: that reproduces the previous
+    # behaviour (6N never flagged) instead of inventing breaches out of a
+    # missing config. The facility-config warning above already tells the
+    # operator when the density judgement is degraded.
+    from forecast.tiers import effective_density_cap as _eff_cap_kpi
+    _ctl_kpi = None
+    try:
+        from forecast.config_io import load_control
+        _ctl_kpi = load_control(CONFIG_DIR)
+    except Exception as e:  # noqa: BLE001
+        print(f"WARN: control config unreadable ({type(e).__name__}: {e}) — "
+              f"6N density judged as PURGE (exempt) for the whole horizon")
+
+    def _purge_kpi(ctl, when):
+        if ctl is None or when is None:
+            return True
+        try:
+            from forecast.sixn import is_purge_mode
+            return is_purge_mode(ctl, when)
+        except Exception:  # noqa: BLE001
+            return True
     # Density violations from BatchLocations (header at row 4).
     violations = []
     bl_rows = []
@@ -5434,20 +5469,25 @@ def _parse_output_workbook(path: Path) -> dict:
             if i < 5 or not row or row[0] is None:
                 continue
             wk, ws_d, bid, tid, sys_id, count, avg_wt, biomass, density = row[:9]
+            # Stage (col 10) drives R8: a STARVE tank is exempt wherever
+            # it sits, so the alert needs it, not just the system name.
+            stage = row[9] if len(row) > 9 else ""
             bl_rows.append({
                 "Week": wk, "Batch": bid, "Tank": tid, "System": sys_id,
                 "Count": count, "AvgWt_kg": avg_wt, "Biomass_kg": biomass,
                 "Density_kg_m3": density,
             })
-            # Density alert EXCLUDES the OG6N depuration/purge pool: those tanks
-            # hold harvest-size fish concentrated + off-feed for depuration just
-            # before shipping, so high density there is expected, not a welfare
-            # flag. Mirrors the engine's own density-violation count, which skips
-            # the 6N purge pool (run.py). This parse is shared by every pipeline's
-            # output (controller + global), so the exclusion applies to all.
-            if (isinstance(density, (int, float))
-                    and density > tank_caps.get(tid, growout_cap)
-                    and sys_id != "OG6N"):
+            # Density alert judged through R8 (tiers.effective_density_cap) --
+            # ONE rule, shared with the engine, run.py's audit and the
+            # advisory panel. This parse feeds EVERY pipeline's KPI
+            # (controller + global), so a wrong rule here mis-scores all of
+            # them at once. It replaced `sys_id != "OG6N"`, which both hid
+            # real breaches once 6N runs as a production system and counted
+            # in-place harvest-prep tanks outside 6N as violations.
+            _cap = _eff_cap_kpi(tank_caps.get(tid, growout_cap), sys_id or "",
+                                stage, _purge_kpi(_ctl_kpi, ws_d))
+            if (isinstance(density, (int, float)) and _cap > 0
+                    and _cap != float("inf") and density > _cap):
                 violations.append(density)
 
     # BiologyProjection — per (batch, week) explicit mortality % + cull

@@ -12,6 +12,7 @@ from .harvest_scheduler import schedule_harvests, summarize_demands
 from .placement import run_placement, summarize_placement
 from .precalc import build_precalc_canvas, print_canvas_summary
 from .sixn import is_purge_mode
+from .tiers import effective_density_cap
 from .caps import (
     apply_facility_buffer,
     resolve_facility_cap,
@@ -200,7 +201,11 @@ def main(
                   f"in batches {sorted(info['batches'])}")
     for w in hydration_warns:
         print(f"  WARN: {w}")
-    inv_warns = state.check_invariants(min_tank_control=control.min_tank_control)
+    # Pass the 6N mode explicitly: R8 exempts 6N only WHILE IT PURGES,
+    # and this snapshot is taken at the forecast start.
+    inv_warns = state.check_invariants(
+        min_tank_control=control.min_tank_control,
+        sixn_purge_mode=is_purge_mode(control, control.forecast_start))
     if inv_warns:
         print(f"  Invariant violations at hydration ({len(inv_warns)}):")
         for w in inv_warns:
@@ -673,10 +678,14 @@ def main(
             cap = tank_cap.get(r.tank_id, 0.0)
             if cap <= 0:
                 continue
-            if (tank_sys.get(r.tank_id) == "OG6N"
-                    and is_purge_mode(control, r.week_start)):
-                continue
-            if r.density_kg_m3 > cap:
+            # R8 — the SAME rule as the run's own audit. The old test
+            # handled 6N-in-purge but NOT a STARVE tank outside 6N, so the
+            # trial evaluator scored legal harvest-prep consolidation as a
+            # density violation and tuning was pushed away from it.
+            cap = effective_density_cap(cap, tank_sys.get(r.tank_id, ""),
+                                        getattr(r, "stage", ""),
+                                        is_purge_mode(control, r.week_start))
+            if cap != float("inf") and r.density_kg_m3 > cap:
                 viols.append(r.density_kg_m3)
         # ZERO-HARVEST weeks (the hard steady-harvest contract): horizon weeks
         # with no harvested fish at all. Ranked ABOVE density in the trial
@@ -792,6 +801,28 @@ def main(
     cull_biomass_total = sum(s.cull_biomass_kg_week for s in states)
     cull_count_in_flight = sum(s.cull_count_week for s in in_flight_states)
     cull_biomass_in_flight = sum(s.cull_biomass_kg_week for s in in_flight_states)
+    # SW-SIDE HANDLING MORTALITY -- the fish the PLAN killed by moving them.
+    # Every tank-to-tank deposit is charged (forecast/events.py), so mortality
+    # is no longer the FW-only story the cull block below tells. It reconciles
+    # inside the tank audit -- it is booked on the destination tank -- but
+    # folded into the same column as natural mortality the operator cannot
+    # SEE it, and "a plan that shuffles more fish kills more of them" is only
+    # actionable as a number.
+    _hm = {}
+    for _ev in placement.transfer_events:
+        for _t, _k in (getattr(_ev, "handling_mort_by_tank", None) or {}).items():
+            _hm[_t] = _hm.get(_t, 0.0) + _k
+    _hm_total = sum(_hm.values())
+    if _hm_total > 0:
+        _moves = sum(1 for _e in placement.transfer_events
+                     if getattr(_e, "count_transferred", 0) > 0)
+        print("")
+        print(f"  Handling mortality (SW transfers -- fish lost to MOVING "
+              f"them, {control.handling_mortality_pct}% per deposit):")
+        print(f"    Lost to handling:       {_hm_total:>12,.0f} fish  "
+              f"over {_moves:,} transfer(s) into {len(_hm)} tank(s)")
+        print(f"    booked as mortality on the destination tank, so the tank "
+              f"continuity audit still balances")
     print(f"\n  Cull totals (FW-side biology: scheduled bottom culls + "
           f"TranOG handling-mort + reconciliation cull):")
     print(f"    Incoming-batch culls:   {cull_count_total:>12,.0f} fish  "
@@ -1093,6 +1124,19 @@ def main(
     print(f"  SystemLimits:  biomass over-cap {n_bio_over} (worst "
           f"{worst_bio:.2f}x), feed over-cap {n_feed_over} (worst {worst_feed:.2f}x) "
           f"-> SystemLimitsAudit sheet")
+    # DENSITY gets the same one-line summary SystemLimits gets. Without it the
+    # per-tank breaches land in ValidationLog and nowhere else, so the console
+    # shows a bare "warnings=N" and a real welfare breach reads as noise. The
+    # count is R8-judged (purge / harvest-prep tanks are exempt and excluded),
+    # so every line here is a tank that is genuinely over its cap.
+    if density_violations:
+        _worst = max(density_violations, key=lambda v: v[3] / v[4])
+        print(f"  Density:       {len(density_violations)} tank-week(s) over "
+              f"per-tank cap (worst {_worst[3]:.1f} kg/m3 vs cap {_worst[4]:.0f} "
+              f"in {_worst[1]}, {_worst[0]}) -> ValidationLog")
+    else:
+        print(f"  Density:       no tank over its per-tank cap "
+              f"(purge / harvest-prep exempt under R8)")
 
     write_facility_map(wb, placement.batch_locations, facility,
                        batches=batch_by_id, tables=tables,

@@ -22,6 +22,8 @@ where possible and surfaced as warnings via `check_invariants()`.
 """
 from __future__ import annotations
 
+from .tiers import effective_density_cap
+
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Optional
@@ -221,6 +223,7 @@ class FacilityState:
     def check_invariants(
         self,
         min_tank_control: float = 0.0,
+        sixn_purge_mode: bool = True,
     ) -> list[str]:
         """Snapshot-time invariant checks. Returns list of violation strings.
 
@@ -245,16 +248,23 @@ class FacilityState:
                     f"INV-5 violation: tank {t.location_id} (#{t.tank_id}) holds {t.count:.0f} "
                     f"fish of batch {t.batch_id}, below min_tank_control={min_tank_control:.0f}"
                 )
-            # In purge mode, OG6N has no biomass cap — it's the depuration
-            # pool, intentionally allowed to hold whatever the pipeline
-            # routes through. The density-cap field on FacilityConfig
-            # only applies in production mode.
-            if t.system_id == "OG6N":
-                continue
-            if t.density_kg_m3 > t.max_density_kg_m3 and t.max_density_kg_m3 > 0:
+            # R8 (tiers.effective_density_cap) — ONE definition, shared with
+            # the engine, run.py's audit, the workbook reports and the app.
+            # Exempt: 6N while it runs in PURGE, and ANY tank whose stage is
+            # STARVE, wherever it sits — fish preparing for harvest are meant
+            # to be dense.
+            #
+            # This replaced `if t.system_id == "OG6N": continue`, whose own
+            # comment said "in purge mode" while nothing actually checked the
+            # mode. So 6N stayed exempt after it began GROWING fish, and an
+            # in-place harvest-prep tank outside 6N was flagged for doing
+            # exactly what the plan asked of it.
+            cap = effective_density_cap(t.max_density_kg_m3, t.system_id,
+                                        t.stage, sixn_purge_mode)
+            if cap != float("inf") and t.density_kg_m3 > cap:
                 out.append(
                     f"Density violation: tank {t.location_id} (#{t.tank_id}) at "
-                    f"{t.density_kg_m3:.1f} kg/m3 > cap {t.max_density_kg_m3:.1f}"
+                    f"{t.density_kg_m3:.1f} kg/m3 > cap {cap:.1f}"
                 )
         return out
 

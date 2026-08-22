@@ -417,6 +417,8 @@ def write_transfer_template(
         "Wks_Entry→Harvest", "Harvest_AvgWt (kg)", "Density_Status",
     ])
 
+    from .sixn import is_purge_mode as _is_purge_mode
+    from .tiers import effective_density_cap as _eff_cap
     cap = {t.tank_id: t.max_density_kg_m3 for t in facility.tanks}
     tsys = {t.tank_id: t.system_id for t in facility.tanks}
     weeks = sorted({r.week_label for r in batch_locations})
@@ -428,12 +430,21 @@ def write_transfer_template(
         e["cnt"] += r.count
         e["wsum"] += r.avg_wt_g * r.count
         e["tanks"].add(r.tank_id)
-        c = cap.get(r.tank_id)
-        # Peak density EXCLUDES the OG6N depuration/purge pool — harvest-size fish
-        # held off-feed at high density before shipping is expected, not a stocking
-        # problem, so it must not dominate a batch's peak (consistent with the
-        # engine + the app/optimizer density alerts).
-        if c and r.density_kg_m3 and tsys.get(r.tank_id) != "OG6N":
+        # Peak density is judged through R8 (tiers.effective_density_cap) --
+        # the SAME rule as the engine, run.py's violation audit and the
+        # optimizer's alert, so a tank called legal in one place is never
+        # called a breach in another. R8 returns +inf for a tank preparing
+        # for harvest, which drops it from the peak entirely.
+        #
+        # This replaced a system-based `!= "OG6N"` test that was wrong in BOTH
+        # directions: it hid real breaches once 6N runs as a PRODUCTION system
+        # (from control.sixn_production_start), and it counted an in-place
+        # harvest-prep tank OUTSIDE 6N as a breach -- exactly what the
+        # harvest-prep consolidation step now creates on purpose.
+        c = _eff_cap(cap.get(r.tank_id) or 0.0, tsys.get(r.tank_id, ""),
+                     getattr(r, "stage", ""),
+                     _is_purge_mode(control, r.week_start))
+        if r.density_kg_m3 and c and c != float("inf"):
             e["maxratio"] = max(e["maxratio"], r.density_kg_m3 / c)
 
     tog_week = {}
@@ -3137,8 +3148,9 @@ def write_system_limits_audit(
     `caps.carry_forward_cap_lookup` (per-week exception > system+mode default
     > system default) and are buffered by Control R29. OG6N's BIOMASS cap
     is enforced like any other system's (it is an operator input); only its
-    FEED cap is exempt — purge fish are STARVE and eat nothing, so that check
-    could only ever report 0.
+    FEED cap is exempt WHILE 6N IS IN PURGE — those fish are STARVE and eat
+    nothing, so the check could only ever report 0. Once 6N runs in PRODUCTION
+    its fish eat and the cap is enforced like any other system's.
 
     Returns (n_biomass_over, n_feed_over, worst_biomass_ratio, worst_feed_ratio).
     """
@@ -3161,7 +3173,9 @@ def write_system_limits_audit(
         sb[(r.week_label, r.system_id)] += r.biomass_kg
         # STARVE = in-place purge: biomass counts to the system, but no feed
         # (helper returns 0). Per-DAY feed-rate cap check -> steady realized rate
-        # only; the 6N move-in 4-day pre-transfer feed is a total-feed accounting
+        # only; the 6N move-in pre-transfer feed (placement.
+        # PURGE_TRANSFER_GROWTH_DAYS days, currently 3 -- Thursday
+        # move-in) is a total-feed accounting
         # item (FeedForecast / ledger / YearlySummary), not a per-day rate.
         sf[(r.week_label, r.system_id)] += _row_feed_kg_day(r, batch_by_id, tables)
 
@@ -3170,7 +3184,8 @@ def write_system_limits_audit(
     ws = wb.create_sheet(sheet_name)
     ws.append(["SYSTEM LIMITS AUDIT"])
     ws.append(["Realized per-system biomass + feed vs caps "
-               "(carry-forward, +R29 buffer). OG6N feed exempt (purge = no feed)."])
+               "(carry-forward, +R29 buffer). OG6N feed exempt while in "
+               "PURGE (no feed); enforced once 6N runs in production."])
     ws.append([])
     ws.append(["Week", "System", "Biomass_kg", "Biomass_cap", "Bio_flag",
                "Feed_kg_day", "Feed_cap", "Feed_flag"])
@@ -3214,7 +3229,12 @@ def write_system_limits_audit(
             if bio > bcap * buf:
                 bflag = "BIOMASS_OVER"
                 nb += 1
-        if fcap and sysid != "OG6N":   # purge fish are STARVE and eat nothing
+        # Feed exemption is PURGE-ONLY, and reuses the same _sixn_purge
+        # flag the biomass branch above uses. In purge the sum is 0 by
+        # construction (STARVE rows feed nothing), so skipping changes
+        # nothing; in PRODUCTION 6N grows fish that eat, and a bare
+        # `sysid != "OG6N"` would hide a real feed breach forever.
+        if fcap and not _sixn_purge:
             worst_f = max(worst_f, feed / fcap)
             if feed > fcap * buf:
                 fflag = "FEED_OVER"

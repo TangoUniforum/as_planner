@@ -589,6 +589,13 @@ def _density_overshoot(wb):
         dens = row[di] if len(row) > di else None
         if isinstance(dens, (int, float)):
             tot += 1
+            # 95 is hardcoded because this scorer reads a WORKBOOK and has no
+            # facility config to consult. It is exact, not approximate:
+            # BatchLocations is seawater-only and every OG tank in
+            # config/facility.yaml is capped at 95 kg/m3 (the sub-95 caps --
+            # 30..65 -- belong to FW/smolt systems, which never appear on this
+            # sheet). If an OG tank is ever given a different cap, this test
+            # goes silently wrong and must switch to a per-tank lookup.
             if dens > 95:
                 over += 1
     return (over / tot) if tot else 0.0
