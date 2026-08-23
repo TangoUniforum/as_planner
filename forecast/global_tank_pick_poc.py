@@ -284,6 +284,13 @@ def pick_tanks(
     # it was skipping the two-week pipeline lag the controller must live with.
     # `sixn_arrival[tank] = week index the current occupancy arrived`.
     sixn_arrival: dict[int, int] = {}
+    # Which PURGE COHORT (batch, release_week) occupies each 6N tank.
+    # 6N is a batch process: one cohort per tank, filled, closed, held,
+    # harvested. Without this the pick keyed on batch alone and
+    # even-split a blended per-batch total, mixing each week's fresh
+    # arrivals into tanks already mid-purge -- which restarts the hold
+    # clock, correctly, because a topped-up tank cannot be certified.
+    sixn_cohort: dict[int, tuple] = {}
     # Same constant L1 plans against — imported, not restated, so the pick and
     # the envelope can never disagree about the hold length.
     from .global_planner_poc import _PURGE_HOLD_WEEKS as _HOLD
@@ -784,20 +791,28 @@ def pick_tanks(
         # Batches already in a 6N tank keep it (continuity); growth claims more
         # 6N tanks in main-then-sister order.
         held = purge_rows.get(w, [])
-        held_batches = {r.batch_id for r in held}
-        # prev 6N occupancy per batch.
-        prev_sixn_by_batch: dict[str, list[int]] = {}
+
+        def _ck(row):
+            """Cohort key: (batch, release_week). One cohort per 6N tank."""
+            return (row.batch_id, getattr(row, "release_week", None))
+
+        held_keys = {_ck(r) for r in held}
+        # prev 6N occupancy per COHORT (not per batch): a batch with two
+        # cohorts mid-purge holds two separate tanks and they must not merge.
+        prev_sixn_by_cohort: dict[tuple, list[int]] = {}
         for tid in sixn_order:
-            occ = prev_state.get(tid)
-            if occ is not None:
-                prev_sixn_by_batch.setdefault(occ.batch_id, []).append(tid)
+            if prev_state.get(tid) is None:
+                continue
+            ck = sixn_cohort.get(tid)
+            if ck is not None:
+                prev_sixn_by_cohort.setdefault(ck, []).append(tid)
         # FALLOW guard (mirrors sixn's 2-purge-1-rest rotation): a 6N tank that
         # held a batch last week which is NOT held this week has just been
         # RELEASED (harvested) — keep it fallow this week rather than restocking
         # a different batch into it the SAME week (a same-week swap cannot
         # reconcile cleanly in the audit's one-row-per-(tank, week) model).
         fallow = {tid for tid, occ in prev_state.items()
-                  if tid in sixn_set and occ.batch_id not in held_batches}
+                  if tid in sixn_set and sixn_cohort.get(tid) not in held_keys}
         sixn_free = [t for t in sixn_order if t not in fallow]  # claim order
         # Claim order: DESCENDING biomass, so a large live depuration cohort is
         # seated before near-spent tails. A sub-1-fish tail claims NO 6N tank — it
@@ -810,28 +825,29 @@ def pick_tanks(
         # First, honour continuity: re-seat live cohorts on their prior 6N tanks.
         for r in claim_order:
             if r.count < 1.0:
-                sixn_assigned[r.batch_id] = []
+                sixn_assigned[_ck(r)] = []
                 continue
             n_need = max(1, math.ceil(r.biomass_kg / sixn_cap))
-            keep = [t for t in prev_sixn_by_batch.get(r.batch_id, [])
+            keep = [t for t in prev_sixn_by_cohort.get(_ck(r), [])
                     if t in sixn_free][:n_need]
             for t in keep:
                 sixn_free.remove(t)
-            sixn_assigned[r.batch_id] = keep
+            sixn_assigned[_ck(r)] = keep
         # Then claim additional 6N tanks (main-then-sister) for any shortfall.
         for r in claim_order:
             if r.count < 1.0:
                 continue
             n_need = max(1, math.ceil(r.biomass_kg / sixn_cap))
-            cur = sixn_assigned.get(r.batch_id, [])
+            cur = sixn_assigned.get(_ck(r), [])
             while len(cur) < n_need and sixn_free:
                 cur.append(sixn_free.pop(0))
-            sixn_assigned[r.batch_id] = cur
+            sixn_assigned[_ck(r)] = cur
             if len(cur) < n_need:
-                week_oversub = True   # 6N pool genuinely over-subscribed (rare)
+                week_oversub = True   # 6N pool genuinely over-subscribed
 
+        cur_sixn_cohort: dict[int, tuple] = {}
         for r in held:
-            tanks = sixn_assigned.get(r.batch_id, [])
+            tanks = sixn_assigned.get(_ck(r), [])
             if not tanks:
                 # A depurating cohort with no 6N tank writes no new_state, and
                 # the mortality plug below then books it as DEAD. That is a real
@@ -856,6 +872,7 @@ def pick_tanks(
                 new_state[tid] = _Occ(
                     batch_id=r.batch_id, count=per_cnt, biomass_kg=per_bio,
                     avg_wt_g=r.avg_wt_g, oversub=False)
+                cur_sixn_cohort[tid] = _ck(r)
 
         # =============================================================
         # 3) Emit BatchLocations.
@@ -1247,6 +1264,7 @@ def pick_tanks(
                     or now.count > before.count + 1.0):
                 sixn_arrival[tid] = w
 
+        sixn_cohort = cur_sixn_cohort
         if week_oversub:
             oversub_weeks.append(wl)
         state = new_state

@@ -601,6 +601,18 @@ class BatchStandingRow:
     avg_wt_g: float
     feed_kg_day: float
     in_purge: bool = False
+    # RELEASE WEEK of the purge cohort this row describes (in_purge rows only;
+    # None otherwise). 6N is a BATCH process: a tank is filled, closed, held
+    # off-feed for the hold, then harvested. Without this the pick received one
+    # BLENDED total per batch and could only even-split it across tanks, so
+    # every week's fresh arrivals were mixed into tanks already mid-purge --
+    # which restarts the hold clock (correctly: you cannot certify a tank whose
+    # contents were topped up). Measured before this: 81 of 346 draws,
+    # 1,497,820 fish (50%), harvested BEFORE completing the 2-week hold.
+    #
+    # L1 already knew: `purge_buffer` is keyed by release week. The old emit
+    # summed across those keys and threw the cohort identity away.
+    release_week: Optional[int] = None
 
 
 @dataclass
@@ -1340,22 +1352,33 @@ def plan(
             # as ordinary (non-purge) standing so it competes for the 36-tank
             # production pool. Both are OFF-FEED (feed_kg_day=0).
             if model_purge_hold:
-                held_6n: dict[str, list[float]] = {}     # bid -> [count, kg]
+                # 6N rows are per COHORT -- keyed by (batch, RELEASE WEEK) --
+                # so the pick can seat each cohort in its own tank and hold it
+                # untouched. Summing across release weeks (what this did until
+                # 2026-08-23) hands the pick a blended total it can only
+                # even-split, mixing fresh fish into tanks mid-purge.
+                # IN-PLACE holds stay blended: they sit on their own grow-out
+                # tank and never share, so cohort identity buys nothing there.
+                held_6n: dict[tuple[str, int], list[float]] = {}
                 held_inplace: dict[str, list[float]] = {}
-                for rel in purge_buffer.values():
+                for _relw, rel in purge_buffer.items():
                     for e in rel:
-                        tgt = held_6n if e.get("sixn") else held_inplace
-                        acc = tgt.setdefault(e["batch_id"], [0.0, 0.0])
+                        if e.get("sixn"):
+                            acc = held_6n.setdefault(
+                                (e["batch_id"], int(_relw)), [0.0, 0.0])
+                        else:
+                            acc = held_inplace.setdefault(
+                                e["batch_id"], [0.0, 0.0])
                         acc[0] += e["count"]
                         acc[1] += e["biomass_kg"]
-                for bid, (c, kg) in held_6n.items():
+                for (bid, _relw), (c, kg) in sorted(held_6n.items()):
                     if c <= 1e-9:
                         continue
                     batch_standing.append(BatchStandingRow(
                         week=w, week_label=label, batch_id=bid,
                         count=c, biomass_kg=kg,
                         avg_wt_g=(kg * 1000.0 / c if c > 0 else 0.0),
-                        feed_kg_day=0.0, in_purge=True,
+                        feed_kg_day=0.0, in_purge=True, release_week=_relw,
                     ))
                 for bid, (c, kg) in held_inplace.items():
                     if c <= 1e-9:
