@@ -319,6 +319,8 @@ def run_global(input_path, output_path, config_dir, scenario_dir, *,
     batches = load_batches(str(scenario_dir))
     _facility_limits, system_limits = load_limits(str(scenario_dir), control)
     inflight_og, fw_inflight, purge_inflight = {}, {}, {}
+    _pr_state = None    # PR-hydrated opening occupancy: seeds the pick AND
+    _pr_note = 'no ProductionReport read (--no-pr)'   # opens the audit
     _mw_stitch = None   # manual-window rows/events to prepend into the output
     _mw_weeks = 0       # manual-window length (0 = no window)
     _mw_warns = []      # manual-window lints (stays empty on the no_pr path)
@@ -327,6 +329,20 @@ def run_global(input_path, output_path, config_dir, scenario_dir, *,
             Path(input_path), batches)
         if derived_start is not None:
             control.forecast_start = derived_start
+        # SEED both halves from the ProductionReport. Without this the tank
+        # picker starts from an EMPTY facility (so week 0 has no prior tanks,
+        # the harvest draw cannot fire, and L1's week-0 release is silently
+        # unrealisable) AND the continuity audit opens on nothing. Used below
+        # only when there is no manual window, whose close state supersedes it.
+        _pr_state, _pr_note = _pr_facility_state(
+            Path(input_path), batches, control, facility)
+        if _pr_state is not None:
+            print(f"  Opening tank state from ProductionReport: {_pr_note} "
+                  f"(seeds the pick and opens the audit)")
+        else:
+            print(f"  !! NO opening tank state ({_pr_note}) — the pick starts "
+                  f"from an EMPTY facility, so the first week cannot harvest "
+                  f"and will read as an empty week.")
         # Manual override window: execute the operator's starting-state events
         # (manual transfers/harvests) + biology, then seed the global plan from the
         # resulting state — same starting point the controller honors. No events =>
@@ -368,15 +384,17 @@ def run_global(input_path, output_path, config_dir, scenario_dir, *,
             grow_q, _cpsat_info = _solve_cpsat_q(
                 result, facility, system_limits, control,
                 cpsat_time, workers=cpsat_workers, det_time=cpsat_det_time,
-                initial_tb=(_mw_stitch or {}).get("window_close_state"))
+                initial_tb=((_mw_stitch or {}).get("window_close_state")
+                            or _pr_state))
             _w = cpsat_degrade_warning(_cpsat_info)
             if _w:
                 _engine_warns.append(_w)
                 print(f"  !! {_w}")
         gft = gf.build_tables(result, batches, tables, control, facility,
                               fw_inflight=fw_inflight, grow_q_by_week=grow_q,
-                              initial_tank_state=(_mw_stitch or {}).get(
-                                  "window_close_state"))
+                              initial_tank_state=(
+                                  (_mw_stitch or {}).get("window_close_state")
+                                  or _pr_state))
         # Stitch the MANUAL WINDOW weeks into the output so the timeline OPENS with
         # the operator's starting-state work (transfers/harvests + biology), then the
         # global plan. The manual rows/events are read-compatible with the writers
@@ -423,7 +441,12 @@ def run_global(input_path, output_path, config_dir, scenario_dir, *,
             _mw_stitch.get("realized_biology", {})) if _mw_stitch else [])
         _emit_workbook(gft, result, batches, tables, control, facility,
                        _facility_limits, cons, Path(output_path),
-                       initial_state=(_mw_stitch or {}).get("initial_state"),
+                       # THE HALF THAT WAS MISSING. Seeding the picker
+                       # without this makes every seeded tank's fish
+                       # arrive with no recorded source, which the audit
+                       # correctly reports as fish created from nothing.
+                       initial_state=((_mw_stitch or {}).get("initial_state")
+                                      or _pr_state),
                        manual_week_states=_mw_states, system_limits=system_limits,
                        manual_warnings=list(_mw_warns) + _engine_warns)
     finally:
@@ -515,6 +538,46 @@ def cpsat_degrade_warning(info) -> str:
             f"their per-tank densities and per-system loads are NOT "
             f"solver-verified and may exceed the cap. This run is NOT an "
             f"optimal placement." + _why)
+
+
+def _pr_facility_state(input_path, batches, control, facility):
+    """The PR closing tank occupancy as a FacilityState, or (None, why).
+
+    The same state the CONTROLLER hydrates and both plans and audits from
+    (run.py: state -> audit_initial_state), built the same way via
+    production_report.hydrate_facility_state. By construction
+    pr_closing == forecast_start - 1, so it is exactly the "prior week"
+    occupancy both the tank picker's seed and the continuity audit's opening
+    expect.
+
+    Returns None on any failure: seeding is an improvement, not a
+    precondition, and a global run must not start failing because a PR could
+    not be re-read. The caller reports what it got either way -- silently
+    falling back to an empty facility is the bug this fixes.
+    """
+    try:
+        from forecast.excel_io import load_workbook
+        from forecast.production_report import (hydrate_facility_state,
+                                                read_production_report)
+        from forecast.state import FacilityState
+        wb = load_workbook(Path(input_path))
+        try:
+            _pr_closing, og_records, _fw = read_production_report(wb)
+        finally:
+            wb.close()
+        if not og_records:
+            return None, "ProductionReport has no OG tank rows"
+        st = FacilityState.from_facility_config(
+            facility, today=control.forecast_start.date())
+        warns = hydrate_facility_state(st, og_records, batches)
+        n = sum(1 for t in st.tanks_by_id.values()
+                if not t.is_empty and t.count > 0)
+        if n == 0:
+            return None, "ProductionReport hydrated to an EMPTY facility"
+        return st, (f"{n} occupied tank(s)"
+                    + (f", {len(warns)} hydration warning(s)" if warns else ""))
+    except Exception as e:  # noqa: BLE001
+        return None, f"{type(e).__name__}: {e}"
 
 
 def _solve_cpsat_q(result, facility, system_limits, control, time_limit,
