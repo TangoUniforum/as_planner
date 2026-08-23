@@ -778,7 +778,22 @@ def _gate_sixn_one_way(ctx):
                     f"may only be harvested")
 
 
-register_gate("sixn_one_way", "6N one-way commitment (R7)", hard=False,
+# HARD (operator ruling 2026-08-23: "every method needs to follow the same
+# rules"). R7 is a RULE, not a preference: fish in depuration may leave only by
+# harvest, because a transfer out means they are harvested WITHOUT completing
+# the purge hold -- food safety, not bookkeeping.
+#
+# As a SOFT gate it merely ranked a method down, so an engine that broke R7
+# still competed and could be promoted. That is how the Global arms placed in
+# the 2026-08-23 tournament while moving 44,838 fish out of 6N, and their
+# apparent advantage (555 t more harvest, zero density breaches) was measured
+# against a controller that obeys the rule. Comparing a rule-follower with a
+# rule-breaker is not a comparison.
+#
+# The controller family passes this gate at ZERO outbound moves, so making it
+# binding costs nothing that obeys the rule -- it disqualifies exactly the
+# methods that do not.
+register_gate("sixn_one_way", "6N one-way commitment (R7)", hard=True,
               fn=_gate_sixn_one_way)
 
 

@@ -39,7 +39,11 @@ from __future__ import annotations
 from typing import Optional
 
 # The hard rules a probe must fix (analysis.GATES keys with hard=True).
-HARD_GATE_KEYS = ("conservation", "no_empty_week")
+# Mirrors analysis.GATES keys with hard=True; test_negative_controls
+# asserts they stay in sync. sixn_one_way joined 2026-08-23 when R7 was
+# promoted from soft to hard -- a method that breaks a RULE is not a
+# candidate, it is disqualified.
+HARD_GATE_KEYS = ("conservation", "no_empty_week", "sixn_one_way")
 
 
 # --------------------------------------------------------------------------- #

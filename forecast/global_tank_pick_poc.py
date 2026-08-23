@@ -87,7 +87,7 @@ from .global_planner_poc import PlannerResult
 from .models import ControlParams, FacilityConfig
 from .sixn import SIXN_PAIRS, is_purge_mode
 from .tiers import effective_density_cap as _density_cap_for
-from .tiers import SIXN_SYSTEM, is_entry, move_allowed
+from .tiers import SIXN_SYSTEM, is_entry, move_allowed, sixn_exit_allowed
 from .time_grid import parse_iso_label
 
 
@@ -833,6 +833,18 @@ def pick_tanks(
         for r in held:
             tanks = sixn_assigned.get(r.batch_id, [])
             if not tanks:
+                # A depurating cohort with no 6N tank writes no new_state, and
+                # the mortality plug below then books it as DEAD. That is a real
+                # defect -- but it is a SYMPTOM. This pick does not stage fish
+                # into 6N ahead of the draw at all: the DEPURATION AUDIT reports
+                # 81 of 346 draws (1,497,820 fish, 50%) harvested BEFORE the
+                # 2-week hold, because tanks are filled and harvested the same
+                # week. Catching the overflow here would be a guardrail around
+                # a subsystem that does not work; the fix is to build the
+                # staging, so a cohort always has a tank because the pipeline
+                # put it there. Left as-is deliberately, and the 6N one-way
+                # gate (R7) is now HARD so a plan that does this is
+                # disqualified rather than ranked.
                 continue
             _depurating.update(tanks)
             per_bio = r.biomass_kg / len(tanks)
@@ -1094,6 +1106,40 @@ def pick_tanks(
             # SAME forecast.tiers module the controller uses so both families are
             # held to identical code.
             def _legal_src(s_entry, dest_tank):
+                # R7 -- 6N IS ONE-WAY. Fish enter depuration and leave only by
+                # HARVEST, never by transfer back into production. tiers.
+                # move_allowed deliberately does NOT gate this ("that pipeline
+                # logic is layered on top by the callers"), and this caller
+                # never layered it on -- so evicting a purging batch into a
+                # grow-out tank read as a legal move and did not even warn.
+                #
+                # It is not bookkeeping: those fish are harvested a week later
+                # WITHOUT completing their purge hold. Measured 2026-08-23 on
+                # the shipped workbook: 4 moves, 33,969 fish out of 6N in
+                # 2026-W33, which is ~exactly the 33,981-fish "overflow" the
+                # 6N-rule probe then reported in W34 -- the same fish, drawn
+                # from the production tanks they had been evicted into.
+                #
+                # 6N -> 6N stays legal (pair rotation, e.g. 65 -> 61).
+                #
+                # Uses tiers.sixn_exit_allowed -- the SAME predicate
+                # placement.py:5902 calls -- rather than a local membership
+                # test, so both engines are held to one definition of R7. The
+                # first version of this guard tested `tank_id in sixn_set`,
+                # which is WRONG in production mode: from
+                # sixn_production_start the 6N mains rear ordinary grow-out
+                # fish (stage SW) and may move freely. Only a tank
+                # mid-commitment (STARVE) is locked, which is what the shared
+                # rule keys on.
+                _src_sys = tank_sys.get(s_entry[0], "")
+                _src_stage = ("STARVE"
+                              if (s_entry[0] in _depurating
+                                  or (_src_sys == SIXN_SYSTEM
+                                      and is_purge_mode(control, ws)))
+                              else "SW")
+                if not sixn_exit_allowed(_src_sys, _src_stage):
+                    if dest_tank not in sixn_set:
+                        return False
                 ok, _ = move_allowed(tank_sys.get(s_entry[0], ""),
                                      tank_sys.get(dest_tank, ""), s_entry[2])
                 return ok
@@ -1115,6 +1161,15 @@ def pick_tanks(
                         s = avail_s[0]
                         _ok, _why = move_allowed(tank_sys.get(s[0], ""),
                                                  tank_sys.get(dest, ""), s[2])
+                        if (s[0] in sixn_set) and (dest not in sixn_set):
+                            # move_allowed does not speak about 6N, so say it
+                            # here or the breach is reported with an empty reason
+                            _why = ("R7: 6N is ONE-WAY — fish leave depuration "
+                                    "only by harvest. These fish will be "
+                                    "harvested WITHOUT completing the purge "
+                                    "hold. No legal source existed for this "
+                                    "destination, so the move is emitted to "
+                                    "conserve fish.")
                         topology_warnings.append(
                             f"TOPOLOGY VIOLATION - {wl}: batch {batch_id} "
                             f"{tank_sys.get(s[0])}-{s[0]} -> "
