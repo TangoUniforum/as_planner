@@ -993,8 +993,24 @@ def pick_tanks(
                 def _residency(t, _w=w):
                     return _w - sixn_arrival.get(t, -10 ** 6)
 
+                # DRAW THE COHORT L1 IS ACTUALLY RELEASING. `sixn_cohort` still
+                # holds LAST week's per-tank map at this point (it is replaced
+                # at the end of the week), and a cohort keyed (batch, w) is one
+                # whose RELEASE WEEK is now -- exactly the fish L1 popped out of
+                # purge_buffer to build this week's envelope. Taking those tanks
+                # first makes the two sides agree by construction instead of
+                # hoping residency order lands on the same fish: L1 releases
+                # cohort X, the pick harvests the tanks holding cohort X.
+                #
+                # Residency stays as the tiebreak for anything else, so a tank
+                # that has served longest is still preferred among equals.
+                def _due_now(t, _w=w, _b=batch_id):
+                    ck = sixn_cohort.get(t)
+                    return 1 if (ck is not None and ck[0] == _b
+                                 and ck[1] == _w) else 0
+
                 _six = sorted((t for t in old_tanks if t in sixn_set),
-                              key=lambda t: (-_residency(t), t))
+                              key=lambda t: (-_due_now(t), -_residency(t), t))
                 # THE FALLTHROUGH TO PRODUCTION TANKS IS A KNOWN RULE
                 # VIOLATION, AND IT IS DELIBERATE UNTIL STEP 2 LANDS.
                 #
