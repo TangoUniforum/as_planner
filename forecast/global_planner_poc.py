@@ -679,6 +679,14 @@ def plan(
     arrival_lead_weeks: int = 2,
     max_grade_fraction: float = 0.5,
     reserve_fraction: float = 0.05,
+    # Minimum 6N cohort as a fraction of ONE depuration tank. Every batch drawn
+    # in a purge week becomes its own cohort and 6N cannot mix batches, so a
+    # sliver burns a whole tank for a full 3-week cycle (2 hold + 1 fallow)
+    # exactly like a full one. Swept on the 2-second L1-only harness
+    # (tools/l1_probe.py): 0.15 takes the weeks needing >2 tanks from 71 to 31
+    # for +0.02% harvest. 0.25 starts costing harvest (-1.21%); 0.0 is the old
+    # behaviour (max 9 cohorts in a week against a pool that frees ~2).
+    sixn_min_cohort_frac: float = 0.15,
     harvest_tank_density_pct: float = 1.25,
     record_standing: bool = False,
     biomass_ceiling: Optional[dict[str, float]] = None,
@@ -1252,6 +1260,13 @@ def plan(
             elig = h.eligible_mass_kg(min_wt)
             allowable = max(0.0, min(elig - reserve_kg, max_grade_kg, remaining))
             if allowable <= 1e-6:
+                continue
+            if (sixn_min_cohort_frac > 0.0 and model_purge_hold and _purge
+                    and og_ceiling > 0 and week_rows
+                    and allowable < sixn_min_cohort_frac * og_ceiling):
+                # Skip a SLIVER -- but only once this week already has a real
+                # cohort (`week_rows`), so a week can never collapse to zero
+                # the way a blanket floor did (-33.8% harvest, 27 empty weeks).
                 continue
             got_c, got_kg = h.harvest_top_kg(allowable, min_wt)
             if got_kg > 0:
