@@ -24,17 +24,18 @@ already chosen.
 
 WHAT IT REPORTS, and why these
 ------------------------------
-    cohorts/week   distinct batches drawn in a purge week. Each becomes its OWN
-                   6N cohort (6N cannot mix batches), and each burns a whole
-                   depuration tank for a 3-week cycle (2 hold + 1 fallow). With
-                   6 tanks and a 2-week hold the pool seats cohorts/week x 2,
-                   so >3 per week CANNOT be seated and the overflow is harvest
-                   drawn from production tanks -- unpurged fish, an R7 breach.
-    harvest        total envelope fish. Any staging change must be judged
-                   against this: a "fix" that empties the 6N pressure by
-                   harvesting fewer fish has not fixed anything.
-    held tanks     L1's own per-cohort 6N footprint, the honest version of the
-                   blended ceil(total/cap) its purge trace reports.
+    max_cohorts        distinct batches drawn in a purge week. Same-batch
+                       cohorts SHARE a tank (operator rule 2026-08-24); two
+                       batches in one week take a pair's main + sister.
+    max_tanks_needed   the number to compare against the 6-TANK pool. Applies
+                       the real seating rule above. Counting per COHORT instead
+                       reports 8 where the pick needs 7 and the fish need 3 --
+                       a metric that sends the reader chasing a capacity
+                       problem that does not exist.
+    harvest            total envelope fish. Any staging change must be judged
+                       against this: a "fix" that relieves 6N pressure by
+                       harvesting fewer fish has not fixed anything (one such
+                       attempt cost 33.8% of harvest).
 
 READ BOTH COLUMNS. Cohorts/week alone is optimised trivially by harvesting
 less; harvest alone says nothing about legality.
@@ -84,11 +85,20 @@ def summarize(l1, control, facility):
             harvest += e.count
             if str(e.week_label) < "2028":       # purge mode only
                 per_week[e.week_label] += 1
-    # per-cohort tank footprint from the standing rows L1 emits
-    need = collections.Counter()
+    # Tank footprint under the SEATING RULE THE PICK ACTUALLY USES: same batch
+    # shares a tank (operator, 2026-08-24), two batches in one week take a
+    # pair's main + sister. Counting per COHORT instead reports 8 tanks where
+    # the pick needs 7 and the fish need 3 -- a metric that would send the next
+    # reader chasing a capacity problem that does not exist.
+    by_week: dict = collections.defaultdict(lambda: collections.defaultdict(float))
     for r in l1.batch_standing:
-        if getattr(r, "in_purge", False) and r.biomass_kg > 1e-9 and og_ceiling > 0:
-            need[r.week] += math.ceil(r.biomass_kg / og_ceiling)
+        if getattr(r, "in_purge", False) and r.biomass_kg > 1e-9:
+            by_week[r.week][r.batch_id] += r.biomass_kg
+    need = collections.Counter()
+    for wk, per_batch in by_week.items():
+        if og_ceiling > 0:
+            need[wk] = sum(math.ceil(kg / og_ceiling)
+                           for kg in per_batch.values())
     return {
         "harvest": harvest,
         "max_cohorts": max(per_week.values()) if per_week else 0,
@@ -118,9 +128,9 @@ def main() -> int:
         for k, v in m.items():
             print(f"  {k:>20}: {v:,.0f}" if isinstance(v, (int, float))
                   else f"  {k:>20}: {v}")
-        print("\n  6 tanks, 2-week hold -> cohorts/week x 2 = tanks needed.")
-        print("  >3 cohorts in a week cannot be seated; the excess is harvested")
-        print("  from production tanks, i.e. UNPURGED (R7).")
+        print("  Compare max_tanks_needed against the 6-tank 6N pool.")
+        print("  A week it cannot seat is harvested from production tanks"
+              " instead -- UNPURGED fish, an R7 breach.")
         return 0
 
     knob, raw = args.sweep

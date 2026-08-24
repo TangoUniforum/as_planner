@@ -922,7 +922,14 @@ def plan(
                 max(0, int(entry.get("release_week", 0))), []).append({
                     "batch_id": _bid, "count": _c,
                     "biomass_kg": float(entry["biomass_kg"]),
-                    "avg_wt_g": float(entry["avg_wt_g"])})
+                    "avg_wt_g": float(entry["avg_wt_g"]),
+                    # These fish ARE physically in 6N at the handover. Without
+                    # "sixn" they were filed as an IN-PLACE hold (see the
+                    # held_6n / held_inplace split at step 8b), so they never
+                    # became in_purge standing, the pick never seated them in a
+                    # 6N tank, and the harvest L1 scheduled against them had no
+                    # legal source -- the whole 2026-W34 overflow.
+                    "sixn": True})
     elif model_purge_hold and purge_inflight:
         _nrel = _PURGE_HOLD_WEEKS
         for _bid, (_c, _wt) in purge_inflight.items():
@@ -934,7 +941,8 @@ def plan(
             for _k in range(_nrel):
                 purge_buffer.setdefault(_k, []).append({
                     "batch_id": _bid, "count": _c / _nrel,
-                    "biomass_kg": _c / _nrel * _wt / 1000.0, "avg_wt_g": _wt})
+                    "biomass_kg": _c / _nrel * _wt / 1000.0, "avg_wt_g": _wt,
+                    "sixn": True})      # physically in 6N at the handover
 
     # ASSUME A PRIMED 6N at forecast start (operator directive: "what we have
     # today is not important — follow the constraints"). The handover 6N snapshot
