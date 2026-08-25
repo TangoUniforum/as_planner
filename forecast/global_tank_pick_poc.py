@@ -76,6 +76,8 @@ no existing math, and is not imported by `forecast/run.py`.
 """
 from __future__ import annotations
 
+import os as _os
+
 import math
 from dataclasses import dataclass, field
 from datetime import date
@@ -231,6 +233,51 @@ def _label_to_week_start(label: str, fs_date: date) -> date:
 # 6N pair-tank ordering (mirrors forecast.sixn round-robin)
 # ---------------------------------------------------------------------------
 
+_os_env = _os.environ
+
+
+def _draw_order(old_tanks, sixn_set, released_tanks, sixn_arrival, w, batch_id):
+    """The ORDER a batch's prior tanks are drawn from for harvest.
+
+    Split out so the harvest allocation can be computed BEFORE production
+    placement (to anchor per-tank contents) and again inside the event flow (to
+    emit the rows) WITHOUT the two drifting apart. One definition, two callers.
+
+    6N first, and within 6N:
+      * tanks whose cohort L1 is releasing THIS week (`released_tanks`) --
+        exactly the fish the envelope harvests, so the two sides agree by
+        construction rather than by luck;
+      * then longest residency, so a tank that has served its full off-feed
+        hold is emptied before one stocked more recently.
+    Production tanks follow. In purge mode drawing from them is a rule breach,
+    reported by the 6N probe; it stays reachable only because refusing it
+    loses fish (see the fallthrough note at the call site).
+    """
+    def _residency(t):
+        return w - sixn_arrival.get(t, -10 ** 6)
+
+    def _due_now(t):
+        return 1 if t in released_tanks.get(batch_id, ()) else 0
+
+    _six = sorted((t for t in old_tanks if t in sixn_set),
+                  key=lambda t: (-_due_now(t), -_residency(t), t))
+    return _six + [t for t in old_tanks if t not in sixn_set]
+
+
+def _draw_takes(order, avail, h_cnt):
+    """Greedy per-tank harvest amounts down `order`. [(tank, count)]."""
+    out, drawn = [], 0.0
+    for t in order:
+        if h_cnt - drawn <= 1e-9:
+            break
+        take = min(avail.get(t, 0.0), h_cnt - drawn)
+        if take <= 1e-9:
+            continue
+        out.append((t, take))
+        drawn += take
+    return out
+
+
 def _sixn_tank_order() -> list[int]:
     """6N tanks in claim order: all MAINS first (61,63,65 — preferred), then the
     SISTERS (67,69,71) — a pair's sister is taken only after its main, matching
@@ -284,13 +331,18 @@ def pick_tanks(
     # it was skipping the two-week pipeline lag the controller must live with.
     # `sixn_arrival[tank] = week index the current occupancy arrived`.
     sixn_arrival: dict[int, int] = {}
-    # Which PURGE COHORT (batch, release_week) occupies each 6N tank.
+    # Which PURGE COHORT (batch, ENTRY week) occupies each 6N tank. Keyed on
+    # entry, never release: release slides when a cohort is deferred, and a
+    # sliding key makes held fish look harvested-then-rearrived (a phantom
+    # move between depuration tanks).
     # 6N is a batch process: one cohort per tank, filled, closed, held,
     # harvested. Without this the pick keyed on batch alone and
     # even-split a blended per-batch total, mixing each week's fresh
     # arrivals into tanks already mid-purge -- which restarts the hold
     # clock, correctly, because a topped-up tank cannot be certified.
-    sixn_cohort: dict[int, tuple] = {}
+    # tank -> [cohort keys it holds]. STABLE: a cohort never moves once
+    # placed, so no fish are shuffled between depuration tanks.
+    sixn_tank_cohorts: dict[int, list] = {}
     # Same constant L1 plans against — imported, not restated, so the pick and
     # the envelope can never disagree about the hold length.
     from .global_planner_poc import _PURGE_HOLD_WEEKS as _HOLD
@@ -366,6 +418,21 @@ def pick_tanks(
                 biomass_kg=tank.biomass_kg,
                 avg_wt_g=(tank.biomass_kg * 1000.0 / tank.count
                           if tank.count > 0 else 0.0))
+
+    # WHICH BATCH THE HANDOVER ALREADY HAD IN EACH 6N TANK. The stable-packing
+    # map starts empty, so without this the opening week seats every seeded
+    # cohort by size order and relocates fish that are already sitting in a
+    # perfectly good depuration tank -- each relocation emitting a 6N->6N move
+    # for fish that never left the building (2026-W33: B41 67->65, B42 65->63).
+    _sixn_set = set(sixn_order)
+    sixn_seed_batch: dict[int, str] = {
+        t: occ.batch_id for t, occ in state.items() if t in _sixn_set}
+    # ...and HOW MANY fish, so a cohort can be seated in the tank already
+    # holding most of it. Preferring merely the first seeded tank put B42's
+    # surviving 33,323 fish in tank 63 (which held 7,651) instead of tank 65
+    # (which held 33,066) -- a 33,062-fish move on the opening week.
+    sixn_seed_count: dict[int, float] = {
+        t: occ.count for t, occ in state.items() if t in _sixn_set}
 
     batch_locations: list[TankLocRow] = []
     transfers: list[TankTransfer] = []
@@ -461,6 +528,154 @@ def pick_tanks(
             b: [t for t in ids if t not in _blocked6n]
             for b, ids in prev_by_batch.items()
         }
+
+        # NOTE (2026-08-25): the 6N purge block runs BEFORE production
+        # placement. It needs only prev_state + L1's purge_rows, and the
+        # harvest draw in section 4 needs what it seats. Running it first
+        # means the tanks it claims are already in `used_tanks` when
+        # placement looks, instead of placement claiming a 6N main in
+        # production mode and this block overwriting it afterwards.
+        # =============================================================
+        # 2) 6N PURGE HOLD — park in_purge population in 6N pairs (round-robin).
+        # =============================================================
+        # Batches already in a 6N tank keep it (continuity); growth claims more
+        # 6N tanks in main-then-sister order.
+        held = purge_rows.get(w, [])
+        # ---- STABLE PACKING (operator, 2026-08-24): "once a group is chosen to
+        # enter purge to be harvested at a particular time, we should focus to
+        # empty and harvest that entire group at the same time."
+        #
+        # A cohort is placed ONCE and never moves. Same-batch cohorts may SHARE
+        # a tank; a tank empties only when its cohorts are harvested.
+        #
+        # The previous even-split (per_bio = batch_kg / len(tanks), recomputed
+        # every week) is what produced 56 same-batch moves BETWEEN 6N tanks
+        # (665,236 fish) -- the whole of the R7 gate failure. When a batch went
+        # from two tanks to one as its held population was harvested down, the
+        # survivor was re-split across the smaller allocation and the fish
+        # physically moved (e.g. B43 tank 63 -> 61 across 2026-W38/W39).
+        # Simulated offline on L1's own cohorts: max 6 tanks, 0 weeks over the
+        # pool, 1 unseated cohort in 74 weeks, and 0 moves by construction.
+        held_by_ck = {}
+        for _r in held:
+            if _r.count >= 1.0 and _r.biomass_kg > 1e-9:
+                _ck_id = getattr(_r, "entry_week", None)
+                if _ck_id is None:          # pre-entry_week L1, keep working
+                    _ck_id = getattr(_r, "release_week", None)
+                held_by_ck[(_r.batch_id, _ck_id)] = _r
+        _live = set(held_by_ck)
+
+        # 1) RELEASE: a cohort no longer held has been harvested. Drop it; a
+        #    tank whose cohorts have all gone becomes free.
+        # Tanks whose cohorts are released THIS week, per batch. The draw
+        # below needs them: those fish are still physically in the tank (they
+        # are in prev_state) and are exactly what L1's envelope harvests now.
+        released_tanks: dict = {}
+        for _t in list(sixn_tank_cohorts):
+            keep_cks = [ck for ck in sixn_tank_cohorts[_t] if ck in _live]
+            for ck in sixn_tank_cohorts[_t]:
+                if ck not in _live:
+                    released_tanks.setdefault(ck[0], set()).add(_t)
+            if keep_cks:
+                sixn_tank_cohorts[_t] = keep_cks
+            else:
+                del sixn_tank_cohorts[_t]
+
+        # 2) PLACE new cohorts. Never move one already placed.
+        _already = {ck for cks in sixn_tank_cohorts.values() for ck in cks}
+        _free6 = [t for t in sixn_order if t not in sixn_tank_cohorts]
+        for _ck, _r in sorted(held_by_ck.items(), key=lambda kv: -kv[1].biomass_kg):
+            if _ck in _already:
+                continue
+            _dest = None
+            # prefer a tank already holding THIS BATCH that has room
+            for _t, _cks in sixn_tank_cohorts.items():
+                if _cks and all(c[0] == _ck[0] for c in _cks):
+                    _used = sum(held_by_ck[c].biomass_kg
+                                for c in _cks if c in held_by_ck)
+                    if _used + _r.biomass_kg <= sixn_cap:
+                        _dest = _t
+                        break
+            if _dest is None and _free6:
+                # SEAT WHERE THE FISH ALREADY ARE. Ranked, best first:
+                #   0. a tank the handover had THIS batch in -- most fish first,
+                #      so the cohort lands on the tank already holding the bulk
+                #      of it and nothing has to be trucked;
+                #   1. a tank that was EMPTY at handover -- free to take;
+                #   2. a tank holding ANOTHER batch's fish -- taking it evicts
+                #      them, so it is the last resort. Cohorts are placed
+                #      largest-first, and without this rank the biggest cohort
+                #      grabbed tank 61 out of pair order and displaced the
+                #      seeded batch sitting in it.
+                def _seed_rank(t, _b=_ck[0]):
+                    _sb = sixn_seed_batch.get(t)
+                    if _sb == _b:
+                        return (0, -sixn_seed_count.get(t, 0.0), t)
+                    if _sb is None:
+                        return (1, 0.0, t)
+                    return (2, 0.0, t)
+                _dest = min(_free6, key=_seed_rank)
+                _free6.remove(_dest)
+            if _dest is None:
+                week_oversub = True          # 6N pool genuinely full
+                depuration_warnings.append(
+                    f"6N UNSEATED - {wl}: batch {_ck[0]} cohort entry_wk="
+                    f"{_ck[1]} ({_r.count:,.0f} fish) has no free tank; the "
+                    f"pool is full. Its harvest cannot come from 6N.")
+                continue
+            sixn_tank_cohorts.setdefault(_dest, []).append(_ck)
+
+        # 3) WRITE each tank from ITS OWN contents -- no re-split.
+        _seated6n: dict[str, float] = {}     # batch -> fish seated in 6N
+        for _t, _cks in sixn_tank_cohorts.items():
+            _kg = sum(held_by_ck[c].biomass_kg for c in _cks if c in held_by_ck)
+            _cnt = sum(held_by_ck[c].count for c in _cks if c in held_by_ck)
+            if _cnt <= 1e-9 or _kg <= 1e-9:
+                continue
+            _bid = _cks[0][0]
+            _depurating.add(_t)
+            used_tanks.add(_t)
+            if _t in prev_avail.get(_bid, []):
+                prev_avail[_bid].remove(_t)
+            new_state[_t] = _Occ(batch_id=_bid, count=_cnt, biomass_kg=_kg,
+                                 avg_wt_g=_kg * 1000.0 / _cnt, oversub=False)
+            _seated6n[_bid] = _seated6n.get(_bid, 0.0) + _cnt
+
+        # =============================================================
+        # 2b) HARVEST PRE-PASS — decide WHICH TANKS this week's harvest comes
+        #     out of, BEFORE production placement runs.
+        # =============================================================
+        # Placement cannot anchor a batch to its prior tanks without knowing how
+        # many fish left each one, and the harvest draw lives in section 4 --
+        # after placement. That ordering is why the writer recomputes a target
+        # split every week instead of carrying contents forward, and why a
+        # harvest out of ONE tank gets smeared across all of a batch's tanks
+        # (2028-W09: 8,989 fish out of tank 25, then 3 x 2,247 trucked back IN
+        # to re-level, one of them an R4 backward move).
+        #
+        # The draw needs only prev_state, L1's demand, and the 6N block above --
+        # never placement -- so it can run here. `new_total` is predicted as
+        # L1's production standing plus what the 6N block seated; that identity
+        # is asserted every week under ANCHOR_PROBE and holds exactly.
+        _min_tr = float(getattr(control, "min_transfer_count", 0.0) or 0.0)
+        _pre_mp: dict[str, float] = {}
+        _pre_harvest: dict[int, float] = {}
+        for _bid in sorted(prev_by_batch):
+            _old = sorted(prev_by_batch.get(_bid, []))
+            if not _old:
+                continue
+            _ptot = sum(prev_state[t].count for t in _old)
+            _ntot = (standing.get((_bid, w), (0.0, 0.0, 0.0))[0]
+                     + _seated6n.get(_bid, 0.0))
+            _hc = harvest_by_bw.get((_bid, wl), (0.0, 0.0, 0.0))[0]
+            _mp = (max(0.0, _ptot - _ntot - _hc) / _ptot) if _ptot > 1e-9 else 0.0
+            _pre_mp[_bid] = _mp
+            _av = {t: prev_state[t].count * (1.0 - _mp) for t in _old}
+            for _t, _take in _draw_takes(
+                    _draw_order(_old, sixn_set, released_tanks, sixn_arrival,
+                                w, _bid), _av, _hc):
+                _pre_harvest[_t] = _pre_harvest.get(_t, 0.0) + _take
+        _act_harvest: dict[int, float] = {}   # what section 4 really draws
 
         # ---- PASS 0: CONTINUITY ANCHOR (never-drop). Reserve each standing
         # batch's OWN prior non-6N tanks FIRST — before the per-system greedy below
@@ -703,23 +918,97 @@ def pick_tanks(
         # Splitting over the actually-placed tank count (not L3's planned count)
         # guarantees ALL of the batch's biomass/count is placed even when a
         # shortfall forced fewer tanks — denser, but conserved.
+        # ANCHORED (2026-08-25): a tank the batch already held keeps ITS OWN
+        # survivors -- prior count, less its share of mortality, less what THIS
+        # tank was harvested of. Only fish whose tank is leaving the batch's set,
+        # plus a genuine shortfall, land in newly-taken tanks.
+        #
+        # This replaces `per_cnt = cnt / n_act` applied to every tank: a target
+        # recomputed weekly, so any per-tank event re-levelled the whole batch.
+        # Harvesting 8,989 fish out of B55's tank 25 put all four of its tanks
+        # back on one number, which the emitter could only express as trucking
+        # 3 x 2,247 fish back INTO the tank just harvested -- one leg an R4
+        # backward move into a retained entry tank. 22% of transfer legs were
+        # this shape, and not one of them moved a fish that needed moving.
+        #
+        # Batch totals, tank SETS and system assignment are untouched: this
+        # changes only the arrangement WITHIN the set the planner chose.
+        _tanks_by_b: dict[str, list[int]] = {}
         for (batch_id, system), chosen in chosen_by_ps.items():
-            if not chosen:
-                continue
-            n_act = actual_total.get(batch_id, len(chosen))
+            if chosen:
+                _tanks_by_b.setdefault(batch_id, []).extend(chosen)
+        for batch_id, tankset in _tanks_by_b.items():
+            n_act = actual_total.get(batch_id, len(tankset))
             cnt, bio, avg = standing.get((batch_id, w), (0.0, 0.0, 0.0))
             if bio <= 0:
                 bio = sum(pp.biomass_kg for pp in plist if pp.batch_id == batch_id)
                 cnt = (bio * 1000.0 / avg) if avg > 0 else 0.0
-            per_bio = bio / n_act if n_act else 0.0
-            per_cnt = cnt / n_act if n_act else 0.0
-            per_avg = avg if avg > 0 else (per_bio * 1000.0 / per_cnt
-                                           if per_cnt > 0 else 0.0)
             denser = n_act < batch_total_tanks.get(batch_id, n_act)
-            for tid in chosen:
+            _mp_b = _pre_mp.get(batch_id, 0.0)
+            _old_b = [t for t in prev_by_batch.get(batch_id, []) if t not in sixn_set]
+            _keep: dict[int, float] = {}
+            for tid in tankset:
+                if tid in _old_b:
+                    _surv = max(0.0, prev_state[tid].count * (1.0 - _mp_b)
+                                - _pre_harvest.get(tid, 0.0))
+                    if _surv > 1e-9:
+                        _keep[tid] = _surv
+            _kept = sum(_keep.values())
+            _fresh = [t for t in tankset if t not in _keep]
+            _inbound = cnt - _kept
+            _cts: dict[int, float] = dict(_keep)
+            if _inbound < -1e-9:
+                # retained tanks hold MORE than the standing: the batch is
+                # consolidating, so shed proportionally -- those fish leave as
+                # real moves rather than being silently re-levelled.
+                _scale = (cnt / _kept) if _kept > 1e-9 else 0.0
+                _cts = {t: c * _scale for t, c in _keep.items()}
+            elif _fresh and 0.0 < _min_tr and _inbound < _min_tr and _keep:
+                # MIN_TRANSFER_COUNT (operator input, 7,000 fish). Opening a
+                # fresh tank for fewer fish than you would ever move is what
+                # produced legs of 3, 26, 82 and 138 fish -- 62% of all transfer
+                # legs sat under this floor, and the ones staging into a 6N tank
+                # mid-purge are why 36 fish were harvested short of their hold.
+                # placement.py has enforced it at 8 sites since long before this
+                # engine existed; no global_* module read the knob at all.
+                #
+                # Prevented at SOURCE rather than suppressed after the fact: the
+                # fish simply stay in the tanks they are already in, so nothing
+                # is stranded and conservation is untouched. The tank placement
+                # reserved stays empty this week.
+                _kt = sum(_keep.values())
+                for t, c in _keep.items():
+                    _cts[t] = c + (_inbound * (c / _kt) if _kt > 1e-9 else 0.0)
+            elif _fresh:
+                # BY VOLUME, not per-tank. An even split is only density-even
+                # when every tank is the same size, and they are not: facility
+                # volumes run 950 - 1,726 m3 (1.8x), and OG4N alone holds
+                # 1200 / 1720 / 1721. Splitting `inbound / n_tanks` puts the
+                # same mass in a 950 m3 tank as in a 1,726 m3 one, so the small
+                # tank sits 1.8x denser for no reason -- it just does not bite
+                # today because no batch currently holds mixed-volume tanks.
+                # Volume-proportional puts every tank of a batch at the SAME
+                # density, which is the maximum-headroom arrangement and the
+                # one the CP-SAT branch already documents.
+                _vs = {t: max(0.0, tank_vol_m3.get(t, 0.0)) for t in _fresh}
+                _vt = sum(_vs.values())
+                for t in _fresh:
+                    _cts[t] = (_inbound * (_vs[t] / _vt) if _vt > 1e-9
+                               else _inbound / len(_fresh))
+            # Conservation is not negotiable: land exactly on L1's standing.
+            _tot = sum(_cts.values())
+            if _tot > 1e-9 and abs(_tot - cnt) > 1e-9:
+                _f = cnt / _tot
+                _cts = {t: c * _f for t, c in _cts.items()}
+            for tid in tankset:
+                _c = _cts.get(tid, 0.0)
+                _kg = (bio * (_c / cnt)) if cnt > 1e-9 else 0.0
+                if _c <= 1e-9 and _kg <= 1e-9:
+                    continue
+                _a = avg if avg > 0 else (_kg * 1000.0 / _c if _c > 0 else 0.0)
                 new_state[tid] = _Occ(
-                    batch_id=batch_id, count=per_cnt, biomass_kg=per_bio,
-                    avg_wt_g=per_avg, oversub=denser)
+                    batch_id=batch_id, count=_c, biomass_kg=_kg,
+                    avg_wt_g=_a, oversub=denser)
                 if denser:
                     n_oversub_rows += 1
 
@@ -751,14 +1040,67 @@ def pick_tanks(
                 # the solver's own layout had 0 over-cap slack. Scaling the solver's
                 # q to the pick's exact `bio` keeps count + biomass conserved and the
                 # per-tank density under the (solver-proved) cap.
-                qsum = sum(qw.get((b, t), 0.0) for t in tankset) or 1.0
+                # ---- ANCHORED WRITE (2026-08-25) ----------------------------
+                # Fish STAY WHERE THEY ARE. A tank the batch already held keeps
+                # its own survivors (prior count, less its mortality share, less
+                # what THIS tank was harvested of); only fish whose tank is
+                # leaving the batch's set, plus any genuine shortfall, are
+                # distributed into the newly-taken tanks.
+                #
+                # What this replaces: `count = batch_total * q_share`, recomputed
+                # from scratch every week. That is target-driven, so ANY per-tank
+                # event re-levelled the whole batch -- harvest 8,989 fish out of
+                # tank 25 and the writer put all four of B55's tanks back on the
+                # same number, which the emitter could only express as trucking
+                # 3 x 2,247 fish INTO the tank just harvested (one leg an R4
+                # backward move into a retained entry tank). 22% of all transfer
+                # legs were this, and none of them move a fish that needed moving.
+                #
+                # The solver still owns WHICH tanks and the target split; this
+                # only stops paying handling to chase the target when the fish
+                # are already in a feasible place.
+                _mp_b = _pre_mp.get(b, 0.0)
+                _old_b = [t for t in prev_by_batch.get(b, []) if t not in sixn_set]
+                _keep: dict[int, float] = {}
                 for t in tankset:
-                    qf = qw.get((b, t), 0.0) / qsum
-                    pkg = bio * qf
+                    if t in _old_b:
+                        _surv = max(0.0, prev_state[t].count * (1.0 - _mp_b)
+                                    - _pre_harvest.get(t, 0.0))
+                        if _surv > 1e-9:
+                            _keep[t] = _surv
+                _kept = sum(_keep.values())
+                _fresh = [t for t in tankset if t not in _keep]
+                qsum_f = sum(qw.get((b, t), 0.0) for t in _fresh) or 1.0
+                _inbound = cnt - _kept          # arrivals (or, if <0, an overshoot)
+                _cts: dict[int, float] = {}
+                if _inbound >= -1e-9 and _fresh:
+                    for t in _fresh:
+                        _cts[t] = _inbound * (qw.get((b, t), 0.0) / qsum_f)
+                    _cts.update(_keep)
+                elif _inbound >= -1e-9:
+                    _cts = dict(_keep)          # nowhere fresh to put arrivals
+                else:
+                    # Retained tanks hold MORE than the batch's standing: the
+                    # batch is consolidating. Shed proportionally from what is
+                    # retained -- those fish are leaving via real moves.
+                    _scale = cnt / _kept if _kept > 1e-9 else 0.0
+                    _cts = {t: c * _scale for t, c in _keep.items()}
+                # Conservation is not negotiable: normalise to L1's standing
+                # exactly, so the anchored layout cannot invent or lose a fish.
+                _tot = sum(_cts.values())
+                if _tot > 1e-9 and abs(_tot - cnt) > 1e-9:
+                    _f = cnt / _tot
+                    _cts = {t: c * _f for t, c in _cts.items()}
+                _wt = avg if avg > 0 else 0.0
+                for t in tankset:
+                    _c = _cts.get(t, 0.0)
+                    pkg = (bio * (_c / cnt)) if cnt > 1e-9 else 0.0
                     volm = tank_vol_m3.get(t, 0.0)
                     over = (pkg / volm if volm > 0 else 0.0) > tank_maxd.get(t, 1e9)
-                    new_state[t] = _Occ(batch_id=b, count=cnt * qf, biomass_kg=pkg,
-                                        avg_wt_g=avg, oversub=over)
+                    if _c <= 1e-9 and pkg <= 1e-9:
+                        continue           # tank not actually used this week
+                    new_state[t] = _Occ(batch_id=b, count=_c, biomass_kg=pkg,
+                                        avg_wt_g=_wt, oversub=over)
                     used_tanks.add(t)
                     if over:
                         n_oversub_rows += 1
@@ -784,107 +1126,6 @@ def pick_tanks(
                     new_state[tid] = _Occ(batch_id=b2, count=cnt2, biomass_kg=bio2,
                                           avg_wt_g=avg2, oversub=False)
                     used_tanks.add(tid)
-
-        # =============================================================
-        # 2) 6N PURGE HOLD — park in_purge population in 6N pairs (round-robin).
-        # =============================================================
-        # Batches already in a 6N tank keep it (continuity); growth claims more
-        # 6N tanks in main-then-sister order.
-        held = purge_rows.get(w, [])
-
-        def _ck(row):
-            """Seating key. Operator rule 2026-08-24: SAME BATCH SHARES A TANK
-            -- the no-mixing rule protects count fidelity BETWEEN batches, and
-            two batches needing the same harvest week use the pair's sister
-            tank. So the key is the BATCH, not the (batch, release_week)
-            cohort.
-
-            Seating per cohort needed 8 tanks in the worst week against a pool
-            of 6, while the fish themselves only needed 3 -- pure
-            fragmentation. Per batch it is 1 week of 74 over the pool.
-            L1 still emits per-cohort rows (they carry release_week, which the
-            draw uses to take the cohort actually being released); they are
-            merged here at seating time."""
-            return row.batch_id
-
-        # Merge same-batch cohorts into ONE seat request: n_need must be sized
-        # on the batch's TOTAL held biomass, else each cohort would still claim
-        # its own tank via the ceil below.
-        _held_by_batch: dict = {}
-        for _r in held:
-            _acc = _held_by_batch.get(_r.batch_id)
-            if _acc is None:
-                _held_by_batch[_r.batch_id] = [_r.count, _r.biomass_kg, _r]
-            else:
-                _acc[0] += _r.count
-                _acc[1] += _r.biomass_kg
-        held_keys = set(_held_by_batch)
-        # prev 6N occupancy per BATCH (same batch shares a tank).
-        prev_sixn_by_batch: dict[str, list[int]] = {}
-        for tid in sixn_order:
-            if prev_state.get(tid) is None:
-                continue
-            ck = sixn_cohort.get(tid)
-            if ck is not None:
-                prev_sixn_by_batch.setdefault(ck, []).append(tid)
-        # FALLOW guard (mirrors sixn's 2-purge-1-rest rotation): a 6N tank that
-        # held a batch last week which is NOT held this week has just been
-        # RELEASED (harvested) — keep it fallow this week rather than restocking
-        # a different batch into it the SAME week (a same-week swap cannot
-        # reconcile cleanly in the audit's one-row-per-(tank, week) model).
-        fallow = {tid for tid, occ in prev_state.items()
-                  if tid in sixn_set and sixn_cohort.get(tid) not in held_keys}
-        sixn_free = [t for t in sixn_order if t not in fallow]  # claim order
-        # Claim order: DESCENDING held biomass, so a large live batch is seated
-        # before near-spent tails. A sub-1-fish tail claims NO 6N tank — it is
-        # the tolerated near-harvest tail — so it cannot hog a whole tank via
-        # continuity and strand a big cohort. n_need is sized on the batch's
-        # TOTAL held biomass, so merged cohorts share tanks instead of each
-        # claiming one.
-        claim_order = sorted(_held_by_batch.items(), key=lambda kv: -kv[1][1])
-        sixn_assigned: dict[str, list[int]] = {}
-        # First, honour continuity: re-seat live batches on their prior tanks.
-        for _bid, (_cnt, _kg, _r0) in claim_order:
-            if _cnt < 1.0:
-                sixn_assigned[_bid] = []
-                continue
-            n_need = max(1, math.ceil(_kg / sixn_cap))
-            keep = [t for t in prev_sixn_by_batch.get(_bid, [])
-                    if t in sixn_free][:n_need]
-            for t in keep:
-                sixn_free.remove(t)
-            sixn_assigned[_bid] = keep
-        # Then claim additional 6N tanks (main-then-sister) for any shortfall.
-        # Two batches harvesting the same week take a pair's main + sister,
-        # which is exactly what sixn_order interleaves.
-        for _bid, (_cnt, _kg, _r0) in claim_order:
-            if _cnt < 1.0:
-                continue
-            n_need = max(1, math.ceil(_kg / sixn_cap))
-            cur = sixn_assigned.get(_bid, [])
-            while len(cur) < n_need and sixn_free:
-                cur.append(sixn_free.pop(0))
-            sixn_assigned[_bid] = cur
-            if len(cur) < n_need:
-                week_oversub = True   # 6N pool genuinely over-subscribed
-
-        cur_sixn_cohort: dict[int, tuple] = {}
-        for _bid, (_cnt, _kg, _r0) in _held_by_batch.items():
-            tanks = sixn_assigned.get(_bid, [])
-            if not tanks:
-                continue
-            _depurating.update(tanks)
-            per_bio = _kg / len(tanks)
-            per_cnt = _cnt / len(tanks)
-            _avg = (_kg * 1000.0 / _cnt) if _cnt > 1e-9 else _r0.avg_wt_g
-            for tid in tanks:
-                used_tanks.add(tid)
-                if tid in prev_avail.get(_bid, []):
-                    prev_avail[_bid].remove(tid)
-                new_state[tid] = _Occ(
-                    batch_id=_bid, count=per_cnt, biomass_kg=per_bio,
-                    avg_wt_g=_avg, oversub=False)
-                cur_sixn_cohort[tid] = _bid
 
         # =============================================================
         # 3) Emit BatchLocations.
@@ -955,6 +1196,23 @@ def pick_tanks(
             # ---- (a) batch weekly mortality %. The audit applies it per tank on
             # the prior count, so the SUM over the batch's tanks = prev_total *
             # mp/100 = the batch's total deaths. survivors = new_total + harvest.
+            # TEMP PROBE (2026-08-25): is `new_total` -- the sum of the
+            # placement's per-tank writes -- always exactly L1's standing count?
+            # If so the draw can be computed BEFORE placement (it needs only
+            # prev_state + L1), which is what makes anchoring possible without
+            # circularity. Asserted rather than assumed.
+            if _os_env.get("ANCHOR_PROBE"):
+                # CORRECTED: `standing` is the PRODUCTION standing only. The
+                # 6N packing (section 2) contributes the rest of new_state, so
+                # the predictable total is production standing + what section 2
+                # seated. Both are known BEFORE section 1 runs, which is the
+                # property anchoring needs.
+                _l1c = (standing.get((batch_id, w), (0.0, 0.0, 0.0))[0]
+                        + _seated6n.get(batch_id, 0.0))
+                if cur_tanks and abs(_l1c - new_total) > max(1.0, 1e-6 * max(1.0, _l1c)):
+                    print(f"  ANCHOR_PROBE MISMATCH {wl} {batch_id}: "
+                          f"predicted={_l1c:,.1f} placement sum={new_total:,.1f} "
+                          f"delta={_l1c - new_total:,.1f}", flush=True)
             mort_total = max(0.0, prev_total - new_total - h_cnt)
             mp = (mort_total / prev_total) if prev_total > 1e-9 else 0.0
             if prev_total > 1e-9:
@@ -1002,27 +1260,21 @@ def pick_tanks(
                 # pool makes it possible. `_hold_weeks` is L1's own constant, so
                 # the pick and the envelope cannot disagree about the length —
                 # including the change at sixn_production_start.
-                def _residency(t, _w=w):
-                    return _w - sixn_arrival.get(t, -10 ** 6)
+                # (ordering lives in _draw_order so the anchor pre-pass and this
+                # emitter cannot disagree about which tanks a harvest comes from)
 
-                # DRAW THE COHORT L1 IS ACTUALLY RELEASING. `sixn_cohort` still
-                # holds LAST week's per-tank map at this point (it is replaced
-                # at the end of the week), and a cohort keyed (batch, w) is one
-                # whose RELEASE WEEK is now -- exactly the fish L1 popped out of
-                # purge_buffer to build this week's envelope. Taking those tanks
-                # first makes the two sides agree by construction instead of
-                # hoping residency order lands on the same fish: L1 releases
-                # cohort X, the pick harvests the tanks holding cohort X.
+                # DRAW THE COHORT L1 IS ACTUALLY RELEASING. `released_tanks`
+                # was captured above: the tanks whose cohorts left the held set
+                # this week, i.e. exactly the fish L1 popped out of
+                # purge_buffer to build this week's envelope. The fish are
+                # still physically there (prev_state). Taking those tanks first
+                # makes the two sides agree by construction instead of hoping
+                # residency order lands on the same fish: L1 releases cohort X,
+                # the pick harvests the tank holding cohort X.
                 #
                 # Residency stays as the tiebreak for anything else, so a tank
                 # that has served longest is still preferred among equals.
-                def _due_now(t, _w=w, _b=batch_id):
-                    ck = sixn_cohort.get(t)
-                    return 1 if (ck is not None and ck[0] == _b
-                                 and ck[1] == _w) else 0
 
-                _six = sorted((t for t in old_tanks if t in sixn_set),
-                              key=lambda t: (-_due_now(t), -_residency(t), t))
                 # THE FALLTHROUGH TO PRODUCTION TANKS IS A KNOWN RULE
                 # VIOLATION, AND IT IS DELIBERATE UNTIL STEP 2 LANDS.
                 #
@@ -1053,8 +1305,8 @@ def pick_tanks(
                 # other batches. Enforcement and reconciliation are ONE job,
                 # not two: fix `purge_rows` vs `harvest_by_bw` first, then the
                 # fallthrough can be deleted and will cost nothing.
-                _nonsix = [t for t in old_tanks if t not in sixn_set]
-                starve_first = _six + _nonsix
+                starve_first = _draw_order(old_tanks, sixn_set, released_tanks,
+                                           sixn_arrival, w, batch_id)
                 drawn_c = 0.0
                 _from6n = 0.0
                 for t in starve_first:
@@ -1094,6 +1346,7 @@ def pick_tanks(
                         count=take_c,
                         avg_wt_g=_twt))
                     h_out_kg[t] = h_out_kg.get(t, 0.0) + take_kg
+                    _act_harvest[t] = _act_harvest.get(t, 0.0) + take_c
                     avail[t] -= take_c
                     drawn_c += take_c
                     if t in sixn_set:
@@ -1197,6 +1450,18 @@ def pick_tanks(
                         break
                     legal = [s for s in avail_s if _legal_src(s, dest)]
                     if legal:
+                        # BIGGEST LEGAL SOURCE FIRST. `legal[0]` took whatever
+                        # sat first in tank order, so a destination was filled
+                        # from many small remainders: 67 of 98 legs came in
+                        # under min_transfer_count (7,000) -- legs of 3, 26, 82,
+                        # 138 fish -- and the ones staging into a 6N tank
+                        # mid-purge are why fish were harvested short of their
+                        # hold. Draining the largest source first fills the same
+                        # demand in the fewest moves, which is what the operator
+                        # floor is asking for, without suppressing any move that
+                        # genuinely has to happen (conservation is untouched:
+                        # the same fish go to the same place, in fewer legs).
+                        legal.sort(key=lambda _s: -_s[1])
                         s = legal[0]
                     else:
                         # No legal source for this destination. Conservation wins
@@ -1245,6 +1510,14 @@ def pick_tanks(
                     destinations=[_TransferDest(
                         tank_id=dest, count=need, avg_wt_g=dest_wt)]))
                 tn_in_kg[dest] = tn_in_kg.get(dest, 0.0) + need * dest_wt / 1000.0
+
+        if _os_env.get("ANCHOR_PROBE"):
+            _keys = set(_pre_harvest) | set(_act_harvest)
+            for _t in sorted(_keys):
+                _pv, _av2 = _pre_harvest.get(_t, 0.0), _act_harvest.get(_t, 0.0)
+                if abs(_pv - _av2) > max(1.0, 1e-6 * max(1.0, _av2)):
+                    print(f"  DRAW_PROBE MISMATCH {wl} tank {_t}: "
+                          f"pre-pass={_pv:,.1f} actual={_av2:,.1f}", flush=True)
 
         # ---- realized_biology: per (tank, week) net biomass (growth-minus-mort)
         # = close - (open - h_out_kg - t_out_kg + t_in_kg + tranog_kg). Closes the
@@ -1301,7 +1574,6 @@ def pick_tanks(
             elif before is None or before.batch_id != now.batch_id:
                 sixn_arrival[tid] = w
 
-        sixn_cohort = cur_sixn_cohort
         if week_oversub:
             oversub_weeks.append(wl)
         state = new_state

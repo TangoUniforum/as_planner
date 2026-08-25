@@ -612,7 +612,22 @@ class BatchStandingRow:
     #
     # L1 already knew: `purge_buffer` is keyed by release week. The old emit
     # summed across those keys and threw the cohort identity away.
+    #
+    # NOT an identity: `release_week` SLIDES. release_due_capped() defers what
+    # will not fit to `w + 1`, re-filing the cohort under a new key, so the same
+    # physical fish are (b, 2) one week and (b, 3) the next. Keying the pick on
+    # it made a deferred cohort look HARVESTED (its tank freed) and its
+    # successor look NEW (placed again, often elsewhere) -- emitting a move for
+    # fish that never moved. Measured in L1: 60 such re-keyings, and 13
+    # surviving intra-6N moves in the plan. Use `entry_week` for identity and
+    # keep this for "when is it due".
     release_week: Optional[int] = None
+    # WEEK THIS COHORT ENTERED THE HOLD -- the stable identity. Set once when
+    # the fish are staged into 6N and carried through every deferral (the
+    # defer path copies the entry with `{**entry}`), so it never changes while
+    # the fish sit in the tank. A cohort key built on this vanishes only when
+    # the fish are actually harvested, which is exactly when its tank frees.
+    entry_week: Optional[int] = None
 
 
 @dataclass
@@ -687,6 +702,13 @@ def plan(
     # for +0.02% harvest. 0.25 starts costing harvest (-1.21%); 0.0 is the old
     # behaviour (max 9 cohorts in a week against a pool that frees ~2).
     sixn_min_cohort_frac: float = 0.15,
+    # ONE PURGE GROUP PER BATCH AT A TIME (operator, 2026-08-24: "once a group
+    # is chosen to enter purge to be harvested at a particular time, we should
+    # focus to empty and harvest that entire group at the same time"). While a
+    # batch still has fish in the 6N hold, it is not drawn again -- the group
+    # goes in, sits the hold, and comes out whole. Default False = the old
+    # dribble, kept so the flag can be swept.
+    sixn_one_group_per_batch: bool = False,
     harvest_tank_density_pct: float = 1.25,
     record_standing: bool = False,
     biomass_ceiling: Optional[dict[str, float]] = None,
@@ -918,11 +940,15 @@ def plan(
                 "harvested_count": 0.0, "harvested_kg": 0.0,
                 "mortality_count": 0.0, "cull_count": 0.0, "cull_kg": 0.0})
             _cc["seeded_count"] += _c
-            purge_buffer.setdefault(
-                max(0, int(entry.get("release_week", 0))), []).append({
+            _relw0 = max(0, int(entry.get("release_week", 0)))
+            purge_buffer.setdefault(_relw0, []).append({
                     "batch_id": _bid, "count": _c,
                     "biomass_kg": float(entry["biomass_kg"]),
                     "avg_wt_g": float(entry["avg_wt_g"]),
+                    # STABLE IDENTITY. These fish entered the hold BEFORE the
+                    # forecast starts, so back-date it; the value only has to be
+                    # constant and distinct per slot, never a real calendar week.
+                    "entry_week": _relw0 - _PURGE_HOLD_WEEKS,
                     # These fish ARE physically in 6N at the handover. Without
                     # "sixn" they were filed as an IN-PLACE hold (see the
                     # held_6n / held_inplace split at step 8b), so they never
@@ -942,6 +968,7 @@ def plan(
                 purge_buffer.setdefault(_k, []).append({
                     "batch_id": _bid, "count": _c / _nrel,
                     "biomass_kg": _c / _nrel * _wt / 1000.0, "avg_wt_g": _wt,
+                    "entry_week": _k - _PURGE_HOLD_WEEKS,   # stable identity
                     "sixn": True})      # physically in 6N at the handover
 
     # ASSUME A PRIMED 6N at forecast start (operator directive: "what we have
@@ -1019,6 +1046,7 @@ def plan(
                         "batch_id": s.batch_id, "count": got_c,
                         "biomass_kg": got_kg,
                         "avg_wt_g": (got_kg * 1000.0 / got_c if got_c > 0 else 0.0),
+                        "entry_week": _k - _PURGE_HOLD_WEEKS,  # stable identity
                         "sixn": True})
                     _need -= got_kg
 
@@ -1269,6 +1297,16 @@ def plan(
             allowable = max(0.0, min(elig - reserve_kg, max_grade_kg, remaining))
             if allowable <= 1e-6:
                 continue
+            # THE DRIBBLE. Feeding a batch into depuration a slice at a time
+            # makes its held population change every week, so its tank
+            # requirement grows and shrinks and the seating re-picks tanks --
+            # 56 same-batch moves BETWEEN 6N tanks (665,236 fish) on the
+            # shipped workbook, which is the whole of the R7 gate failure. A
+            # group that enters together and leaves together needs no moves.
+            if (sixn_one_group_per_batch and model_purge_hold and _purge
+                    and any(e.get("sixn") and e["batch_id"] == s.batch_id
+                            for _rel in purge_buffer.values() for e in _rel)):
+                continue
             if (sixn_min_cohort_frac > 0.0 and model_purge_hold and _purge
                     and og_ceiling > 0 and week_rows
                     and allowable < sixn_min_cohort_frac * og_ceiling):
@@ -1290,6 +1328,9 @@ def plan(
                         "batch_id": s.batch_id, "count": got_c,
                         "biomass_kg": got_kg,
                         "avg_wt_g": (got_kg * 1000.0 / got_c if got_c > 0 else 0.0),
+                        # STABLE IDENTITY: the week they were staged in. Survives
+                        # deferral (release_due_capped re-files with `{**entry}`).
+                        "entry_week": w,
                         "sixn": _purge,
                     })
                     moved_in_kg += got_kg
@@ -1382,26 +1423,41 @@ def plan(
                 # even-split, mixing fresh fish into tanks mid-purge.
                 # IN-PLACE holds stay blended: they sit on their own grow-out
                 # tank and never share, so cohort identity buys nothing there.
+                # Grouped by ENTRY week, not release week: a cohort keeps one
+                # identity from staging to harvest even when part of it is
+                # deferred to a later release slot. Grouping on release week
+                # instead split one physical tankful across two keys the week a
+                # deferral happened, and the pick then treated the vanished key
+                # as harvested and the new one as an arrival -- a phantom move.
+                # `release_week` is still reported, as the EARLIEST slot the
+                # group is due out, so downstream ordering is unchanged.
                 held_6n: dict[tuple[str, int], list[float]] = {}
                 held_inplace: dict[str, list[float]] = {}
                 for _relw, rel in purge_buffer.items():
                     for e in rel:
                         if e.get("sixn"):
+                            # pre-entry_week entries fall back to the old key,
+                            # so a stale buffer can never KeyError here
+                            _ek = e.get("entry_week")
+                            _ek = int(_relw) if _ek is None else int(_ek)
                             acc = held_6n.setdefault(
-                                (e["batch_id"], int(_relw)), [0.0, 0.0])
+                                (e["batch_id"], _ek), [0.0, 0.0, float(_relw)])
+                            acc[2] = min(acc[2], float(_relw))
                         else:
                             acc = held_inplace.setdefault(
                                 e["batch_id"], [0.0, 0.0])
                         acc[0] += e["count"]
                         acc[1] += e["biomass_kg"]
-                for (bid, _relw), (c, kg) in sorted(held_6n.items()):
+                for (bid, _ew), _acc in sorted(held_6n.items()):
+                    c, kg, _min_rel = _acc[0], _acc[1], _acc[2]
                     if c <= 1e-9:
                         continue
                     batch_standing.append(BatchStandingRow(
                         week=w, week_label=label, batch_id=bid,
                         count=c, biomass_kg=kg,
                         avg_wt_g=(kg * 1000.0 / c if c > 0 else 0.0),
-                        feed_kg_day=0.0, in_purge=True, release_week=_relw,
+                        feed_kg_day=0.0, in_purge=True,
+                        release_week=int(_min_rel), entry_week=_ew,
                     ))
                 for bid, (c, kg) in held_inplace.items():
                     if c <= 1e-9:
