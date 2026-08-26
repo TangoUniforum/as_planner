@@ -431,6 +431,17 @@ register(Method(
     # band 0.05, not the 0.10 knob default: measured tighter on every axis that
     # matters (see blurb). The band is the CEILING half — a narrower band clamps
     # harvest less in the fat weeks, so fewer fish are held back for later.
+    # NOTE (2026-08-26): pinning the LEVERS here to cure the inert stock arm was
+    # tried and REVERTED. `overrides` are PINS -- tests/test_tuned_tournament.py
+    # asserts every probe variant carries each override at its pinned value --
+    # and the levers live in the TUNABLE knob space, so pinning them makes a
+    # knob simultaneously fixed identity and tunable policy. The test caught it.
+    # The inertness is real but only affects someone choosing the STOCK arm on
+    # the board; a TUNED tournament already reaches the levers through
+    # optimize.OPT_FULL_GRID (hybrid:prod-lever / both-levers / levers-off) and
+    # on 2026-08-25 it searched them and chose OFF. Curing it properly means
+    # deciding whether the levers are ARM IDENTITY (untunable) or POLICY
+    # (tunable) -- an architecture call, not a default to flip.
     overrides={"hybrid_follow": "full", "hybrid_follow_band": 0.05},
     knob_grid=CONTROLLER_KNOB_GRID,
     knob_space=CONTROLLER_KNOB_SPACE,

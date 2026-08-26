@@ -625,6 +625,20 @@ def pick_tanks(
                 continue
             sixn_tank_cohorts.setdefault(_dest, []).append(_ck)
 
+        # SIXN_PROBE: dump the packing's view at the moment it is decided, for a
+        # week window. Two hypotheses about the intra-6N moves (draw-order, then
+        # pool saturation) were both refuted by reading OUTPUTS; this reads the
+        # decision itself. Env-gated, off by default.
+        if _os_env.get("SIXN_PROBE") and wl >= _os_env.get("SIXN_PROBE_FROM", "2027-W20"):
+            print(f"  [SIXN] {wl} held_cohorts=" + ", ".join(
+                f"{k[0]}/e{k[1]}:{v.count:,.0f}" for k, v in sorted(
+                    held_by_ck.items(), key=lambda kv: str(kv[0]))), flush=True)
+            print(f"  [SIXN] {wl} tank_map=" + ", ".join(
+                f"t{t}:[{','.join(f'{c[0]}/e{c[1]}' for c in cks)}]"
+                for t, cks in sorted(sixn_tank_cohorts.items())), flush=True)
+            print(f"  [SIXN] {wl} released_tanks={ {k: sorted(v) for k, v in released_tanks.items()} }",
+                  flush=True)
+
         # 3) WRITE each tank from ITS OWN contents -- no re-split.
         _seated6n: dict[str, float] = {}     # batch -> fish seated in 6N
         for _t, _cks in sixn_tank_cohorts.items():
