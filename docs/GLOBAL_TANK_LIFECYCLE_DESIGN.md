@@ -232,15 +232,50 @@ against a free-form optimum; irregular batches and the starting state (the
 PR handover is never in template position) need an explicit exception path;
 and the template itself has to be derived, which is its own study.
 
-**These are not exclusive.** The template can be the objective's preferred
-shape while the grid handles deviations — the solver prefers
-template-conforming residences and pays a penalty to depart. That is likely
-the best of both, but it doubles the design surface, so it is offered as a
-decision rather than assumed.
+### 5.1 DECIDED (operator, 2026-08-25): grid first, template as an OUTPUT
 
-**OPEN QUESTION Q1:** template-first, grid-first, or
-grid-with-template-preference? This is the largest single fork in the
-design, and it is an operational judgement rather than an engineering one.
+> *"We don't have a standard batch path. Use grid first — it would be nice
+> to determine the standard path as a result of the method."*
+
+Two decisions, and the second inverts the section above.
+
+**There is no existing standard path to encode.** The template-first option
+is therefore not available even in principle: it would require deriving the
+template first, which is the study §5 warned about, before any planning
+could start.
+
+**The template becomes a RESULT, not an input.** Solve the grid freely under
+the constraints, then look at what the solutions have in common. If the
+solver, across many batches and a long horizon, keeps producing residences
+of a similar shape, THAT is the plant's natural production model —
+discovered from the physics and the constraints rather than assumed from
+habit.
+
+This is a better shape than imposing a template, for three reasons:
+
+1. **It cannot be wrong the way an assumed template can.** A hand-written
+   standard path encodes today's practice, including its accidents. A
+   derived one encodes what the facility and the rules actually admit.
+2. **It is falsifiable.** If no recurring pattern emerges, that is a real
+   finding — it means the plant genuinely has no steady state under these
+   constraints, and any template would have been a fiction.
+3. **It pays back into runtime.** A derived template can warm-start or
+   restrict later solves, which is the most promising answer to the cost
+   concern in §6.1. Deriving it first would have been guesswork; deriving it
+   from solved plans makes it evidence.
+
+**How to derive it (proposed, not yet specified in detail):** take the
+solved residences — `(batch, tank, start week, end week, entry count, exit
+count, entry weight, exit weight)` — and look for modal structure in the
+system sequence a batch takes, the weights at which it moves, and residence
+lengths. The output is a description like *"a batch typically enters OG1/2
+at X g, splits at Y g into N tanks, enters grow-out at Z g, and stages to 6N
+at W g"* — with the spread around each figure, since the spread is what says
+whether it is a real pattern or an average of unlike things.
+
+**Do NOT constrain the solver to the derived template without measuring the
+cost.** The moment it becomes an input it can only reduce the solution
+space; it must earn that against the §7 baseline like any other change.
 
 ## 6. Implications — what this costs and breaks
 
@@ -331,7 +366,9 @@ day. Regime coverage makes a short run BETTER, not sufficient.
 
 ## 10. Open questions for the operator
 
-- **Q1 (§5)** Template-first, grid-first, or grid-with-template-preference?
+- ~~**Q1 (§5)** Template-first, grid-first, or grid-with-template-preference?~~
+  **ANSWERED (§5.1): GRID FIRST**, with the standard path derived from the
+  solved plans as an output of the method.
 - ~~**Q2** Which lever is preferred when a residence cannot end cleanly?~~
   **ANSWERED (§3b):** no ranking — all are tools, and the choice depends on
   what other systems and tanks have available. The ranking IS the
@@ -339,9 +376,22 @@ day. Regime coverage makes a short run BETTER, not sufficient.
 - ~~**Q3** Is `min_transfer_count` a hard floor or a preference?~~
   **ANSWERED (§3b):** a proxy for the real objective, therefore relaxable
   once lifetime handling is modelled directly.
-- **Q4** Does a "general production model" (§5) already exist informally — a
-  standard path operations expects a batch to take? If so it should be
-  written down and used, not derived from the data.
+- ~~**Q4** Does a "general production model" already exist informally?~~
+  **ANSWERED (operator): NO.** *"We don't have a standard batch path."* So
+  there is nothing to encode, and §5.1 derives one instead.
+
+**All five opening questions are now closed.** What remains open is
+engineering, not judgement:
+
+- **E1** Is the mode switch expensive to SOLVE? A 30-week regime-compressed
+  run exceeded 10 minutes where a normal 30-week run should take ~1. If the
+  switch is genuinely costly, the cheap development gate in §9 does not
+  exist and iteration stays slow. UNRESOLVED — being measured.
+- **E2** Does the pick dominate runtime, or the LP/MILP solve? Decides
+  whether §4b's up-to-10x pick passes cost minutes or hours (§6.1).
+- **E3** Does a recurring residence pattern actually emerge from solved
+  plans (§5.1)? Unknowable until the grid solver exists — and a negative
+  answer is a legitimate result.
 - ~~**Q5 (§3b)** Should a whole-tank move count for less than a split?~~
   **ANSWERED (operator, 2026-08-25):** *"A whole tank move adds one transfer
   for each of the fish that were transferred."* No discount. The objective is
