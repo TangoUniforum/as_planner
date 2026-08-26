@@ -1,10 +1,26 @@
 # Global engine — tank-lifecycle planning
 
-> **STATUS 2026-08-25: DESIGN, NOT BUILT.** Written for operator review
-> before any code. Supersedes nothing yet. Sibling to
+> **STATUS 2026-08-26: DESIGN, NOT BUILT — AND ITS PREMISE IS NOW WEAKER.**
+> Written for operator review before any code. Sibling to
 > `GREENFIELD_RESERVATION_SCHEDULER_DESIGN.md` (built + shelved for the
 > incremental coordinator) — this is the global/ILP exploration that
 > document explicitly parked its grid model for.
+>
+> **READ §1b, §3b.3 and §3c.1 BEFORE ACTING ON THIS.** Three of the claims
+> that motivated a multi-day rewrite have since been contradicted by
+> measurement:
+>
+> | original claim | what measurement showed |
+> |---|---|
+> | a 92% handling prize is available (§3b.1) | it was the density bug — the anchored run's 0.00 grow-out handling came from crowding fish into 44% fewer tanks at 613 kg/m³. **Withdrawn** (§3b.3). |
+> | the pick structurally cannot enforce rules (§1) | it cannot change AMOUNTS; it CAN change ORDER. An ordering-only fix cut intra-6N moves 24 → 7 with zero collateral change (§1b). |
+> | the handling budget is a defect to fix | it is a density-vs-handling TRADE and an operator judgement (§3c.1). |
+>
+> What still stands, and is measured: **Global holds a hard biomass cap the
+> shipping controller cannot** (§3c) — the one durable reason to keep
+> investing here. The remaining defects (4 DISPLACED moves, `sixn_one_way`
+> at 9) are smaller than §1 implies and have not been shown to need a
+> rewrite. **Do not start the grid build on this document as it stands.**
 
 ---
 
@@ -34,6 +50,43 @@ render, and conservation broke every time:
 
 The pick has no legitimate way to change the plan, so every change it makes
 unilaterally is a conservation break wearing a different hat.
+
+### 1b. CORRECTED 2026-08-26 — the constraint is AMOUNTS, not authority
+
+The paragraph above is too strong, and a sixth change disproved it.
+
+Every failure in that table changed a QUANTITY: draw more, draw less, hold
+different amounts per tank. None of them changed only an ORDER. The 2026-08-26
+partial-release fix changed nothing but the order the draw visits tanks, and it
+cut intra-6N moves 24 -> 7 and the fish moved 305,620 -> 35,384 with **zero**
+collateral change — same transfer count, same topology, same density, same peak,
+same harvest, conservation clean, 816 tests green.
+
+**The working rule is therefore:**
+
+> The pick may **REORDER** freely. It may not **RE-QUANTIFY**.
+>
+> Which tanks, in which sequence, is the pick's to decide — those choices are
+> conservation-neutral by construction. How many fish, and when, is L1's
+> contract; deviating from it leaves fish with no allocated home.
+
+That is a far more useful statement than "the pick is a renderer", and it is
+actionable: it says in advance which fixes are safe to attempt.
+
+**It also re-dates the R7 diagnosis.** The failure was not structural. It was an
+arithmetic blind spot: `released_tanks` watched for cohorts to DISAPPEAR, so it
+never saw a partial release — and partial releases are the norm, because L1 caps
+each week at the processing limit. Ordering by the week-over-week delta fixed
+it. No rewrite was required for the part everyone assumed needed one.
+
+**What remains genuinely unresolved** is smaller than §1 implies:
+
+- **DISPLACED moves (4 of the surviving 7).** A new cohort is seated into a tank
+  whose previous batch's fish are still physically there because the draw never
+  took them — the map says free, the tank is not. Same map-vs-physical seam,
+  opposite direction, not yet instrumented.
+- **`sixn_one_way` still FAILS** — it requires exactly 0 and reads 9 (was 26).
+- **`handling_budget`** — see §3c.1: a real trade, not a defect.
 
 ## 2. The operator's reframing (2026-08-25) — why repairs are the wrong shape
 
@@ -336,6 +389,50 @@ obeys the rules.** Operator ruling 2026-08-26: *"I would like Global to work
 properly too, even if it is very slow -- I do not want code that does not
 function as intended."* Runtime is therefore NOT a reason to reject an approach;
 correctness is the constraint, speed is a preference.
+
+## 3c.1 The handling budget is a TRADE, not a defect
+
+`handling_budget` (max_transfers_per_week = 15) is Global's other hard FAIL: 8
+of 85 weeks over, worst week 28 moves. It looked like a dribble problem — 577
+of 903 legs are under the 7,000-fish `min_transfer_count` floor, and stripping
+them would drop the worst week to 12, under budget.
+
+**It is not waste.** 76 of 143 multi-source destination-weeks have every leg
+IDENTICAL (8 legs of 2,956; 7 legs of 5,053). They are equal because the batch's
+fish are evenly split across its production tanks, so staging into 6N drains all
+of them. The legs are the batch's ENTIRE holding moving, not a rounding tail —
+which is also why an earlier "drain the largest source first" fix measured
+neutral: when every source holds the same amount, ordering them changes nothing.
+
+Reducing those legs means concentrating fish into fewer, fuller tanks — the
+exact move that took density to 613 kg/m3 when the anchored write tried it. So
+the handling budget trades directly against density spreading.
+
+**That makes it an operator judgement, not an engineering fix**, and the same
+shape as the biomass/handling trade already ruled on. Do not "fix" it in code
+without a ruling on where the trade should land.
+
+## 3d. SCOPE — what a change to each module affects
+
+| module | methods affected |
+|---|---|
+| `global_tank_pick_poc.py` (the pick) | global-lp, global-milp |
+| `global_planner_poc.py` (**L1**) | global-lp, global-milp, **controller-hybrid** |
+| `global_planner_l3_poc.py` (L3) | global-lp, global-milp |
+| `global_placement_milp_poc.py` | global-milp only |
+| `placement.py` (controller engine) | controller, controller-lns, controller-hybrid |
+
+**The non-obvious one: `controller-hybrid` runs the Global L1.**
+`hybrid_guide.build_harvest_guide` imports `global_planner_poc` and calls
+`plan()` to build the harvest envelope it feeds the controller
+(`forecast/hybrid_guide.py:201`). So an L1 change reaches a Controller-family
+arm. The 2026-08-25 `entry_week` change was an L1 change and therefore touched
+it — with no live effect only because the hybrid ships INERT (its levers are
+false, so the guide steers nothing; see `methods.py`). **If those levers are
+ever switched on, L1 changes become live for that arm and it must be re-gated.**
+
+Pick-only changes (the partial-release fix, the DISPLACED work) reach the two
+Global arms and nothing else.
 
 ## 4. Design
 
