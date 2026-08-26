@@ -135,6 +135,11 @@ fish-transfers and per-fish lifetime transfer counts alongside leg counts,
 in `fast_check` and the workbook. The current comparison cannot see the
 thing the operator actually cares about.
 
+> **§3b.1 AND §3b.2 BELOW ARE SUPERSEDED — see §3b.3.** Their figures were
+> computed on a broken basis (horizon-wide, and excluding Grade rows). They
+> are kept because the design's early reasoning rests on them and the record
+> of what was wrong is worth more than a clean-looking document.
+
 ### 3b.1 Measured — and it reverses the 2026-08-25 conclusions
 
 Applying the objective to the runs already on disk:
@@ -201,6 +206,63 @@ Decomposed (fish-transfers, 85 weeks):
 **Objective for the grid solver (§4a): minimise DISCRETIONARY fish-transfers**
 — in-6N plus grow-out — with mandatory staging excluded, since including a
 constant the solver cannot change only obscures the number.
+
+### 3b.3 CORRECTED 2026-08-26 — three measurement errors, and the ranking flips
+
+The operator challenged the figures: *"less than 1 handling per fish does not
+make sense, I think there may be an issue in the constraints for the method"*
+and *"I'm also not sure how the fish can be moved less than once in grow-out
+and less than once into 6N."* Both objections were correct. Three errors:
+
+**Error 1 — mixed populations.** Handling was computed as
+(transfers in horizon) / (fish harvested in horizon). Those are different
+populations. B41–B48 are PRE-EXISTING at the PR handover — most of their life
+predates week 1, so their transfers are invisible (B42 read 0.25/fish, which
+is impossible for a full life). B56–B60 are stocked but never harvested —
+transfers counted, no denominator. **Fix: measure only batches stocked AND
+≥90% harvested inside the horizon (B49–B54).**
+
+**Error 2 — Grade rows excluded.** `Type=Grade` rows were not counted. The
+operator confirms grading is **full handling — "a whole tank move adds one
+transfer for each of the fish that were transferred"** applies equally: every
+fish goes through the sorter. Excluding it hid 2.64 transfers/fish on the
+tuned controller.
+
+**Error 3 — the "0.13 prize" was the density bug.** The anchored run's
+grow-out handling of **0.00** was not an achievement. It kept fish in 44%
+fewer tanks at up to 613 kg/m³, so batches never spread and never needed to
+move. **The low handling and the density violation are the same fact.** §3b.1
+cites 0.13 as the design's central justification. That is withdrawn.
+
+**Corrected — complete journeys (B49–B54), Grade included:**
+
+| arm | Transfer | Grade | **total/fish** | harvest | over 95 | peak | topology |
+|---|---|---|---|---|---|---|---|
+| controller tuned | 1.31 | 2.64 | **3.95** | 3,652,084 | 0 | 89 | none |
+| controller stock | 2.13 | 1.34 | **3.47** | 3,635,023 | 0 | 89 | none |
+| global-lp stock | 2.75 | **0.00** | **2.75** | 3,604,211 | 185 (7.2%) | 153 | R3:10 |
+
+**Two findings that change the picture:**
+
+1. **TUNING MAKES HANDLING WORSE.** Stock 3.47 → tuned 3.95. The tuner
+   switches the rebalancer off (Transfer 2.13 → 1.31) but grading rises
+   (1.34 → 2.64) and more than eats the gain. **The scoring function does not
+   count grading as handling**, so the tuner optimises one bucket while the
+   cost moves into another. This is actionable independently of anything else
+   in this document.
+2. **GLOBAL DOES NOT GRADE AT ALL** — zero Grade rows in every Global run;
+   the machinery lives in `placement.py` (65 refs) with one passing mention in
+   the Global pick. So its lower handling is achieved by SKIPPING an operation
+   the controller performs, not by doing it better. It compensates by growing
+   fish heavier (4,048 g average vs 3,884 g) with slightly more below spec
+   (0.6% vs 0.3%) — and holding fish heavier is precisely what drives its
+   density pressure and its 7.2% over-cap tank-weeks.
+
+**Net:** the controller wins harvest, density, tier legality and weight-spec
+compliance. Global wins handling only, and only because it omits grading
+while producing a plan that is not executable (10 R3 breaches, 185 over-cap
+tank-weeks). A handling comparison between them is NOT like-for-like until
+Global grades or the controller's grading is priced into the tuner's score.
 
 **Process note.** A full day was spent on 6N moves (5% of avoidable handling)
 because that is where the loud failures were — topology warnings and
