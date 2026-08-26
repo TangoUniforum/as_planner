@@ -353,12 +353,33 @@ the cheap gate is to move the boundary rather than cut the length:
 forward puts startup, purge, the switch, and production mode inside a short
 run.
 
-**STATUS: being measured.** A 30-week regime-compressed run exceeded 10
-minutes where a 30-week normal run should take ~1, so the switch may be
-expensive to solve (or it was CPU contention with a concurrent full run).
-If it is genuinely cheap once isolated, it becomes the development gate and
-the full 85 weeks stays the ship gate. If not, the full run remains the only
-honest gate and iteration stays slow.
+**MEASURED 2026-08-25 — the idea does NOT work.** A 30-week run with
+`sixn_production_start` pulled to 2026-12-01 consumed ~30 MINUTES of CPU at
+1.18 cores and had still not finished when it was killed. A normal 12-week
+run takes **0.4 minutes**; linear scaling predicts ~1 minute for 30 weeks.
+Regime compression is roughly **75x worse than linear**.
+
+Likely cause (not confirmed): at `sixn_production_start` the 6N mains rejoin
+the production pool, enlarging the placement search space — and compressing
+the switch to week ~15 leaves so little purge history that the problem may
+also be near-degenerate. A gentler compression (switch at ~2027-06 rather
+than 2026-12) might be cheaper while still spanning both regimes, and is
+worth one measurement when the machine is free. It was not pursued
+immediately because it was competing for CPU with the shipping engine's
+confirming run.
+
+**Consequence for the build (E1): there is no cheap gate for the
+production-mode regime.** What exists:
+
+| gate | covers | cost |
+|---|---|---|
+| `fast_check --weeks 12` | startup + purge mode | ~0.4 min |
+| full 85-week run | both regimes, incl. the week-74 switch | ~3.2 h |
+
+Purge-mode behaviour — which is 86% of the horizon — can be iterated on in
+seconds. Anything touching the mode switch, the 6N mains rejoining
+production, or the R4 class costs a full run. Sequence the build so
+mode-switch work is batched rather than iterated.
 
 **This does not relax the rule earned on 2026-08-25:** a short run is a
 filter for obviously-broken. `fast_check` was overturned three times that
@@ -383,10 +404,12 @@ day. Regime coverage makes a short run BETTER, not sufficient.
 **All five opening questions are now closed.** What remains open is
 engineering, not judgement:
 
-- **E1** Is the mode switch expensive to SOLVE? A 30-week regime-compressed
-  run exceeded 10 minutes where a normal 30-week run should take ~1. If the
-  switch is genuinely costly, the cheap development gate in §9 does not
-  exist and iteration stays slow. UNRESOLVED — being measured.
+- ~~**E1** Is the mode switch expensive to solve?~~ **ANSWERED (§9): YES,
+  ~75x worse than linear.** No cheap gate exists for the production-mode
+  regime; purge mode iterates in 0.4 min, anything touching the week-74
+  switch costs a full 3.2 h run. Batch mode-switch work rather than
+  iterating on it. One measurement still worth taking: a gentler compression
+  (switch at ~2027-06) may be cheaper while still spanning both regimes.
 - **E2** Does the pick dominate runtime, or the LP/MILP solve? Decides
   whether §4b's up-to-10x pick passes cost minutes or hours (§6.1).
 - **E3** Does a recurring residence pattern actually emerge from solved
