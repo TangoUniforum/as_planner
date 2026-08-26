@@ -236,7 +236,8 @@ def _label_to_week_start(label: str, fs_date: date) -> date:
 _os_env = _os.environ
 
 
-def _draw_order(old_tanks, sixn_set, released_tanks, sixn_arrival, w, batch_id):
+def _draw_order(old_tanks, sixn_set, released_tanks, sixn_arrival, w,
+                batch_id, released_amt=None):
     """The ORDER a batch's prior tanks are drawn from for harvest.
 
     Split out so the harvest allocation can be computed BEFORE production
@@ -256,8 +257,16 @@ def _draw_order(old_tanks, sixn_set, released_tanks, sixn_arrival, w, batch_id):
     def _residency(t):
         return w - sixn_arrival.get(t, -10 ** 6)
 
+    # Biggest actual release first. This was a BINARY flag on
+    # released_tanks membership, which a partial release never set -- so the
+    # draw fell through to residency and emptied a tank whose fish L1 had not
+    # released. Ordering by the amount makes "L1 releases cohort X, the pick
+    # harvests the tank holding X" true by construction, without capping
+    # anything (see the release block for why capping loses fish).
+    _amt = released_amt or {}
+
     def _due_now(t):
-        return 1 if t in released_tanks.get(batch_id, ()) else 0
+        return _amt.get(t, 0.0)
 
     _six = sorted((t for t in old_tanks if t in sixn_set),
                   key=lambda t: (-_due_now(t), -_residency(t), t))
@@ -343,6 +352,9 @@ def pick_tanks(
     # tank -> [cohort keys it holds]. STABLE: a cohort never moves once
     # placed, so no fish are shuffled between depuration tanks.
     sixn_tank_cohorts: dict[int, list] = {}
+    # Last week's per-cohort counts, so a PARTIAL release is visible. See the
+    # release block below: cohort disappearance alone cannot see one.
+    _sixn_prev_held: dict = {}
     # Same constant L1 plans against — imported, not restated, so the pick and
     # the envelope can never disagree about the hold length.
     from .global_planner_poc import _PURGE_HOLD_WEEKS as _HOLD
@@ -570,16 +582,43 @@ def pick_tanks(
         # Tanks whose cohorts are released THIS week, per batch. The draw
         # below needs them: those fish are still physically in the tank (they
         # are in prev_state) and are exactly what L1's envelope harvests now.
+        # HOW MUCH each tank released, from the WEEK-OVER-WEEK DELTA in its
+        # cohorts' counts -- not from cohorts disappearing.
+        #
+        # Disappearance only sees a FULLY released cohort, and a partial release
+        # is the NORM: L1 caps each week's release at the processing limit, so a
+        # large cohort always comes out in slices. Measured 2027-W22 (SIXN_PROBE):
+        # L1 released 41,567 fish of B49/e40, which lives in tank 69, but e40
+        # stayed alive (50,043 -> 8,476) so tank 69 was never flagged. With B49
+        # absent from released_tanks the draw fell back to RESIDENCY order, took
+        # the whole 41,567 out of tank 61 -- which holds the un-released cohort
+        # e41 -- and the emitter then refilled tank 69 from tank 71. That is the
+        # 41,551-fish "move", and 7 of the 9 unexplained intra-6N moves have this
+        # exact shape: harvested near-empty, then refilled to the same number.
+        #
+        # Used to ORDER the draw, never to cap it. An earlier cap attempt built
+        # on the same disappearance test read zero for precisely the partially
+        # released cohorts and starved the draw, destroying 696 fish. Ordering
+        # cannot: the greedy draw still takes the full h_cnt, it just starts
+        # where the fish actually left.
         released_tanks: dict = {}
+        released_amt: dict = {}
+        _now_held = {ck: r.count for ck, r in held_by_ck.items()}
         for _t in list(sixn_tank_cohorts):
             keep_cks = [ck for ck in sixn_tank_cohorts[_t] if ck in _live]
             for ck in sixn_tank_cohorts[_t]:
-                if ck not in _live:
+                _was = _sixn_prev_held.get(ck)
+                if _was is None:
+                    continue                       # first week seen; no delta
+                _gone = _was - _now_held.get(ck, 0.0)   # absent => fully released
+                if _gone > 1e-9:
+                    released_amt[_t] = released_amt.get(_t, 0.0) + _gone
                     released_tanks.setdefault(ck[0], set()).add(_t)
             if keep_cks:
                 sixn_tank_cohorts[_t] = keep_cks
             else:
                 del sixn_tank_cohorts[_t]
+        _sixn_prev_held = dict(_now_held)
 
         # 2) PLACE new cohorts. Never move one already placed.
         _already = {ck for cks in sixn_tank_cohorts.values() for ck in cks}
@@ -686,7 +725,7 @@ def pick_tanks(
             _av = {t: prev_state[t].count * (1.0 - _mp) for t in _old}
             for _t, _take in _draw_takes(
                     _draw_order(_old, sixn_set, released_tanks, sixn_arrival,
-                                w, _bid), _av, _hc):
+                                w, _bid, released_amt), _av, _hc):
                 _pre_harvest[_t] = _pre_harvest.get(_t, 0.0) + _take
         _act_harvest: dict[int, float] = {}   # what section 4 really draws
 
@@ -1192,7 +1231,8 @@ def pick_tanks(
                 # not two: fix `purge_rows` vs `harvest_by_bw` first, then the
                 # fallthrough can be deleted and will cost nothing.
                 starve_first = _draw_order(old_tanks, sixn_set, released_tanks,
-                                           sixn_arrival, w, batch_id)
+                                           sixn_arrival, w, batch_id,
+                                           released_amt)
                 drawn_c = 0.0
                 _from6n = 0.0
                 for t in starve_first:
