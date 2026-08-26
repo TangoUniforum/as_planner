@@ -657,7 +657,6 @@ def pick_tanks(
         # never placement -- so it can run here. `new_total` is predicted as
         # L1's production standing plus what the 6N block seated; that identity
         # is asserted every week under ANCHOR_PROBE and holds exactly.
-        _min_tr = float(getattr(control, "min_transfer_count", 0.0) or 0.0)
         _pre_mp: dict[str, float] = {}
         _pre_harvest: dict[int, float] = {}
         for _bid in sorted(prev_by_batch):
@@ -918,97 +917,23 @@ def pick_tanks(
         # Splitting over the actually-placed tank count (not L3's planned count)
         # guarantees ALL of the batch's biomass/count is placed even when a
         # shortfall forced fewer tanks — denser, but conserved.
-        # ANCHORED (2026-08-25): a tank the batch already held keeps ITS OWN
-        # survivors -- prior count, less its share of mortality, less what THIS
-        # tank was harvested of. Only fish whose tank is leaving the batch's set,
-        # plus a genuine shortfall, land in newly-taken tanks.
-        #
-        # This replaces `per_cnt = cnt / n_act` applied to every tank: a target
-        # recomputed weekly, so any per-tank event re-levelled the whole batch.
-        # Harvesting 8,989 fish out of B55's tank 25 put all four of its tanks
-        # back on one number, which the emitter could only express as trucking
-        # 3 x 2,247 fish back INTO the tank just harvested -- one leg an R4
-        # backward move into a retained entry tank. 22% of transfer legs were
-        # this shape, and not one of them moved a fish that needed moving.
-        #
-        # Batch totals, tank SETS and system assignment are untouched: this
-        # changes only the arrangement WITHIN the set the planner chose.
-        _tanks_by_b: dict[str, list[int]] = {}
         for (batch_id, system), chosen in chosen_by_ps.items():
-            if chosen:
-                _tanks_by_b.setdefault(batch_id, []).extend(chosen)
-        for batch_id, tankset in _tanks_by_b.items():
-            n_act = actual_total.get(batch_id, len(tankset))
+            if not chosen:
+                continue
+            n_act = actual_total.get(batch_id, len(chosen))
             cnt, bio, avg = standing.get((batch_id, w), (0.0, 0.0, 0.0))
             if bio <= 0:
                 bio = sum(pp.biomass_kg for pp in plist if pp.batch_id == batch_id)
                 cnt = (bio * 1000.0 / avg) if avg > 0 else 0.0
+            per_bio = bio / n_act if n_act else 0.0
+            per_cnt = cnt / n_act if n_act else 0.0
+            per_avg = avg if avg > 0 else (per_bio * 1000.0 / per_cnt
+                                           if per_cnt > 0 else 0.0)
             denser = n_act < batch_total_tanks.get(batch_id, n_act)
-            _mp_b = _pre_mp.get(batch_id, 0.0)
-            _old_b = [t for t in prev_by_batch.get(batch_id, []) if t not in sixn_set]
-            _keep: dict[int, float] = {}
-            for tid in tankset:
-                if tid in _old_b:
-                    _surv = max(0.0, prev_state[tid].count * (1.0 - _mp_b)
-                                - _pre_harvest.get(tid, 0.0))
-                    if _surv > 1e-9:
-                        _keep[tid] = _surv
-            _kept = sum(_keep.values())
-            _fresh = [t for t in tankset if t not in _keep]
-            _inbound = cnt - _kept
-            _cts: dict[int, float] = dict(_keep)
-            if _inbound < -1e-9:
-                # retained tanks hold MORE than the standing: the batch is
-                # consolidating, so shed proportionally -- those fish leave as
-                # real moves rather than being silently re-levelled.
-                _scale = (cnt / _kept) if _kept > 1e-9 else 0.0
-                _cts = {t: c * _scale for t, c in _keep.items()}
-            elif _fresh and 0.0 < _min_tr and _inbound < _min_tr and _keep:
-                # MIN_TRANSFER_COUNT (operator input, 7,000 fish). Opening a
-                # fresh tank for fewer fish than you would ever move is what
-                # produced legs of 3, 26, 82 and 138 fish -- 62% of all transfer
-                # legs sat under this floor, and the ones staging into a 6N tank
-                # mid-purge are why 36 fish were harvested short of their hold.
-                # placement.py has enforced it at 8 sites since long before this
-                # engine existed; no global_* module read the knob at all.
-                #
-                # Prevented at SOURCE rather than suppressed after the fact: the
-                # fish simply stay in the tanks they are already in, so nothing
-                # is stranded and conservation is untouched. The tank placement
-                # reserved stays empty this week.
-                _kt = sum(_keep.values())
-                for t, c in _keep.items():
-                    _cts[t] = c + (_inbound * (c / _kt) if _kt > 1e-9 else 0.0)
-            elif _fresh:
-                # BY VOLUME, not per-tank. An even split is only density-even
-                # when every tank is the same size, and they are not: facility
-                # volumes run 950 - 1,726 m3 (1.8x), and OG4N alone holds
-                # 1200 / 1720 / 1721. Splitting `inbound / n_tanks` puts the
-                # same mass in a 950 m3 tank as in a 1,726 m3 one, so the small
-                # tank sits 1.8x denser for no reason -- it just does not bite
-                # today because no batch currently holds mixed-volume tanks.
-                # Volume-proportional puts every tank of a batch at the SAME
-                # density, which is the maximum-headroom arrangement and the
-                # one the CP-SAT branch already documents.
-                _vs = {t: max(0.0, tank_vol_m3.get(t, 0.0)) for t in _fresh}
-                _vt = sum(_vs.values())
-                for t in _fresh:
-                    _cts[t] = (_inbound * (_vs[t] / _vt) if _vt > 1e-9
-                               else _inbound / len(_fresh))
-            # Conservation is not negotiable: land exactly on L1's standing.
-            _tot = sum(_cts.values())
-            if _tot > 1e-9 and abs(_tot - cnt) > 1e-9:
-                _f = cnt / _tot
-                _cts = {t: c * _f for t, c in _cts.items()}
-            for tid in tankset:
-                _c = _cts.get(tid, 0.0)
-                _kg = (bio * (_c / cnt)) if cnt > 1e-9 else 0.0
-                if _c <= 1e-9 and _kg <= 1e-9:
-                    continue
-                _a = avg if avg > 0 else (_kg * 1000.0 / _c if _c > 0 else 0.0)
+            for tid in chosen:
                 new_state[tid] = _Occ(
-                    batch_id=batch_id, count=_c, biomass_kg=_kg,
-                    avg_wt_g=_a, oversub=denser)
+                    batch_id=batch_id, count=per_cnt, biomass_kg=per_bio,
+                    avg_wt_g=per_avg, oversub=denser)
                 if denser:
                     n_oversub_rows += 1
 
@@ -1040,67 +965,14 @@ def pick_tanks(
                 # the solver's own layout had 0 over-cap slack. Scaling the solver's
                 # q to the pick's exact `bio` keeps count + biomass conserved and the
                 # per-tank density under the (solver-proved) cap.
-                # ---- ANCHORED WRITE (2026-08-25) ----------------------------
-                # Fish STAY WHERE THEY ARE. A tank the batch already held keeps
-                # its own survivors (prior count, less its mortality share, less
-                # what THIS tank was harvested of); only fish whose tank is
-                # leaving the batch's set, plus any genuine shortfall, are
-                # distributed into the newly-taken tanks.
-                #
-                # What this replaces: `count = batch_total * q_share`, recomputed
-                # from scratch every week. That is target-driven, so ANY per-tank
-                # event re-levelled the whole batch -- harvest 8,989 fish out of
-                # tank 25 and the writer put all four of B55's tanks back on the
-                # same number, which the emitter could only express as trucking
-                # 3 x 2,247 fish INTO the tank just harvested (one leg an R4
-                # backward move into a retained entry tank). 22% of all transfer
-                # legs were this, and none of them move a fish that needed moving.
-                #
-                # The solver still owns WHICH tanks and the target split; this
-                # only stops paying handling to chase the target when the fish
-                # are already in a feasible place.
-                _mp_b = _pre_mp.get(b, 0.0)
-                _old_b = [t for t in prev_by_batch.get(b, []) if t not in sixn_set]
-                _keep: dict[int, float] = {}
+                qsum = sum(qw.get((b, t), 0.0) for t in tankset) or 1.0
                 for t in tankset:
-                    if t in _old_b:
-                        _surv = max(0.0, prev_state[t].count * (1.0 - _mp_b)
-                                    - _pre_harvest.get(t, 0.0))
-                        if _surv > 1e-9:
-                            _keep[t] = _surv
-                _kept = sum(_keep.values())
-                _fresh = [t for t in tankset if t not in _keep]
-                qsum_f = sum(qw.get((b, t), 0.0) for t in _fresh) or 1.0
-                _inbound = cnt - _kept          # arrivals (or, if <0, an overshoot)
-                _cts: dict[int, float] = {}
-                if _inbound >= -1e-9 and _fresh:
-                    for t in _fresh:
-                        _cts[t] = _inbound * (qw.get((b, t), 0.0) / qsum_f)
-                    _cts.update(_keep)
-                elif _inbound >= -1e-9:
-                    _cts = dict(_keep)          # nowhere fresh to put arrivals
-                else:
-                    # Retained tanks hold MORE than the batch's standing: the
-                    # batch is consolidating. Shed proportionally from what is
-                    # retained -- those fish are leaving via real moves.
-                    _scale = cnt / _kept if _kept > 1e-9 else 0.0
-                    _cts = {t: c * _scale for t, c in _keep.items()}
-                # Conservation is not negotiable: normalise to L1's standing
-                # exactly, so the anchored layout cannot invent or lose a fish.
-                _tot = sum(_cts.values())
-                if _tot > 1e-9 and abs(_tot - cnt) > 1e-9:
-                    _f = cnt / _tot
-                    _cts = {t: c * _f for t, c in _cts.items()}
-                _wt = avg if avg > 0 else 0.0
-                for t in tankset:
-                    _c = _cts.get(t, 0.0)
-                    pkg = (bio * (_c / cnt)) if cnt > 1e-9 else 0.0
+                    qf = qw.get((b, t), 0.0) / qsum
+                    pkg = bio * qf
                     volm = tank_vol_m3.get(t, 0.0)
                     over = (pkg / volm if volm > 0 else 0.0) > tank_maxd.get(t, 1e9)
-                    if _c <= 1e-9 and pkg <= 1e-9:
-                        continue           # tank not actually used this week
-                    new_state[t] = _Occ(batch_id=b, count=_c, biomass_kg=pkg,
-                                        avg_wt_g=_wt, oversub=over)
+                    new_state[t] = _Occ(batch_id=b, count=cnt * qf, biomass_kg=pkg,
+                                        avg_wt_g=avg, oversub=over)
                     used_tanks.add(t)
                     if over:
                         n_oversub_rows += 1
@@ -1450,18 +1322,6 @@ def pick_tanks(
                         break
                     legal = [s for s in avail_s if _legal_src(s, dest)]
                     if legal:
-                        # BIGGEST LEGAL SOURCE FIRST. `legal[0]` took whatever
-                        # sat first in tank order, so a destination was filled
-                        # from many small remainders: 67 of 98 legs came in
-                        # under min_transfer_count (7,000) -- legs of 3, 26, 82,
-                        # 138 fish -- and the ones staging into a 6N tank
-                        # mid-purge are why fish were harvested short of their
-                        # hold. Draining the largest source first fills the same
-                        # demand in the fewest moves, which is what the operator
-                        # floor is asking for, without suppressing any move that
-                        # genuinely has to happen (conservation is untouched:
-                        # the same fish go to the same place, in fewer legs).
-                        legal.sort(key=lambda _s: -_s[1])
                         s = legal[0]
                     else:
                         # No legal source for this destination. Conservation wins
