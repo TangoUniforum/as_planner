@@ -82,6 +82,92 @@ removes.
 The shelving decision anticipated this: *"preserve this as a documented
 capability for a future global/ILP exploration."* This is that exploration.
 
+## 3b. THE OBJECTIVE (operator, 2026-08-25) — lifetime handling per fish
+
+> *"Global is beneficial as a reference model as it is based on pure
+> mathematical result. The challenge is the mathematical result implies many
+> small changes; the goal should be to find a result that balances all of
+> the small changes while hitting all of the other constraints... all should
+> be tools, with the constraint of minimising the total number of transfers
+> each individual fish must go through at the end of life prior to harvest."*
+
+This is the objective function, and it is **per-fish over a lifetime**, not
+per-week over the facility.
+
+Everything measured on 2026-08-25 was the wrong quantity: "903 transfers"
+counts LEGS, which cannot distinguish one fish moved five times from five
+fish moved once. Operationally those are entirely different — handling
+stress accumulates in the animal, not in the plan. The metric to minimise is
+therefore
+
+```
+    sum over fish of (transfers that fish experiences before harvest)
+  = sum over transfer legs of (fish in that leg x 1)
+```
+
+i.e. **fish-transfers**, weighted by count, and attributable to a cohort's
+whole journey rather than to a week.
+
+Consequences for the design:
+
+- **`min_transfer_count` is a PROXY, not a goal.** The operator: *"just a
+  constraint to try and force the result of not having many small
+  transfers."* It is a crude instrument aimed at lifetime handling. With the
+  real objective in the model, the proxy should be relaxable — and it
+  explains why patching it produced neutral or harmful results: the proxy
+  was being enforced against plans whose real handling cost it never
+  measured.
+- **No lever is privileged.** Stock differently at the start, split earlier,
+  shift the harvest week, re-time a transfer — *"all should be tools"*, and
+  which one applies *"depends on what the other systems and tanks have
+  available"*. So the choice is a solver decision under availability, not a
+  fixed precedence list. **This answers Q2: there is no ranking; the ranking
+  is the optimisation.**
+- **Global's role is REFERENCE.** *"Global is beneficial as a reference
+  model... based on pure mathematical result."* Its job is to say what is
+  achievable, and the reason it cannot ship as-is is that a mathematical
+  optimum expresses itself as many small changes. Balancing those against
+  lifetime handling is the whole problem — not a detail to clean up
+  afterwards.
+
+**Reporting change (do this even before any rewrite):** report
+fish-transfers and per-fish lifetime transfer counts alongside leg counts,
+in `fast_check` and the workbook. The current comparison cannot see the
+thing the operator actually cares about.
+
+### 3b.1 Measured — and it reverses the 2026-08-25 conclusions
+
+Applying the objective to the runs already on disk:
+
+| run | legs | fish-transfers | **transfers/fish** | why not shipping |
+|---|---|---|---|---|
+| stable (2 days prior) | 893 | 9,257,629 | 2.57 | R4 breaches |
+| **fix1 (shipping)** | 903 | 9,410,815 | **2.61** | — |
+| anchored | 383 | 3,554,117 | **0.99** | 613 kg/m³, 38% over cap |
+| relief | 1,415 | 8,894,710 | **2.47** | R3 breaches 10 → 32 |
+
+Two conclusions from that day were wrong because they were drawn from LEG
+COUNTS:
+
+1. **`relief` was reverted partly for having the most legs (1,415). By the
+   real objective it was the BEST legal engine (2.47).** Its extra legs were
+   small; the fish moved less. It remains unshippable for tier breaches —
+   but the handling argument against it was backwards.
+2. **"Anchoring made every plan worse" is false.** It cut lifetime handling
+   **62%**, from 2.61 to 0.99 — barely one transfer per fish. It failed on
+   density, not on principle. Anchoring is the right mechanism missing two
+   constraints (density headroom, tier legality), which is precisely what
+   §4a puts into the solver.
+
+**The shipping engine is the worst legal option on handling.** `fix1` at
+2.61 moves fish more than the baseline it replaced. It ships because it is
+legal and conserves, not because it is good on this axis.
+
+This is the clearest available evidence for the design: the prize is real
+and large (a 62% handling reduction was demonstrated, not projected), and it
+is unreachable by patching, because the two constraints it violates are
+exactly the ones a renderer cannot enforce.
+
 ## 4. Design
 
 Three changes. Each is independently useful; together they are the
@@ -207,15 +293,56 @@ gains too and we have back up."* Concretely:
   changes if the pick becomes a participant.
 - Help text and popups referencing transfer behaviour.
 
-## 9. Open questions for the operator
+## 9. Verification horizon — what shortening actually costs
+
+The operator offered to shorten the model run *"to 52 weeks or 60 weeks,
+whatever we need to ensure good coverage and enforced accurate results."*
+Measured, the horizon is not the dial that matters:
+
+| | |
+|---|---|
+| horizon | 2026-W33 → 2028-W12 (85 weeks) |
+| `sixn_production_start` 2028-01-01 | **week 74** |
+| purge mode | weeks 1–73 (**86%** of the run) |
+| production mode (6N mains rejoin production) | weeks 74–85 (14%) |
+| R4 breaches observed | week **82** |
+
+A 52-week run ends at 2027-W31; a 60-week run at 2027-W39. **Both are
+entirely inside purge mode.** Truncating trims the regime that is already
+well covered and still never reaches the one that is not — which is exactly
+where the R4 class lives.
+
+The horizon has TWO REGIMES, and coverage is about regimes, not weeks. So
+the cheap gate is to move the boundary rather than cut the length:
+`sixn_production_start` is a config date, so a test config that pulls it
+forward puts startup, purge, the switch, and production mode inside a short
+run.
+
+**STATUS: being measured.** A 30-week regime-compressed run exceeded 10
+minutes where a 30-week normal run should take ~1, so the switch may be
+expensive to solve (or it was CPU contention with a concurrent full run).
+If it is genuinely cheap once isolated, it becomes the development gate and
+the full 85 weeks stays the ship gate. If not, the full run remains the only
+honest gate and iteration stays slow.
+
+**This does not relax the rule earned on 2026-08-25:** a short run is a
+filter for obviously-broken. `fast_check` was overturned three times that
+day. Regime coverage makes a short run BETTER, not sufficient.
+
+## 10. Open questions for the operator
 
 - **Q1 (§5)** Template-first, grid-first, or grid-with-template-preference?
-- **Q2** When a tank's residence cannot end cleanly, which lever is
-  preferred — stock it differently at the start, split earlier, shift the
-  harvest week, or accept the remnant? Ranked, not merely permitted.
-- **Q3** Is `min_transfer_count` (7,000) a hard floor or a strong
-  preference? A hard floor can make a plan infeasible that a soft one would
-  merely make ugly.
+- ~~**Q2** Which lever is preferred when a residence cannot end cleanly?~~
+  **ANSWERED (§3b):** no ranking — all are tools, and the choice depends on
+  what other systems and tanks have available. The ranking IS the
+  optimisation, under the lifetime-handling objective.
+- ~~**Q3** Is `min_transfer_count` a hard floor or a preference?~~
+  **ANSWERED (§3b):** a proxy for the real objective, therefore relaxable
+  once lifetime handling is modelled directly.
 - **Q4** Does a "general production model" (§5) already exist informally — a
   standard path operations expects a batch to take? If so it should be
   written down and used, not derived from the data.
+- **Q5 (new, §3b)** Is lifetime handling counted per TRANSFER EVENT a fish
+  experiences, or should a whole-tank move (fish stay together, no grading
+  or crowding) count for less than a split? The objective's shape depends on
+  it, and it is an animal-welfare judgement rather than an engineering one.
