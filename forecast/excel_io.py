@@ -176,6 +176,146 @@ def write_batch_plan(wb, batch_locations, harvest_events, default_hog_yield: flo
         ws.column_dimensions[get_column_letter(c)].width = w
 
 
+def write_facility_config(wb, facility, sheet_name="FacilityConfig"):
+    """Emit the facility's per-tank geometry and caps, in the same shape the
+    operator's input workbook uses.
+
+    Added 2026-08-26 so a GLOBAL output workbook is self-describing. The
+    controller writes into a copy of the input .xlsm and inherits its
+    FacilityConfig; the Global runner builds a fresh .xlsx and had none. The
+    scorer's per-tank density lookup therefore found caps for the controller
+    (85 / 120) and none for Global, silently falling back to 95 -- so the two
+    engines were judged against DIFFERENT density caps and were not comparable.
+
+    Stage is written FW/SW to match the input sheet; the internal tank type
+    is 'OG' for seawater, which no reader of this sheet expects.
+    """
+    if sheet_name in wb.sheetnames:
+        del wb[sheet_name]
+    ws = wb.create_sheet(sheet_name)
+    ws.append(["FACILITY CONFIGURATION"])
+    ws.append([])
+    ws.append(["LocationID", "Department", "Stage", "SystemID", "TankID",
+               "Volume_m3", "MaxDensity_kg/m3", "MaxFeed_kg/day"])
+    for t in getattr(facility, "tanks", []):
+        ws.append([
+            getattr(t, "location_id", ""), getattr(t, "system_id", ""),
+            # Stage uses the INPUT workbook's convention (FW / SW). The internal
+            # tank type is 'OG' for seawater, which no reader of this sheet
+            # expects.
+            ("FW" if str(getattr(t, "type", "")).upper() == "FW" else "SW"),
+            getattr(t, "system_id", ""),
+            getattr(t, "tank_id", ""), getattr(t, "volume_m3", None),
+            getattr(t, "max_density_kg_m3", None),
+            getattr(t, "max_feed_kg_day", None),
+        ])
+    for c, w in {1: 14, 2: 14, 3: 8, 4: 10, 5: 9, 6: 11, 7: 18, 8: 15}.items():
+        ws.column_dimensions[get_column_letter(c)].width = w
+
+
+def annotate_batch_plan_handling(wb, batch_sheet="Batch Plan",
+                                 transfer_sheet="TransferPlan"):
+    """Add per-batch HANDLING to the Batch Plan summary: on average, how many
+    times a fish of that batch is moved while inside the forecast horizon.
+
+    Operator definition (2026-08-26): *"count every time a fish is transferred
+    and add that to the batch... on average how many transfers each fish of a
+    batch went through while in the horizon of the forecast."* No weighting by
+    transfer type -- a move is a move.
+
+    Counts `Transfer` and `Grade` rows: grading runs every fish through a
+    sorter, so it is handling. EXCLUDES `TranOG`, the FW -> OG stocking event,
+    which is *"part of the production cycle that we cannot remove"* -- it adds
+    a constant to every engine and hides the differences.
+
+    Denominator is the batch's `Input_Count` from InputConservationAudit.
+
+    JOURNEY column marks whether the figure is comparable. A batch still
+    growing when the horizon ends has only part of its handling counted (one
+    run showed 1.51, 1.11, 0.69, 0.59, 0.00 for five successively later
+    batches -- a horizon artefact, not a plan improving). Only "complete" rows
+    may be compared with each other.
+
+    Runs as a post-pass so it does not depend on the order an engine writes its
+    sheets (forecast.run writes TransferPlan before the Batch Plan; the Global
+    runner writes it after).
+    """
+    import collections
+    if batch_sheet not in wb.sheetnames or transfer_sheet not in wb.sheetnames:
+        return
+
+    # ---- handling events per batch, from the written TransferPlan ----------
+    ev = collections.Counter()
+    cols = None
+    for row in wb[transfer_sheet].iter_rows(values_only=True):
+        if cols is None:
+            if row and any(str(c).strip() == "Type" for c in row if c is not None):
+                cols = {str(c or "").strip(): j for j, c in enumerate(row)}
+            continue
+        if not row or not row[cols.get("Week", 0)]:
+            continue
+        if str(row[cols["Type"]]).strip() not in ("Transfer", "Grade"):
+            continue
+        try:
+            ev[str(row[cols["Batch"]]).strip()] += float(row[cols["Count (fish)"]] or 0)
+        except (TypeError, ValueError):
+            pass
+    if cols is None:
+        return
+
+    # ---- batch population + whether its journey completes in-horizon ------
+    pop, done = {}, {}
+    if "InputConservationAudit" in wb.sheetnames:
+        acols = None
+        for row in wb["InputConservationAudit"].iter_rows(values_only=True):
+            if acols is None:
+                if row and str(row[0] or "").strip() == "Batch" and                         any("Input_Count" in str(c) for c in row if c is not None):
+                    acols = {str(c or "").strip(): j for j, c in enumerate(row)}
+                continue
+            b = str(row[0] or "").strip()
+            if not (len(b) > 1 and b[0] == "B" and b[1:].isdigit()):
+                continue
+            try:
+                ic = float(row[acols["Input_Count (fish)"]] or 0)
+            except (TypeError, ValueError):
+                continue
+            hv = 0.0
+            if "Harvested (fish)" in acols:
+                try:
+                    hv = float(row[acols["Harvested (fish)"]] or 0)
+                except (TypeError, ValueError):
+                    hv = 0.0
+            pop[b] = ic
+            done[b] = ic > 0 and hv >= 0.90 * ic
+
+    # ---- write the two columns onto the summary table ---------------------
+    ws = wb[batch_sheet]
+    head_r = None
+    for i, row in enumerate(ws.iter_rows(values_only=True), start=1):
+        if row and str(row[0] or "").strip() == "Batch" and                 any(str(c).strip() == "Peak_tanks" for c in row if c is not None):
+            head_r = i
+            break
+    if head_r is None:
+        return
+    ncol = sum(1 for c in ws[head_r] if c.value is not None)
+    ws.cell(row=head_r, column=ncol + 1, value="Handling (moves/fish)")
+    ws.cell(row=head_r, column=ncol + 2, value="Journey")
+    r = head_r + 1
+    while True:
+        b = ws.cell(row=r, column=1).value
+        if b is None or not str(b).strip():
+            break
+        bid = str(b).strip()
+        n = pop.get(bid, 0.0)
+        ws.cell(row=r, column=ncol + 1,
+                value=(round(ev.get(bid, 0.0) / n, 2) if n > 0 else None))
+        ws.cell(row=r, column=ncol + 2,
+                value=("complete" if done.get(bid) else "PARTIAL - still in horizon"))
+        r += 1
+    ws.column_dimensions[get_column_letter(ncol + 1)].width = 21
+    ws.column_dimensions[get_column_letter(ncol + 2)].width = 26
+
+
 def write_harvest_plan_output(
     wb,
     harvest_events,

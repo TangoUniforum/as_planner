@@ -471,8 +471,28 @@ def _harvest_weekly_series(wb):
     return weeks, [weekly.get(w, 0.0) for w in weeks]
 
 
-def _transfers_per_fish(wb):
+def _transfers_per_fish(wb, per_batch=None):
+    """Average handling events a fish of each batch goes through IN HORIZON.
+
+    Operator definition (2026-08-26): *"count every time a fish is transferred
+    and add that to the batch... on average how many transfers each fish of a
+    batch went through while in the horizon of the forecast."* No weighting by
+    transfer type -- a move is a move.
+
+    Counted: `Transfer` and `Grade`. Grading runs every fish through a sorter,
+    so it IS handling (operator: a whole-tank move charges every fish in it;
+    the same applies to a grade).
+
+    NOT counted: `TranOG`, the FW -> OG stocking event -- *"that's part of the
+    production cycle that we cannot remove, we should just focus on after OG
+    introduction."* It is a constant the planner cannot influence, so including
+    it only adds ~1.0 to every engine and hides the differences.
+
+    `per_batch`, if a dict is passed, is filled with
+    {batch: (events, input_count, events/input)}.
+    """
     by_type = {"TranOG": 0.0, "Transfer": 0.0, "Grade": 0.0}
+    ev_by_batch = {}
     for d in _table(
             wb["TransferPlan"],
             lambda r: r and r[0] == "Week" and len(r) > 2 and r[2] == "Type",
@@ -481,6 +501,24 @@ def _transfers_per_fish(wb):
         c = d.get("Count (fish)")
         if t in by_type and isinstance(c, (int, float)):
             by_type[t] += c
+            if t in ("Transfer", "Grade"):
+                b = str(d.get("Batch") or "").strip()
+                if b:
+                    ev_by_batch[b] = ev_by_batch.get(b, 0.0) + c
+    # DENOMINATOR = fish actually IN THE HORIZON.
+    #
+    # This summed EVERY batch in the registry, including ones the run never
+    # touches. On the operator's 7.29 PR that is 33 of 45 batches and
+    # 18,110,000 of 24,750,000 fish -- so the reported "transfers per fish"
+    # was divided by 3.7x too many fish and read 0.76 where the truth is 2.84.
+    # The audit publishes In_Horizon precisely to make this distinction and
+    # the metric ignored it.
+    #
+    # Ranking between variants of ONE scenario was unaffected (the inflated
+    # denominator is the same constant for all of them, and score_variants
+    # normalises per component anyway) -- but the number an operator READS in
+    # the workbook was wrong, and comparisons ACROSS scenarios with different
+    # registries were not comparable at all.
     total_in = 0.0
     if "InputConservationAudit" in wb.sheetnames:
         for d in _table(
@@ -488,10 +526,19 @@ def _transfers_per_fish(wb):
                 lambda r: r and r[0] == "Batch" and len(r) > 1 and "Input_Count" in str(r[1]),
                 lambda r: isinstance(r[0], str) and len(r[0]) > 1
                           and r[0][0] == "B" and r[0][1:].isdigit()):
+            in_h = str(d.get("In_Horizon", "Y")).strip().lower()
+            if in_h in ("n", "no", "false", "0"):
+                continue            # batch never active in this run
             ic = d.get("Input_Count (fish)")
             if isinstance(ic, (int, float)):
                 total_in += ic
-    tpf = (sum(by_type.values()) / total_in) if total_in else 0.0
+                if per_batch is not None:
+                    b = str(d.get("Batch") or "").strip()
+                    ev = ev_by_batch.get(b, 0.0)
+                    per_batch[b] = (ev, ic, (ev / ic) if ic else 0.0)
+    # Handling only: TranOG is the unavoidable stocking event, not a decision.
+    events = by_type["Transfer"] + by_type["Grade"]
+    tpf = (events / total_in) if total_in else 0.0
     return tpf, by_type
 
 
@@ -556,9 +603,47 @@ def _is_purge_row(row, si, sti):
     return len(row) > si and row[si] == "OG6N"
 
 
+def _tank_density_caps(wb):
+    """{tank_id: max_density_kg_m3} from the workbook's own FacilityConfig.
+
+    Added 2026-08-26. `_density_overshoot` hardcoded 95 with a note that it
+    "goes silently wrong" if any OG tank were given a different cap. That became
+    true when the operator set the OG caps to 85 (production) and 120 (6N): the
+    scorer was passing tank-weeks between 85 and 95 as compliant when they are
+    over cap, and judging 6N production-mode rows against 95 when their cap is
+    120. Wrong in BOTH directions, and invisible.
+
+    Only SW rows are read: FacilityConfig repeats TankID '1' across the FW
+    systems, while OG tank ids are unique and BatchLocations is seawater-only.
+    """
+    caps = {}
+    if "FacilityConfig" not in wb.sheetnames:
+        return caps
+    hdr = None
+    for row in wb["FacilityConfig"].iter_rows(values_only=True):
+        if hdr is None:
+            if row and any(str(c).strip() == "TankID" for c in row if c is not None):
+                hdr = {str(c or "").strip(): j for j, c in enumerate(row)}
+            continue
+        if not row or row[0] is None:
+            continue
+        try:
+            # Exclude FW rather than require SW: FacilityConfig repeats
+            # TankID '1' across the FW systems, and 'seawater' is spelled SW in
+            # the operator's workbook but OG internally. Excluding the one
+            # unambiguous case is robust to both.
+            if str(row[hdr["Stage"]]).strip().upper() == "FW":
+                continue
+            caps[str(row[hdr["TankID"]]).strip()] = float(
+                row[hdr["MaxDensity_kg/m3"]])
+        except (KeyError, TypeError, ValueError):
+            continue
+    return caps
+
+
 def _density_overshoot(wb):
-    """Fraction of (tank, week) cells over the ~95 kg/m3 density cap (per-tank
-    density compliance — the trade leveling can create)."""
+    """Fraction of (tank, week) cells over their OWN per-tank density cap
+    (per-tank density compliance — the trade leveling can create)."""
     if "BatchLocations" not in wb.sheetnames:
         return 0.0
     ws = wb["BatchLocations"]
@@ -567,6 +652,8 @@ def _density_overshoot(wb):
     di = _find_col(cols, "Density", default=8)   # "Density (kg/m3)"
     si = _find_col(cols, "System", default=4)
     sti = _find_col(cols, "Stage", default=9)
+    tki = _find_col(cols, "Tank", default=3)
+    caps = _tank_density_caps(wb)      # per-tank, from FacilityConfig
     over = tot = 0
     for i, row in enumerate(ws.iter_rows(values_only=True), 1):
         if i < 5 or not row or row[0] is None:
@@ -578,14 +665,15 @@ def _density_overshoot(wb):
         dens = row[di] if len(row) > di else None
         if isinstance(dens, (int, float)):
             tot += 1
-            # 95 is hardcoded because this scorer reads a WORKBOOK and has no
-            # facility config to consult. It is exact, not approximate:
-            # BatchLocations is seawater-only and every OG tank in
-            # config/facility.yaml is capped at 95 kg/m3 (the sub-95 caps --
-            # 30..65 -- belong to FW/smolt systems, which never appear on this
-            # sheet). If an OG tank is ever given a different cap, this test
-            # goes silently wrong and must switch to a per-tank lookup.
-            if dens > 95:
+            # PER-TANK cap from the workbook's own FacilityConfig (2026-08-26).
+            # This was hardcoded 95 with a note that it "goes silently wrong"
+            # if an OG tank were ever given a different cap -- which happened
+            # when the OG caps became 85 (production) / 120 (6N). At 95 the
+            # scorer passed every tank-week between 85 and 95 as compliant and
+            # judged 6N production rows 25 kg/m3 too strictly. 95 remains the
+            # fallback for a workbook with no FacilityConfig sheet.
+            cap = caps.get(str(row[tki]).strip() if len(row) > tki else "", 95.0)
+            if dens > cap:
                 over += 1
     return (over / tot) if tot else 0.0
 
@@ -875,7 +963,12 @@ def metrics_from_workbook(out_path, harvest_cap,
         biomass_var=biomass_var,
         biomass_util_gap=util_gap,
         harvest_var=_cv(fish),
-        harvest_overshoot=(sum(1 for x in fish if x > harvest_cap) / len(fish)) if fish else 0.0,
+        # planner weeks only -- manual-window weeks are the operator's own
+        # scripted harvests, and the gate field weeks_over_harvest_cap
+        # already excludes them. Scoring a method for the operator's
+        # events was inconsistent with the stated policy above.
+        harvest_overshoot=((sum(1 for x in planner_fish if x > harvest_cap)
+                            / len(planner_fish)) if planner_fish else 0.0),
         feed_load=statistics.mean(feed) if feed else 0.0,
         feed_var=_cv(feed) + _swing(feed),
         transfers_per_fish=tpf,

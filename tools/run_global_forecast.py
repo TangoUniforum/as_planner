@@ -658,7 +658,9 @@ def _emit_workbook(gft, result, batches, tables, control, facility,
                    system_limits=None, manual_warnings=None) -> None:
     from openpyxl import Workbook
     from forecast.excel_io import (
-        write_advisory, write_batch_locations, write_batch_plan,
+        annotate_batch_plan_handling, write_advisory,
+        write_facility_config,
+        write_batch_locations, write_batch_plan,
         write_facility_map, write_feed_forecast_monthly,
         write_feed_forecast_weekly, write_harvest_plan_output,
         write_harvest_plan_report, write_harvest_report,
@@ -805,6 +807,7 @@ def _emit_workbook(gft, result, batches, tables, control, facility,
     write_batch_locations(wb, bl)
     write_transfer_plan_output(wb, gft.transfer_events,
                                tranog_events=gft.tranog_events, grade_events=[])
+
     # Per-batch input conservation (every stocked batch has a realized fate) +
     # per-(week, system) realized biomass/feed vs the system caps. These two
     # audits are written for the CONTROLLER too; emitting them here gives the
@@ -834,6 +837,15 @@ def _emit_workbook(gft, result, batches, tables, control, facility,
 
     # Order: RunConfig first.
     wb.move_sheet("RunConfig", -(wb.sheetnames.index("RunConfig")))
+    # Per-batch handling (moves/fish) onto the Batch Plan. LAST, because it
+    # reads TransferPlan (written after the Batch Plan here) AND
+    # InputConservationAudit (later still) -- both must already exist.
+    annotate_batch_plan_handling(wb)
+    # Per-tank caps, so the scorer judges this workbook against the SAME
+    # densities as the controller's (which inherits them from the input
+    # .xlsm). Without it the scorer fell back to 95 for Global and 85/120
+    # for the controller -- not a like-for-like comparison.
+    write_facility_config(wb, facility)
     wb.save(out_path)
     wb.close()
 

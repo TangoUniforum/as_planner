@@ -46,6 +46,7 @@ from .excel_io import (
     write_transfer_plan_output,
     write_transfer_template,
     write_batch_plan,
+    annotate_batch_plan_handling,
     write_weekly_report,
 )
 from .caps import METRIC_HOG_YIELD
@@ -1200,6 +1201,9 @@ def main(
         print(f"  NOTE: output extension '{out_path.suffix}' does not match the "
               f"workbook type; saving as '{_new.name}' so Excel can open it.")
         out_path = _new
+    # Per-batch handling (moves/fish) onto the Batch Plan. LAST: it reads
+    # TransferPlan and InputConservationAudit, so every sheet must exist.
+    annotate_batch_plan_handling(wb)
     wb.save(out_path)
     wb.close()
     print(f"\nSaved workbook {out_path}  ({elapsed:.2f}s, status={status}, "
