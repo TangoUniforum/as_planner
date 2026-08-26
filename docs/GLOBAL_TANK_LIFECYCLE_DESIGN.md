@@ -342,7 +342,28 @@ day. Regime coverage makes a short run BETTER, not sufficient.
 - **Q4** Does a "general production model" (§5) already exist informally — a
   standard path operations expects a batch to take? If so it should be
   written down and used, not derived from the data.
-- **Q5 (new, §3b)** Is lifetime handling counted per TRANSFER EVENT a fish
-  experiences, or should a whole-tank move (fish stay together, no grading
-  or crowding) count for less than a split? The objective's shape depends on
-  it, and it is an animal-welfare judgement rather than an engineering one.
+- ~~**Q5 (§3b)** Should a whole-tank move count for less than a split?~~
+  **ANSWERED (operator, 2026-08-25):** *"A whole tank move adds one transfer
+  for each of the fish that were transferred."* No discount. The objective is
+  therefore exactly `sum over legs of (fish in that leg)` — total fish moved
+  — with no structural weighting.
+
+  Two consequences worth stating, because they are not obvious:
+
+  1. **Consolidation is expensive.** Moving a small remnant into another tank
+     charges every fish in it. So "tidy up the dribble by merging tanks" is
+     not free under this objective, and can be worse than leaving the remnant
+     — which is the opposite of what `min_tank_control` pushes toward. The
+     proxy and the objective genuinely conflict here (see §3b), and the
+     objective wins.
+  2. **There is no preference between one big move and several small ones**
+     carrying the same fish. Leg count is irrelevant except where it hits
+     `max_transfers_per_week`, which is a crew-capacity limit and a real,
+     separate constraint.
+
+  **ASSUMPTION (open, minor):** the measured figures count `Type=Transfer`
+  legs only. TranOG (the FW → OG stocking event) and Grade pickup/retention
+  rows are excluded. Including TranOG would add roughly one transfer per fish
+  uniformly across every engine, so it does not change any ranking — but if
+  the operator counts stocking as a handling event, the absolute numbers
+  should include it.
