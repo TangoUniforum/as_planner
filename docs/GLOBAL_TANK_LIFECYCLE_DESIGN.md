@@ -168,6 +168,47 @@ and large (a 62% handling reduction was demonstrated, not projected), and it
 is unreachable by patching, because the two constraints it violates are
 exactly the ones a renderer cannot enforce.
 
+### 3b.2 MANDATORY vs DISCRETIONARY — where the cost actually is
+
+Operator, 2026-08-25, on excluding FW→OG: *"that's part of the production
+cycle that we cannot remove... focus on after OG introduction."*
+
+The principle generalises: **only AVOIDABLE handling belongs in an objective
+the solver is asked to minimise.** A move that must happen regardless of the
+plan is not a decision variable. Inside OG, one such move remains — every
+fish must enter 6N before harvest, so OG→6N staging is structural in exactly
+the same way FW→OG is.
+
+Decomposed (fish-transfers, 85 weeks):
+
+| run | →6N (mandatory) | in-6N | grow-out | total/fish | **discretionary/fish** |
+|---|---|---|---|---|---|
+| stable | 3,462,746 | 155,737 | 5,639,146 | 2.57 | 1.61 |
+| **fix1 (shipping)** | 3,457,864 | 305,620 | 5,647,331 | 2.61 | **1.65** |
+| anchored | 3,086,324 | 294,752 | **173,041** | 0.99 | **0.13** |
+| relief | 3,482,609 | 335,748 | 5,076,353 | 2.47 | 1.50 |
+
+1. **~0.96 transfers/fish is structural** (the 6N staging). The shipping
+   engine's avoidable handling is **1.65 per fish** — every fish moved about
+   one and a half times for no operational reason.
+2. **Grow-out redistribution is 93% of the avoidable cost** (5.6M
+   fish-transfers vs 0.3M inside 6N). The 6N pipeline, which absorbed almost
+   all engineering attention on 2026-08-25, is ~5% of the problem.
+3. **Anchoring cut grow-out handling 97%** (5,647,331 → 173,041), taking
+   discretionary handling 1.65 → 0.13. That is the size of the prize, and it
+   is measured rather than projected.
+
+**Objective for the grid solver (§4a): minimise DISCRETIONARY fish-transfers**
+— in-6N plus grow-out — with mandatory staging excluded, since including a
+constant the solver cannot change only obscures the number.
+
+**Process note.** A full day was spent on 6N moves (5% of avoidable handling)
+because that is where the loud failures were — topology warnings and
+purge-hold breaches — while grow-out re-levelling (95%) produced no warning
+at all and went untouched. Attention followed alarms rather than magnitude.
+Report discretionary handling per fish on every run so magnitude is visible
+without anyone having to ask for it.
+
 ## 4. Design
 
 Three changes. Each is independently useful; together they are the
@@ -434,9 +475,8 @@ engineering, not judgement:
      `max_transfers_per_week`, which is a crew-capacity limit and a real,
      separate constraint.
 
-  **ASSUMPTION (open, minor):** the measured figures count `Type=Transfer`
-  legs only. TranOG (the FW → OG stocking event) and Grade pickup/retention
-  rows are excluded. Including TranOG would add roughly one transfer per fish
-  uniformly across every engine, so it does not change any ranking — but if
-  the operator counts stocking as a handling event, the absolute numbers
-  should include it.
+  **CLOSED (operator, 2026-08-25):** FW → OG stocking does NOT count —
+  *"that's part of the production cycle that we cannot remove, we should just
+  focus on after OG introduction."* The measured figures already exclude it
+  (`Type=Transfer` only). See §3b.2: the same logic excludes mandatory 6N
+  staging, leaving DISCRETIONARY handling as the objective.
