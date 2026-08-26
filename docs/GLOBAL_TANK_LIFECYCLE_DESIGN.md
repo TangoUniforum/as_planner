@@ -456,6 +456,27 @@ engineering, not judgement:
 - **E3** Does a recurring residence pattern actually emerge from solved
   plans (§5.1)? Unknowable until the grid solver exists — and a negative
   answer is a legitimate result.
+- **E4 — THIS DESIGN MAY BE AIMED AT THE WRONG ENGINE.** Discretionary
+  handling (§3b.2) has NEVER been measured on any controller arm. It was
+  defined hours before this document and applied only to Global's runs. If
+  the controller family also sits near **1.65 transfers/fish**, then
+  grow-out re-levelling is a SHARED defect and the fix belongs somewhere
+  other than the Global pick — the whole premise of §1 ("Global is the
+  outlier") would be wrong. If it sits near **0.13**, Global is confirmed as
+  the outlier and the grid build is justified.
+
+  There is a structural reason to expect the controller is better — it plans
+  in tanks, one representation, so it should not have the even-split
+  re-levelling that costs Global 5.6M fish-moves. **That is reasoning, not
+  measurement**, and reasoning about this codebase was wrong repeatedly on
+  2026-08-25. Do not start the build on it. MEASURING — the tuned tournament
+  launched 2026-08-25 22:25 will settle it, with discretionary handling
+  computed post-hoc from each arm's workbook (the tournament does not know
+  about the metric).
+- **E5** The controller family's density profile and tier legality have not
+  been independently verified in this work. "The controller passes every hard
+  gate" is carried forward from earlier sessions, not re-measured. The
+  premise that only Global is non-compliant rests on it.
 - ~~**Q5 (§3b)** Should a whole-tank move count for less than a split?~~
   **ANSWERED (operator, 2026-08-25):** *"A whole tank move adds one transfer
   for each of the fish that were transferred."* No discount. The objective is
