@@ -271,6 +271,72 @@ at all and went untouched. Attention followed alarms rather than magnitude.
 Report discretionary handling per fish on every run so magnitude is visible
 without anyone having to ask for it.
 
+## 3c. THE PAYOFF, measured 2026-08-26 — Global holds a cap the controller cannot
+
+The justification in §3b.1 (a 92% handling cut) was withdrawn in §3b.3: it was
+the density bug in disguise. **This replaces it, and it is real.**
+
+| arm | peak % of biomass cap | weeks over | `biomass_cap` gate |
+|---|---|---|---|
+| controller stock | 107.0% | 24 | FAIL |
+| controller tuned (SHIPPING) | 105.7% | 11 | **WARN** |
+| global-lp | 97.1% | **0** | **PASS** |
+| **global-milp** | **96.7%** | **0** | **PASS** |
+
+`max_biomass_kg` is a hard operator input. The shipping engine cannot hold it;
+both Global arms hold it with room to spare, and global-milp does so without
+straining any per-system cap either (worst system at peak: OG3S at 80%).
+
+**Why the controller cannot.** Its level-load smoother is one-directional:
+
+```python
+harvest_target = max(harvest_target, _level_floor)      # placement.py
+```
+
+A floor, never a ceiling. It can pre-harvest to shed a coming peak; it has no
+way to hold fish back. So it runs at the 55,000/week processing limit for 8 of
+10 weeks before the peak, drains every fish over 3,500 g, and then starves for
+eight weeks (23-28k/week, below the 30,000 contract floor) while 330-390k fish
+sit in the 3,000-3,500 g band.
+
+**Global does exactly what the operator proposed** — less before the gap, more
+during it:
+
+| week | controller | global-milp |
+|---|---|---|
+| 2026-W44 | 54,912 | 42,839 |
+| 2026-W46 | 23,366 | 36,961 |
+| 2026-W48 | 25,040 | 51,879 |
+| 2026-W49 | 25,873 | 52,463 |
+| 2026-W53 | 27,515 | 46,671 |
+
+**But it is NOT a transferable knob.** Tested directly (2026-08-26): capping
+`max_harvest_per_week` at 42k/48k over W36-W45 via the per-week FacilityLimits
+override made things WORSE -- peak 105.7% -> 111.0/112.3% (crossing into FAIL),
+weeks over cap 11 -> 26, below-floor weeks 8 -> 18. Fish held back do not
+vanish; they carry into the peak window and add to it. Average weight and HOG
+tonnage DID rise (3.88 -> 3.91 kg, +70 t), so the operator's intuition about
+fish size was right -- the biomass constraint simply binds first.
+
+Global achieves it by shaping the WHOLE trajectory: it stocks more (3,772,010
+vs 3,712,430), holds more fish standing (2,043,475 vs 1,980,614), yet peaks
+lower, and maxes out in 26 weeks against the controller's 36. That is a
+property of solving the horizon simultaneously, not of any setting.
+
+**The `controller-hybrid` bridge already exists and pulls the wrong way.** It
+feeds Global's L1 envelope to the controller as a target band. Its own blurb:
+as shipped it is INERT (the levers ship false, so the guide steers nothing);
+with the levers ON, weeks under the contract floor fall 20 -> 14 but peak
+biomass rises 102.6% -> 107.1%. The tuned tournament searched those levers and
+switched them OFF. It buys floor compliance by holding fish -- the opposite of
+what the biomass cap needs.
+
+**Conclusion: the only route to Global's biomass performance is a Global that
+obeys the rules.** Operator ruling 2026-08-26: *"I would like Global to work
+properly too, even if it is very slow -- I do not want code that does not
+function as intended."* Runtime is therefore NOT a reason to reject an approach;
+correctness is the constraint, speed is a preference.
+
 ## 4. Design
 
 Three changes. Each is independently useful; together they are the
