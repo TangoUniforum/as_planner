@@ -128,6 +128,31 @@ def audit(xlsx: Path, control) -> dict:
         if 1.0 < have - got < mtc:
             bad += 1
     out["draws"], out["sub_min_remnants"], out["mtc"] = draws, bad, mtc
+
+    # ---- DENSITY + tank utilisation ---------------------------------------
+    # Added 2026-08-25 after an anchoring change passed every check here and
+    # then, on the full run, turned out to have crammed the same fish into 44%
+    # fewer tanks at up to 613 kg/m3 -- 6x the hard cap. Nothing in this harness
+    # looked at density, so a catastrophic plan read as a clean pass. A check
+    # that cannot see the failure mode is not a check.
+    over = totd = 0
+    peak = 0.0
+    for r in blrows[h_i + 1:]:
+        if not r or not r[bx["Week"]]:
+            continue
+        if str(r[bx["Stage"]]).strip() == "STARVE":
+            continue                      # purge is density-exempt (R8)
+        try:
+            d = float(r[bx["Density (kg/m3)"]] or 0)
+        except Exception:
+            continue
+        if d <= 0:
+            continue
+        totd += 1
+        peak = max(peak, d)
+        if d > 95.0:
+            over += 1
+    out["prod_tank_weeks"], out["over_cap"], out["peak_density"] = totd, over, peak
     wb.close()
     return out
 
@@ -169,6 +194,10 @@ def main() -> int:
           f"  ({a['sixn_move_fish']:,.0f} fish)     <- target 0")
     print(f"  topology violations    : {a['topology'] or 'none'}")
     print(f"  harvest draws          : {a['draws']:,}")
+    print(f"  prod tank-weeks        : {a['prod_tank_weeks']:,}")
+    print(f"  over 95 kg/m3          : {a['over_cap']:,}"
+          f"  ({100.0 * a['over_cap'] / max(1, a['prod_tank_weeks']):.1f}%)"
+          f"   peak {a['peak_density']:,.0f}        <- watch for CONCENTRATION")
     print(f"  sub-min remnants       : {a['sub_min_remnants']:,}"
           f"   (min_tank_control {a['mtc']:,.0f})   <- target 0")
     print("\n  NOTE: a short horizon does not reach 2028 production mode;"
