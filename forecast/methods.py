@@ -93,6 +93,15 @@ UNTUNABLE_KNOBS = frozenset({
     # density_target_pct is the direct expression of the operator's
     # minimise-density stance; a search free to raise it (it reached 0.95)
     # optimises against the very preference it is meant to serve.
+    # ARM IDENTITY (2026-08-27). These two decide whether the L1 guide steers
+    # ANYTHING, so they are what makes controller-hybrid a hybrid -- not policy
+    # within it. While they were tunable the tuner switched them OFF on the
+    # hybrid arm (measured 2026-08-25), leaving it byte-identical to the plain
+    # controller on every metric across all 21 PRs while still appearing on the
+    # board as a distinct method. A tournament then "agreed" three ways when it
+    # had run one method three times.
+    "hybrid_production_lever",
+    "hybrid_purge_lever",
     "min_tank_control",
     "tran_og_default_tanks",
     "density_target_pct",
@@ -442,7 +451,8 @@ register(Method(
     # on 2026-08-25 it searched them and chose OFF. Curing it properly means
     # deciding whether the levers are ARM IDENTITY (untunable) or POLICY
     # (tunable) -- an architecture call, not a default to flip.
-    overrides={"hybrid_follow": "full", "hybrid_follow_band": 0.05},
+    overrides={"hybrid_follow": "full", "hybrid_follow_band": 0.05,
+               "hybrid_production_lever": True, "hybrid_purge_lever": True},
     knob_grid=CONTROLLER_KNOB_GRID,
     knob_space=CONTROLLER_KNOB_SPACE,
     blurb="The validated controller with the Global engine's L1 harvest "

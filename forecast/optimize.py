@@ -77,11 +77,12 @@ OPT_FULL_GRID = [
     # hybrid_follow: off and these rows are inert there — by design: the grid is
     # shared across the family). Measured on the real workbook: weeks under the
     # contract floor 20 -> 16 (both) and 20 -> 14 (production only).
-    ("hybrid:prod-lever", {"hybrid_production_lever": True}),
-    ("hybrid:both-levers", {"hybrid_production_lever": True,
-                            "hybrid_purge_lever": True}),
-    ("hybrid:levers-off", {"hybrid_production_lever": False,
-                           "hybrid_purge_lever": False}),
+    # hybrid:*-lever entries REMOVED 2026-08-27. The levers became ARM
+    # IDENTITY (methods.UNTUNABLE_KNOBS): they are what makes controller-hybrid
+    # a hybrid, not policy within it. Leaving them tunable let the tuner switch
+    # them off on the hybrid arm -- which it did -- making the arm
+    # byte-identical to the plain controller while presenting itself on the
+    # board as a distinct method.
     # ---- density relief / consolidation policy -------------------------------
     # Added 2026-08-21. These were hand-tuned on ONE workbook and the reference
     # fixture disagreed with the real workbook about the best values, so they
@@ -1662,8 +1663,8 @@ CD_KNOB_SPACE = [
     # guard, see UNTUNABLE_KNOBS). `hybrid_purge_lever` is refused outright
     # while that guard is off, so on the shipped config this axis is a no-op —
     # it is included so the search still explores it wherever the guard is on.
-    ("hybrid_production_lever", [False, True]),
-    ("hybrid_purge_lever", [False, True]),
+    # (hybrid_production_lever / hybrid_purge_lever removed -- arm identity,
+    #  see methods.UNTUNABLE_KNOBS)
     ("facility_biomass_deviation_pct", [0.005, 0.01, 0.02]),
     ("harvest_smooth_lookahead_weeks", [6, 12]),
     ("global_buffer_pct", [0.0, 0.05, 0.10]),
