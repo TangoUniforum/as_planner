@@ -517,6 +517,47 @@ harvest, handling, tier legality and density. Global's one measured advantage is
 holding the facility biomass cap. Extending premeditation to tanks is the fix
 for the defects — it is not, on its own, evidence Global will win.
 
+## 3f. DENSITY — five hypotheses tested, five eliminated (2026-08-26)
+
+Global runs **13.5% of production tank-weeks over cap** (347 of 2,561), peak 153
+kg/m3, against the controller's 1.8% and peak 89. It is the largest measured
+defect. Every candidate cause was tested against data rather than argued:
+
+| hypothesis | verdict |
+|---|---|
+| L3 under-counts tanks | **NO** — it sizes counts off the SMALLEST OG tank (`min_OG(max_density x volume) * density_target_pct`), which over-allocates |
+| even split across mixed-volume tanks | **NO** — 0 of 462 multi-tank batch-weeks span mixed volumes (the controller has 19, also with 0 breaches inside them) |
+| the relief trigger misses breaches | **NO** — flags 420 tank-weeks, catches all 347 real ones, misses 0 |
+| per-system biomass/feed caps block relief | **NO** — in all 59 breach weeks at least 5 systems had both biomass and feed headroom |
+| relief has tanks but refuses them | **PARTLY** — `free = ... t not in used_tanks and t not in prev_state` accepts only tanks empty LAST week too, excluding 52 of 163 (32%) |
+
+**What is left is not local.** Even admitting all 163 empty tank-weeks, there
+are 347 breaches. And the tank shortage is tier-shaped: 166 grow-out breaches
+against only 48 grow-out empties (181 entry breaches against 115 entry empties).
+
+**The residue is §3e.** Relief is a REACTIVE valve — it fires in the week the
+breach appears, and by then the tanks it needs are committed to other batches.
+It cannot reach back and reserve a tank three weeks earlier, because the pick
+has no forward view. Global knows the whole horizon and spends that knowledge
+entirely on quantities.
+
+**Two things worth keeping from this that are actionable on their own:**
+
+1. **`t not in prev_state` is over-strict.** It exists to prevent an illegal
+   same-week A->B swap, but a tank whose previous occupant was HARVESTED OUT is
+   genuinely free. A safe narrowing would recover 52 tank-weeks (32% of the
+   available pool). It closes maybe a third of a gap needing 3x the tanks, so it
+   is an improvement, not a fix.
+2. **Per-system biomass runs to 188% of cap and NO GATE FAILS.** Measured in
+   2028: W12 188.6%, W11 179.7%, W10 171.1%, climbing monotonically through the
+   production-mode era while 6 other systems sat with room.
+   `SystemLimitsAudit` records it and the `system_overshoot` scoring component
+   sees it, but nothing gates it. That is a reporting gap independent of
+   everything else in this document.
+
+**Recommendation: stop incremental work on Global's density.** Not because the
+code is unfixable, but because five measurements say the fix is not local.
+
 ## 4. Design
 
 Three changes. Each is independently useful; together they are the
