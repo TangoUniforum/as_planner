@@ -499,8 +499,35 @@ register(Method(
 # the zero-harvest-week blind spot fixed (34ecbaf) the plain controller was shown
 # to breach the never-an-empty-week rule on 5 of 6 real PRs, while the hybrid
 # breaches it on none. The old exclusion note here predated that measurement.
-DEFAULT_ROSTER = ["controller", "controller-hybrid", "controller-lns",
-                  "global-lp", "global-milp"]
+# The GLOBAL family is deliberately NOT in the default roster (2026-08-27).
+#
+# A method that hard-fails a gate can never be promoted, so running it in a
+# routine sweep spends hours to reach a foregone conclusion. Measured on the
+# 2026-08-25 tuned tournament:
+#
+#     all 3 controller arms, TUNED (58 variants)   ~19 min
+#     global-lp,   stock only                      10,948 s  (3.0 h)
+#     global-milp, stock only                      16,750 s  (4.7 h)
+#
+# Global consumed ~90% of an 8h35m tournament to produce two arms that
+# hard-fail sixn_one_way AND handling_budget. It also cannot tune -- its knob
+# space is empty by design (see GLOBAL_KNOB_* below) -- so it contributes one
+# fixed point, not a search.
+#
+# It remains fully available: pass --methods global-lp,global-milp (CLI) or
+# select it on the board. Run it deliberately as a REFERENCE when you want the
+# achievable bound -- it is the only engine that holds the facility biomass cap
+# (96.7% peak vs the controller's 105.7%, 0 weeks over vs 11).
+#
+# READMISSION CONDITION, so this is not a permanent exile: put it back in the
+# default roster when it passes every HARD gate. See
+# docs/GLOBAL_TANK_LIFECYCLE_DESIGN.md for what that needs.
+DEFAULT_ROSTER = ["controller", "controller-hybrid", "controller-lns"]
+
+# Everything registered, for callers that want the full sweep including the
+# gate-bound reference arms.
+FULL_ROSTER = ["controller", "controller-hybrid", "controller-lns",
+               "global-lp", "global-milp"]
 
 
 def get_roster(keys: "Optional[list[str]]" = None) -> "list[Method]":

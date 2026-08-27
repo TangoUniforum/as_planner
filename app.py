@@ -4973,13 +4973,15 @@ def _acc_calibration_section():
 # ============================================================
 
 st.set_page_config(
-    page_title="AS Production Forecast",
+    page_title="AS Forecast — NEXT (v2)",
     page_icon="🐟",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-st.title("AS Production Forecast")
+st.title("AS Production Forecast — NEXT (v2)")
+st.caption("Development build on branch `v2/roster-and-emphasis`. "
+           "Your production app is the one under OneDrive; this one is safe to break.")
 st.caption(
     "Upload an input workbook, run the planner, review the results, "
     "and download a new workbook with all tabs populated. "
