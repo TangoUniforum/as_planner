@@ -710,24 +710,32 @@ def pick_tanks(
         # never placement -- so it can run here. `new_total` is predicted as
         # L1's production standing plus what the 6N block seated; that identity
         # is asserted every week under ANCHOR_PROBE and holds exactly.
+        # DIAGNOSTIC ONLY, and gated. The anchored write that consumed this was
+        # reverted (see docs/GLOBAL_TANK_LIFECYCLE_DESIGN.md 3b.3), leaving the
+        # pre-pass with one consumer: the DRAW_PROBE cross-check below. It
+        # simulates the whole draw for EVERY batch EVERY week, so leaving it on
+        # doubles that work for nothing in a ~3 hour run. It is kept because it
+        # is what proved the draw can be computed before placement -- a fact the
+        # design rests on -- and it costs nothing when the flag is off.
         _pre_mp: dict[str, float] = {}
         _pre_harvest: dict[int, float] = {}
-        for _bid in sorted(prev_by_batch):
-            _old = sorted(prev_by_batch.get(_bid, []))
-            if not _old:
-                continue
-            _ptot = sum(prev_state[t].count for t in _old)
-            _ntot = (standing.get((_bid, w), (0.0, 0.0, 0.0))[0]
-                     + _seated6n.get(_bid, 0.0))
-            _hc = harvest_by_bw.get((_bid, wl), (0.0, 0.0, 0.0))[0]
-            _mp = (max(0.0, _ptot - _ntot - _hc) / _ptot) if _ptot > 1e-9 else 0.0
-            _pre_mp[_bid] = _mp
-            _av = {t: prev_state[t].count * (1.0 - _mp) for t in _old}
-            for _t, _take in _draw_takes(
-                    _draw_order(_old, sixn_set, released_tanks, sixn_arrival,
-                                w, _bid, released_amt), _av, _hc):
-                _pre_harvest[_t] = _pre_harvest.get(_t, 0.0) + _take
         _act_harvest: dict[int, float] = {}   # what section 4 really draws
+        if _os_env.get("ANCHOR_PROBE"):
+            for _bid in sorted(prev_by_batch):
+                _old = sorted(prev_by_batch.get(_bid, []))
+                if not _old:
+                    continue
+                _ptot = sum(prev_state[t].count for t in _old)
+                _ntot = (standing.get((_bid, w), (0.0, 0.0, 0.0))[0]
+                         + _seated6n.get(_bid, 0.0))
+                _hc = harvest_by_bw.get((_bid, wl), (0.0, 0.0, 0.0))[0]
+                _mp = (max(0.0, _ptot - _ntot - _hc) / _ptot) if _ptot > 1e-9 else 0.0
+                _pre_mp[_bid] = _mp
+                _av = {t: prev_state[t].count * (1.0 - _mp) for t in _old}
+                for _t, _take in _draw_takes(
+                        _draw_order(_old, sixn_set, released_tanks, sixn_arrival,
+                                    w, _bid, released_amt), _av, _hc):
+                    _pre_harvest[_t] = _pre_harvest.get(_t, 0.0) + _take
 
         # ---- PASS 0: CONTINUITY ANCHOR (never-drop). Reserve each standing
         # batch's OWN prior non-6N tanks FIRST — before the per-system greedy below
