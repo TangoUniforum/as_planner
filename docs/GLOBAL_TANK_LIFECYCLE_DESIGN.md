@@ -73,6 +73,34 @@ same harvest, conservation clean, 816 tests green.
 That is a far more useful statement than "the pick is a renderer", and it is
 actionable: it says in advance which fixes are safe to attempt.
 
+**CAVEAT, learned the hard way 2026-08-26.** "May reorder freely" means
+CONSERVATION-safe. It does NOT mean effect-free. Changing which tank a cohort is
+seated in changes which tanks are free later, which changes production
+placement — and this planner is chaos-sensitive. An ordering-only fix for the
+DISPLACED moves (rank physically-empty tanks above merely map-free ones) was
+built, tested, and REVERTED on its 85-week gate:
+
+| | delta (kept) | + displaced fix |
+|---|---|---|
+| intra-6N moves | 7 | 6 |
+| fish moved | 35,384 | **35,384 — unchanged** |
+| R7 gate metric | 9 | **10 (worse)** |
+| topology | R3: 10 | **R3: 10 + R4: 4 (worse)** |
+
+It removed one move, shifted no fish, and reintroduced the four R4 backward-move
+violations that the entry_week work had eliminated. **Ordering changes still
+need a full-horizon gate before they can be trusted** — being conservation-safe
+only rules out the catastrophic failure mode, not a net-negative one.
+
+The DISPLACED diagnosis itself still stands and is worth keeping: the packing
+map frees a tank when its cohort is RELEASED, but released is not drawn. L1 can
+release more than `max_harvest_per_week`; the draw stops at the cap; the undrawn
+fish sit in the tank. Measured 2027-W44 — the draw took 36,639 + 18,361 = 55,000
+EXACTLY and never reached t71, leaving 5,618 B52 fish there; B53 was then seated
+into t71 while t63 and t67 sat empty all week. **The map can be ahead of
+physical reality by exactly one weekly harvest cap.** What has not been found is
+a fix for it that does not cost more elsewhere.
+
 **It also re-dates the R7 diagnosis.** The failure was not structural. It was an
 arithmetic blind spot: `released_tanks` watched for cohorts to DISAPPEAR, so it
 never saw a partial release — and partial releases are the norm, because L1 caps
