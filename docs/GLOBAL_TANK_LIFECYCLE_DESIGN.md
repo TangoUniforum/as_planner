@@ -462,6 +462,61 @@ ever switched on, L1 changes become live for that arm and it must be re-gated.**
 Pick-only changes (the partial-release fix, the DISPLACED work) reach the two
 Global arms and nothing else.
 
+## 3e. THE ROOT CAUSE, stated properly (operator, 2026-08-26)
+
+> *"Controller works on reactive, global works on premeditated, they are
+> different in processes. Global, considering it knows everything in advance,
+> should be able to make a better plan."*
+
+That is right, and it is the cleanest statement of why Global underperforms.
+
+**Global's premeditation stops one layer above where the binding constraints
+live.**
+
+| layer | scope | decides |
+|---|---|---|
+| L1 | **whole horizon** | fish counts per batch-week |
+| L3 | **whole horizon** (LP, converged with L1) | *how many* tanks per batch-system-week |
+| **the pick** | **`for w in weeks:` — week by week, greedy** | **which specific tanks** |
+
+So Global is **premeditated in QUANTITIES and reactive in TANKS.** Its
+foreknowledge never reaches the layer where density, tank availability, 6N
+residency and transfer counts are actually decided. The pick walks weeks one at
+a time with no view of week+1 — exactly like the controller — except the
+controller has one consistent representation, while the pick is realising
+decisions made by a planner that never saw a tank.
+
+It has the worst of both: **global information, local tank decisions, and a
+seam between them that nothing reconciles.**
+
+Every measured defect is that seam:
+
+- **Density 13.5% over cap.** L3 sizes tank COUNTS off the smallest OG tank — a
+  horizon-wide, tank-blind calculation. The pick then discovers week by week
+  that the tanks are not free and its only recourse is to pack denser. Its own
+  words: *"needed N tank(s) to stay under the density cap but only M were
+  legally free; it is placed DENSER than the cap rather than dropped."* It
+  cannot look ahead to reserve them and cannot renegotiate the quantities.
+  Measured: mean density 62.5 vs an 85 cap, 163 tier-usable empty tank-weeks
+  against 347 breaches — part allocation failure, part real grow-out shortage
+  (166 grow-out breaches, only 48 grow-out empties).
+- **6N moves.** The released cohort's tank is known to L1 in aggregate, but the
+  pick rediscovers it week by week from residency order.
+- **Handling budget.** Legs emerge from a quantity plan realised across whatever
+  tanks happen to be free that week.
+
+**This is the real case for the reservation grid — and a better one than §4
+originally gave.** `grid[tank][week]` extends premeditation down to the tank,
+which is exactly the layer that is still greedy. It is not a rewrite for its own
+sake; it finishes the architecture Global was supposed to have. The original
+justification (a handling prize) was withdrawn in §3b.3; this one is structural
+and matches every defect measured.
+
+**Caveat that still stands (§3c):** the controller currently beats Global on
+harvest, handling, tier legality and density. Global's one measured advantage is
+holding the facility biomass cap. Extending premeditation to tanks is the fix
+for the defects — it is not, on its own, evidence Global will win.
+
 ## 4. Design
 
 Three changes. Each is independently useful; together they are the
