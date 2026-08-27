@@ -231,9 +231,22 @@ def _ingest_pr(uploaded):
         p = wd / uploaded.name
         p.write_bytes(uploaded.getvalue())
         wb = load_workbook(p)
-        if "ProductionReport" not in wb.sheetnames:
-            res["errors"].append("No 'ProductionReport' sheet in the workbook.")
+        # Tolerant on the NAME (any spelling of "production report"), strict on
+        # the CONTENT — the checks below still require a closing date and tank
+        # rows. A workbook in the right format was being rejected over a space
+        # or a capital letter.
+        from forecast.production_report import find_pr_sheet, pr_sheet_name
+        _pr_ws = find_pr_sheet(wb)
+        if _pr_ws is None:
+            res["errors"].append(
+                "No ProductionReport sheet in the workbook (any spelling of "
+                "'production report' is accepted). Sheets found: "
+                + ", ".join(wb.sheetnames))
         else:
+            _nm = pr_sheet_name(wb)
+            if _nm and _nm != "ProductionReport":
+                res["warnings"].append(
+                    f"Using sheet '{_nm}' as the ProductionReport.")
             closing, og, fw = read_production_report(wb)
             res["closing"], res["n_og"], res["n_fw"] = closing, len(og), len(fw)
             if closing is None:

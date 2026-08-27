@@ -342,7 +342,8 @@ def read_actual_locations(src) -> tuple[Optional[date], list[dict]]:
     from .production_report import read_production_report
     wb = openpyxl.load_workbook(src, read_only=False, data_only=True)
     try:
-        if "ProductionReport" not in wb.sheetnames:
+        from .production_report import find_pr_sheet
+        if find_pr_sheet(wb) is None:
             raise ValueError(
                 "That workbook has no ProductionReport sheet — it does not "
                 "look like a PR.")

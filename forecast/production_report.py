@@ -87,6 +87,46 @@ def _parse_unit_label(unit_str: str) -> tuple[Optional[int], Optional[str]]:
     return None, prefix or None
 
 
+_PR_CANON = "productionreport"
+
+
+def _norm_sheet(name) -> str:
+    """Sheet name reduced to letters+digits, lowercased."""
+    return "".join(ch for ch in str(name).lower() if ch.isalnum())
+
+
+def find_pr_sheet(wb):
+    """The ProductionReport worksheet, TOLERATING name variants — or None.
+
+    The reader used to demand the exact string "ProductionReport", so a
+    workbook that was otherwise perfectly valid was rejected for a space or a
+    capital: "Production Report", "PRODUCTION REPORT", "Production_Report" all
+    failed. tools/build_pr_corpus.py exists partly to rename sheets to satisfy
+    that, which is a sign the strictness was never serving anyone.
+
+    Matching is on the name reduced to letters and digits, so spacing,
+    underscores, hyphens and case no longer matter. It is deliberately NOT
+    fuzzy beyond that: a sheet has to actually be called some rendering of
+    "production report", because accepting a guess would mean parsing the wrong
+    tab and reporting confident nonsense. Content is still validated by the
+    caller (closing date, tank rows) — this only relaxes the NAME.
+    """
+    if wb is None:
+        return None
+    if "ProductionReport" in wb.sheetnames:
+        return wb["ProductionReport"]
+    for n in wb.sheetnames:
+        if _norm_sheet(n) == _PR_CANON:
+            return wb[n]
+    return None
+
+
+def pr_sheet_name(wb):
+    """Name of the sheet find_pr_sheet would use, or None."""
+    ws = find_pr_sheet(wb)
+    return getattr(ws, "title", None) if ws is not None else None
+
+
 def read_production_report(
     wb,
 ) -> tuple[Optional[date], list[PRTankRecord], list[PRFWRecord]]:
@@ -95,7 +135,11 @@ def read_production_report(
     OG records are emitted with closing_count > 0; same for FW.
     Empty tanks at closing are silently dropped.
     """
-    ws = wb["ProductionReport"]
+    ws = find_pr_sheet(wb)
+    if ws is None:
+        raise KeyError(
+            "no ProductionReport sheet (looked for any spelling of "
+            f"'production report'; workbook has: {list(wb.sheetnames)})")
     closing_date: Optional[date] = None
     current_batch: Optional[str] = None
     og_records: list[PRTankRecord] = []

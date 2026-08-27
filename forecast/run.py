@@ -59,6 +59,13 @@ from .production_report import (
 from .state import FacilityState
 
 
+def _pr_sheet(wb):
+    """ProductionReport worksheet, tolerating name variants (see
+    forecast.production_report.find_pr_sheet). Was an exact-string lookup."""
+    from .production_report import find_pr_sheet
+    return find_pr_sheet(wb)
+
+
 def main(
     input_path: str | Path | None = None,
     output_path: str | Path | None = None,
@@ -124,7 +131,7 @@ def main(
     # production_report.read_pr_period.
     from .production_report import read_pr_period as _read_pr_period
     _pr_period = _read_pr_period(
-        wb["ProductionReport"] if "ProductionReport" in wb.sheetnames else None,
+        _pr_sheet(wb),
         pr_closing)
     _control_start = control.forecast_start
     _ctrl_date = (_control_start.date() if hasattr(_control_start, "date")
