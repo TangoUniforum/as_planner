@@ -1,25 +1,43 @@
-method: controller-hybrid
+method: controller
 overrides:
-  hybrid_follow: full
-  hybrid_follow_band: 0.05
-  rebalance_balance_budget: 8
-  facility_biomass_deviation_pct: 0.01
+  hybrid_follow: 'off'
+  rebalance_varqty_budget: 0
+  hybrid_production_lever: false
+  hybrid_purge_lever: false
+  facility_biomass_deviation_pct: 0.02
   harvest_smooth_lookahead_weeks: 12
-  density_target_pct: 0.9
-  global_buffer_pct: 0.05
-  min_tank_control: 7000
-promoted_ts: '2026-08-15T08:15:41'
-note: operator pick from the candidates table on 8.13.26_PR.xlsx
+  global_buffer_pct: 0.0
+  rebalance_balance_budget: 0
+  rebalance_split_budget: 0
+promoted_ts: '2026-08-26T08:59:53'
+note: 'tuned tournament 2026-08-25/26 (8h35m, 5 methods, 85wk, emphasis ''Walk the
+  line''). Winner of 8 arms. The 3 controller arms TIE at 7.719 on identical knobs
+  -- the tuner set hybrid_follow=off even on the hybrid arm, so they are one method
+  three times, not three corroborating results. Both Global arms are GATE-BOUND: hard-fail
+  sixn_one_way (R7). Headline knob change: the rebalancer is switched OFF (all three
+  budgets 0), which lifts biomass_cap FAIL -> WARN. CAVEAT: scores were computed BEFORE
+  the 2026-08-26 basis fixes (density_overshoot used a hardcoded 95 cap when the real
+  caps are 85/120; transfers_per_fish divided by the whole batch registry). The GATES
+  are unaffected -- density_quality always used per-tank caps + R8, and R7 is what
+  disqualifies Global -- so the RANKING stands, but the score VALUES predate the fixes
+  and should not be quoted.'
 evidence:
   gates:
     conservation: PASS
     no_empty_week: PASS
     harvest_floor: WARN
-    biomass_cap: FAIL
+    biomass_cap: WARN
     harvest_cap: PASS
     targets: N/A
     density_quality: PASS
     sixn_one_way: PASS
-    handling_budget: FAIL
-  score: 13.079483936576064
-  emphasis: Walk the line
+    handling_budget: WARN
+  score: 7.719283969897402
+  label: 'Controller — reactive greedy (tuned: facility_biomass_deviation_pct=0.02,
+    global_buffer_pct=0.0, harvest_smooth_lookahead_weeks=12, hybrid_production_lever=False,
+    hybrid_purge_lever=False, rebalance_balance_budget=0, rebalance_split_budget=0,
+    rebalance_varqty_budget=0)'
+  beat: Global LP + CP-SAT (both gate-bound on R7)
+  prior_default: 'controller-hybrid, promoted 2026-08-15 (its own evidence recorded
+    biomass_cap: FAIL)'
+  scoring_caveat: score values predate the 2026-08-26 basis fixes; gates unaffected
