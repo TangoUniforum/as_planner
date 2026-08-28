@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import collections
 import math
+import os as _os
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Optional
@@ -1821,6 +1822,7 @@ def _run_sixn_purge_week(
     #    mature inventory >= min_h, and the resulting pair drain 2 weeks
     #    later also >= min_h (minus mortality).
     main_tank_id = fill_pair[0]  # prefer main (61/63/65) over sister (67/69/71)
+
     count_moved = 0
     contributing_batches: list[str] = []
     for move_in_batch in move_in_batches:
@@ -4447,6 +4449,26 @@ def phase_d_emit_events(
             gain=_MOVE_IN_GAIN,
             arrivals_kg=arrivals_kg,
         )
+
+        # MOVEIN_PROBE (env-gated, inert unless set) — the controller's own
+        # terms, so a starved move-in can be attributed to a TERM instead of
+        # guessed at from the plan it produced. Same convention as SIXN_PROBE /
+        # ANCHOR_PROBE. Prints what predictive_move_in_count actually saw:
+        # if `raw` lands under `min` the FLOOR is sizing the fill, not the
+        # controller, and the biomass correction is not reaching the plant.
+        if _os.environ.get("MOVEIN_PROBE") and setpoint is not None:
+            _raw = ((max(0.0, fac_growth_kg) + _MOVE_IN_GAIN
+                     * (fac_bio - setpoint) + max(0.0, arrivals_kg))
+                    * 1000.0 / oldest_wt) if oldest_wt > 0 else float("nan")
+            print(f"[MOVEIN] {week_label} bio={fac_bio:>10,.0f} "
+                  f"cap={(bio_cap or 0):>9,.0f} set={setpoint:>10,.0f} "
+                  f"excess={fac_bio - (bio_cap or 0):>9,.0f} "
+                  f"growth={fac_growth_kg:>8,.0f} arrivals={arrivals_kg:>8,.0f} "
+                  f"wt={oldest_wt:>6,.0f}g raw={_raw:>8,.0f} "
+                  f"min={(min_hv or 0):>7,.0f} max={weekly_max:>7,.0f} "
+                  f"-> {move_in_target:>7,.0f}"
+                  f"{'  <-- FLOOR BINDS' if _raw < (min_hv or 0) else ''}"
+                  f"{'  <-- CLIPPED' if _raw > weekly_max else ''}", flush=True)
 
         # HYBRID lever 1 — PURGE weeks only. Fish moved in NOW drain at
         # `drain_idx`, so this week's move-in must deliver the guide's quantity
