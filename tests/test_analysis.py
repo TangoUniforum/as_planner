@@ -478,3 +478,73 @@ def test_variant_cache_stores_only_plain_data(monkeypatch):
                     variant_cache=vc)
     assert again[0].metrics is not None
     assert again[0].metrics.weeks_over_harvest_cap == res[0].metrics.weeks_over_harvest_cap
+
+
+def _conv(**kw):
+    """A convergence review with the same TRAJECTORY every time; only the
+    forced/avoidable split varies."""
+    base = {"n_weeks": 60, "start_pct": 101.6, "red_start": True, "weeks_red": 6,
+            "converged": True, "first_green_i": 6, "first_green_week": "2026-W41",
+            "settled_i": 6, "settled_week": "2026-W41", "relapses": 0,
+            "relapses_avoidable": 0, "forced_judged": True,
+            "weeks_red_forced": 6, "weeks_red_avoidable": 0,
+            "forced_weeks": ["2026-W35"], "weeks_red_after_green": 0,
+            "worst_pct": 105.0, "worst_relapse_pct": None,
+            "steady_worst_pct": 96.0, "steady_worst_week": "2027-W10"}
+    base.update(kw)
+    return {"convergence": base}
+
+
+def test_forced_red_weeks_are_not_charged_but_avoidable_ones_are():
+    """The doctrine: an identical biomass trajectory is a PASS when no legal
+    move existed and a WARN when one did.
+
+    A maturity trough (no fish at harvest weight outside 6N) or a plant already
+    running at its processing limit leaves the planner no move; charging those
+    weeks makes every plan WARN for a reason no engine can fix, and the gate
+    stops telling candidates apart — the exact flaw that peak-biomass judging
+    had."""
+    forced = A._gate_convergence(_conv())
+    assert forced[0] == "PASS", forced
+    assert "FORCED" in forced[1]
+
+    avoidable = A._gate_convergence(
+        _conv(weeks_red_forced=0, weeks_red_avoidable=6, forced_weeks=[],
+              relapses=1, relapses_avoidable=1, worst_relapse_pct=105.0))
+    assert avoidable[0] == "WARN", avoidable
+    assert "AVOIDABLE" in avoidable[1]
+
+
+def test_unjudgeable_workbook_charges_every_red_week():
+    """No inputs to judge with (an engine that does not stamp them) must never
+    SILENTLY excuse weeks — absent evidence, the plan is charged."""
+    st, msg = A._gate_convergence(
+        _conv(forced_judged=False, weeks_red_forced=0, weeks_red_avoidable=0,
+              relapses=1, relapses_avoidable=1, worst_relapse_pct=105.0))
+    assert st == "WARN", (st, msg)
+    assert "FORCED" not in msg
+
+
+def test_week_was_forced_needs_both_capacity_and_fish():
+    """The heart of the convergence gate: a feeding week contributes the SMALLER
+    of its spare plant capacity and the mature fish the pick could see.
+
+    Capacity with no fish is useless and fish with no capacity cannot be
+    processed — an earlier form asked only "was staging below the limit while
+    fish existed", which charged a feedback controller for correctly staging the
+    floor weeks before biomass ever crossed the cap (19 weeks flagged on the
+    July'26 PR where a direct sweep found 3)."""
+    # 39,000 kg over at 3.9 kg/fish = 10,000 fish needed.
+    over, wt = 39_000.0, 3.9
+    # Plenty of both across two feeding weeks -> the plan could have erased it.
+    assert A.week_was_forced(over, wt, [8_000, 8_000], [9_000, 9_000]) is False
+    # Capacity, but no mature fish to fill it -> forced.
+    assert A.week_was_forced(over, wt, [25_000, 25_000], [0, 0]) is True
+    # Mature fish, but the plant was already flat out -> forced.
+    assert A.week_was_forced(over, wt, [0, 0], [500_000, 500_000]) is True
+    # Each week has one or the other but never both -> forced (the min, not sum).
+    assert A.week_was_forced(over, wt, [25_000, 0], [0, 25_000]) is True
+    # Exactly enough is not a shortfall.
+    assert A.week_was_forced(over, wt, [10_000], [10_000]) is False
+    # No harvest weight to convert with -> never charge the plan.
+    assert A.week_was_forced(over, 0.0, [99_999], [99_999]) is True

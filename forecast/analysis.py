@@ -26,6 +26,7 @@ Everything here is pure logic + file IO; Streamlit stays in app.py.
 from __future__ import annotations
 
 import datetime as _dt
+import re as _re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
@@ -368,6 +369,381 @@ def density_review(out_path) -> Optional[dict]:
             "buckets": dict(d.buckets), "severe_rows": list(detail)}
 
 
+def week_was_forced(excess_kg: float, harvest_wt_kg: float,
+                   feed_capacity: list, feed_mature: list) -> bool:
+    """Could the weeks that FED this one have erased its excess?
+
+    `excess_kg`     how far over the cap the week ran.
+    `harvest_wt_kg` realised harvest weight, to turn kg into fish.
+    `feed_capacity` per feeding week, plant capacity still unused that week.
+    `feed_mature`   per feeding week, mature fish the pick could actually SEE
+                    (the PRIOR week's standing stock outside 6N).
+
+    Each feeding week can contribute only the smaller of the two: capacity with
+    no fish is useless, and fish with no capacity cannot be processed. If their
+    sum cannot cover the fish the excess represents, no plan could have erased
+    it -> FORCED. Pure arithmetic on workbook numbers, so it reads identically
+    for every engine.
+    """
+    if harvest_wt_kg <= 0:
+        return True                       # cannot convert -> never charge
+    need = max(0.0, excess_kg) / harvest_wt_kg
+    possible = sum(min(c, m) for c, m in zip(feed_capacity, feed_mature))
+    return possible < need
+
+
+# Staging leads harvest: fish move into 6N, sit the purge hold, then drain. A red
+# week is judged against the mature inventory available in the weeks that could
+# still have fed it — the hold (~2 weeks) plus one week of rotation slack.
+_CONVERGE_FEED_LEAD = 3
+
+
+def convergence_review(out_path) -> Optional[dict]:
+    """Does the plan WORK ITS WAY into bounds, and then HOLD there?
+
+    The starting state is an operator INPUT, not a planner choice. A PR handed
+    over at 101% of the biomass cap makes week 0 red whichever engine runs, so
+    judging candidates on PEAK biomass scores the inherited state rather than
+    the plan: every candidate fails the same way and the ranking says nothing.
+    The question that actually separates plans is the operator's own —
+
+        start red  ->  how fast does it reach green  ->  can it STAY green?
+
+    A plan that inherits 101%, is under the cap by week 22 and never returns is
+    doing its job. A plan that reaches green and relapses has not converged; it
+    is oscillating, and the relapse is a planning failure in a way the red
+    START never was.
+
+    Judged against the per-week RESOLVED cap (Biomass_Limit moves — 3.80M at
+    2026-W35, 3.65M by W37), so "green" means inside THAT week's limit, never a
+    constant. Uses the Advisory sheet's own Biomass_Excess, the same column the
+    operator reads, so the gate and the workbook can never disagree.
+
+    FORCED vs AVOIDABLE red weeks (2026-08-27)
+    ------------------------------------------
+    The same logic that excuses an inherited red START has to be applied one
+    level deeper, or the gate stops discriminating. Fish reach the plant only
+    through the 6N purge, and only fish at/above `min_harvest_weight_g` may be
+    staged. When a cohort has passed through and the next has not yet grown into
+    the window, there is NO mature inventory: harvest cannot rise, biomass
+    climbs, and NO plan — from any engine, under any knobs — can do otherwise.
+    Measured on the 8.23.26 PR: 2026-W44..W49 hold ZERO mature fish outside 6N
+    while 244k-440k sit just under the line, and the facility runs to 107% of
+    cap. That excursion is a property of the smolt/growth calendar, which the
+    operator does not control either (the site grows its own smolts).
+
+    So a red week is FORCED when the weeks that could still have FED it (staging
+    leads harvest by `_CONVERGE_FEED_LEAD`) could not between them have supplied
+    the fish needed to erase the excess — each contributing the smaller of its
+    remaining plant capacity and the mature fish the pick could actually see.
+    Otherwise it is AVOIDABLE and counts against the plan. The gate judges
+    AVOIDABLE weeks; forced ones are reported, never charged, and
+    operator-scripted window weeks are excluded from both.
+
+    The yardstick is deliberately the EXCESS, not the engine's own target. An
+    intent-based test ("did it get what it asked for?") would judge the
+    controller on a number it records and Global on plant capacity, which is the
+    same asymmetry that let Global's OG-only biomass flatter it for months. This
+    form reads only workbook data and applies identically to both.
+
+    BASIS, stated plainly: maturity is measured on the TANK AVERAGE weight, so
+    the graded tail of a sub-threshold batch (the engine can pull the top of a
+    3,083 g batch across a 3,500 g line) is NOT counted as available. FORCED
+    therefore means "no batch stood at harvest weight", which is the physical
+    condition; where the engine ALSO logged its own shortfall, that is recorded
+    in `engine_shortfall_weeks` as corroboration.
+
+    Returns None when Advisory is absent -> the gate reports N/A, never a false
+    verdict. `forced_judged` is False when BatchLocations/RunConfig are missing,
+    in which case every red week is treated as AVOIDABLE (never silently
+    excused).
+    """
+    import openpyxl
+    try:
+        wb = openpyxl.load_workbook(out_path, read_only=True, data_only=True)
+    except Exception:  # noqa: BLE001 — unreadable/foreign file -> no lens
+        return None
+    try:
+        if "Advisory" not in wb.sheetnames:
+            return None
+        header, rows, adv_harvest = None, [], []
+        for r in wb["Advisory"].iter_rows(values_only=True):
+            if header is None:
+                if (r and str(r[0]).strip() == "Week" and len(r) > 2
+                        and "Total_Biomass" in str(r[2] or "")):
+                    header = {str(c).strip(): i for i, c in enumerate(r) if c}
+                continue
+            if not r or not str(r[0] or "").startswith("20"):
+                continue
+            def _num(key):
+                i = next((j for k, j in header.items() if k.startswith(key)), None)
+                v = r[i] if i is not None and i < len(r) else None
+                return float(v) if isinstance(v, (int, float)) else None
+            bio, cap = _num("Total_Biomass"), _num("Biomass_Limit")
+            if bio is None or not cap:
+                continue
+            rows.append((str(r[0]).strip(), bio, cap))
+            adv_harvest.append((str(r[0]).strip(), bio, cap,
+                                _num("Harvest_Count"), _num("Harvest_Biomass")))
+
+        # Operator inputs, taken from the workbook's own RunConfig stamp so the
+        # gate judges against the numbers THIS run used, never today's config.
+        min_wt_g = min_hv = max_hv = None
+        inputs_from = "workbook"
+        if "RunConfig" in wb.sheetnames:
+            # Two stamp DIALECTS: the controller writes a YAML snapshot
+            # ("key: value" in one cell), Global writes a two-column method
+            # stamp (key in A, value in B). Read both — a parser that knows only
+            # one silently leaves the other engine unjudged, which is how a
+            # comparison stops being apples-to-apples.
+            for r in wb["RunConfig"].iter_rows(values_only=True):
+                cells = list(r or ())
+                for key, setter in (("min_harvest_weight_g", "wt"),
+                                    ("min_harvest_per_week", "hv"),
+                                    ("max_harvest_per_week", "mx")):
+                    v = None
+                    for i, c in enumerate(cells):
+                        t = str(c or "").strip()
+                        if t.startswith(key + ":"):
+                            try:
+                                v = float(t.split(":", 1)[1].strip())
+                            except (ValueError, IndexError):
+                                v = None
+                        elif t == key and i + 1 < len(cells):
+                            try:
+                                v = float(cells[i + 1])
+                            except (TypeError, ValueError):
+                                v = None
+                        if v is not None:
+                            break
+                    if v is None:
+                        continue
+                    if setter == "wt":
+                        min_wt_g = v
+                    elif setter == "hv":
+                        min_hv = v
+                    else:
+                        max_hv = v
+
+        # Not every engine stamps its inputs (Global's RunConfig omits the
+        # harvest block). Without them nothing can be excused and that engine
+        # would be charged for every red week while another is excused — the
+        # apples-to-apples failure this whole lens exists to prevent. Fall back
+        # to the SHIPPED control defaults and say so in `inputs_from`, so a
+        # reader can see the numbers did not come from the run itself.
+        if min_wt_g is None or min_hv is None or max_hv is None:
+            try:
+                _cfg = yaml.safe_load(
+                    (Path(__file__).resolve().parent.parent / "config"
+                     / "control.yaml").read_text(encoding="utf-8")) or {}
+                min_wt_g = min_wt_g or float(_cfg.get("min_harvest_weight_g") or 0) or None
+                min_hv = min_hv or float(_cfg.get("min_harvest_per_week") or 0) or None
+                max_hv = max_hv or float(_cfg.get("max_harvest_per_week") or 0) or None
+                inputs_from = "shipped config (workbook did not stamp them)"
+            except Exception:  # noqa: BLE001 — no config -> stays unjudged
+                pass
+
+        # Mature inventory OUTSIDE 6N: the only fish that can still be staged.
+        # Fish already in 6N are committed — counting them is the double-count
+        # that made an early read of this data show 355k "waiting" fish that
+        # were in fact the 6N contents themselves.
+        mature = {}
+        if min_wt_g and "BatchLocations" in wb.sheetnames:
+            from .sixn import SIXN_ALL_TANKS
+            sixn = {str(t) for t in SIXN_ALL_TANKS}
+            bh = None
+            for r in wb["BatchLocations"].iter_rows(values_only=True):
+                if bh is None:
+                    if (r and str(r[0]).strip() == "Week"
+                            and any(str(c).strip() == "Tank" for c in r if c)):
+                        bh = {str(c).strip(): i for i, c in enumerate(r) if c}
+                    continue
+                if not r or not str(r[0] or "").startswith("20"):
+                    continue
+                try:
+                    tank = str(int(float(r[bh["Tank"]])))
+                    awt = float(r[bh["AvgWt (kg)"]] or 0)
+                    cnt = float(r[bh["Count (fish)"]] or 0)
+                except (TypeError, ValueError, KeyError):
+                    continue
+                if tank in sixn or awt * 1000.0 < min_wt_g:
+                    continue
+                wk = str(r[0]).strip()
+                mature[wk] = mature.get(wk, 0.0) + cnt
+
+        # What was actually STAGED into 6N each week. A week where the plan
+        # already filled to the processing limit had no legal move left, however
+        # many mature fish stood in the tanks — without this the lens calls
+        # 2026-W52 "avoidable" while the plan is pinned at 55,000.
+        staged = {}
+        if "TransferPlan" in wb.sheetnames:
+            from .sixn import SIXN_ALL_TANKS as _S
+            _sx = {str(t) for t in _S}
+            th = None
+            for r in wb["TransferPlan"].iter_rows(values_only=True):
+                if th is None:
+                    if (r and str(r[0]).strip() == "Week"
+                            and any(str(c).strip() == "From_Tank" for c in r if c)):
+                        th = {str(c).strip(): i for i, c in enumerate(r) if c}
+                    continue
+                if not r or not str(r[0] or "").startswith("20"):
+                    continue
+                if str(r[th.get("Type", 0)] or "").strip() != "Transfer":
+                    continue
+                try:
+                    ft = str(int(float(r[th["From_Tank"]])))
+                    tt = str(int(float(r[th["To_Tank"]])))
+                    cnt = float(r[th["Count (fish)"]] or 0)
+                except (TypeError, ValueError, KeyError):
+                    continue
+                if tt in _sx and ft not in _sx:
+                    wk = str(r[0]).strip()
+                    staged[wk] = staged.get(wk, 0.0) + cnt
+
+        # Realised harvest weight per week, to convert an excess in KG into the
+        # number of FISH that would have had to be harvested to erase it.
+        # Advisory carries both columns, so this needs no second sheet.
+        hv_wt = {}
+        for w, _b, _c, hc, hkg in adv_harvest:
+            if hc and hkg and hc > 0:
+                hv_wt[w] = hkg / hc
+
+        # Operator-scripted MANUAL WINDOW weeks execute only the operator's own
+        # events — no engine may add or trim a harvest there — so they are not
+        # the planner's to answer for. Every harvest gate already excludes them
+        # (forecast.window_weeks); this one must too, or a deliberately scripted
+        # week is charged as a planning failure. Measured: the July'26 PR
+        # scripts 2026-W31..W33 and W33 was landing in the avoidable list.
+        try:
+            from . import window_weeks as _ww
+            scripted = set(_ww.manual_window_weeks(wb) or ())
+        except Exception:  # noqa: BLE001 — no window info -> exclude nothing
+            scripted = set()
+
+        # The engine's OWN admission, where it made one — corroboration for the
+        # inventory measure, never a substitute (it only logs on weeks where a
+        # fill was actually attempted).
+        shortfall_weeks = set()
+        if "ValidationLog" in wb.sheetnames:
+            for r in wb["ValidationLog"].iter_rows(values_only=True):
+                txt = " ".join(str(c) for c in (r or ()) if c is not None)
+                if "mature inventory" in txt or "short of min_hv" in txt:
+                    m = _re.search(r"\b(\d{4}-W\d{2})\b", txt)
+                    if m:
+                        shortfall_weeks.add(m.group(1))
+    finally:
+        wb.close()
+    if not rows:
+        return None
+
+    pct = [(w, b / c * 100.0) for w, b, c in rows]
+    red = [p > 100.0 for _w, p in pct]
+    n = len(pct)
+    # TOUCHING green and SETTLING into it are different events, and conflating
+    # them is how "green by week 5" hides a December bulge to 107%. `first_green`
+    # is the first week under the cap; `settled` is the week after the LAST red
+    # one -- the point from which the plan actually MAINTAINS green, which is the
+    # operator's question. None when the horizon ends red: it never settles.
+    first_green = next((i for i, r in enumerate(red) if not r), None)
+    last_red = max((i for i, r in enumerate(red) if r), default=None)
+    settled = None if last_red is None else (
+        last_red + 1 if last_red + 1 < n else None)
+    if last_red is None:
+        settled = 0
+    # A relapse is a GREEN -> RED transition after the first green week: the plan
+    # had it and gave it back. Counting red weeks instead would punish the
+    # inherited start, which is exactly the confound this lens exists to remove.
+    relapses = sum(1 for i in range(1, n)
+                   if first_green is not None and i > first_green
+                   and red[i] and not red[i - 1])
+    # FORCED: no plan could have harvested more into this week, because the
+    # weeks that could still have FED it held no batch at harvest weight.
+    # Without the inputs to judge that (foreign/old workbook), nothing is
+    # excused — `forced_judged` False and every red week stays AVOIDABLE.
+    forced_judged = bool(mature) and bool(min_hv)
+    scripted_red = [red[i] and pct[i][0] in scripted for i in range(n)]
+    forced = [False] * n
+    if forced_judged:
+        _wts = [v for v in hv_wt.values() if v > 0]
+        _mean_wt = (sum(_wts) / len(_wts)) if _wts else 0.0
+        for i in range(n):
+            if not red[i] or scripted_red[i]:
+                continue
+            lo = max(0, i - _CONVERGE_FEED_LEAD)
+            # AVOIDABILITY, not "was there slack". The earlier form asked
+            # whether staging sat below the PLANT limit while mature fish
+            # existed — which charges a feedback controller for correctly
+            # staging the floor three weeks before biomass ever crossed the cap.
+            # Measured: it called 19 weeks avoidable on the July'26 PR where a
+            # direct sweep found 3 real staging defects.
+            #
+            # Ask the operator's question instead: could ENOUGH MORE FISH have
+            # been staged, across the weeks that could still have fed this one,
+            # to erase the excess? Each feeding week contributes the smaller of
+            # its remaining plant capacity and the mature fish the pick could
+            # actually see. If their sum cannot cover the excess, no plan could
+            # have erased it and the week is FORCED. Uses only workbook data, so
+            # it applies IDENTICALLY to every engine — an intent-based yardstick
+            # would judge the controller on what it asked for while Global, which
+            # records no such number, kept being judged on capacity.
+            #
+            # MATURITY IS READ ONE WEEK BACK. BatchLocations is a week-END
+            # snapshot, so week j's row counts fish that crossed the harvest
+            # weight AFTER week j's pick had already run — charging the pick for
+            # fish it could not yet see. Measured on the 8.23.26 PR: 2026-W51
+            # staged 27,445 and its own week shows 231,737 mature (a damning
+            # -looking miss), while the snapshot the pick actually saw held
+            # exactly 27,445 — it took every fish available. Reading w-1 is also
+            # conservative: mid-week growth can only ADD, so this never invents
+            # an opportunity that did not exist.
+            _caps, _mats = [], []
+            for j in range(max(1, lo), i):
+                _caps.append(max(0.0, (max_hv or 0.0) - staged.get(pct[j][0], 0.0)))
+                _mats.append(mature.get(pct[j - 1][0], 0.0))
+            forced[i] = week_was_forced(
+                max(0.0, rows[i][1] - rows[i][2]),
+                hv_wt.get(pct[i][0]) or _mean_wt, _caps, _mats)
+    avoidable = [red[i] and not forced[i] and not scripted_red[i]
+                 for i in range(n)]
+
+    relapse_pcts = [p for i, (_w, p) in enumerate(pct)
+                    if first_green is not None and i > first_green and red[i]]
+    steady = pct[settled:] if settled is not None else []
+    steady_worst = max(steady, key=lambda x: x[1]) if steady else None
+    return {
+        "n_weeks": n,
+        "start_pct": pct[0][1],
+        "red_start": red[0],
+        "weeks_red": sum(red),
+        "converged": first_green is not None,
+        "first_green_i": first_green,
+        "first_green_week": pct[first_green][0] if first_green is not None else None,
+        "settled_i": settled,
+        "settled_week": pct[settled][0] if settled is not None else None,
+        "relapses": relapses,
+        # Relapses that begin on an AVOIDABLE week — the ones the plan owns.
+        "relapses_avoidable": sum(
+            1 for i in range(1, n)
+            if first_green is not None and i > first_green
+            and avoidable[i] and not red[i - 1]),
+        "forced_judged": forced_judged,
+        "inputs_from": inputs_from,
+        "weeks_red_forced": sum(forced),
+        "weeks_red_avoidable": sum(avoidable),
+        "forced_weeks": [pct[i][0] for i in range(n) if forced[i]],
+        "avoidable_weeks": [pct[i][0] for i in range(n) if avoidable[i]],
+        "engine_shortfall_weeks": sorted(shortfall_weeks),
+        "weeks_red_scripted": sum(scripted_red),
+        "scripted_weeks": [pct[i][0] for i in range(n) if scripted_red[i]],
+        "weeks_red_after_green": (sum(red[first_green:])
+                                  if first_green is not None else sum(red)),
+        "worst_pct": max(p for _w, p in pct),
+        "worst_relapse_pct": max(relapse_pcts) if relapse_pcts else None,
+        "steady_worst_pct": steady_worst[1] if steady_worst else None,
+        "steady_worst_week": steady_worst[0] if steady_worst else None,
+    }
+
+
 def revenue_for(rows: list[dict], economics: dict) -> dict:
     """Revenue for a plan: each harvest event's kg is SPREAD across the price
     bands with the size-biased lognormal (model_cv_pct), then priced per band
@@ -670,6 +1046,92 @@ def _gate_biomass_cap(ctx):
     return ("WARN" if p <= 110.0 else "FAIL"), f"peak {p:.1f}% of cap"
 
 
+def _gate_convergence(ctx):
+    """Red -> green -> STAY green, charging only what the plan could control.
+
+    `biomass_cap` judges the PEAK, which on an inherited over-cap starting state
+    is a property of the INPUT: every engine peaks in week 0 and the gate cannot
+    tell them apart. This gate judges the TRAJECTORY, and charges a red week
+    only when the plan had a legal move it did not take — mature fish standing
+    outside 6N in a week that was not already staging at the processing limit.
+    Weeks with neither are FORCED (a maturity trough, or the plant already
+    flat out) and are reported, never charged: no engine under any knobs could
+    have done better, so charging them makes every plan WARN for the same
+    reason and the gate stops discriminating.
+
+    Touching green is not holding it, so the gate reports the week the plan
+    SETTLES (the week after its last red one).
+
+    PASS — never red; or every red week forced; or settles with real headroom.
+    WARN — avoidable relapses, thin headroom, or ends red with no legal move.
+    FAIL — the horizon ENDS red with avoidable weeks: it never settles and the
+           plan owns it.
+    """
+    cr = ctx.get("convergence")
+    if not cr:
+        return "N/A", "weekly biomass-vs-cap series unavailable for this plan"
+    n, worst = cr["n_weeks"], cr["worst_pct"]
+    if cr["weeks_red"] == 0:
+        return "PASS", (f"in bounds from week 0 and stays there — worst "
+                        f"{worst:.1f}% of cap across {n} weeks")
+    judged = cr.get("forced_judged")
+    av = cr.get("weeks_red_avoidable", cr["weeks_red"]) if judged else cr["weeks_red"]
+    fc = cr.get("weeks_red_forced", 0) if judged else 0
+    fw = cr.get("forced_weeks") or []
+    sc_n = cr.get("weeks_red_scripted", 0)
+    sc_note = (f"; {sc_n} red week(s) were operator-SCRIPTED "
+               f"({', '.join(cr.get('scripted_weeks') or [])}) and are excluded — "
+               f"the engine may not add or trim a harvest there"
+               if sc_n else "")
+    forced_note = ""
+    if fc:
+        span = (f"{fw[0]}..{fw[-1]}" if len(fw) > 1 else fw[0])
+        forced_note = (f"; {fc} further red week(s) ({span}) were FORCED — no "
+                       f"mature fish outside 6N, or already staging at the "
+                       f"processing limit — and are not charged")
+    start = (f"starts at {cr['start_pct']:.1f}% (inherited starting state)"
+             if cr["red_start"] else f"starts green at {cr['start_pct']:.1f}%")
+    if cr["settled_i"] is None:
+        if av == 0 and judged:
+            return "WARN", (f"{start} and is still over the cap in the final "
+                            f"week — but every one of its {cr['weeks_red']} red "
+                            f"week(s) was forced: no plan could have harvested "
+                            f"more. Worst {worst:.1f}%. This is a capacity/"
+                            f"maturity problem, not a planning one")
+        return "FAIL", (f"{start} and is still over the cap in the final week "
+                        f"({av} avoidable red week(s), worst {worst:.1f}%): "
+                        f"the plan never settles into green{forced_note}{sc_note}")
+    sw, si = cr["settled_week"], cr["settled_i"]
+    stw = cr["steady_worst_pct"]
+    head = (f"; once settled it holds {100.0 - stw:.1f}% clear of the cap "
+            f"(worst {stw:.1f}% at {cr['steady_worst_week']})"
+            if stw is not None else "")
+    if av == 0 and judged:
+        return "PASS", (f"{start}; every one of its {cr['weeks_red']} red week(s) "
+                        f"was FORCED — no mature fish outside 6N, or already "
+                        f"staging at the processing limit — so no plan could "
+                        f"have done better. Settles at {sw} (week {si} of {n})"
+                        f"{head}")
+    rel = cr.get("relapses_avoidable", cr["relapses"]) if judged else cr["relapses"]
+    if rel:
+        wr = cr["worst_relapse_pct"]
+        wr_s = f", worst relapse {wr:.1f}%" if wr is not None else ""
+        return "WARN", (f"{start}, first touches green at {cr['first_green_week']} "
+                        f"but gives it back {rel}x{wr_s}, settling only at {sw} "
+                        f"(week {si} of {n}). {av} red week(s) were AVOIDABLE — "
+                        f"mature fish stood outside 6N in a week that was not "
+                        f"already staging at the limit{forced_note}{sc_note}{head}")
+    if stw is not None and stw > 99.5:
+        return "WARN", (f"{start}, settles by {sw} (week {si} of {n}) with no "
+                        f"avoidable relapse — but only {100.0 - stw:.1f}% "
+                        f"headroom at {cr['steady_worst_week']}; it is riding "
+                        f"the cap, so any surprise puts it back over"
+                        f"{forced_note}")
+    return "PASS", (f"{start}, works down to green by {sw} (week {si} of {n}) "
+                    f"with {av} avoidable red week(s) and no avoidable relapse"
+                    f"{forced_note}{head}")
+
+
 def _gate_harvest_cap(ctx):
     """Weekly processing limit + pressure relief (operator semantics
     2026-08-09). `max_harvest_per_week` is THE processing limit; the relief
@@ -740,6 +1202,8 @@ register_gate("harvest_floor", "Weekly contract floor (min harvest/week)",
               hard=False, fn=_gate_harvest_floor)
 register_gate("biomass_cap", "Facility biomass cap", hard=False,
               fn=_gate_biomass_cap)
+register_gate("convergence", "Converges: red -> green -> stays green",
+              hard=False, fn=_gate_convergence)
 register_gate("harvest_cap", "Weekly processing limit + relief",
               hard=False, fn=_gate_harvest_cap)
 register_gate("targets", "Harvest targets (monthly/yearly)", hard=False,

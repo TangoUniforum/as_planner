@@ -170,6 +170,37 @@ GATE_CONTROLS = {
     "sixn_one_way": dict(
         neg={"sixn_outbound_purge": 3}, fires={"FAIL"},
         pos={"sixn_outbound_purge": 0}),
+    # Red -> green -> STAY green, charging only AVOIDABLE weeks.
+    # NEG: ends the horizon over the cap with avoidable weeks -> FAIL.
+    # POS: the doctrine under test — a plan whose every red week was FORCED (no
+    # mature fish outside 6N, or already staging at the processing limit) must
+    # NOT fire, even though it spends 5 weeks over the cap and starts red.
+    "convergence": dict(
+        neg={"convergence": {"n_weeks": 60, "start_pct": 101.6, "red_start": True,
+                             "weeks_red": 9, "converged": True,
+                             "first_green_i": 5, "first_green_week": "2026-W40",
+                             "settled_i": None, "settled_week": None,
+                             "relapses": 2, "relapses_avoidable": 2,
+                             "forced_judged": True, "weeks_red_forced": 1,
+                             "weeks_red_avoidable": 8,
+                             "forced_weeks": ["2026-W48"],
+                             "weeks_red_after_green": 4,
+                             "worst_pct": 107.1, "worst_relapse_pct": 107.1,
+                             "steady_worst_pct": None, "steady_worst_week": None}},
+        fires={"FAIL"},
+        pos={"convergence": {"n_weeks": 60, "start_pct": 101.6, "red_start": True,
+                             "weeks_red": 5, "converged": True,
+                             "first_green_i": 5, "first_green_week": "2026-W40",
+                             "settled_i": 5, "settled_week": "2026-W40",
+                             "relapses": 0, "relapses_avoidable": 0,
+                             "forced_judged": True, "weeks_red_forced": 5,
+                             "weeks_red_avoidable": 0,
+                             "forced_weeks": ["2026-W35", "2026-W36", "2026-W37",
+                                              "2026-W38", "2026-W39"],
+                             "weeks_red_after_green": 0,
+                             "worst_pct": 104.0, "worst_relapse_pct": None,
+                             "steady_worst_pct": 96.0,
+                             "steady_worst_week": "2027-W24"}}),
     "handling_budget": dict(
         neg={"weeks_moves_over_cap": 2, "weeks_moves_warn": 2,
              "moves_week_max": 18}, fires={"FAIL"},

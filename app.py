@@ -4554,9 +4554,9 @@ Independent invariants, each catching a *different* failure (the hard lesson:
 6. **Closed freshwater mass-balance** — the FW phase can't leak fish either.
 7. **Steady-harvest contract** — no near-empty week past the startup handoff.
 
-**On top of the audits, Analyze grades every plan on nine gates, in this
+**On top of the audits, Analyze grades every plan on ten gates, in this
 order.** Only the first two are **hard** — a hard FAIL sinks a plan no matter
-how well it scores on everything else. The other seven are flagged and
+how well it scores on everything else. The other eight are flagged and
 penalised, never disqualifying:
 
 | # | Gate | Hard? | Reads |
@@ -4565,11 +4565,46 @@ penalised, never disqualifying:
 | 2 | Never an empty harvest week | **HARD** | 0 empty weeks, or FAIL |
 | 3 | Weekly contract floor (min harvest/week) | soft | PASS if every planner week clears `min_harvest_per_week`, else WARN with the count + the worst week |
 | 4 | Facility biomass cap | soft | PASS ≤100% of cap · WARN ≤110% · FAIL above |
-| 5 | Weekly processing limit + relief | soft | PASS 0 relief weeks · WARN 1-3 · FAIL >3 **or** any week past the relief ceiling |
-| 6 | Harvest targets (monthly/yearly) | soft | never worse than WARN — targets are penalised, never disqualifying |
-| 7 | Per-batch density quality | soft | PASS if no batch peaks ≥1.3× its tank cap, else WARN |
-| 8 | 6N one-way commitment (R7) | soft | PASS if nothing left a depuration tank except by harvest |
-| 9 | Weekly handling budget | soft | PASS every week within budget · WARN any week over ~80% · FAIL any week over |
+| 5 | Converges: red -> green -> stays green | soft | judges only **avoidable** red weeks · PASS if it never goes red, if every red week was forced, or if it settles and holds · WARN if it settles only after an avoidable relapse, or holds on <0.5% headroom · FAIL if the final week is still over **and** the plan owns it |
+| 6 | Weekly processing limit + relief | soft | PASS 0 relief weeks · WARN 1-3 · FAIL >3 **or** any week past the relief ceiling |
+| 7 | Harvest targets (monthly/yearly) | soft | never worse than WARN — targets are penalised, never disqualifying |
+| 8 | Per-batch density quality | soft | PASS if no batch peaks ≥1.3× its tank cap, else WARN |
+| 9 | 6N one-way commitment (R7) | soft | PASS if nothing left a depuration tank except by harvest |
+| 10 | Weekly handling budget | soft | PASS every week within budget · WARN any week over ~80% · FAIL any week over |
+
+**Gate 5 judges the plan; gate 4 judges what you inherited.** Peak biomass is
+mostly a property of the *starting state* — hand every engine a Production
+Report that opens at 101% of the cap and every engine peaks in week 0, so gate
+4 cannot tell them apart. Gate 5 asks the operator's question instead: it
+starts red, so **how fast does it work down to green, and can it hold there?**
+It reads each week against **that week's** resolved limit (the cap moves —
+3.80M in one week, 3.65M in the next), and it separates *touching* green from
+*settling* into it, so a plan that dips under the cap in September and bulges
+back to 107% in December reads as the relapse it is rather than "green by week
+5". An inherited red start is not held against a plan; **reaching green and
+giving it back is.**
+
+**And it only charges what the plan could control.** Fish reach the plant only
+through the 6N purge, and only fish at or above the minimum harvest weight may
+be staged. When one cohort has passed through and the next has not yet grown
+into the window there is *no mature inventory*: harvest cannot rise, biomass
+climbs, and no engine under any knobs could do otherwise. The same holds for a
+week already staging at the weekly processing limit — there is no legal move
+left. Those weeks are **forced**: reported, never charged, as are
+operator-scripted window weeks. A red week counts against the plan only when the
+weeks that could still have fed it could between them have supplied the fish
+needed to **erase the excess** — each offering the smaller of its remaining
+plant capacity and the mature fish the pick could actually see. Maturity is read
+from the snapshot that pick could SEE (the prior week), never the week-end one
+that counts fish which grew into the window afterwards.
+
+The yardstick is the excess itself, never an engine's own target. Asking "did it
+get what it asked for?" would judge the controller on a number it records while
+Global, which records none, kept being judged on plant capacity — the same
+asymmetry that let Global's OG-only biomass flatter it for months. On the
+8.23.26 PR this separates a controller plan with **1 avoidable** red week from a
+Global plan with **14**, where the raw counts (15 and 30) largely measure the
+same maturity trough twice.
 
 **Gate 3 is the contract, gate 2 is only its degenerate case.** "Never an
 empty week" catches a week that harvests *literally nothing*; the rule you
@@ -7290,6 +7325,15 @@ def _ana_grade(res, targets, econ):
                               if res.get("output_path") else None)}
         res["_ana_density"] = dcached
     dr = dcached["review"]
+    # Same rid+schema caching as the density lens: reading Advisory is cheap,
+    # but the board re-renders on every widget interaction.
+    ccached = res.get("_ana_convergence")
+    if not ccached or ccached.get("rid") != rid or ccached.get("schema") != _schema:
+        ccached = {"rid": rid, "schema": _schema,
+                   "review": (_ana.convergence_review(res["output_path"])
+                              if res.get("output_path") else None)}
+        res["_ana_convergence"] = ccached
+    cvr = ccached["review"]
     sc = res.get("_score") or {}
     m = sc.get("metrics")
     v = sc.get("verdict") or {}
@@ -7325,6 +7369,7 @@ def _ana_grade(res, targets, econ):
         "peak_pct_of_cap": peak_pct,
         "targets_review": tr,
         "density_review": dr,
+        "convergence": cvr,
     }
     return {"gates": _ana.evaluate_gates(ctx), "targets_review": tr,
             "revenue": rev, "metrics": m, "density_review": dr}
