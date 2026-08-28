@@ -742,6 +742,14 @@ def _emit_workbook(gft, result, batches, tables, control, facility,
         ("horizon_weeks", control.horizon_weeks),
         ("biomass_cap_kg", control.max_biomass_kg),
         ("feed_cap_kg_day", control.max_feed_per_day_kg),
+        # The harvest inputs the plan was built under. Stamped because readers
+        # judge the plan against them: analysis.convergence_review needs the
+        # minimum harvest weight and the weekly limits to tell a red week the
+        # plan CAUSED from one it could not have avoided. Absent, that engine
+        # gets charged for every red week while the other is excused.
+        ("min_harvest_weight_g", control.min_harvest_weight_g),
+        ("min_harvest_per_week", control.min_harvest_per_week),
+        ("max_harvest_per_week", control.max_harvest_per_week),
         ("loop_converged", result.converged),
         ("loop_iterations", result.n_iterations),
         ("peak_facility_biomass_kg", round(result.peak_biomass_kg, 0)),
@@ -780,8 +788,16 @@ def _emit_workbook(gft, result, batches, tables, control, facility,
                                batch_by_id)
     write_feed_forecast_monthly(wb, bl, fw_states_by_batch, fs_date, tables,
                                 batch_by_id)
+    # FW/EGG biomass + hatchery feed belong in the FACILITY totals: those fish
+    # live in FW tanks (absent from batch_locations) but count against the 3.8M
+    # biomass cap and the feed/day cap all the same. The controller has always
+    # passed its states here; GLOBAL DID NOT, so its Advisory reported OG-only
+    # biomass -- ~183 t of false headroom at week 0 on the 8.23 PR, enough to
+    # turn a red start green and make `biomass_cap` pass on a plan that is over.
+    # Same `fw_states_by_batch` the feed-forecast writers above already use.
     write_advisory(wb, bl, hv, facility_limits, control,
-                   batches=batch_by_id, tables=tables)
+                   batches=batch_by_id, tables=tables,
+                   biology_states_by_batch=fw_states_by_batch)
     # Manual-window synth states FIRST so a genuine fw_state on a colliding
     # (batch, week) overwrites them (last-write-wins in the ledger's bio_state /
     # mortpct); base run has manual_week_states=[] -> byte-identical to fw_states.
