@@ -347,6 +347,10 @@ _PR_COL = {
     "harv_count": 28, "harv_gross_kg": 29,
     "mort_bio_kg": 33, "mort_count": 36,
     "cull_bio_kg": 37, "cull_count": 38,
+    # The site system's own count-correction term. It is NOT a fish flow, but
+    # it sits inside the PR's closing balance, so deriving an input without
+    # subtracting it would attribute the correction to stocking.
+    "dev_count": 15,
 }
 
 
@@ -378,6 +382,34 @@ class PRBatchPeriod:
     mort_bio_kg: float
     cull_count: float
     cull_bio_kg: float
+    # Optional: needed only to DERIVE the period's input (see input_count).
+    # Defaulted so existing constructors keep working; a record without a
+    # closing balance simply derives no input rather than a negative one.
+    close_count: float = 0.0
+    dev_count: float = 0.0
+
+    @property
+    def input_count(self) -> float:
+        """Fish that ENTERED this batch during the elapsed period.
+
+        The PR has no usable input column -- "Transfer in count in period"
+        reads 0 even on a month that took a full smolt intake -- but the
+        intake is inside the closing balance, so it can be recovered from the
+        balance itself:
+
+            input = close - open + harvested + mortality + cull - deviation
+
+        Measured on the 8.23.26 PR: every batch derives 0 except B56, which
+        derives exactly 570,000 -- one smolt intake, and precisely the figure
+        by which that PR's own facility balance failed to close
+        (opening 4,807,523 + flows = 4,537,983 against a stated closing of
+        5,107,983). Without this the batch materialises out of nothing and the
+        month's Count_Check reads -570,000.
+        """
+        if self.close_count <= 0:
+            return 0.0          # no closing balance recorded -> nothing to derive
+        return max(0.0, self.close_count - self.open_count + self.harv_count
+                   + self.mort_count + self.cull_count - self.dev_count)
 
 
 @dataclass
@@ -451,6 +483,8 @@ def read_pr_period(ws, closing_date) -> Optional[PRPeriod]:
         batches[bid] = PRBatchPeriod(
             batch_id=bid,
             open_count=_num(row, "open_count"),
+            close_count=_num(row, "close_count"),
+            dev_count=_num(row, "dev_count"),
             open_bio_kg=_num(row, "open_bio_kg"),
             open_avg_wt_g=_num(row, "open_avg_wt_g"),
             growth_kg=_num(row, "growth_kg"),

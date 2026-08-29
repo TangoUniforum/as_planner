@@ -249,6 +249,7 @@ def main(
     prefix_tranogs: list = []
     transferred_fw: set = set()
     manual_fw_balance: dict = {}
+    prefix_openings: list = []
     manual_warns: list = []
     # The continuity audit anchors each tank's first week to this initial state.
     # The window advances `state` in place to week N+1 (what the pipeline plans
@@ -279,6 +280,7 @@ def main(
             control=control, pr_closing=pr_closing, fw_records=fw_records)
         prefix_realized = _win["realized_biology"]
         prefix_batch_locations = _win["batch_locations"]
+        prefix_openings = _win.get("opening_locations") or []
         prefix_transfers = _win["transfer_events"]
         prefix_harvests = _win["harvest_events"]
         prefix_tranogs = _win["tranog_events"]
@@ -1080,12 +1082,24 @@ def main(
         transfer_events=placement.transfer_events, batches=batch_by_id, tables=tables,
         scenario_name=control.scenario_name, hog_yield=control.default_hog_yield,
         hog_overrides=facility_hog_overrides,
+        realized_biology=getattr(placement, "realized_biology", None),
+        tranog_events=getattr(placement, "tranog_events", None),
+        window_openings=prefix_openings,
         sixn_move_in_feed=getattr(placement, "sixn_move_in_feed", None))
     write_monthly_report(
         wb, placement.batch_locations, placement.harvest_events, all_states,
         transfer_events=placement.transfer_events, batches=batch_by_id, tables=tables,
         scenario_name=control.scenario_name, hog_yield=control.default_hog_yield,
         hog_overrides=facility_hog_overrides, forecast_start=control.forecast_start,
+        realized_biology=getattr(placement, "realized_biology", None),
+        # NO tranog_events here, deliberately. In the WEEKLY ledger a TranOG is a
+        # genuine inflow into the OG track (the batch's OG opening is 0, so the
+        # arrival must be credited or the fish appear from nowhere). In the
+        # MONTHLY report the PR merge opens the month at the PR's FACILITY-WIDE
+        # opening, which already counts those fish while they sat in freshwater
+        # -- crediting the arrival again double-books it. Measured: passing them
+        # here took 2026-08's Count_Check from 2,998 to 292,998, exactly the
+        # 290,000 of B49's transfer.
         sixn_move_in_feed=getattr(placement, "sixn_move_in_feed", None),
         pr_period=_pr_period)
     write_reconciliation_report(

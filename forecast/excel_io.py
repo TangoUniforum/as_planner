@@ -1315,7 +1315,8 @@ def _build_batch_week_ledger(
     batch_locations, harvest_events, batch_week_states,
     transfer_events=None, batches=None, tables=None, hog_yield=0.0,
     hog_overrides=None, sixn_move_in_feed=None,
-    tranog_events=None, og_mort_states=None,
+    tranog_events=None, og_mort_states=None, realized_biology=None,
+    window_openings=None,
 ):
     """Assemble a per-(batch, week) open/close production ledger.
 
@@ -1396,6 +1397,35 @@ def _build_batch_week_ledger(
     cull: dict[tuple, dict] = defaultdict(lambda: {"count": 0.0, "bio": 0.0})
     mortpct: dict[tuple, float] = {}
     mortc: dict[tuple, float] = {}   # realized mortality count (fish) per week
+    # MANUAL-WINDOW mortality. Window weeks run their own biology
+    # (manual_window.advance_facility_one_week) and produce NO batch_week_state,
+    # so `mortc` and `mortpct` are both empty for them and the ledger booked
+    # zero mortality while the count visibly fell. Measured on the 8.23.26 PR:
+    # B49 lost 145 fish in each of 2026-W36 and W37 with Mort_Count = 0, leaving
+    # +145 per week in Count_Check on every batch alive during the window.
+    # realized_biology is that window's own ground truth -- the same series the
+    # continuity audit reconciles against -- keyed (tank, week, batch).
+    # MANUAL-WINDOW true openings. batch_locations holds each window week's
+    # CLOSING snapshot, so a week whose script harvests fish opens on the
+    # post-harvest count and the harvest has nothing to come out of: measured
+    # on the 8.23.26 PR, B42's 2026-W35 opened at 21,964 while its scripted
+    # harvest took 25,742, leaving -25,753 in Count_Check. manual_window's
+    # opening_locations is the start-of-week state taken BEFORE that week's
+    # operations and before its biology -- the opening the ledger needs. (The
+    # ReconciliationReport already uses it and reports B42 opening at 47,717.)
+    _wopen: dict[tuple, list] = {}
+    for _r in (window_openings or ()):
+        _e = _wopen.setdefault((_r.batch_id, _r.week_label), [0.0, 0.0, 0.0])
+        _e[0] += _r.count
+        _e[1] += _r.avg_wt_g * _r.count
+        _e[2] += _r.biomass_kg
+
+    _rmort: dict[tuple, float] = defaultdict(float)
+    for (_tk, _wl, _bid), _v in (realized_biology or {}).items():
+        try:
+            _rmort[(_bid, _wl)] += float(_v[1])
+        except (TypeError, ValueError, IndexError):
+            continue
     inputc: dict[tuple, float] = defaultdict(float)
     bio_state: dict[tuple, object] = {}
     for s in batch_week_states or ():
@@ -1508,6 +1538,12 @@ def _build_batch_week_ledger(
                     oc, owt, obio = 0.0, 0.0, 0.0
                 else:
                     oc, owt, obio, _ = close_vals((b, prev_wk))
+            # A manual-window week opens on its PRE-EVENT state, never on the
+            # closing snapshot (see _wopen above).
+            _wo = _wopen.get((b, wk))
+            if _wo is not None and _wo[0] > 0:
+                oc, obio = _wo[0], _wo[2]
+                owt = _wo[1] / _wo[0]
             h = harv.get((b, wk), {"count": 0.0, "gross": 0.0, "wt_sum": 0.0})
             cu = cull.get((b, wk), {"count": 0.0, "bio": 0.0})
             # Mortality count: for a FW/EGG PROJECTION week (close comes from the
@@ -1522,6 +1558,18 @@ def _build_batch_week_ledger(
                 mort_count = mortc.get((b, wk), oc * mortpct.get((b, wk), 0.0) / 100.0)
             else:
                 mort_count = oc * mortpct.get((b, wk), 0.0) / 100.0
+                if not mort_count and _rmort.get((b, wk)):
+                    # MANUAL-WINDOW week. Its weeks are realized in OG (they have
+                    # BatchLocations rows) but carry no batch_week_state, so
+                    # `mortpct` is absent and the rate-based estimate above is 0
+                    # -- the ledger booked no mortality while the count visibly
+                    # fell. Measured on the 8.23.26 PR: B49 lost 145 fish in each
+                    # of 2026-W36 and W37 with Mort_Count = 0, and the
+                    # TankContinuityAudit recorded the very same 72+72 per week.
+                    # Use the window's own realized figure. A REPLACEMENT of a
+                    # zero, never an addition, so any week that already booked
+                    # mortality is untouched and nothing double-counts.
+                    mort_count = _rmort[(b, wk)]
             mort_bio = mort_count * owt / 1000.0
             input_count = inputc.get((b, wk), 0.0) + tranog_in.get((b, wk), 0.0)
             input_bio = input_count * owt / 1000.0
@@ -1599,6 +1647,8 @@ def write_weekly_report(
     tranog_events=None,
     og_mort_states=None,
     sheet_name: str = "WeeklyReport",
+    realized_biology=None,
+    window_openings=None,
 ) -> None:
     """Per-(week, batch) open/close production ledger (matches reference format).
 
@@ -1619,7 +1669,8 @@ def write_weekly_report(
         batch_locations, harvest_events, batch_week_states,
         transfer_events, batches, tables, hog_yield, hog_overrides,
         sixn_move_in_feed=sixn_move_in_feed,
-        tranog_events=tranog_events, og_mort_states=og_mort_states)
+        tranog_events=tranog_events, og_mort_states=og_mort_states,
+        realized_biology=realized_biology, window_openings=window_openings)
     for d in rows:
         ws.append([scenario_name, d["week"], d["week_start"], d["batch"]]
                   + _ledger_value_cells(d))
@@ -1644,6 +1695,7 @@ def write_monthly_report(
     og_mort_states=None,
     pr_period=None,
     sheet_name: str = "MonthlyReport",
+    realized_biology=None,
 ) -> None:
     """Per-(month, batch) open/close production ledger (matches reference format).
 
@@ -1669,7 +1721,8 @@ def write_monthly_report(
         batch_locations, harvest_events, batch_week_states,
         transfer_events, batches, tables, hog_yield, hog_overrides,
         sixn_move_in_feed=sixn_move_in_feed,
-        tranog_events=tranog_events, og_mort_states=og_mort_states)
+        tranog_events=tranog_events, og_mort_states=og_mort_states,
+        realized_biology=realized_biology)
 
     # Roll the weekly ledger up to calendar months, splitting any week that
     # straddles a month boundary into its true month. CONTINUOUS flows (growth,
@@ -1791,7 +1844,17 @@ def write_monthly_report(
             # reconciliation term, which is not a fish flow and has no column
             # here. Surfacing it is the honest option: hiding it would put a
             # silent ~1.7k-fish discrepancy behind a column that reads 30.
-            a["count_check"] += ((pb.open_count - _old_oc)
+            #
+            # INPUT: the elapsed period can also STOCK a batch, and the PR
+            # records that only inside its closing balance -- its transfer-in
+            # column reads 0 even on a month that took a full intake. Moving
+            # Open back to the PR's (0 for a batch stocked mid-period) without
+            # the matching input made the batch materialise from nothing:
+            # measured -570,000 fish on B56 in 2026-08, which was the whole of
+            # that month's -565,869 Count_Check. PRBatchPeriod.input_count
+            # recovers it from the balance itself.
+            a["input_count"] += pb.input_count
+            a["count_check"] += ((pb.open_count - _old_oc) + pb.input_count
                                  - (pb.mort_count + pb.harv_count + pb.cull_count))
             a["bio_check"] += ((pb.open_bio_kg - _old_ob) + pb.growth_kg
                                - (pb.mort_bio_kg + pb.harv_gross_kg + pb.cull_bio_kg))
@@ -2763,6 +2826,8 @@ def write_facility_map(
     (kg/day) and total biomass (kg) per system — each with a FACILITY total row
     so the operator can read system loads and check them against the caps.
     """
+    from openpyxl.styles import Font, PatternFill
+
     if sheet_name in wb.sheetnames:
         del wb[sheet_name]
     ws = wb.create_sheet(sheet_name)
@@ -2784,24 +2849,68 @@ def write_facility_map(
     # Build occupancy map (tank, week) → (batch_id, avg_wt_g, density).
     occ: dict[tuple[int, str], tuple] = {}
     for r in batch_locations:
-        occ[(r.tank_id, r.week_label)] = (r.batch_id, r.avg_wt_g, r.density_kg_m3)
+        occ[(r.tank_id, r.week_label)] = (r.batch_id, r.avg_wt_g, r.density_kg_m3,
+                                          r.stage)
+
+    # ---- COLOUR PER BATCH -------------------------------------------------
+    # A cohort occupies different tanks in different weeks, and reading that
+    # flow out of text cells means tracing a batch number across a 60-column
+    # grid by eye. One fill colour per batch turns it into a picture: you SEE a
+    # cohort enter, spread, consolidate and leave.
+    #
+    # Colours are assigned in order of FIRST APPEARANCE, not by batch id, so a
+    # cohort's colour reflects where it sits in the timeline and neighbouring
+    # cohorts are visually distinct. Fills are light so the black cell text
+    # stays legible, and the sequence avoids adjacent hues so two batches in
+    # the same week never read as the same colour.
+    _PALETTE = [
+        "FFD9D9", "D9E8FF", "DFF5D9", "FFF0C2", "E9D9F5", "CFF0EE",
+        "FFE0C2", "DCE8D0", "F5D9E8", "D9F0FF", "EDE7D3", "E0D9FF",
+        "FFE8E8", "E3F0FF", "EAF7E3", "FFF7DB", "F2E8FA", "DFF5F3",
+        "FFEFDF", "E8F0E0", "FAE3EF", "E6F5FF", "F3F0E3", "EDE8FF",
+    ]
+    _first_seen: dict = {}
+    for r in sorted(batch_locations, key=lambda r: (r.week_label, r.tank_id)):
+        _first_seen.setdefault(r.batch_id, r.week_label)
+    _batch_order = sorted(_first_seen, key=lambda b: (_first_seen[b], b))
+    _batch_fill = {b: PatternFill("solid", fgColor=_PALETTE[i % len(_PALETTE)])
+                   for i, b in enumerate(_batch_order)}
 
     # Two-row header: week labels then week-start dates.
     ws.append(["Week", ""] + weeks)
     ws.append(["Tank", "Sys"] + [wk_start.get(w) for w in weeks])
 
+    _grid_first_row = ws.max_row + 1
     for t in og_tanks:
         sys = t.system_id[2:] if t.system_id.startswith("OG") else t.system_id
         row = [t.tank_id, sys]
+        _paint = []                       # (column index, batch_id, density)
         for wk in weeks:
             cell = occ.get((t.tank_id, wk))
             if cell:
-                bid, wt_g, dens = cell
+                bid, wt_g, dens, _stage = cell
                 bnum = bid[1:] if bid and bid[:1] == "B" else bid
                 row.append(f"{bnum} {wt_g / 1000.0:.1f}/{dens:.0f}")
+                _paint.append((len(row), bid, dens, _stage))
             else:
                 row.append("")
         ws.append(row)
+        _r = ws.max_row
+        _cap = float(getattr(t, "max_density_kg_m3", 0) or 0)
+        for _c, _bid, _dens, _stage in _paint:
+            _cell = ws.cell(row=_r, column=_c)
+            _f = _batch_fill.get(_bid)
+            if _f is not None:
+                _cell.fill = _f
+            # Over its own tank's cap: red bold text ON the batch colour, so
+            # the cohort stays identifiable while the breach still shouts.
+            #
+            # STARVE is EXEMPT (rule R8): a 6N purge tank is deliberately packed
+            # off-feed and has no density cap, so flagging it red would raise an
+            # alarm on the one place a high number is CORRECT. Marking them made
+            # this grid show 124 breaches where the run reports 55.
+            if _cap and _dens > _cap and _stage != "STARVE":
+                _cell.font = Font(bold=True, color="9C0006")
 
     # ---- Per-system summaries below the tank grid ----
     from collections import defaultdict
@@ -2844,6 +2953,48 @@ def write_facility_map(
            sys_feed, lambda v: round(v, 0))
     _block("BIOMASS (kg) — per system per week; FW = hatchery, FACILITY = total vs cap",
            sys_bio, lambda v: round(v, 0), extra=("FW (hatchery)", fw_bio))
+
+    # ---- BATCH LEGEND / cohort summary ------------------------------------
+    # The colours above are only useful if you can name them, and the same pass
+    # can answer the questions the grid makes you count by hand: when did this
+    # cohort arrive, how wide did it spread, when did it leave.
+    _agg: dict = {}
+    for r in batch_locations:
+        a = _agg.setdefault(r.batch_id, {"wks": set(), "tanks": {}, "peak_n": 0.0,
+                                         "peak_bio": 0.0, "stages": set()})
+        a["wks"].add(r.week_label)
+        a["tanks"].setdefault(r.week_label, set()).add(r.tank_id)
+        a["stages"].add(r.stage)
+    _wk_n: dict = {}
+    _wk_b: dict = {}
+    for r in batch_locations:
+        _wk_n[(r.batch_id, r.week_label)] = _wk_n.get((r.batch_id, r.week_label), 0.0) + r.count
+        _wk_b[(r.batch_id, r.week_label)] = _wk_b.get((r.batch_id, r.week_label), 0.0) + r.biomass_kg
+    for (b, _w), v in _wk_n.items():
+        _agg[b]["peak_n"] = max(_agg[b]["peak_n"], v)
+    for (b, _w), v in _wk_b.items():
+        _agg[b]["peak_bio"] = max(_agg[b]["peak_bio"], v)
+
+    ws.append([])
+    ws.append(["BATCH LEGEND — the colour key for the grid above, and what each "
+               "cohort did while it was here"])
+    ws.append(["Batch", "Colour", "First week", "Last week", "Weeks on site",
+               "Peak tanks", "Peak fish", "Peak biomass (kg)", "Stages seen"])
+    _legend_hdr = ws.max_row
+    for _c in range(1, 10):
+        ws.cell(row=_legend_hdr, column=_c).font = Font(bold=True)
+    for b in _batch_order:
+        a = _agg.get(b)
+        if not a:
+            continue
+        _wks = sorted(a["wks"])
+        ws.append([b, "", _wks[0], _wks[-1], len(_wks),
+                   max((len(v) for v in a["tanks"].values()), default=0),
+                   round(a["peak_n"], 0), round(a["peak_bio"], 0),
+                   ", ".join(sorted(x for x in a["stages"] if x))])
+        _f = _batch_fill.get(b)
+        if _f is not None:
+            ws.cell(row=ws.max_row, column=2).fill = _f
 
     ws.column_dimensions[get_column_letter(1)].width = 9
     ws.column_dimensions[get_column_letter(2)].width = 6
