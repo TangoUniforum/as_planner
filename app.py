@@ -46,7 +46,13 @@ _DEFAULT_METHOD = "controller-hybrid"
 _TYPICAL = {"controller": "~30 s", "controller-hybrid": "~40 s",
             "controller-lns": "~30 s", "global-lp": "~4 min",
             "global-milp": "~30 min+"}
-_BOARD_OPTIONAL = {"global-milp"}          # behind its own checkbox (slow)
+# Behind the opt-in checkbox (slow, and benchmarks only -- see the label).
+# MUST stay a subset of _BOARD_ORDER: when the roster dropped to the three
+# controller arms on 2026-08-27 (84d3e90) this set stopped intersecting it,
+# so the comprehensions below returned the same three arms whether the box
+# was ticked or not -- a control that silently did nothing, while five
+# places of UI text promised it worked.
+_BOARD_OPTIONAL = {"global-lp", "global-milp"}
 # Pseudo-method: run the controller pipeline on the given config EXACTLY as-is,
 # with NO registry pins layered on top. Optimize's sweep measures variants that
 # way (variant knobs onto the live config, nothing else), so its verification
@@ -55,6 +61,17 @@ _BOARD_OPTIONAL = {"global-milp"}          # behind its own checkbox (slow)
 _AS_CONFIGURED = _methods.Method(
     key="as-configured", label="As configured", family="Controller",
     blurb="", engine="controller")
+
+
+def _method_obj(key):
+    """Method object for a stored `_chosen_method`, INCLUDING the as-configured
+    pseudo-method. `_METHODS` is the registry and does not contain
+    "as-configured", so a plain `_METHODS.get(key) or _METHODS[_DEFAULT_METHOD]`
+    silently renames it "Controller — hybrid" — the run would use the right
+    engine while the caption named a different one."""
+    if key == _AS_CONFIGURED.key:
+        return _AS_CONFIGURED
+    return _METHODS.get(key) or _METHODS[_DEFAULT_METHOD]
 
 # App-managed config (Phase 1) + scenario (Phase 2) live here. In PR-only
 # mode the app reads these instead of pulling everything from the upload;
@@ -858,10 +875,13 @@ _CONTROL_HELP = {
         "for the lean ones, the one thing a week-by-week planner cannot see "
         "for itself. IT STEERS ONLY THROUGH THE TWO LEVERS BELOW ('guide "
         "lever: 6N staging (purge)' and 'guide lever: harvest cap "
-        "(production)'): this install ships BOTH OFF, so the guide is "
-        "computed and then IGNORED and 'full' produces the same plan as "
-        "'off' — measured byte-identical to the plain controller across 21 "
-        "PRs on 2026-08-21. The purge lever is refused outright whenever "
+        "(production)'): config/control.yaml ships both OFF, so on the PLAIN "
+        "controller the guide is computed and then IGNORED. The "
+        "'Controller — hybrid' METHOD pins both levers ON (and "
+        "hybrid_follow='full'), and a method's pins are written OVER "
+        "control.yaml for its own run — so on THAT arm the guide really does "
+        "steer. The byte-identical measurement across 21 PRs (2026-08-21) "
+        "predates those pins (2026-08-27) and no longer describes it. The purge lever is refused outright whenever "
         "'Level 6N purge drains' is off (it is, here). Switching the levers "
         "on does work: on the real workbook weeks under the harvest floor "
         "fall 20 → 16 with both, 20 → 14 with the production lever alone, "
@@ -900,8 +920,12 @@ _CONTROL_HELP = {
         "Default is ON in code, but this install ships it OFF — check the box "
         "below rather than assuming. Forced off whenever 'Level 6N purge "
         "drains' is off (that is a safety guard against over-filling one 6N "
-        "pair, and the guide is not allowed to remove it). Now part of the "
-        "optimizer's search space, so a tuned run can settle it for you.",
+        "pair, and the guide is not allowed to remove it). NOT TUNABLE: since "
+        "2026-08-27 this lever is arm IDENTITY (methods.UNTUNABLE_KNOBS) and "
+        "register() refuses any search space containing it, so no tuned run "
+        "will settle it for you. What sets it is the METHOD you run — "
+        "'Controller — hybrid' pins it ON; the plain controller leaves it at "
+        "the value below.",
     "hybrid_production_lever":
         "Lets the harvest guide steer the weekly harvest ceiling and off-feed "
         "entry once 6N is in grow-out mode. NOT a diagnostic switch — see the "
@@ -909,7 +933,9 @@ _CONTROL_HELP = {
         "ON in code, but this install ships it OFF. Measured on the real "
         "workbook (2026-08-21): turning THIS lever on alone took weeks under "
         "the contract floor from 20 to 14, better than turning both on (16). "
-        "Now part of the optimizer's search space.",
+        "NOT TUNABLE: like the purge lever it is arm IDENTITY "
+        "(methods.UNTUNABLE_KNOBS), so a tuned run cannot settle it — "
+        "'Controller — hybrid' pins it ON, the plain controller does not.",
 }
 
 # Friendly display labels for the Control editor (the raw field name stays the key).
@@ -4532,10 +4558,13 @@ about it first).
 **What binds them.** Conservation and tank continuity bind every method
 equally. The rest is graded, not enforced: Compare & Choose shows four
 hard-rule badges (conserves · fully placed · no empty week · under cap), and
-Analyze's checklist adds the density, handling-budget and R7 gates — but those
-three are **flagged, never disqualifying**. A Global plan can therefore top a
-lens and still be unrunnable; the badges and the ValidationLog are how you
-tell.""")
+Analyze's checklist adds the density and handling-budget gates, which are
+**flagged, never disqualifying**, plus the **6N one-way rule (R7), which is
+hard** — any outbound depuration transfer FAILs it and drops the plan to the
+bottom of the ranking. That is why the Global family left the default roster: it
+consumed most of an 8h35m tournament to produce arms that hard-fail R7. A plan
+can still top a lens and be unrunnable for a SOFT reason; the badges and the
+ValidationLog are how you tell.""")
 
     with st.expander("9 · The checks that bind everything (the audit net)"):
         st.markdown("""
@@ -4555,9 +4584,10 @@ Independent invariants, each catching a *different* failure (the hard lesson:
 7. **Steady-harvest contract** — no near-empty week past the startup handoff.
 
 **On top of the audits, Analyze grades every plan on ten gates, in this
-order.** Only the first two are **hard** — a hard FAIL sinks a plan no matter
-how well it scores on everything else. The other eight are flagged and
-penalised, never disqualifying:
+order.** **Three** are hard — conservation, never-an-empty-week, and the 6N
+one-way rule (R7) — and a hard FAIL sinks a plan no matter how well it scores on
+everything else. The other seven are flagged and penalised, never
+disqualifying:
 
 | # | Gate | Hard? | Reads |
 |---|---|---|---|
@@ -4569,7 +4599,7 @@ penalised, never disqualifying:
 | 6 | Weekly processing limit + relief | soft | PASS 0 relief weeks · WARN 1-3 · FAIL >3 **or** any week past the relief ceiling |
 | 7 | Harvest targets (monthly/yearly) | soft | never worse than WARN — targets are penalised, never disqualifying |
 | 8 | Per-batch density quality | soft | PASS if no batch peaks ≥1.3× its tank cap, else WARN |
-| 9 | 6N one-way commitment (R7) | soft | PASS if nothing left a depuration tank except by harvest |
+| 9 | 6N one-way commitment (R7) | **HARD** | PASS if nothing left a depuration tank except by harvest · **FAIL** on any outbound transfer, which disqualifies the plan |
 | 10 | Weekly handling budget | soft | PASS every week within budget · WARN any week over ~80% · FAIL any week over |
 
 **Gate 5 judges the plan; gate 4 judges what you inherited.** Peak biomass is
@@ -4680,14 +4710,15 @@ lift a plan above one that beats it on an earlier tier.""")
   balance the facility beautifully; that is a different question from "can
   the crew execute this". Layer 8 has the full list — read it before
   adopting a Global plan.
-* **Only two gates can actually sink a plan.** Conservation and
-  never-an-empty-week are the hard ones. THREE more can never even reach
-  FAIL by design — the weekly contract floor, harvest targets and
-  per-batch density stop at WARN. (The floor still binds, just not here:
-  a tuned tournament will not promote a variant that starves its lean
-  weeks.) The remaining three (biomass cap, processing limit, handling
-  budget) *can* read FAIL but are soft: they rank a plan down, they do
-  not disqualify it.
+* **Three gates can actually sink a plan.** Conservation,
+  never-an-empty-week and the 6N one-way commitment (R7) are the hard
+  ones. THREE more can never even reach FAIL by design — the weekly
+  contract floor, harvest targets and per-batch density stop at WARN.
+  (The floor still binds, just not here: a tuned tournament will not
+  promote a variant that starves its lean weeks.) The remaining four
+  (biomass cap, convergence, processing limit, handling budget) *can*
+  read FAIL but are soft: they rank a plan down, they do not disqualify
+  it.
   So a plan can be recommended with a red handling gate — the checklist
   shows it, and it is your call, not the tool's.
 * **Severe per-batch density clusters are a stocking problem.** When a
@@ -5206,7 +5237,7 @@ with st.sidebar:
     # you can see every method graded side by side. Run forecast just re-runs
     # whichever plan you picked — no second, blind choice on the main screen.
     _chosen = st.session_state.get("_chosen_method", _DEFAULT_METHOD)
-    _chosen_m = _METHODS.get(_chosen) or _METHODS[_DEFAULT_METHOD]
+    _chosen_m = _method_obj(_chosen)
     st.caption(f"Method: **{_chosen_m.label}**")
     if _chosen == _DEFAULT_METHOD:
         st.caption("The default. It is the only method measured to harvest "
@@ -6314,8 +6345,8 @@ def _optimizer():
         ["Quick grid", "Full grid", "Deep search (finds combos)",
          "Grid + Deep (best of both)"],
         horizontal=True,
-        help="TWO search algorithms, offered as FOUR choices. GRID (Quick = 4 configs, "
-             "Full = 31) enumerates a hand-picked list — fast and broad, but mostly one "
+        help="TWO search algorithms, offered as FOUR choices. GRID (Quick = 2 configs, "
+             "Full = 23) enumerates a hand-picked list — fast and broad, but mostly one "
              "knob at a time, so it misses COMBINATIONS. DEEP SEARCH is a coordinate "
              "descent that tunes one knob at a time and FINDS combinations (~15–30 runs). "
              "GRID + DEEP runs the full grid, then deep-searches FROM the grid's best and "
@@ -6588,8 +6619,11 @@ def _optimizer():
         "weekly processing limit (y). "
         "**Lower-left is best** — both caps held. The lower-left envelope is the "
         "Pareto frontier; your operating point is a choice along it. E.g. "
-        "`tran_og=3` slides left on feed but up on harvest, `baseline` the reverse — "
-        "so you can SEE the trade instead of discovering it after a run."
+        "`dev=0.005 (tight)` runs the facility closer to the cap than "
+        "`dev=0.02 (loose)`, trading headroom for harvest — so you can SEE the "
+        "trade instead of discovering it after a run. (The old worked example "
+        "named `tran_og=3`; seawater-entry spread is an operator INPUT, not a "
+        "search row, so it can never appear on this plot.)"
     )
     pdf = df.copy()
     pdf["Kind"] = [
@@ -6809,7 +6843,11 @@ def _board_lens_pool(scored: dict) -> dict:
     return eligible or scored
 
 
-_BOARD_ORDER = tuple(_methods.DEFAULT_ROSTER)
+# FULL_ROSTER, not DEFAULT_ROSTER: the Global arms must be PRESENT here for
+# the opt-in filter to have anything to add. They are excluded by default
+# via _BOARD_OPTIONAL, so an unticked board is still the three controller
+# arms -- identical to before, but now the checkbox actually reaches them.
+_BOARD_ORDER = tuple(_methods.FULL_ROSTER)
 
 
 def _board_method_sig(mkey: str, pr_md5: str) -> str:
@@ -6991,8 +7029,11 @@ def _compare_and_choose():
         return
 
     include_milp = st.checkbox(
-        "Include the optimal CP-SAT placement (slow — tightest density, most "
-        "balanced across systems)", value=True, key="board_milp")
+        "Include the Global engines (global-lp ~4 min, CP-SAT ~30 min+) — "
+        "BENCHMARKS, not runnable plans: both plan the horizon as independent "
+        "weekly problems, never read the handling budget, and currently "
+        "hard-fail the 6N one-way rule (R7), which disqualifies them",
+        value=False, key="board_milp")
     _always = [k for k in _BOARD_ORDER if k not in _BOARD_OPTIONAL]
     st.caption(
         ", ".join(f"{_METHODS[k].label} ({_TYPICAL.get(k, '?')})" for k in _always)
@@ -7557,7 +7598,8 @@ def _analyze():
         help="Hard rules always come first regardless of emphasis; this weights "
              "the soft objectives (flat biomass, feed, handling, density).")
     include_milp = st.checkbox(
-        "Include Global — CP-SAT optimal (adds ~30 min; finished legs are reused)",
+        "Include the Global engines (adds ~4 min + ~30 min; finished legs are "
+        "reused) — benchmarks only: they hard-fail R7, so they rank last",
         value=False, key="ana_milp")
     depth = st.radio(
         "Analysis depth",
@@ -8023,8 +8065,17 @@ def _analyze():
             if _refusal:
                 st.error(_refusal)
             else:
+                # The pinned method must be the engine that PRODUCED this
+                # plan, or the next Run forecast reproduces a DIFFERENT one.
+                # The quick-depth tuned winner is keyed "_tuned" and was
+                # verified with method="as-configured" (the live config, no
+                # registry pins). Falling back to _DEFAULT_METHOD here pinned
+                # controller-hybrid, whose arm pins BOTH hybrid levers ON while
+                # the graded plan ran with them OFF (config ships them false) —
+                # so the adopted plan silently would not reproduce.
                 _m = (winner["key"] if winner["key"] in _METHODS
-                      else _DEFAULT_METHOD)
+                      else (_AS_CONFIGURED.key if winner["key"] == "_tuned"
+                            else _DEFAULT_METHOD))
                 if winner["overrides"]:
                     optimize.save_overrides_to_config(str(CONFIG_DIR),
                                                       winner["overrides"])
@@ -8045,7 +8096,15 @@ def _analyze():
             from datetime import datetime as _dtn2
             _gsum = {g["key"]: g["status"] for g in cand["gates"]}
             _br = list(cand.get("breaches") or [])
-            _m = (cand["key"] if cand["key"] in _METHODS else _DEFAULT_METHOD)
+            # Same rule as Adopt: store the engine that PRODUCED the plan. The
+            # quick-depth tuned candidate is keyed "_tuned" and was run
+            # as-configured; coercing it to _DEFAULT_METHOD stored
+            # controller-hybrid, whose arm pins both hybrid levers ON while the
+            # promoted plan ran with them OFF — so ⚡ Quick run replayed a
+            # different plan than the one promoted.
+            _m = (cand["key"] if cand["key"] in _METHODS
+                  else (_AS_CONFIGURED.key if cand["key"] == "_tuned"
+                        else _DEFAULT_METHOD))
             _ana.save_promoted_default(
                 str(CONFIG_DIR),
                 method=_m,
@@ -8276,7 +8335,7 @@ if uploaded is not None:
 
 if (run_clicked or st.session_state.pop("_pending_run", False)) and uploaded is not None:
     _method = st.session_state.get("_chosen_method", _DEFAULT_METHOD)
-    _mobj = _METHODS.get(_method) or _METHODS[_DEFAULT_METHOD]
+    _mobj = _method_obj(_method)
     _spin = (f"Running {_mobj.label} — typically {_TYPICAL.get(_method, '?')}...")
     with st.status(_spin, expanded=True) as status:
         st.write("Config + scenario from the app; ProductionReport from upload...")
