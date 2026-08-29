@@ -310,7 +310,10 @@ def advance_facility_window(state, batch_by_id, tables, forecast_start,
     labels = forecast_week_labels(forecast_start, n_weeks)
     realized: dict[tuple[int, str, str], list[float]] = {}
     batch_locations: list = []
-    opening_locations: list = []   # start-of-week (post-event, PRE-biology) snapshot
+    opening_locations: list = []   # start-of-week, PRE-event and PRE-biology
+    # (batch, week) -> [count, biomass_kg] culled by a manual fw_to_og. A real
+    # removal, so the ledger must carry it as a flow; see manual_events.
+    manual_fw_cull: dict = {}
     transfer_events: list = []
     harvest_events: list = []
     tranog_events: list = []
@@ -348,9 +351,15 @@ def advance_facility_window(state, batch_by_id, tables, forecast_start,
         # audit — then biology, then the closing snapshot.
         hv: list = []
         if events:
+            _wk_culls: list = []
             tr, hv, tn, w, fwb = apply_events_for_week(
                 state, events, i + 1, week_start, week_label=labels[i],
-                handling_frac=handling_frac, fw_lookup=fw_lookup)
+                handling_frac=handling_frac, fw_lookup=fw_lookup,
+                out_week_culls=_wk_culls)
+            for _cb, _cn, _cbio in _wk_culls:
+                _e = manual_fw_cull.setdefault((_cb, labels[i]), [0.0, 0.0])
+                _e[0] += _cn
+                _e[1] += _cbio
             transfer_events.extend(tr)
             harvest_events.extend(hv)
             tranog_events.extend(tn)
@@ -420,6 +429,7 @@ def advance_facility_window(state, batch_by_id, tables, forecast_start,
         "tranog_events": tranog_events,
         "transferred_fw_batches": {e.batch_id for e in tranog_events},
         "manual_fw_balance": manual_fw_balance,
+        "manual_fw_cull": manual_fw_cull,
         "warnings": warnings,
         "new_start": week_start,
     }

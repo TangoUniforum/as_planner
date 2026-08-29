@@ -1316,7 +1316,7 @@ def _build_batch_week_ledger(
     transfer_events=None, batches=None, tables=None, hog_yield=0.0,
     hog_overrides=None, sixn_move_in_feed=None,
     tranog_events=None, og_mort_states=None, realized_biology=None,
-    window_openings=None,
+    window_openings=None, window_culls=None,
 ):
     """Assemble a per-(batch, week) open/close production ledger.
 
@@ -1427,6 +1427,12 @@ def _build_batch_week_ledger(
         except (TypeError, ValueError, IndexError):
             continue
     inputc: dict[tuple, float] = defaultdict(float)
+    # Manual fw_to_og culls. The AUTOMATIC TranOG books its reconcile-to-target
+    # cull through the biology's cull_count_week; a MANUAL fw_to_og bypasses
+    # that path entirely, so without this the fish leave with no flow to
+    # explain them (8.23.26 PR: B49, 9,809 fish culled to hit tran_og_count
+    # 290,000, recorded only as a warning).
+    _wcull: dict[tuple, list] = {k: list(v) for k, v in (window_culls or {}).items()}
     bio_state: dict[tuple, object] = {}
     for s in batch_week_states or ():
         key = (s.batch_id, s.week_label)
@@ -1444,6 +1450,7 @@ def _build_batch_week_ledger(
         if s.cull_count_week > 0 and key not in rl:
             cull[key]["count"] += s.cull_count_week
             cull[key]["bio"] += s.cull_biomass_kg_week
+
         if s.week_from_input == 0:
             # STOCKING week: the input flow is the count that was STOCKED =
             # the closing balance plus this week's mortality + culls (open is 0).
@@ -1546,6 +1553,9 @@ def _build_batch_week_ledger(
                 owt = _wo[1] / _wo[0]
             h = harv.get((b, wk), {"count": 0.0, "gross": 0.0, "wt_sum": 0.0})
             cu = cull.get((b, wk), {"count": 0.0, "bio": 0.0})
+            _wc = _wcull.get((b, wk))
+            if _wc is not None:
+                cu = {"count": cu["count"] + _wc[0], "bio": cu["bio"] + _wc[1]}
             # Mortality count: for a FW/EGG PROJECTION week (close comes from the
             # biology, not realized BatchLocations) use the REALIZED mortality the
             # daily sim actually applied — open*weekly_rate% mis-counts when the
@@ -1649,6 +1659,7 @@ def write_weekly_report(
     sheet_name: str = "WeeklyReport",
     realized_biology=None,
     window_openings=None,
+    window_culls=None,
 ) -> None:
     """Per-(week, batch) open/close production ledger (matches reference format).
 
@@ -1670,7 +1681,8 @@ def write_weekly_report(
         transfer_events, batches, tables, hog_yield, hog_overrides,
         sixn_move_in_feed=sixn_move_in_feed,
         tranog_events=tranog_events, og_mort_states=og_mort_states,
-        realized_biology=realized_biology, window_openings=window_openings)
+        realized_biology=realized_biology, window_openings=window_openings,
+        window_culls=window_culls)
     for d in rows:
         ws.append([scenario_name, d["week"], d["week_start"], d["batch"]]
                   + _ledger_value_cells(d))
@@ -1696,6 +1708,7 @@ def write_monthly_report(
     pr_period=None,
     sheet_name: str = "MonthlyReport",
     realized_biology=None,
+    window_culls=None,
 ) -> None:
     """Per-(month, batch) open/close production ledger (matches reference format).
 
@@ -1722,7 +1735,7 @@ def write_monthly_report(
         transfer_events, batches, tables, hog_yield, hog_overrides,
         sixn_move_in_feed=sixn_move_in_feed,
         tranog_events=tranog_events, og_mort_states=og_mort_states,
-        realized_biology=realized_biology)
+        realized_biology=realized_biology, window_culls=window_culls)
 
     # Roll the weekly ledger up to calendar months, splitting any week that
     # straddles a month boundary into its true month. CONTINUOUS flows (growth,

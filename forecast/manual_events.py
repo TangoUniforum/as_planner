@@ -412,7 +412,8 @@ def _apply_og_to_6n(state, ev: ManualEvent, idx: int,
 
 
 def _apply_fw_to_og(state, ev: ManualEvent, idx: int, fw_count, fw_avg_wt_g,
-                    fw_cv, handling_frac, event_date=None, out_tranog=None):
+                    fw_cv, handling_frac, event_date=None, out_tranog=None,
+                    out_cull=None):
     """Manual FW->OG transfer (TranOG) into operator-chosen OG tanks.
 
     Applies the SAME logic as the auto pipeline: handling mortality, then a
@@ -444,12 +445,17 @@ def _apply_fw_to_og(state, ev: ManualEvent, idx: int, fw_count, fw_avg_wt_g,
     # 1. handling mortality, 2. reconcile-to-target cull (operator's tran_og_count)
     cnt = fw_count * (1.0 - handling_frac)
     culled = fw_count - cnt
+    # Handling mortality leaves at the PRE-cull weight; the reconcile cull
+    # returns its own biomass. Both are real removals and both need a biomass
+    # so Bio_Check balances, not just a count.
+    culled_bio = culled * fw_avg_wt_g / 1000.0
     target = ev.count
     if target and cnt > target:
         cull_pct = 1.0 - target / cnt
         cnt, fw_avg_wt_g, _cn, _cb = _apply_bottom_cull(
             cnt, fw_avg_wt_g, fw_cv, cull_pct)
         culled += _cn
+        culled_bio += _cb
 
     # 3. size-class split, 4. allocate big/small across the chosen tanks
     split = compute_size_class_split(
@@ -527,6 +533,14 @@ def _apply_fw_to_og(state, ev: ManualEvent, idx: int, fw_count, fw_avg_wt_g,
             f"{_tgt}); placed {cnt:,.0f} into OG tanks {tanks}")
     print(f"    {tag}: TranOG {cnt:,.0f} fish of {batch_id} -> OG tanks {tanks} "
           f"(culled {culled:,.0f} to hit target {target})")
+    # The cull is a REMOVAL, so the ledger has to carry it as a flow. The
+    # warning above is traceability, not accounting: on its own it left the
+    # fish leaving with nothing to explain them (measured on the 8.23.26 PR,
+    # B49's 9,809-fish reconcile to tran_og_count 290,000). The automatic
+    # TranOG path books its cull through the biology's cull_count_week; this
+    # manual path bypasses that, so it reports its own.
+    if out_cull is not None and culled > 0:
+        out_cull.append((batch_id, culled, culled_bio))
     return warns, culled
 
 
@@ -699,7 +713,7 @@ def _apply_graded_harvest(state, ev: ManualEvent, idx: int, event_date=None,
 
 
 def apply_events_for_week(state, events, week, week_start, week_label=None,
-                          handling_frac=0.0, fw_lookup=None):
+                          handling_frac=0.0, fw_lookup=None, out_week_culls=None):
     """Apply every manual event scheduled for `week` (1-based) at the start of
     that override-window week, dating each event at `week_start`.
 
@@ -750,7 +764,8 @@ def apply_events_for_week(state, events, week, week_start, week_label=None,
             else:
                 ew, _culled = _apply_fw_to_og(
                     state, ev, i, fw[0], fw[1], fw[2], handling_frac,
-                    event_date=week_start, out_tranog=tranogs)
+                    event_date=week_start, out_tranog=tranogs,
+                    out_cull=out_week_culls)
                 # Record the FW-phase conservation leg for the audit gate:
                 # fw_count entering the transfer must equal placed + culled.
                 rec = fw_balance.setdefault(ev.batch, [0.0, 0.0])

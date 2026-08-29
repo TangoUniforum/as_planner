@@ -250,6 +250,7 @@ def main(
     transferred_fw: set = set()
     manual_fw_balance: dict = {}
     prefix_openings: list = []
+    prefix_fw_cull: dict = {}
     manual_warns: list = []
     # The continuity audit anchors each tank's first week to this initial state.
     # The window advances `state` in place to week N+1 (what the pipeline plans
@@ -281,6 +282,7 @@ def main(
         prefix_realized = _win["realized_biology"]
         prefix_batch_locations = _win["batch_locations"]
         prefix_openings = _win.get("opening_locations") or []
+        prefix_fw_cull = _win.get("manual_fw_cull") or {}
         prefix_transfers = _win["transfer_events"]
         prefix_harvests = _win["harvest_events"]
         prefix_tranogs = _win["tranog_events"]
@@ -1085,6 +1087,13 @@ def main(
         realized_biology=getattr(placement, "realized_biology", None),
         tranog_events=getattr(placement, "tranog_events", None),
         window_openings=prefix_openings,
+        # NO window_culls here, deliberately -- the mirror of the tranog_events
+        # decision below. A manual fw_to_og culls in FRESHWATER, before the fish
+        # enter OG, and the TranOG inflow this ledger credits is already NET of
+        # it (290,000 placed out of 299,809). Booking the cull on the OG row
+        # removes it twice: measured, weekly sum|Count_Check| 1,253 -> 10,912.
+        # The MONTHLY report is facility-scope -- its PR opening counts those
+        # fish while they were still in freshwater -- so the cull belongs there.
         sixn_move_in_feed=getattr(placement, "sixn_move_in_feed", None))
     write_monthly_report(
         wb, placement.batch_locations, placement.harvest_events, all_states,
@@ -1092,6 +1101,7 @@ def main(
         scenario_name=control.scenario_name, hog_yield=control.default_hog_yield,
         hog_overrides=facility_hog_overrides, forecast_start=control.forecast_start,
         realized_biology=getattr(placement, "realized_biology", None),
+        window_culls=prefix_fw_cull,
         # NO tranog_events here, deliberately. In the WEEKLY ledger a TranOG is a
         # genuine inflow into the OG track (the batch's OG opening is 0, so the
         # arrival must be credited or the fish appear from nowhere). In the
