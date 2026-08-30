@@ -389,6 +389,42 @@ class BatchAccuracy:
     act_biomass_kg: float = 0.0
     pred_wt_g: float = 0.0
     act_wt_g: float = 0.0
+    # Count-weighted mean weight at the forecast ANCHOR week — the starting
+    # point both trajectories share. Needed to back-solve the growth multiplier
+    # (see sgr_scale); 0.0 when the batch was not yet in the water at the anchor.
+    anchor_wt_g: float = 0.0
+
+    @property
+    def sgr_scale(self):
+        """Factor to multiply this batch's `sgr_correction` by so the model
+        would have landed on the ACTUAL weight.
+
+        The seawater analogue of the freshwater `suggested_fw_correction`. FW
+        can be solved against the plan's own TranOG target; seawater has no
+        target, so the only way to know the growth rate was wrong is to compare
+        against actuals -- which is why this lives here and not in Diagnostics.
+
+        Growth over the interval is `correction x (curve integral)`, and the
+        curve integral is common to both trajectories, so it cancels:
+
+            scale = ln(actual / anchor) / ln(predicted / anchor)
+
+        Below 1.0 the model grew too FAST and the correction should come down.
+        Returns None unless both trajectories actually grew from a real anchor
+        -- a shrinking or flat batch makes the log ratio meaningless.
+
+        NOT a clean signal when `exec_confounded`: a partial harvest removes the
+        biggest fish, so the survivors' mean falls for reasons that have nothing
+        to do with growth. Read the clean subset (summarize_sgr_recalibration).
+        """
+        a, p_, x = self.anchor_wt_g, self.pred_wt_g, self.act_wt_g
+        if a <= 0 or p_ <= 0 or x <= 0:
+            return None
+        import math
+        gp, ga = math.log(p_ / a), math.log(x / a)
+        if gp <= 0 or ga <= 0:
+            return None
+        return ga / gp
 
     @property
     def count_err(self) -> float:
@@ -450,6 +486,7 @@ class AccuracyReport:
     facility: dict = field(default_factory=dict)
     basis: dict = field(default_factory=dict)   # how the prediction was read
     bias: dict = field(default_factory=dict)
+    sgr_recalibration: dict = field(default_factory=dict)
     sensitivity: dict = field(default_factory=dict)
     coverage: dict = field(default_factory=dict)
     notes: list = field(default_factory=list)
@@ -517,10 +554,15 @@ def compare(forecast_src, actual_src) -> AccuracyReport:
     aligned = align_week(fc_rows, closing)
     if aligned is None:
         raise ValueError("That forecast workbook has no dated weeks to grade.")
+    _fc_anchor_wtsum: dict[str, float] = {}
     for _r in fc_rows:
         _w, _b, _c = _r.get("week"), _r.get("batch"), _r.get("count") or 0.0
         if _w == _anchor_wk:
             _fc_anchor_count[_b] = _fc_anchor_count.get(_b, 0.0) + _c
+            # count-weighted, so a batch spread over tanks of different sizes
+            # anchors on the weight its FISH actually had, not a tank mean
+            _fc_anchor_wtsum[_b] = (_fc_anchor_wtsum.get(_b, 0.0)
+                                    + (_r.get("avg_wt_g") or 0.0) * _c)
         if _w == aligned["week"]:
             _fc_aligned_count[_b] = _fc_aligned_count.get(_b, 0.0) + _c
 
@@ -575,6 +617,7 @@ def compare(forecast_src, actual_src) -> AccuracyReport:
             act_biomass_kg=ab,
             pred_wt_g=(p or {}).get("wt_g", 0.0),
             act_wt_g=(ab / ac * 1000.0) if ac > 0 else 0.0,
+            anchor_wt_g=((_fc_anchor_wtsum.get(bid, 0.0) / _a0) if _a0 > 0 else 0.0),
         ))
 
     # ---- tank level: the plan-adherence view --------------------------------
@@ -651,6 +694,7 @@ def compare(forecast_src, actual_src) -> AccuracyReport:
         rep.facility["act_wt_g"])
 
     rep.bias = summarize_bias(graded)
+    rep.sgr_recalibration = summarize_sgr_recalibration(graded)
     rep.sensitivity = _alignment_sensitivity(fc_rows, weeks, aligned, a_batch)
     return rep
 
@@ -698,6 +742,61 @@ def _alignment_sensitivity(fc_rows, weeks, aligned, a_batch) -> dict:
 
     return {"graded": typical_for(i), "previous": typical_for(i - 1),
             "next": typical_for(i + 1)}
+
+
+def summarize_sgr_recalibration(graded: list) -> dict:
+    """What the seawater growth correction SHOULD have been, from actuals.
+
+    The freshwater side already self-corrects: solve_inflight_fw_correction
+    back-solves a suggested `fw_correction` against the plan's own TranOG
+    target, and Diagnostics reports it every run. Seawater has the same knob
+    (`sgr_correction`) and had NO feedback at all -- there is no target to solve
+    against, so the only reference is what the fish actually did. That gap is
+    why a growth error can sit in the curve indefinitely without surfacing.
+
+    AGGREGATION: the ratio of SUMMED log-growth, not a median of per-batch
+    ratios. Over a short interval a batch grows little, so a small weight error
+    implies a huge rate error -- the ratio is unstable exactly where the signal
+    is weakest. Summing the logs weights each batch by how much it actually
+    grew, which is the amount of evidence it carries.
+
+    Execution-confounded batches are EXCLUDED, not merely flagged: a partial
+    harvest removes the biggest fish, so the survivors' mean weight falls for
+    reasons unrelated to growth and would read as the model being far too fast.
+
+    Returns `scale` = multiply the batch's current `sgr_correction` by this.
+    Below 1.0 the model grows too fast.
+    """
+    import math
+    clean = [b for b in graded
+             if not b.exec_confounded and b.sgr_scale is not None]
+    if not clean:
+        return {"n": 0,
+                "verdict": "No clean batch: every graded batch was harvested "
+                           "over the interval, so none is a growth signal."}
+    gp = sum(math.log(b.pred_wt_g / b.anchor_wt_g) for b in clean)
+    ga = sum(math.log(b.act_wt_g / b.anchor_wt_g) for b in clean)
+    scale = (ga / gp) if gp > 0 else None
+    per = sorted(({"batch_id": b.batch_id,
+                   "anchor_wt_g": round(b.anchor_wt_g, 1),
+                   "scale": round(b.sgr_scale, 4)} for b in clean),
+                 key=lambda r: r["anchor_wt_g"])
+    hot = sum(1 for b in clean if b.sgr_scale < 1.0)
+    if scale is None:
+        verdict = "Growth over the interval was too small to solve against."
+    elif scale >= 0.98:
+        verdict = (f"Seawater growth is tracking ({scale:.3f}); no "
+                   f"recalibration indicated.")
+    else:
+        verdict = (f"The model grew {(1/scale - 1) * 100:.0f}% too FAST over "
+                   f"this interval: multiply sgr_correction by {scale:.3f}. "
+                   f"Hot on {hot} of {len(clean)} clean batches. A SCALAR "
+                   f"cannot fix a size-dependent error -- read the per-batch "
+                   f"scales against anchor weight before applying one number.")
+    return {"n": len(clean), "excluded_exec_confounded":
+            sum(1 for b in graded if b.exec_confounded),
+            "scale": (round(scale, 4) if scale else None),
+            "hot_batches": hot, "per_batch": per, "verdict": verdict}
 
 
 def summarize_bias(graded: list) -> dict:

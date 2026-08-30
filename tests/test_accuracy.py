@@ -518,3 +518,67 @@ def test_clamped_and_unconverged_runs_are_counted(tmp_path):
 
     assert d["clamped_runs"] == 1
     assert d["not_converged_runs"] == 1
+
+
+class TestSgrBackSolve:
+    """The seawater analogue of the FW correction solver.
+
+    FW self-corrects against the plan's own TranOG target; seawater has no
+    target, so a growth error can only be seen against ACTUALS. Before this,
+    `sgr_correction` was a knob with no feedback at all.
+    """
+
+    @staticmethod
+    def _b(anchor, pred, act, confounded=False):
+        from forecast.accuracy import BatchAccuracy
+        return BatchAccuracy(batch_id="B1", anchor_wt_g=anchor, pred_wt_g=pred,
+                             act_wt_g=act, act_count=1000.0, pred_count=1000.0,
+                             exec_confounded=confounded)
+
+    def test_scale_is_the_ratio_of_log_growth(self):
+        import math
+        b = self._b(1000.0, 1200.0, 1150.0)
+        assert b.sgr_scale == pytest.approx(
+            math.log(1150 / 1000) / math.log(1200 / 1000))
+        assert b.sgr_scale < 1.0          # model grew faster than reality
+
+    def test_a_perfect_forecast_scales_by_one(self):
+        assert self._b(1000.0, 1200.0, 1200.0).sgr_scale == pytest.approx(1.0)
+
+    def test_model_too_slow_scales_above_one(self):
+        assert self._b(1000.0, 1100.0, 1200.0).sgr_scale > 1.0
+
+    def test_no_growth_or_no_anchor_is_unsolvable(self):
+        # A flat or shrinking batch makes the log ratio meaningless — better to
+        # return nothing than a number that looks like a recalibration.
+        assert self._b(1000.0, 1000.0, 1100.0).sgr_scale is None   # no predicted growth
+        assert self._b(1000.0, 1200.0, 900.0).sgr_scale is None    # actual shrank
+        assert self._b(0.0, 1200.0, 1150.0).sgr_scale is None      # not in the water yet
+
+    def test_harvested_batches_are_excluded_not_just_flagged(self):
+        """A partial harvest takes the BIGGEST fish, so survivors' mean weight
+        falls for reasons unrelated to growth. Including one would read as the
+        model being wildly too fast."""
+        from forecast.accuracy import summarize_sgr_recalibration
+        clean = self._b(1000.0, 1200.0, 1190.0)
+        harvested = self._b(1000.0, 1200.0, 1010.0, confounded=True)
+        out = summarize_sgr_recalibration([clean, harvested])
+        assert out["n"] == 1
+        assert out["excluded_exec_confounded"] == 1
+        # the summary rounds to 4 dp for reporting
+        assert out["scale"] == pytest.approx(clean.sgr_scale, abs=1e-4)
+
+    def test_aggregate_weights_by_growth_not_by_batch(self):
+        """Summed log-growth, so a barely-grown batch cannot dominate. A median
+        of per-batch ratios would let it, which is how a 3% weight error over
+        three weeks reads as a 40% rate error."""
+        from forecast.accuracy import summarize_sgr_recalibration
+        big = self._b(1000.0, 2000.0, 1980.0)     # lots of growth, near-perfect
+        tiny = self._b(1000.0, 1010.0, 1005.0)    # negligible growth, ratio ~0.5
+        out = summarize_sgr_recalibration([big, tiny])
+        assert out["scale"] > 0.9, "the barely-grown batch must not dominate"
+
+    def test_clean_tracking_says_so(self):
+        from forecast.accuracy import summarize_sgr_recalibration
+        out = summarize_sgr_recalibration([self._b(1000.0, 1200.0, 1199.0)])
+        assert "no recalibration indicated" in out["verdict"]
