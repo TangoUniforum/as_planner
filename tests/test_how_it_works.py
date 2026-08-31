@@ -384,11 +384,18 @@ def test_every_mode_has_a_caption_saying_what_it_is_for():
 
 
 def test_mode_list_has_no_retired_modes():
-    """Tune was retired; a stored selection outside the option list raises."""
+    """A stored selection outside the option list raises, so every retirement
+    must leave the list AND carry a migration (see test_decide_mode.py).
+
+    Retired so far: Tune (2026-08-06), and Analyze / Compare & Choose /
+    Optimize (2026-08-31, merged into Decide as tabs -- their capabilities are
+    pinned individually by tests/test_decide_mode.py)."""
     opts = next(a for a in _mode_radio_call().args if isinstance(a, ast.List))
     labels = [e.value for e in opts.elts]
-    assert not any(l.startswith("Tune") for l in labels), labels
-    for expected in ("Configure", "Run forecast", "Analyze",
-                     "Compare & Choose", "Optimize", "How it works"):
-        assert any(l.startswith(expected) for l in labels), \
-            f"mode {expected!r} missing from {labels}"
+    for retired in ("Tune", "Analyze", "Compare & Choose", "Optimize"):
+        assert not any(l.startswith(retired) for l in labels), (
+            f"{retired!r} was retired but is still offered: {labels}")
+    for expected in ("Configure", "Run forecast", "Decide", "Accuracy",
+                     "How it works"):
+        assert any(l.startswith(expected) for l in labels), (
+            f"mode {expected!r} missing from {labels}")

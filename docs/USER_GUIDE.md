@@ -2090,6 +2090,49 @@ Headless equivalent: `python -m tools.measure_leveling --pr <PR> --combos @legs.
 
 ---
 
+### 13.4 Analyze, Compare & Choose and Optimize merged into Decide (2026-08-31)
+
+Seven modes became five. The three modes above answered three views of **one**
+question — *which plan should I run?* — and an operator had to know which one
+fitted before they could ask it. Two of them ran the same engine legs over the
+same roster writing the same cache, so the split cost a decision without buying
+anything.
+
+They are now tabs of **Decide**, in the order the question is actually answered:
+
+| tab | question | was |
+|---|---|---|
+| **Recommend a plan** | which plan, end to end — including the monthly lever check | Analyze |
+| **Compare engines** | which ENGINE, on eight lenses | Compare & Choose |
+| **Tune knobs** | which KNOBS on one engine | Optimize |
+
+**Nothing was lost, and that is enforced rather than asserted.** The merge is a
+*wrapper*: the three functions are unchanged and rendered as tabs, so every
+capability survives by construction — the between-system and within-system CV
+lenses, tank footprint, fastest run, raw density peak, welfare/crowded-biomass,
+fewest-moves and steadiest-harvest lenses; the per-method metric readout;
+setting the standing engine to a **non-winning** method; picking a plan while
+writing **nothing** to config; the force re-run; the ~100-second engine-only
+path; the partial-roster warning; the CP-SAT solve-depth control (which the
+Recommend tab itself reads); and naming a failed engine leg with its error.
+
+`tests/test_decide_mode.py` pins each of those to a marker in `app.py` and fails
+the build if one disappears. That is the point: §13.1 exists because a mode was
+once retired and its capabilities went quietly with it.
+
+**Old links keep working.** A stored selection of *Analyze*, *Compare & Choose*
+or *Optimize* migrates to Decide and opens on the matching tab, so a returning
+operator lands where they left off. The migration runs *before* the mode radio
+renders — Streamlit raises if a stored value sits outside the options, which is
+the same bug the Tune retirement had to fix.
+
+**What this does and does not change.** It makes the tool easier to operate
+correctly: one place to ask one question, fewer chances to answer it with the
+wrong tool. It does **not** change what any engine computes, and no plan differs
+because of it.
+
+---
+
 ## 14. Accuracy (forecast vs actuals) — grading the biology
 
 > **Measurement tooling (2026-08-21).** Four CLI tools now grade the model

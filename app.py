@@ -5147,6 +5147,18 @@ with st.sidebar:
     # the radio instantiates (a stored value outside the options raises).
     if str(st.session_state.get("app_mode", "")).startswith("Tune"):
         st.session_state["app_mode"] = "Run forecast"
+    # Analyze / Compare & Choose / Optimize merged into Decide (2026-08-31).
+    # A stored value outside the options raises, so migrate BEFORE the radio
+    # instantiates — same reason as the Tune migration above. Each retired name
+    # lands on the tab that carries its capabilities, so a returning operator
+    # arrives where they left off rather than at a generic front page.
+    _MERGED_INTO_DECIDE = {"Analyze": 0, "Compare": 1, "Optimize": 2}
+    _stored = str(st.session_state.get("app_mode", ""))
+    for _old, _tab in _MERGED_INTO_DECIDE.items():
+        if _stored.startswith(_old):
+            st.session_state["app_mode"] = "Decide (which plan should I run?)"
+            st.session_state.setdefault("_decide_tab", _tab)
+            break
     # The list reads as the order of operations, but the app must still LAND on
     # the everyday mode, not on Configure (option 0). Seed the stored value on
     # first render only — after that the operator's own selection wins.
@@ -5154,20 +5166,15 @@ with st.sidebar:
     app_mode = st.radio(
         "Mode",
         ["Configure (models & control)", "Run forecast",
-         "Analyze (find my best plan)", "Compare & Choose (all methods)",
-         "Optimize (multi-objective)", "Accuracy (forecast vs actuals)",
-         "How it works (the rules)"],
+         "Decide (which plan should I run?)",
+         "Accuracy (forecast vs actuals)", "How it works (the rules)"],
         captions=[
             "Set up once — biology curves, tanks, batches, per-week limits, "
             "control knobs, harvest targets and prices.",
             "The everyday step — run your chosen plan on today's "
             "ProductionReport and download the workbook.",
-            "“Which plan should I use?” — runs every engine, searches the "
-            "knobs, grades them all, recommends ONE.",
-            "Run the planning engines side by side and pick which whole plan "
-            "becomes the report.",
-            "Sweep control knobs on ONE engine and rank the settings on an "
-            "objective you choose.",
+            "“Which plan should I run?” — the monthly lever check, the "
+            "engine board, and knob tuning, in one place.",
             "“How much should I trust this?” — grades a past forecast against "
             "the PR that followed it.",
             "The rulebook — what each layer decides, what it may never do, "
@@ -7625,6 +7632,51 @@ def _monthly_lever_check(uploaded, targets):
     st.caption(_mc.noise_caveat())
 
 
+def _decide():
+    """One entry point for "which plan should I run?".
+
+    Analyze, Compare & Choose and Optimize answered three views of ONE question,
+    and an operator had to know which mode fitted before they could ask it. Two
+    of them ran the same engine legs over the same roster writing the same cache
+    (app.py Analyze phase 1 vs the Compare run loop), so the split cost a
+    decision without buying anything.
+
+    This is deliberately a WRAPPER, not a rewrite. The three functions are
+    unchanged and rendered as tabs, so all thirteen capabilities the mode audit
+    found living only in Compare and Optimize survive BY CONSTRUCTION — the
+    between-system and within-system CV lenses, the tank-footprint and
+    fastest-run lenses, the raw density peak, the per-method metric readout,
+    setting the standing engine to a NON-winning method, picking a plan while
+    writing nothing to config, the force re-run, the ~100-second engine-only
+    path, the partial-roster warning, the CP-SAT solve-depth control (which
+    Analyze itself reads), and naming a failed engine leg with its error.
+
+    The repo's documented failure mode is retiring a mode and quietly losing
+    what only it could do (USER_GUIDE 13.1). A wrapper cannot do that; a deeper
+    integration could, and is a separate decision made with the tests in
+    tests/test_decide_mode.py holding the line.
+
+    Tab order is the order the question is actually answered: which LEVERS this
+    month (cheap, 2 minutes, and most months the answer is "keep what you
+    have"), then which ENGINE, then which KNOBS.
+    """
+    st.header("🧭 Decide — which plan should I run?")
+    st.caption(
+        "Three views of one question. **Recommend** runs every engine, tunes "
+        "the knobs and grades every candidate against the checklist — start "
+        "here. **Compare engines** puts the planners side by side on eight "
+        "lenses. **Tune knobs** sweeps one engine's settings on an objective "
+        "you choose. Finished runs are shared between them; nothing runs twice."
+    )
+    _tabs = st.tabs(["Recommend a plan", "Compare engines", "Tune knobs"])
+    with _tabs[0]:
+        _analyze()
+    with _tabs[1]:
+        _compare_and_choose()
+    with _tabs[2]:
+        _optimizer()
+
+
 def _analyze():
     import hashlib
     from datetime import datetime as _dtn
@@ -8440,7 +8492,11 @@ def _analyze():
     _stocking_frontier_section()
 
 
-if app_mode.startswith("Analyze"):
+if app_mode.startswith("Decide"):
+    _decide()
+    st.stop()
+
+if app_mode.startswith("Analyze"):      # legacy deep-link, kept working
     _analyze()
     st.stop()
 
