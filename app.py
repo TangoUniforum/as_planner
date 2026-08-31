@@ -33,6 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from forecast.run import main as run_pipeline  # noqa: E402
 from forecast import optimize  # noqa: E402
 from forecast import methods as _methods  # noqa: E402
+from forecast import levers as _levers  # noqa: E402
 
 # The ONE method list. Board roster, run-mode label and the engine dispatch all
 # read this, so adding a method is a single register() call in forecast/methods.
@@ -139,10 +140,27 @@ def _active_config_summary(cd: dict) -> list[tuple]:
     lv, hl = bool(g("rebalance_level")), bool(g("harvest_level_load"))
     pm = str(g("placement_method", "greedy"))
     dt = g("density_target_pct", 0) or 0
+    # Feed leveling and the rebalancer budget are reported by forecast.levers,
+    # which knows that leveling SHARES the rebalancer budget and steers nothing
+    # when it is 0. This panel used to read `rebalance_level` alone and print
+    # "ON" over a budget of 0 — stating something false about the plan the
+    # operator was about to run.
+    _lv = {s.key: s for s in _levers.effective_levers(cd)}
+
+    def _lever_row(key, fallback_label):
+        st = _lv.get(key)
+        if st is None:
+            return (fallback_label, "—", "")
+        if st.status == _levers.ACTIVE:
+            val = "ON" if st.raw is True else st.raw
+        elif st.status == _levers.OFF:
+            val = "OFF" if st.raw is False else f"OFF ({st.raw})"
+        else:
+            val = f"{'ON' if st.raw is True else st.raw} — {st.status.replace('_', ' ').lower()}"
+        return (st.label, val, st.reason)
+
     rows = [
-        ("Feed leveling", "ON" if lv else "OFF",
-         "spreads load off the hottest system → no per-system feed spikes"
-         if lv else "density-only → per-system feed can spike"),
+        _lever_row("rebalance_level", "Feed leveling"),
         ("Harvest smoother", "ON" if hl else "OFF",
          "holds the weekly harvest cap hard + pre-harvests → flat harvest"
          if hl else "reactive → harvest can be lumpy"),
@@ -154,8 +172,7 @@ def _active_config_summary(cd: dict) -> list[tuple]:
         ("Density target", f"{dt * 100:.0f}%",
          "packs each tank to this % of its density cap (lower = more headroom, "
          "fewer hot spots)"),
-        ("Rebalancer budget", f"{g('rebalance_balance_budget')} moves/wk",
-         "max fish-moves per week to relieve over-cap systems"),
+        _lever_row("rebalance_balance_budget", "Rebalancer budget"),
         ("Placement engine", pm.upper(),
          "greedy heuristic + rebalancer (default)" if pm == "greedy"
          else "LP-guided LNS optimal-layout refinement"),
@@ -191,21 +208,22 @@ def _active_config_summary(cd: dict) -> list[tuple]:
          "blocked (Controller engines only — Global ignores this)"),
     ]
     # Surface the opt-in knobs only when they're engaged (off by default).
-    if g("harvest_grade_to_min"):
-        rows.append(("Grade-to-min harvest", "ON (no effect)",
-            "this switch is historical — the floor-filling grade now runs "
-            "unconditionally, so turning it on changes nothing"))
     if (g("min_transfer_count") or 0) > 0:
         rows.append(("Min transfer size", f"{g('min_transfer_count'):,.0f} fish",
             "rebalancer won't split a smaller sub-group out of a tank"))
     if (g("cap_repair_budget") or 0) > 0:
-        rows.append(("End-of-week cap repair",
-            f"ON ({g('cap_repair_budget')} moves/wk)",
-            "a last pass moves fish out of systems still over cap AFTER the "
-            "week's growth — big, robust per-system gain; its effect on the "
-            "worst harvest week is PR-dependent (it has both helped and "
-            "collapsed it), so check the harvest floor and the relief ceiling "
-            "on this PR"))
+        rows.append(_lever_row("cap_repair_budget", "End-of-week cap repair"))
+    # Anything that reads as set but is NOT shaping the plan gets its own rows,
+    # so "why did my change do nothing?" is answered on the page rather than in
+    # placement.py.
+    for st in _levers.not_steering(cd):
+        if st.key in ("rebalance_level", "rebalance_balance_budget",
+                      "cap_repair_budget"):
+            continue          # already rendered above
+        rows.append((f"⚠ {st.label}",
+                     f"{'ON' if st.raw is True else st.raw} — "
+                     f"{st.status.replace('_', ' ').lower()}",
+                     st.reason))
     return rows
 
 

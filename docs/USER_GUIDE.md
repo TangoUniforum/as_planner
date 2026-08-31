@@ -1998,6 +1998,50 @@ The old **Tune (density knobs)** mode is retired — nothing it did is gone:
 
 ---
 
+### 13.2 What is actually steering the plan (2026-08-31)
+
+The always-visible **Active configuration** panel now reports what each lever is
+*doing*, not just what it is *set to*. It reads `forecast/levers.py`, which knows
+which settings gate which others.
+
+This exists because the panel was stating something false. It showed
+**"Feed leveling — ON"** whenever `rebalance_level` was true — but leveling
+shares `rebalance_balance_budget` and only runs inside `if _bal_budget > 0`, so
+with the shipped budget of `0` the flag steered nothing. The shipped config is
+exactly that combination, so the panel was wrong on every run.
+
+Each lever now reports one of:
+
+| status | meaning |
+|---|---|
+| **ACTIVE** | steering the plan |
+| **OFF** | deliberately disabled — with the reason it ships off |
+| **INERT** | read, but another setting gates it to nothing |
+| **CLAMPED** | a smaller limit binds first (e.g. a 30-move rebalancer budget against a 15-move handling budget) |
+| **SATURATED** | higher values produce an identical plan |
+| **NO MEASURED EFFECT** | measured across starting states; no change observed |
+| **SUPERSEDED** | no engine reads it; kept only so older configs load |
+
+Anything not steering gets its own ⚠ row with the reason, so *"why did my change
+do nothing?"* is answered on the page instead of in `placement.py`.
+
+On the shipped configuration this surfaces **five** such settings: Feed leveling
+(inert, rebalancer budget 0), Rebalancer fan-out and Rebalancer precise-count
+moves (no measured effect), and the two superseded knobs.
+
+**What it is not.** It is read-only annotation. It never changes a plan, and it
+does not re-implement engine arithmetic it cannot see: the rebalancer's real
+budget is `min(knob, moves left this week)`, and the second term is not knowable
+from config, so a CLAMPED row names the binding limit rather than inventing a
+number. Every measured claim carries its date — prose that rots against the
+config is how the panel came to be wrong in the first place.
+
+Where the measurements come from: `docs/LEVELING_TRADE_2026-08-30.md` (50 runs,
+the rebalancer family) and `docs/SIXN_PURGE_LIVELOCK_2026-08-31.md` (8 states,
+the 6N drain order). Re-run either with `python -m tools.measure_leveling`.
+
+---
+
 ## 14. Accuracy (forecast vs actuals) — grading the biology
 
 > **Measurement tooling (2026-08-21).** Four CLI tools now grade the model
