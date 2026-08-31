@@ -1,0 +1,127 @@
+# Fish trapped in 6N purge — a livelock, still open
+
+**Status:** defect CONFIRMED and quantified. Two fixes measured and REJECTED.
+Both knobs ship off; the shipped plan is unchanged. 2026-08-31.
+
+## The defect
+
+`_run_sixn_purge_week` defers a 6N tank whose fish would not fit in the week's
+remaining processing budget:
+
+```python
+if (budget.used > 0 or pair_drain_count > 0) and tank.count > budget.remaining():
+    hold it, "drains next rotation"
+```
+
+For a tank holding close to a full week's limit that promise **can never be
+kept**. Any earlier harvest in the week leaves too little room, and nothing makes
+the big tank go first, so the same hold repeats on every rotation.
+
+Measured on the 2026-03-31 close, tank **OG6N-69**, batch B40:
+
+| | |
+|---|---|
+| entered purge | 2026-W16 with 53,006 fish |
+| still there | 2027-W20 with 51,516 fish |
+| rotations held | **58** — W18, W21, W24, W27, W30, W33, W36, W39, W42, W45, W48 … |
+| weight | frozen at 4.371 kg throughout (purge is off-feed; correct per the operator ruling) |
+| lost to mortality while frozen | 1,490 fish |
+| ever harvested | **no** |
+
+**This is not a conservation fault.** Nothing is lost, the fish stand at horizon
+end, and every hard gate passes — conservation, no-empty-week and 6N one-way are
+PASS in all runs. It is a plan that **cannot physically happen**: salmon held off
+feed for a year are dead. The arithmetic balances and the plan is still not real.
+
+## Scale
+
+Occupancy spells of ≥8 weeks in STARVE (a legal purge is 1–2 weeks), shipped
+config, eight starting states:
+
+| state | spells | longest | fish | tonnes live |
+|---|---|---|---|---|
+| 2026-07-31 | 11 | 54 wks | 363,116 | **1,463** |
+| 8.13 PR | 7 | 53 wks | 222,146 | 915 |
+| 2026-03-31 | 2 | 58 wks | 101,033 | 402 |
+| 8.23 PR | 1 | 8 wks | 54,940 | 199 |
+| 2026-01-31 | 1 | 11 wks | 30,294 | 143 |
+| 2026-05-31 / 2026-06-30 / **LIVE Forecast.xlsm** | 0 | — | — | — |
+| **total** | | | | **3,121 t** |
+
+The live workbook is clean, so this is not an active crisis on the file in use.
+
+## It manufactures the sub-floor harvest weeks
+
+A trapped tank means its **pair partner drains alone**. That lone drain is the
+recurring **7,129** seen across unrelated starting states:
+
+```
+min_tank_control (7,000) x _REMNANT_KEEP_PAD (1.02) = 7,140
+7,140 eroded by ~0.15% mortality over the purge  = 7,129
+```
+
+So the sub-floor week is a *symptom* of the livelock, not an independent problem,
+and it is manufactured by a rule — not a shortage of fish. In one such week
+**113,131 mature fish were sitting in 6N** while the plan harvested 7,129.
+
+## Two fixes measured, both rejected
+
+* `sixn_drain_largest_first` — drain the pair's biggest tank first.
+* `sixn_overdue_drain_weeks` — a tank past N weeks in purge gets first claim on
+  the week and is exempt from the hold, draining into the exceptional relief band
+  the code already reserves for this case.
+
+Eight states, shipped config as baseline:
+
+| state | trapped t (base / od4 / od4+big) | weeks below floor | worst week |
+|---|---|---|---|
+| 2026-01-31 | 143 / **859** / 0 | 7 / **12** / 7 | 7,763 / 7,589 / 7,763 |
+| 2026-03-31 | 402 / **0** / 34 | 13 / 12 / **8** | 7,129 / 7,129 / **8,825** |
+| 2026-05-31 | 0 / 0 / 0 | 3 / 3 / 3 | unchanged |
+| 2026-06-30 | 0 / 0 / 0 | 5 / 5 / 5 | unchanged |
+| 2026-07-31 | 1,463 / **793** / 1,484 | 10 / **5** / **16** | 7,125 / **16,740** / **1,684** |
+| 8.13 PR | 915 / **320** / 507 | 5 / 3 / **0** | 7,261 / 7,261 / **30,012** |
+| 8.23 PR | 199 / 199 / 199 | 3 / 3 / 3 | unchanged |
+| LIVE | 0 / 0 / 0 | 2 / 2 / 2 | unchanged |
+| **total trapped** | **3,121 / 2,171 / 2,224** | | |
+
+Both cut total trapped biomass by about a third, and both are **incoherent per
+state**. Each variant's worst failure lands where the other succeeds: `od4`
+triples trapped fish on 2026-01-31 (143 → 859 t) while clearing 2026-03-31
+entirely; `od4+big` clears 2026-01-31 to zero while driving July'26's worst
+harvest week to **1,684 fish** and its floor misses to 16 weeks.
+
+An earlier within-pair-only variant behaved the same way — it fully cleared
+2026-03-31 (+38,289 fish harvested) and took 8.13 to zero floor misses, but made
+2026-01-31 worse on every axis and left 507–713 t trapped on the two worst states.
+
+## Why ordering cannot fix it
+
+Reordering *which* tank drains only moves the blockage. The binding fact is that
+a **53,000-fish tank cannot coexist with any other harvest inside a 55,000
+weekly limit**. Whichever tank goes first, the other is held — and on the states
+where the big tank finally drains, it displaces the harvest that would otherwise
+have made those weeks legal, which is why the floor regressions appear.
+
+**The fix belongs upstream: do not FILL a 6N tank to near the weekly processing
+limit.** That is fill sizing, where `sixn_level_drains` already operates (it caps
+a fill by the pair's remaining headroom, and ships off). A fill that can never be
+drained in one week is the defect; the drain is only where it becomes visible.
+
+This is the fourth measured revert in the 6N ordering class. The prior three are
+recorded in `placement.py` and in the 6N fill/drain notes. **Read those and this
+before attempting a fifth.**
+
+## Reproducing
+
+```
+python -m tools.measure_leveling --pr <PR.xlsx> \
+    --combos '[{"name":"base","overrides":{}},
+               {"name":"od4","overrides":{"sixn_overdue_drain_weeks":4}}]' \
+    --out res.jsonl --tag t
+```
+
+The holds are already logged — no probe needed. Search `ValidationLog` for
+`HARVEST LIMIT` and `DEPURATION HOLD`; a tank name repeating every third week is
+the livelock. `SIXNFILL_PROBE=1` (env-gated, stdout) dumps the fill side, and
+needs `quiet=False` since `methods.run_method` redirects stdout by default.

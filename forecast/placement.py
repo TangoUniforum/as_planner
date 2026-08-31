@@ -1695,7 +1695,38 @@ def _run_sixn_purge_week(
 
     # 1. Harvest the harvested pair's contents (both tanks if occupied).
     pair_drain_count = 0.0
-    for tank_id in harvest_pair:
+    # DRAIN ORDER. Default (False) keeps tank-id order, byte-identical. With
+    # `sixn_drain_largest_first` the pair drains its BIGGEST tank first: the
+    # weekly processing limit is consumed as we go, so a small tank going first
+    # can leave too little for its large partner, which is held -- and held
+    # again every rotation after, because the order never changes. See the knob
+    # in models.py for the measured livelock (58 rotations, 53,006 fish).
+    _drain_order = list(harvest_pair)
+    # OVERDUE FIRST. A tank that has sat in purge past `sixn_overdue_drain_weeks`
+    # is the one the harvest-limit hold has been failing to place, so it goes to
+    # the front and (below) is exempt from that hold. Longest-overdue first, then
+    # the largest-first rule if enabled, then tank_id — always deterministic.
+    _overdue_wks = int(getattr(control, "sixn_overdue_drain_weeks", 0) or 0)
+    _fill_dates = getattr(state, "sixn_fill_date", {})
+
+    def _days_purging(tid):
+        d = _fill_dates.get(tid)
+        return (week_start_date - d).days if d is not None else 10 ** 6
+
+    def _is_overdue(tid):
+        return _overdue_wks > 0 and _days_purging(tid) >= _overdue_wks * 7
+
+    if getattr(control, "sixn_drain_largest_first", False) or _overdue_wks > 0:
+        def _cnt(tid):
+            t = state.tanks_by_id.get(tid)
+            return t.count if (t is not None and not t.is_empty) else 0.0
+        _big = getattr(control, "sixn_drain_largest_first", False)
+        _drain_order.sort(key=lambda tid: (
+            0 if _is_overdue(tid) else 1,          # overdue first
+            -_days_purging(tid) if _is_overdue(tid) else 0,   # longest first
+            -_cnt(tid) if _big else 0,
+            tid))
+    for tank_id in _drain_order:
         tank = state.tanks_by_id.get(tank_id)
         if tank is None or tank.is_empty:
             continue
@@ -1731,7 +1762,17 @@ def _run_sixn_purge_week(
         # steady-harvest contract outranks the limit — such a week lands in
         # the EXCEPTIONAL relief band (limit .. limit*(1+harvest_relief_pct))
         # and the harvest gate counts every use.
-        if (budget is not None and math.isfinite(budget.cap)
+        # OVERDUE EXEMPTION: this hold is what livelocks a big tank, so a tank
+        # already past the overdue threshold is not subject to it. It drains,
+        # even into the relief band — a year off feed is not a plan.
+        if _is_overdue(tank_id) and budget is not None:
+            warnings.append(
+                f"{week_label}: OVERDUE DRAIN — 6N {tank.location_id} "
+                f"(batch {tank.batch_id}, {tank.count:.0f} fish) has purged "
+                f"{_days_purging(tank_id)}d, past the "
+                f"{_overdue_wks}-week limit; draining it ahead of the weekly "
+                f"processing budget rather than holding it again")
+        elif (budget is not None and math.isfinite(budget.cap)
                 and (budget.used > 0 or pair_drain_count > 0)
                 and tank.count > budget.remaining()):
             warnings.append(
@@ -1923,9 +1964,29 @@ def _run_sixn_purge_week(
             _want = min(target - count_moved, src.count, _cap_total)
             take = _floored_take(src.count, _want,
                                  control.min_tank_control or 0.0)
+            _escalated = take > _want + 0.5     # floor forced a WHOLE-tank sweep
             if take > _cap_total + 0.5:
                 take = _floored_partial(src.count, _want,
                                         control.min_tank_control or 0.0)
+                _escalated = False
+            # SIXNFILL_PROBE (env-gated, inert unless set) — a 6N fill IS the
+            # harvest a purge-cycle later, so a sub-floor drain is decided HERE,
+            # a week before it is measured. Same convention as MOVEIN_PROBE /
+            # SIXN_PROBE. Prints what the fill actually saw, so a lone remnant
+            # can be attributed to a TERM (floor escalation, exhausted cascade,
+            # pair capacity) instead of inferred from the drain it produced.
+            #   escalated=YES  -> _floored_take swept a whole tank the source
+            #                     could not retain the floor on: that cohort is
+            #                     now alone in a 6N tank and will drain alone.
+            if _os.environ.get("SIXNFILL_PROBE"):
+                print(f"[SIXNFILL] {week_label} pair={fill_pair} "
+                      f"batch={move_in_batch} src_tank={src.tank_id} "
+                      f"src_count={src.count:>9,.0f} want={_want:>9,.0f} "
+                      f"take={take:>9,.0f} escalated={'YES' if _escalated else 'no '} "
+                      f"target={target:>9,.0f} moved_so_far={count_moved:>9,.0f} "
+                      f"pair_cap={_cap_total:>9,.0f} "
+                      f"floor={(control.min_tank_control or 0) * _REMNANT_KEEP_PAD:>8,.0f}",
+                      flush=True)
             if take <= 0:
                 continue
             # Split the take across the pair, capped per tank; FREEZE each

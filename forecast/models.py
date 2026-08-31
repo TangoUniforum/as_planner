@@ -129,6 +129,43 @@ class ControlParams:
     # Verified vs OFF: 6N drain peak 110k->68k (-38%), CV 0.46->0.32, 6N weeks-below-min
     # 38->27, fish conserved. Joins rebalance_level + harvest_level_load as a leveling
     # default. Set false for the old accumulate-then-dump behavior.
+    # 6N DRAIN ORDER (False = OFF = byte-identical). A purge pair is drained in
+    # TANK-ID order, and the weekly processing limit is spent as it goes -- so a
+    # small tank draining first can leave too little budget for its large
+    # partner, which is then HELD "until the pair's next rotation". Next
+    # rotation the same small-first order repeats, and the hold repeats with it.
+    # MEASURED on 8 starting states, 2026-08-31: this livelocks. OG6N-69 held
+    # 53,006 fish from 2026-W16 to 2027-W20 -- 58 consecutive rotations, frozen
+    # at 4.371 kg, off feed, bleeding ~79 fish/week to mortality and never
+    # harvested. 5 of the 8 states trap fish this way, up to 1,463 t live on the
+    # July'26 close. It is not a conservation fault (nothing is lost; the fish
+    # stand at horizon end) -- it is a PHYSICALLY IMPOSSIBLE plan, since salmon
+    # held off feed for a year are dead. It also manufactures the sub-floor
+    # harvest weeks: a trapped tank means its partner drains ALONE, which is the
+    # recurring 7,129 = min_tank_control x 1.02 eroded by mortality.
+    # True drains the pair LARGEST FIRST, so the tank that can only fit in an
+    # empty budget gets the budget while it is still empty. Ties break on
+    # tank_id, so the order stays deterministic.
+    sixn_drain_largest_first: bool = False
+    # OVERDUE 6N DRAIN (weeks; 0 = OFF = byte-identical). The HARVEST LIMIT hold
+    # defers a 6N tank whose fish would not fit in the week's remaining
+    # processing budget, promising it "drains next rotation". For a tank holding
+    # close to a full week's limit that promise can never be kept: any earlier
+    # harvest in the week leaves too little room, and the same thing happens on
+    # every rotation after. Measured: 53,006 fish held from 2026-W16 to
+    # 2027-W20, and 5 of 8 starting states trap fish this way.
+    # Draining biggest-first WITHIN the pair (`sixn_drain_largest_first`) only
+    # half-fixes it -- it cannot help when the budget was already spent before
+    # the pair was reached (one measured week had 60 fish of headroom left).
+    # This gives a tank that has sat in purge longer than N weeks FIRST CLAIM on
+    # the week: it is ordered ahead of its pair-mates and is EXEMPT from the
+    # harvest-limit hold, so it drains even when that pushes the week into the
+    # exceptional relief band (limit .. limit x (1 + harvest_relief_pct)) that
+    # the code already reserves for this case and the harvest gate counts. The
+    # depuration guard is NEVER waived -- an overdue tank has by definition
+    # purged long enough, so the two can not conflict.
+    # A tank cannot be both overdue and legally held: that is the livelock.
+    sixn_overdue_drain_weeks: int = 0
     sixn_level_drains: bool = True
     # R31: per-tank density target as a fraction of the cap. Drives
     # precalc `tanks_needed_at_density_cap` sizing, the Phase D Grade-

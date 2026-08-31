@@ -783,6 +783,20 @@ _CONTROL_HELP = {
         "over their caps into destinations with room, weighing crowding, feed "
         "and biomass together. Load leveling (below) shares this budget. "
         "Unit: moves/week.",
+    "sixn_overdue_drain_weeks":
+        "Rescue fish stuck in purge. A 6N tank whose fish would not fit in "
+        "the week's remaining processing budget is held for the next "
+        "rotation - but a nearly-full tank never fits, so it can be held "
+        "forever (measured: 53,006 fish held 58 weeks off feed; 5 of 8 test "
+        "months trap fish this way). Set to N and a tank that has purged "
+        "longer than N weeks drains anyway, using the exceptional relief "
+        "band. 0 = off, the shipped behaviour. Unit: weeks.",
+    "sixn_drain_largest_first":
+        "6N drain order. On = a purge pair empties its BIGGEST tank first. Off "
+        "= tank-number order, which can spend the week's processing limit on a "
+        "small tank and leave its large partner held - every rotation, "
+        "indefinitely (measured: 53,006 fish held 58 weeks off feed). Off is "
+        "the shipped behaviour.",
     "rebalance_headroom_days":
         "Forward headroom for the rebalancer. It scores destinations on the "
         "load it can see NOW, but the per-system audit measures the END of the "
@@ -981,6 +995,8 @@ _CONTROL_LABEL = {
     "density_welfare_threshold_kg_m3": "Welfare density line (kg/m³)",
     "rebalance_balance_budget": "Rebalancer moves / week",
     "rebalance_headroom_days": "Rebalancer forward headroom (days)",
+    "sixn_drain_largest_first": "6N: drain biggest tank first",
+    "sixn_overdue_drain_weeks": "6N: force-drain after (weeks)",
     "rebalance_split_budget": "Split-pass moves / week",
     "rebalance_varqty_budget": "Variable-qty moves / week",
     "rebalance_level": "Load leveling (on/off)",
