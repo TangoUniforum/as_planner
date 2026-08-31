@@ -118,3 +118,78 @@ def test_the_inactive_set_is_derived_from_the_labels_not_a_second_list():
     labels = _control_labels()
     assert "(INACTIVE)" in labels["harvest_setpoint_lookahead_weeks"]
     assert "(INACTIVE)" not in labels.get("max_harvest_per_week", "")
+
+
+# --- knob GROUPING (added 2026-08-31) --------------------------------------
+# 56 knobs in one flat dataclass-ordered list is a wall, and it sat a sales
+# contract (min_harvest_per_week) next to a solver detail (lns_max_moves) with
+# nothing to distinguish them. Grouping is a LAYOUT and must never become a
+# FILTER: the editor rebuilds the whole config from what it renders, so a knob
+# that is not rendered is silently dropped on Save.
+
+def _groups():
+    import app
+    return app._CONTROL_GROUPS
+
+
+def _all_knobs():
+    from forecast.config_io import load_control, control_to_dict
+    return list(control_to_dict(load_control("config")))
+
+
+def test_no_knob_is_listed_in_two_groups():
+    seen, dupes = set(), []
+    for _t, _b, keys in _groups():
+        for k in keys:
+            if k in seen:
+                dupes.append(k)
+            seen.add(k)
+    assert not dupes, f"listed in more than one group: {dupes}"
+
+
+def test_groups_reference_only_real_knobs():
+    """A typo'd key would silently render nothing and look like a missing knob."""
+    known = set(_all_knobs())
+    bogus = [k for _t, _b, keys in _groups() for k in keys if k not in known]
+    assert not bogus, f"groups name knobs that do not exist: {bogus}"
+
+
+def test_every_knob_is_reachable_somewhere():
+    """The invariant that matters: grouped, inactive, or 'Everything else' —
+    but never nowhere. This is what stops a layout change eating a setting."""
+    import app
+    known = set(_all_knobs())
+    grouped = {k for _t, _b, keys in _groups() for k in keys}
+    inactive = {k for k in known if "(INACTIVE)" in app._ctl_label(k)}
+    # anything left over is caught by the "Everything else" fallback, which the
+    # editor builds from exactly this difference
+    leftover = known - grouped - inactive
+    assert (grouped | inactive | leftover) == known
+    # and the fallback must actually exist in the editor, or leftovers vanish
+    src = open("app.py", encoding="utf-8").read()
+    assert "Everything else" in src, (
+        "the ungrouped fallback is gone — any knob not named in a group would "
+        "be dropped from the saved config")
+
+
+def test_the_contract_knobs_lead():
+    """min_harvest_per_week is a sales commitment. It belongs in the first
+    group with the other things the operator OWNS, not buried among solver
+    settings."""
+    first_title, _b, first_keys = _groups()[0]
+    for k in ("min_harvest_per_week", "max_harvest_per_week",
+              "min_harvest_weight_g", "max_transfers_per_week"):
+        assert k in first_keys, f"{k} should be in the first group ({first_title})"
+
+
+def test_operator_inputs_are_not_scattered_across_groups():
+    """UNTUNABLE_KNOBS are what the operator owns; showing them together is the
+    point of the first group. A few live elsewhere for good reason (arm
+    identity, 6N policy) but the bulk must be in group 1."""
+    from forecast.methods import UNTUNABLE_KNOBS
+    known = set(_all_knobs())
+    untunable = UNTUNABLE_KNOBS & known
+    in_first = set(_groups()[0][2]) & untunable
+    assert len(in_first) >= len(untunable) * 0.6, (
+        f"only {len(in_first)} of {len(untunable)} operator inputs are in the "
+        f"first group; they should mostly sit together")

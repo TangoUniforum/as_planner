@@ -1166,6 +1166,68 @@ _BIO_CULL_HELP = {
 }
 
 
+# Knob GROUPS for the Control editor. 56 knobs rendered as one flat list in
+# dataclass order is a wall an operator has to read end-to-end to find anything,
+# and it puts a sales contract (min_harvest_per_week) next to a solver detail
+# (lns_max_moves) with nothing to say they are different kinds of thing.
+#
+# Ordered by WHAT THE OPERATOR OWNS, hardest commitment first:
+#   1. what the facility IS and the business REQUIRES  — mostly UNTUNABLE_KNOBS
+#   2. how the planner behaves                          — the real levers
+#   3. engine internals                                 — rarely touched
+#
+# A key not listed here still renders, in "Everything else" — the editor's
+# invariant is that EVERY key lands in `new`, so grouping may never be a filter.
+# tests/test_app_control_editor.py holds that line.
+_CONTROL_GROUPS = [
+    ("🏭 The facility and the contract",
+     "What the site IS and what the business REQUIRES. Most of these are "
+     "operator inputs no automatic search may touch — the tuner may change how "
+     "the model plans, never what the facility is or what you have promised.",
+     ["max_feed_per_day_kg", "max_biomass_kg", "max_harvest_per_week",
+      "harvest_relief_pct", "min_harvest_per_week", "min_harvest_weight_g",
+      "min_tank_control", "max_transfers_per_week", "min_transfer_count",
+      "tran_og_default_tanks", "density_target_pct",
+      "density_welfare_threshold_kg_m3", "default_hog_yield",
+      "grade_efficiency", "handling_mortality_pct"]),
+    ("📅 Horizon and scenario",
+     "When the plan starts, how far it runs, and the 6N production-mode "
+     "switchover.",
+     ["forecast_start", "horizon_weeks", "scenario_name",
+      "starvation_period_days", "sixn_growth", "sixn_production_start",
+      "sixn_transition_weeks"]),
+    ("🎣 Harvest control",
+     "How the weekly harvest is paced against the biomass cap and the contract "
+     "floor.",
+     ["facility_biomass_deviation_pct", "harvest_level_load",
+      "harvest_smooth_lookahead_weeks", "harvest_level_target",
+      "harvest_grade_to_min", "harvest_setpoint_lookahead_weeks"]),
+    ("⚖️ Rebalancer and repair",
+     "The passes that move fish to relieve crowding and per-system load. "
+     "MEASURED 2026-08-30/31 across 8 starting states: most of these do less "
+     "than they look like they do — check the Active configuration panel, "
+     "which reports what each one is ACTUALLY doing on your config.",
+     ["rebalance_balance_budget", "rebalance_level", "rebalance_headroom_days",
+      "rebalance_split_budget", "rebalance_varqty_budget", "cap_repair_budget",
+      "density_relief_pct", "consolidation_fill_pct",
+      "chronic_pressure_frac", "chronic_pressure_weeks", "chronic_relief_pct",
+      "chronic_max_frees_per_week"]),
+    ("🧊 6N depuration",
+     "The purge pipeline: how fills are sized and how tanks drain. Two of "
+     "these were measured and rejected as defaults in August 2026 — see the "
+     "tooltips.",
+     ["sixn_level_drains", "sixn_drain_largest_first",
+      "sixn_overdue_drain_weeks"]),
+    ("⚙️ Engine internals",
+     "Which planner runs and how hard it works. Rarely worth touching by hand — "
+     "Decide tunes these for you.",
+     ["placement_method", "lns_max_moves", "hybrid_follow", "hybrid_follow_band",
+      "hybrid_guide_min_frac", "hybrid_guide_smooth_weeks", "hybrid_purge_lever",
+      "hybrid_production_lever", "global_buffer_pct", "global_assume_primed_6n",
+      "auto_calibrate_fw", "auto_calibrate_fw_min", "auto_calibrate_fw_max"]),
+]
+
+
 def _edit_control():
     from forecast.config_io import (
         load_control, load_biology_tables, load_facility_config,
@@ -1210,9 +1272,26 @@ def _edit_control():
                 new[k] = st.text_input(_ctl_label(k), value="" if v is None else str(v),
                                        help=_ctl_help(k, v)) or None
 
-        for k, v in d.items():
-            if k in _inactive:
-                continue
+        # Render group by group. `_seen` guarantees every key lands in `new`
+        # exactly once: a key listed in no group falls through to "Everything
+        # else", and a key listed twice is rendered once. Grouping is a LAYOUT,
+        # never a filter — a skipped key is silently dropped from the config.
+        _seen = set()
+        _grouped = []
+        for _title, _blurb, _keys in _CONTROL_GROUPS:
+            _mine = [k for k in _keys if k in d and k not in _inactive
+                     and k not in _seen]
+            _seen.update(_mine)
+            if _mine:
+                _grouped.append((_title, _blurb, _mine))
+        _rest = [k for k in d if k not in _seen and k not in _inactive]
+        if _rest:
+            _grouped.append(("📦 Everything else",
+                             "Not yet grouped — still saved and still read.",
+                             _rest))
+
+        def _render_key(k):
+            v = d[k]
             if k == "forecast_start":
                 if _derived is not None:
                     st.success(f"forecast_start = **{_derived}** — derived from "
@@ -1225,6 +1304,14 @@ def _edit_control():
                 new[k] = v
             else:
                 _knob(k, v)
+
+        for _i, (_title, _blurb, _keys) in enumerate(_grouped):
+            st.markdown(f"**{_title}**")
+            st.caption(_blurb)
+            for k in _keys:
+                _render_key(k)
+            if _i < len(_grouped) - 1:
+                st.divider()
         if _inactive:
             with st.expander(f"⚪ Inactive settings ({len(_inactive)}) — kept only "
                              f"so older configs load", expanded=False):
