@@ -4583,10 +4583,10 @@ Independent invariants, each catching a *different* failure (the hard lesson:
 6. **Closed freshwater mass-balance** — the FW phase can't leak fish either.
 7. **Steady-harvest contract** — no near-empty week past the startup handoff.
 
-**On top of the audits, Analyze grades every plan on ten gates, in this
+**On top of the audits, Analyze grades every plan on eleven gates, in this
 order.** **Three** are hard — conservation, never-an-empty-week, and the 6N
 one-way rule (R7) — and a hard FAIL sinks a plan no matter how well it scores on
-everything else. The other seven are flagged and penalised, never
+everything else. The other eight are flagged and penalised, never
 disqualifying:
 
 | # | Gate | Hard? | Reads |
@@ -4596,11 +4596,12 @@ disqualifying:
 | 3 | Weekly contract floor (min harvest/week) | soft | PASS if every planner week clears `min_harvest_per_week`, else WARN with the count + the worst week |
 | 4 | Facility biomass cap | soft | PASS ≤100% of cap · WARN ≤110% · FAIL above |
 | 5 | Converges: red -> green -> stays green | soft | judges only **avoidable** red weeks · PASS if it never goes red, if every red week was forced, or if it settles and holds · WARN if it settles only after an avoidable relapse, or holds on <0.5% headroom · FAIL if the final week is still over **and** the plan owns it |
-| 6 | Weekly processing limit + relief | soft | PASS 0 relief weeks · WARN 1-3 · FAIL >3 **or** any week past the relief ceiling |
-| 7 | Harvest targets (monthly/yearly) | soft | never worse than WARN — targets are penalised, never disqualifying |
-| 8 | Per-batch density quality | soft | PASS if no batch peaks ≥1.3× its tank cap, else WARN |
-| 9 | 6N one-way commitment (R7) | **HARD** | PASS if nothing left a depuration tank except by harvest · **FAIL** on any outbound transfer, which disqualifies the plan |
-| 10 | Weekly handling budget | soft | PASS every week within budget · WARN any week over ~80% · FAIL any week over |
+| 6 | Per-system feed capacity | soft | PASS if every system stays within its own feed cap · WARN on breaches within 10% · FAIL above 1.10× or on >25% of system-weeks — the feed system cannot deliver it |
+| 7 | Weekly processing limit + relief | soft | PASS 0 relief weeks · WARN 1-3 · FAIL >3 **or** any week past the relief ceiling |
+| 8 | Harvest targets (monthly/yearly) | soft | never worse than WARN — targets are penalised, never disqualifying |
+| 9 | Per-batch density quality | soft | PASS if no batch peaks ≥1.3× its tank cap, else WARN |
+| 10 | 6N one-way commitment (R7) | **HARD** | PASS if nothing left a depuration tank except by harvest · **FAIL** on any outbound transfer, which disqualifies the plan |
+| 11 | Weekly handling budget | soft | PASS every week within budget · WARN any week over ~80% · FAIL any week over |
 
 **Gate 5 judges the plan; gate 4 judges what you inherited.** Peak biomass is
 mostly a property of the *starting state* — hand every engine a Production
@@ -4715,10 +4716,10 @@ lift a plan above one that beats it on an earlier tier.""")
   ones. THREE more can never even reach FAIL by design — the weekly
   contract floor, harvest targets and per-batch density stop at WARN.
   (The floor still binds, just not here: a tuned tournament will not
-  promote a variant that starves its lean weeks.) The remaining four
-  (biomass cap, convergence, processing limit, handling budget) *can*
-  read FAIL but are soft: they rank a plan down, they do not disqualify
-  it.
+  promote a variant that starves its lean weeks.) The remaining five
+  (biomass cap, convergence, per-system feed, processing limit, handling
+  budget) *can* read FAIL but are soft: they rank a plan down, they do
+  not disqualify it.
   So a plan can be recommended with a red handling gate — the checklist
   shows it, and it is your call, not the tool's.
 * **Severe per-batch density clusters are a stocking problem.** When a
@@ -7375,6 +7376,13 @@ def _ana_grade(res, targets, econ):
                               if res.get("output_path") else None)}
         res["_ana_convergence"] = ccached
     cvr = ccached["review"]
+    sfcached = res.get("_ana_sysfeed")
+    if not sfcached or sfcached.get("rid") != rid or sfcached.get("schema") != _schema:
+        sfcached = {"rid": rid, "schema": _schema,
+                    "review": (_ana.system_feed_review(res["output_path"])
+                               if res.get("output_path") else None)}
+        res["_ana_sysfeed"] = sfcached
+    sfr = sfcached["review"]
     sc = res.get("_score") or {}
     m = sc.get("metrics")
     v = sc.get("verdict") or {}
@@ -7411,6 +7419,7 @@ def _ana_grade(res, targets, econ):
         "targets_review": tr,
         "density_review": dr,
         "convergence": cvr,
+        "system_feed": sfr,
     }
     return {"gates": _ana.evaluate_gates(ctx), "targets_review": tr,
             "revenue": rev, "metrics": m, "density_review": dr}

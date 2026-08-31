@@ -744,6 +744,66 @@ def convergence_review(out_path) -> Optional[dict]:
     }
 
 
+def system_feed_review(out_path) -> Optional[dict]:
+    """Per-SYSTEM feed load against each system's own cap.
+
+    The facility feed cap has a gate; the per-system caps had none, so a plan
+    could sit over a system's feeder capacity indefinitely and nothing would
+    say so. Measured on the 8.23.26 PR: 67 system-weeks over, worst 1.318x,
+    entirely unreported -- and the objective has no term for it either, which
+    means a knob search is actively DRAWN to configurations that breach it,
+    because an unmeasured violation is free score. (The relief pass that would
+    shave these is `for _ in range(rebalance_balance_budget)`, so setting that
+    budget to 0 -- which scores well -- switches the relief off completely.)
+
+    Feed is a per-DAY rate against a per-day cap, so a breach means that system
+    physically cannot deliver the day's ration, not that a total was exceeded.
+
+    Reads SystemLimitsAudit, which both engine families write. Returns None when
+    the sheet is absent -> the gate reports N/A, never a false verdict.
+    """
+    import openpyxl
+    try:
+        wb = openpyxl.load_workbook(out_path, read_only=True, data_only=True)
+    except Exception:  # noqa: BLE001 — unreadable/foreign file -> no lens
+        return None
+    try:
+        if "SystemLimitsAudit" not in wb.sheetnames:
+            return None
+        header, over, worst, n = None, {}, {}, 0
+        for r in wb["SystemLimitsAudit"].iter_rows(values_only=True):
+            if header is None:
+                if (r and str(r[0]).strip() == "Week"
+                        and any(str(c).strip() == "System" for c in r if c)):
+                    header = {str(c).strip(): i for i, c in enumerate(r) if c}
+                continue
+            if not r or not str(r[0] or "").startswith("20"):
+                continue
+            def _n(key):
+                i = header.get(key)
+                v = r[i] if i is not None and i < len(r) else None
+                return float(v) if isinstance(v, (int, float)) else None
+            f, cap = _n("Feed_kg_day"), _n("Feed_cap")
+            if f is None or not cap:
+                continue
+            sysid = str(r[header["System"]]).strip()
+            n += 1
+            if f > cap:
+                over[sysid] = over.get(sysid, 0) + 1
+                worst[sysid] = max(worst.get(sysid, 0.0), f / cap)
+    finally:
+        wb.close()
+    if not n:
+        return None
+    tot = sum(over.values())
+    return {"system_weeks": n, "over": tot,
+            "over_pct": (tot / n * 100.0) if n else 0.0,
+            "worst": (max(worst.values()) if worst else 1.0),
+            "worst_system": (max(worst, key=worst.get) if worst else None),
+            "systems_breaching": len(over),
+            "by_system": dict(sorted(over.items(), key=lambda kv: -kv[1]))}
+
+
 def revenue_for(rows: list[dict], economics: dict) -> dict:
     """Revenue for a plan: each harvest event's kg is SPREAD across the price
     bands with the size-biased lognormal (model_cv_pct), then priced per band
@@ -1179,6 +1239,38 @@ def _gate_harvest_cap(ctx):
                     f"exceptional: ramp harvests up earlier instead{scope}")
 
 
+def _gate_system_feed(ctx):
+    """Per-system feed capacity — the plan must be FEEDABLE system by system.
+
+    Soft, like the facility biomass cap: it ranks a plan down rather than
+    disqualifying it, because a system slightly over on a few days can be
+    absorbed by the feeding schedule. What it must not do is stay SILENT, which
+    is what it did before this gate existed -- and silence is what lets a knob
+    search choose a breach for free.
+
+    PASS — no system-week over its own feed cap.
+    WARN — breaches, but the worst is within 10% and they are not systemic.
+    FAIL — worst above 1.10x, or breaches on more than a quarter of
+           system-weeks: that is a plan the feed system cannot deliver.
+    """
+    sf = ctx.get("system_feed")
+    if not sf:
+        return "N/A", "per-system feed series unavailable for this plan"
+    if sf["over"] == 0:
+        return "PASS", (f"every system within its feed cap across "
+                        f"{sf['system_weeks']:,} system-week(s)")
+    where = ", ".join(f"{k} x{v}" for k, v in list(sf["by_system"].items())[:3])
+    tail = (f"{sf['over']} of {sf['system_weeks']:,} system-week(s) over "
+            f"({sf['over_pct']:.0f}%), worst {sf['worst']:.3f}x on "
+            f"{sf['worst_system']}; {sf['systems_breaching']} system(s) affected "
+            f"— {where}")
+    if sf["worst"] > 1.10 or sf["over_pct"] > 25.0:
+        return "FAIL", (tail + ". The feed system cannot deliver this: check "
+                        "the rebalancer budget, whose relief pass shaves "
+                        "over-cap systems and does nothing when set to 0")
+    return "WARN", tail
+
+
 def _gate_targets(ctx):
     tr = ctx.get("targets_review")
     if not tr or not tr.get("judged"):
@@ -1204,6 +1296,8 @@ register_gate("biomass_cap", "Facility biomass cap", hard=False,
               fn=_gate_biomass_cap)
 register_gate("convergence", "Converges: red -> green -> stays green",
               hard=False, fn=_gate_convergence)
+register_gate("system_feed", "Per-system feed capacity", hard=False,
+              fn=_gate_system_feed)
 register_gate("harvest_cap", "Weekly processing limit + relief",
               hard=False, fn=_gate_harvest_cap)
 register_gate("targets", "Harvest targets (monthly/yearly)", hard=False,

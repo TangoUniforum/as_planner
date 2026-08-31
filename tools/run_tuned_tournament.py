@@ -127,6 +127,7 @@ def _grade(out_path, cfg: dict, targets) -> dict:
         "targets_review": tr,
         "density_review": _ana.density_review(str(out_path)),
         "convergence": _ana.convergence_review(str(out_path)),
+        "system_feed": _ana.system_feed_review(str(out_path)),
     }
     return {"metrics": m, "verdict": verdict, "harvest": harv,
             "gates": _ana.evaluate_gates(ctx), "targets_review": tr}

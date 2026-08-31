@@ -548,3 +548,46 @@ def test_week_was_forced_needs_both_capacity_and_fish():
     assert A.week_was_forced(over, wt, [10_000], [10_000]) is False
     # No harvest weight to convert with -> never charge the plan.
     assert A.week_was_forced(over, 0.0, [99_999], [99_999]) is True
+
+
+def _sf(over, worst, over_pct, n=720):
+    return {"system_feed": {"system_weeks": n, "over": over, "over_pct": over_pct,
+                            "worst": worst, "worst_system": "OG1S",
+                            "systems_breaching": 1 if over else 0,
+                            "by_system": ({"OG1S": over} if over else {})}}
+
+
+def test_system_feed_gate_fails_on_an_undeliverable_plan():
+    """The whole point: a constraint with no gate is one the optimizer may
+    break for free, because the emphasis score has no term for it. Measured on
+    the 8.23.26 PR — 67 system-weeks over, worst 1.318x — and completely
+    unreported until this gate existed."""
+    st, msg = A._gate_system_feed(_sf(67, 1.3182, 9.3))
+    assert st == "FAIL", (st, msg)
+    assert "1.318" in msg and "OG1S" in msg
+
+
+def test_a_small_breach_warns_rather_than_fails():
+    """A system a few percent over on a handful of days is absorbable by the
+    feeding schedule — rank it down, do not disqualify."""
+    st, _ = A._gate_system_feed(_sf(4, 1.04, 0.6))
+    assert st == "WARN"
+
+
+def test_systemic_breaches_fail_even_when_each_is_small():
+    """Over on a quarter of all system-weeks is a plan the feed system cannot
+    deliver, however modest any single week looks."""
+    st, _ = A._gate_system_feed(_sf(200, 1.03, 27.8))
+    assert st == "FAIL"
+
+
+def test_clean_plan_passes_and_says_what_it_checked():
+    st, msg = A._gate_system_feed(_sf(0, 1.0, 0.0))
+    assert st == "PASS" and "720" in msg
+
+
+def test_absent_sheet_is_not_a_pass():
+    """A plan whose per-system series cannot be read must never be scored as
+    compliant — unknown is not the same as clean."""
+    assert A._gate_system_feed({})[0] == "N/A"
+    assert A._gate_system_feed({"system_feed": None})[0] == "N/A"

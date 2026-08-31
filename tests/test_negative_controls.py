@@ -201,6 +201,17 @@ GATE_CONTROLS = {
                              "worst_pct": 104.0, "worst_relapse_pct": None,
                              "steady_worst_pct": 96.0,
                              "steady_worst_week": "2027-W24"}}),
+    # A constraint nobody watches is one the optimizer may break for free: the
+    # emphasis score has no per-system feed term, so an unmonitored breach is
+    # pure score. NEG is the shape actually measured on the 8.23.26 PR.
+    "system_feed": dict(
+        neg={"system_feed": {"system_weeks": 720, "over": 67, "over_pct": 9.3,
+                             "worst": 1.3182, "worst_system": "OG1S",
+                             "systems_breaching": 9, "by_system": {"OG5N": 16}}},
+        fires={"FAIL"},
+        pos={"system_feed": {"system_weeks": 720, "over": 0, "over_pct": 0.0,
+                             "worst": 1.0, "worst_system": None,
+                             "systems_breaching": 0, "by_system": {}}}),
     "handling_budget": dict(
         neg={"weeks_moves_over_cap": 2, "weeks_moves_warn": 2,
              "moves_week_max": 18}, fires={"FAIL"},
