@@ -4625,7 +4625,7 @@ Independent invariants, each catching a *different* failure (the hard lesson:
 6. **Closed freshwater mass-balance** — the FW phase can't leak fish either.
 7. **Steady-harvest contract** — no near-empty week past the startup handoff.
 
-**On top of the audits, Analyze grades every plan on eleven gates, in this
+**On top of the audits, Analyze grades every plan on twelve gates, in this
 order.** **Three** are hard — conservation, never-an-empty-week, and the 6N
 one-way rule (R7) — and a hard FAIL sinks a plan no matter how well it scores on
 everything else. The other eight are flagged and penalised, never
@@ -4644,6 +4644,7 @@ disqualifying:
 | 9 | Per-batch density quality | soft | PASS if no batch peaks ≥1.3× its tank cap, else WARN |
 | 10 | 6N one-way commitment (R7) | **HARD** | PASS if nothing left a depuration tank except by harvest · **FAIL** on any outbound transfer, which disqualifies the plan |
 | 11 | Weekly handling budget | soft | PASS every week within budget · WARN any week over ~80% · FAIL any week over |
+| 12 | Fish stuck in 6N purge | soft | PASS if every 6N tank drains within its rotation · WARN past 5 weeks in purge · **FAIL** past 8 — those fish are never harvested and would not survive. Conservation cannot see it: nothing is lost, they simply stand at horizon end |
 
 **Gate 5 judges the plan; gate 4 judges what you inherited.** Peak biomass is
 mostly a property of the *starting state* — hand every engine a Production
@@ -7425,6 +7426,14 @@ def _ana_grade(res, targets, econ):
                                if res.get("output_path") else None)}
         res["_ana_sysfeed"] = sfcached
     sfr = sfcached["review"]
+    # Fish stuck in 6N purge — same rid+schema caching as the lenses above.
+    tpcached = res.get("_ana_trapped")
+    if not tpcached or tpcached.get("rid") != rid or tpcached.get("schema") != _schema:
+        tpcached = {"rid": rid, "schema": _schema,
+                    "review": (_ana.sixn_trapped_review(res["output_path"])
+                               if res.get("output_path") else None)}
+        res["_ana_trapped"] = tpcached
+    tpr = tpcached["review"]
     sc = res.get("_score") or {}
     m = sc.get("metrics")
     v = sc.get("verdict") or {}
@@ -7462,6 +7471,7 @@ def _ana_grade(res, targets, econ):
         "density_review": dr,
         "convergence": cvr,
         "system_feed": sfr,
+        "sixn_trapped": tpr,
     }
     return {"gates": _ana.evaluate_gates(ctx), "targets_review": tr,
             "revenue": rev, "metrics": m, "density_review": dr}

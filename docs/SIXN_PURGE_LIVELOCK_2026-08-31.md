@@ -95,6 +95,56 @@ An earlier within-pair-only variant behaved the same way — it fully cleared
 2026-03-31 (+38,289 fish harvested) and took 8.13 to zero floor misses, but made
 2026-01-31 worse on every axis and left 507–713 t trapped on the two worst states.
 
+## ROOT CAUSE (found 2026-08-31, after the ordering attempts)
+
+`_make_room_into_6n` moves **one growout tank's WHOLE population into ONE 6N
+tank**, with no check that the result can ever be harvested in a single week.
+
+Growout tank populations on the July'26 close (1,856 tank-weeks):
+
+| | fish |
+|---|---|
+| median | 37,513 |
+| p90 | 96,149 |
+| max | **164,870** — three weeks of harvest capacity |
+| **tank-weeks above one week's limit (55,000)** | **536 (29%)** |
+
+A 6N tank is drained WHOLE. So any make-room dump of a tank above
+`max_harvest_per_week` produces a 6N tank that **can never drain in one week**,
+whatever the drain order. It is born un-harvestable. That is why every fix so
+far only half-worked — all of them are downstream of the tank being created.
+
+Confirmed by the fill-side clamp: `sixn_level_drains` halves the trapped
+biomass (July'26 1,463 → 800 t, 8.13 PR 915 → 477 t) and improves the contract
+floor markedly (floor misses 10 → 4 and 5 → 1) — and leaves **the biggest tank
+unchanged**, 89,397 → 91,276. It caps the pair's weekly fill; it does not stop a
+whole oversized growout tank being dumped in.
+
+**Note** `sixn_level_drains` is in `UNTUNABLE_KNOBS` — an operator input, held
+out of every automated search on purpose. It was measured here through
+`--allow-operator-inputs`, an explicit flag that announces every such run. That
+guard should stay: it exists so a SEARCH cannot win by redefining the operation.
+
+### The remaining options each violate something
+
+| option | what it costs |
+|---|---|
+| partial drain of an oversized 6N tank across consecutive weeks | breaks whole-tank drain and the pair-empties-to-rest rotation |
+| refuse make-room when the dump would be undrainable | may block TranOG placement, cascading |
+| split the dump across the pair's two tanks | **forbidden** — the reverted approach; the sister exists only for a second, different batch |
+
+Physically, option 1 is the honest one: in reality you *would* harvest a big
+tank over two weeks. It is an operator/architecture decision, not a tuning one.
+
+### Meanwhile the defect is at least VISIBLE
+
+A soft gate — **"Fish stuck in 6N purge"**, gate 12 — now reports it: PASS when
+every tank drains within its rotation, WARN past 5 weeks, FAIL past 8. Soft on
+purpose: the root cause is unfixed, so a hard gate would disqualify most plans
+with no way to pass. On the live workbook it reads WARN (8 spells past 5 weeks,
+longest 6 — running late, nothing stuck); on July'26 it reads FAIL with
+363,116 fish.
+
 ## Why ordering cannot fix it
 
 Reordering *which* tank drains only moves the blockage. The binding fact is that

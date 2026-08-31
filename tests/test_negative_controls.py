@@ -141,6 +141,23 @@ GATE_CONTROLS = {
              "min_harvest": 30000.0}, fires={"WARN"},
         pos={"weeks_below_floor": 0, "min_week": 31000.0,
              "min_harvest": 30000.0}),
+    # Fish that entered 6N purge and never left. Soft: the ROOT CAUSE is
+    # unfixed (a make-room dump moves a whole oversized growout tank into one
+    # 6N tank, and a tank above the weekly processing limit can never drain in
+    # one week), so a hard gate would disqualify most plans with no way to
+    # pass. It exists to make an INVISIBLE validity defect visible —
+    # conservation cannot see it, because nothing is lost: the fish just stand
+    # at horizon end, off feed, for up to 58 rotations.
+    "sixn_trapped": dict(
+        neg={"sixn_trapped": {"spells": 40, "stuck": 7, "badly_stuck": 7,
+                              "longest_weeks": 58, "longest_tank": "69",
+                              "longest_batch": "B40", "fish": 51516.0,
+                              "tonnes": 225.2}},
+        fires={"FAIL"},
+        pos={"sixn_trapped": {"spells": 40, "stuck": 0, "badly_stuck": 0,
+                              "longest_weeks": 0, "longest_tank": None,
+                              "longest_batch": None, "fish": 0.0,
+                              "tonnes": 0.0}}),
     "biomass_cap": dict(
         neg={"peak_pct_of_cap": 115.0}, fires={"FAIL"},
         pos={"peak_pct_of_cap": 97.0}),

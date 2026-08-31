@@ -1355,6 +1355,122 @@ register_gate("sixn_one_way", "6N one-way commitment (R7)", hard=True,
               fn=_gate_sixn_one_way)
 
 
+#: Weeks a 6N tank may legitimately sit in purge. The starvation hold is one
+#: week and the rotation is three pairs, so a tank can honestly wait ~3 weeks
+#: for its turn. Beyond WARN it has missed rotations; beyond FAIL it is stuck.
+SIXN_STUCK_WARN_WEEKS = 5
+SIXN_STUCK_FAIL_WEEKS = 8
+
+
+def sixn_trapped_review(out_path) -> Optional[dict]:
+    """Fish that entered 6N depuration and never left.
+
+    A 6N tank is drained WHOLE, and a tank whose population exceeds the weekly
+    processing limit therefore cannot be harvested in one week at all. The
+    make-room pass moves an ENTIRE growout tank into ONE 6N tank
+    (`_make_room_into_6n`), and on the July'26 close 29% of growout tank-weeks
+    hold more than a week's harvest capacity (max 164,870 fish against a 55,000
+    limit). Such a tank is born un-harvestable: the drain defers it "until the
+    pair's next rotation", and the same thing happens every rotation after.
+
+    MEASURED 2026-08-31: tank OG6N-69 held 53,006 fish from 2026-W16 to
+    2027-W20 — 58 rotations, frozen off feed, never harvested. Across eight
+    starting states, 3,121 live tonnes were trapped in five of them.
+
+    Conservation does NOT catch this: nothing is lost, the fish simply stand at
+    horizon end, and every hard gate passes. It is a plan that cannot physically
+    happen — salmon held off feed for a year are dead — so it needs its own
+    check, or the model reports an impossible plan as a clean one.
+
+    Returns None when BatchLocations is absent -> the gate reports N/A rather
+    than a false verdict.
+    """
+    import collections
+    import openpyxl
+    try:
+        wb = openpyxl.load_workbook(out_path, read_only=True, data_only=True)
+    except Exception:  # noqa: BLE001
+        return None
+    try:
+        if "BatchLocations" not in wb.sheetnames:
+            return None
+        hdr, spells = None, collections.defaultdict(list)
+        for r in wb["BatchLocations"].iter_rows(values_only=True):
+            if hdr is None:
+                if r and str(r[0]).strip() == "Week":
+                    hdr = {str(c).strip(): i for i, c in enumerate(r) if c}
+                continue
+            if not r or not str(r[0] or "").startswith("20"):
+                continue
+
+            def _v(key):
+                i = hdr.get(key)
+                return r[i] if i is not None and i < len(r) else None
+
+            if str(_v("System") or "") != "OG6N" or _v("Stage") != "STARVE":
+                continue
+            cnt, wt = _v("Count (fish)"), _v("AvgWt (kg)")
+            if not isinstance(cnt, (int, float)) or cnt <= 0:
+                continue
+            spells[(str(_v("Tank")), str(_v("Batch")))].append(
+                (str(_v("Week")), float(cnt),
+                 float(wt) if isinstance(wt, (int, float)) else 0.0))
+    finally:
+        wb.close()
+    if not spells:
+        return None
+    stuck = [(k, v) for k, v in spells.items()
+             if len(v) >= SIXN_STUCK_WARN_WEEKS]
+    bad = [(k, v) for k, v in stuck if len(v) >= SIXN_STUCK_FAIL_WEEKS]
+    worst = max(stuck, key=lambda kv: len(kv[1]), default=None)
+    return {
+        "spells": len(spells),
+        "stuck": len(stuck),
+        "badly_stuck": len(bad),
+        "longest_weeks": len(worst[1]) if worst else 0,
+        "longest_tank": worst[0][0] if worst else None,
+        "longest_batch": worst[0][1] if worst else None,
+        "fish": sum(v[-1][1] for _k, v in bad),
+        "tonnes": sum(v[-1][1] * v[-1][2] for _k, v in bad) / 1000.0,
+    }
+
+
+def _gate_sixn_trapped(ctx):
+    """Fish stuck in 6N depuration — a plan that cannot physically happen.
+
+    SOFT, deliberately. It is a validity defect, not a rule break: the ROOT
+    CAUSE (a make-room dump moving a whole oversized growout tank into one 6N
+    tank) is unfixed, and five attempted fixes were measured and rejected in
+    August 2026. Making it hard would disqualify most plans without offering
+    anyone a way to pass. It is here so the defect is VISIBLE rather than
+    silently shipped inside a plan whose other gates are all green.
+    """
+    r = ctx.get("sixn_trapped")
+    if not r:
+        return "N/A", "BatchLocations unavailable for this plan"
+    if not r.get("stuck"):
+        return "PASS", "every 6N tank drains within its rotation"
+    if not r.get("badly_stuck"):
+        return "WARN", (
+            f"{r['stuck']} 6N tank-spell(s) sat past {SIXN_STUCK_WARN_WEEKS} "
+            f"weeks in purge (longest {r['longest_weeks']}); the rotation is "
+            f"running late but nothing is stuck yet")
+    return "FAIL", (
+        f"{r['badly_stuck']} 6N tank-spell(s) never drain — {r['fish']:,.0f} "
+        f"fish ({r['tonnes']:,.0f} t) held off feed past "
+        f"{SIXN_STUCK_FAIL_WEEKS} weeks, longest {r['longest_weeks']} weeks in "
+        f"tank {r['longest_tank']} (batch {r['longest_batch']}). Those fish are "
+        f"never harvested and would not survive; conservation cannot see this "
+        f"because nothing is lost, they just stand at horizon end. Root cause: "
+        f"a make-room dump moves a WHOLE growout tank into ONE 6N tank, and a "
+        f"tank bigger than the weekly processing limit can never drain in one "
+        f"week. See docs/SIXN_PURGE_LIVELOCK_2026-08-31.md")
+
+
+register_gate("sixn_trapped", "Fish stuck in 6N purge", hard=False,
+              fn=_gate_sixn_trapped)
+
+
 def _gate_handling_budget(ctx):
     """Operator rule 4 — the weekly handling budget (`max_transfers_per_week`).
     FAIL: any week over the budget; WARN: any week over ~80% of it;

@@ -61,7 +61,8 @@ def _base_cfg(config_dir: str) -> dict:
         return yaml.safe_load(f) or {}
 
 
-def measure(pr, combos, config_dir, scenario_dir, out_dir, tag, targets=None):
+def measure(pr, combos, config_dir, scenario_dir, out_dir, tag, targets=None,
+            allow_operator_inputs=False):
     base = _base_cfg(config_dir)
     econ = _ana.load_economics(config_dir)
     ctl = _methods.REGISTRY["controller"]
@@ -70,11 +71,23 @@ def measure(pr, combos, config_dir, scenario_dir, out_dir, tag, targets=None):
         name = c.get("name") or ("combo%d" % i)
         ov = dict(c.get("overrides") or {})
         illegal = set(ov) & _methods.UNTUNABLE_KNOBS
-        if illegal:
+        if illegal and not allow_operator_inputs:
             results.append({"name": name,
                             "error": "refuses operator inputs: %s" % sorted(illegal)})
             print("  [%s] %-34s REFUSED (operator input)" % (tag, name), flush=True)
             continue
+        if illegal:
+            # DELIBERATE, HUMAN-DIRECTED comparison only. UNTUNABLE_KNOBS exists
+            # so a SEARCH cannot "win" by redefining the operation -- pinning
+            # min_tank_control 7,000 -> 12,000 and claiming the gain. Measuring a
+            # named knob's before/after on request is a different act, and for
+            # some of these the app tells the operator to do exactly that
+            # ("held out of every search as a safety guard, so this one you do
+            # set by hand"). It stays OFF by default and says so loudly, because
+            # the failure mode is someone reading a sweep that quietly moved a
+            # contract and calling it an improvement.
+            print("  [%s] %-34s OPERATOR INPUT overridden by explicit request: %s"
+                  % (tag, name, sorted(illegal)), flush=True)
         m = _methods.Method(
             key="lev_%d" % i, label=name, family="Controller", blurb=name,
             engine=ctl.engine,
@@ -153,6 +166,10 @@ def main(argv=None):
     ap.add_argument("--scenario-dir", default=str(ROOT / "scenario"))
     ap.add_argument("--tag", default="run")
     ap.add_argument("--workbook-dir", default=None)
+    ap.add_argument("--allow-operator-inputs", action="store_true",
+                    help="permit combos that set methods.UNTUNABLE_KNOBS. For a "
+                         "DELIBERATE named before/after only -- never for a "
+                         "search. Every such run is announced in the output.")
     a = ap.parse_args(argv)
 
     spec = a.combos
@@ -162,7 +179,8 @@ def main(argv=None):
     wbdir = a.workbook_dir or tempfile.mkdtemp(prefix="as_lev_")
     os.makedirs(wbdir, exist_ok=True)
     targets = _ana.load_targets(a.config_dir)
-    res = measure(a.pr, combos, a.config_dir, a.scenario_dir, wbdir, a.tag, targets)
+    res = measure(a.pr, combos, a.config_dir, a.scenario_dir, wbdir, a.tag, targets,
+                  allow_operator_inputs=a.allow_operator_inputs)
     Path(a.out).parent.mkdir(parents=True, exist_ok=True)
     with open(a.out, "a", encoding="utf-8") as f:
         for r in res:
