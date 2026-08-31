@@ -783,6 +783,13 @@ _CONTROL_HELP = {
         "over their caps into destinations with room, weighing crowding, feed "
         "and biomass together. Load leveling (below) shares this budget. "
         "Unit: moves/week.",
+    "rebalance_headroom_days":
+        "Forward headroom for the rebalancer. It scores destinations on the "
+        "load it can see NOW, but the per-system audit measures the END of the "
+        "week, a full week of growth later. Set to 7 and it projects each tank "
+        "forward at its own growth rate before checking headroom, so a move "
+        "cannot fill a system that is about to be over cap. 0 = off, unchanged "
+        "behaviour. Unit: days.",
     "rebalance_level":
         "Load leveling. On = each week, spread load off the hottest grow-out "
         "system onto the coolest, leveling feed, biomass and crowding "
@@ -973,6 +980,7 @@ _CONTROL_LABEL = {
     "density_target_pct": "Density target (fraction of cap)",
     "density_welfare_threshold_kg_m3": "Welfare density line (kg/m³)",
     "rebalance_balance_budget": "Rebalancer moves / week",
+    "rebalance_headroom_days": "Rebalancer forward headroom (days)",
     "rebalance_split_budget": "Split-pass moves / week",
     "rebalance_varqty_budget": "Variable-qty moves / week",
     "rebalance_level": "Load leveling (on/off)",

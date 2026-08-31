@@ -165,6 +165,41 @@ class ControlParams:
     # fits capacity every week (86% mean / 97% peak), so the breaches were pure
     # distribution. Set false to recover the old density-only behavior.
     rebalance_level: bool = True
+    # FORWARD HEADROOM (days; 0 = OFF = byte-identical). The balancer scores
+    # destinations on the load it can see NOW, but the SystemLimitsAudit measures
+    # the END-of-week snapshot a full week of growth later. The constants above
+    # (_BALANCE_TARGET_FRAC 0.88 / _BALANCE_TRIGGER_FRAC 0.92 / _BALANCE_SYS_FILL
+    # 0.90) are a FLAT ~10%/week allowance standing in for that growth -- and
+    # A flat number cannot fit: measured on the configured curves, weekly
+    # biomass growth runs +10.0% at the 370 g entry tier but only +3.7% at
+    # 3.5 kg, so one constant is simultaneously too tight for new arrivals and
+    # too generous for grow-out, where most of the biomass sits.
+    # Set to 7 and the balancer projects each tank forward at its OWN SGR (the
+    # same forecast.biology curve the sim uses, geometric-mean weight) before
+    # summing system load, so the growth allowance is MEASURED per tank rather
+    # than assumed uniform. The flat margin is then redundant, so the projected
+    # path fills to _BALANCE_SYS_FILL_FWD instead -- a small model-error margin
+    # rather than a large unmodelled-growth one.
+    #
+    # MEASURED AND REJECTED AS A DEFAULT, 8 states x 4 variants, 2026-08-31.
+    # It does what it was built to do -- feed system-weeks over cap improve in
+    # 8/8 states vs the shipped config (-19 to -50), and `bal8_fwd7` produced
+    # the ONLY run of 32 to escape a system_feed FAIL. It is unusable anyway:
+    #   * weeks below the contract floor WORSEN in 7 of 8 states. On the live
+    #     workbook, 2 -> 12. min_harvest_per_week is a sales commitment.
+    #   * the worst harvest week falls in 6 of 8, by up to -38.6%.
+    #   * harvest_cap FAILS 8/8 with the balancer on, headroom or not (the
+    #     shipped config is 3 PASS / 1 WARN / 4 FAIL).
+    #   * it posts the study's worst single system, 1.528x -- breach COUNT down,
+    #     PEAK up, the same trade metrics-v6 exists to catch.
+    # It also does NOT repair the balancer's floor damage, which was the whole
+    # hypothesis: vs `bal8` the floor is better in 3 states and worse in 4.
+    # CONFOUND, unresolved: the projection and the destination fill fraction
+    # (0.90 -> _BALANCE_SYS_FILL_FWD) changed together, so it is not yet known
+    # whether the floor damage comes from seeing forward or from packing
+    # tighter. Re-test with the fill held at 0.90 before concluding the idea
+    # itself is dead. Data: docs/LEVELING_TRADE_2026-08-30.md.
+    rebalance_headroom_days: int = 0
     # END-OF-WEEK CAP REPAIR (moves/week; 0 = OFF = byte-identical). Every other
     # realised repair pass runs BEFORE the week's day-by-day biology, but the
     # BatchLocations snapshot that the SystemLimitsAudit sums is taken AFTER it

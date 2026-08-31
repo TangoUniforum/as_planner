@@ -341,6 +341,12 @@ _BALANCE_TRIGGER_FRAC = 0.92
 # the 1.05 buffer): same growth-margin logic as density, so a move can't push a
 # destination system over its feed/biomass cap once the week's growth lands.
 _BALANCE_SYS_FILL = 0.90
+# ...and the fill used when `rebalance_headroom_days > 0` projects the load
+# forward explicitly. Once growth is MEASURED per tank the 0.90 is redundant --
+# it was never a safety margin, it was a stand-in for the week's growth. What
+# remains is an allowance for error in the projection itself (SGR curve,
+# mortality, harvest timing), not for growth we failed to model at all.
+_BALANCE_SYS_FILL_FWD = 0.98
 # Fill a variable-quantity move's destination only to this fraction of cap (NOT
 # cap*buf), leaving headroom for the week's growth so a move can't relocate a
 # violation into the destination.
@@ -353,8 +359,22 @@ _VARQTY_DST_FILL = 0.95
 # (`advance_tank_one_day`, further down phase_d_emit_events) — but the
 # BatchLocations snapshot the SystemLimitsAudit sums is taken AFTER it. So the
 # whole stack aims at the START-of-week load while every published metric
-# measures the END-of-week one, and a full week of growth (~+7% biomass, ~+11%
-# feed at entry-tier weights) lands in between with nothing left to check it.
+# measures the END-of-week one, and a full week of growth lands in between with
+# nothing left to check it.
+#   MEASURED 2026-08-31 against the configured curves, because the figure this
+#   comment used to carry ("~+7% biomass, ~+11% feed") had the two BACKWARDS.
+#   Feed grows SLOWER than biomass at every weight, because feed = biomass x SGR
+#   x FCR and SGR falls with size faster than FCR rises (SGR 1.506 -> 0.368
+#   %/day from 370 g to 5 kg, -76%; FCR 1.00 -> 1.50, +50%). Typical batch
+#   (sgr_correction 0.924, the fleet mean of 45):
+#         370 g   biomass +10.0%   feed +6.9%      <- entry tier, the fastest
+#       1,000 g   biomass  +6.9%   feed +5.1%
+#       2,000 g   biomass  +5.0%   feed +3.6%
+#       3,500 g   biomass  +3.7%   feed +2.3%
+#   So "0.90 x 1.11 ~ 1.0" below prices a feed growth that does not exist: the
+#   real worst case is 1.072. The 10% system margin is set for the fastest
+#   corner of the facility and applied to all of it, over-reserving most in
+#   grow-out where most of the biomass sits.
 # MEASURED on the 7.29 PR: of 104 non-6N over-cap (system, week) cells, the
 # balancer had ALREADY left 79 of them compliant at its own exit (0.94-0.99 of
 # cap) with no further event touching the system — growth alone carried them
@@ -3132,12 +3152,39 @@ def _variable_quantity_rebalance(
     return moves
 
 
+def _grown_forward(avg_wt_g, biomass_kg, batch, tables, wl, days):
+    """(avg_wt_g, biomass_kg) after `days` of growth at THIS tank's own rate.
+
+    Uses forecast.biology.sgr_pct_per_day -- the single source the sim, the
+    daily projector and realized_feed_kg_day all read -- evaluated at the
+    GEOMETRIC MEAN of opening and closing weight, matching how SW growth is
+    looked up everywhere else (opening-weight lookup runs ~1.5% hot). Two passes
+    converge it: the first guesses the closing weight, the second prices the
+    interval properly.
+
+    Count is held constant: mortality over a week is ~0.1% and harvest is not
+    this pass's business, so ignoring both makes the projection very slightly
+    CONSERVATIVE (projects marginally more load than arrives), which is the safe
+    direction for a headroom estimate.
+    """
+    if days <= 0 or avg_wt_g <= 0 or biomass_kg <= 0:
+        return avg_wt_g, biomass_kg
+    w0 = avg_wt_g
+    w1 = w0
+    for _ in range(2):
+        wm = math.sqrt(w0 * w1)
+        sgr = sgr_pct_per_day(wm, "SW", batch, tables, wl)
+        w1 = w0 * ((1.0 + sgr / 100.0) ** days)
+    return w1, biomass_kg * (w1 / w0)
+
+
 def _balance_loads(
     state, wl, event_date, transfer_events, warnings,
     ta_index, week_tank_owner, sorted_weeks, week_index,
     cap_lookup, buf, batch_meta, tables,
     og_systems, growout_systems, og_tanks_by_system, budget,
     level=False, reserved=frozenset(), min_transfer=0.0, min_keep=0.0,
+    headroom_days=0,
 ):
     """Multi-objective balancer: cut out-of-bounds across per-tank DENSITY,
     per-system FEED, and per-system BIOMASS *together*.
@@ -3155,18 +3202,33 @@ def _balance_loads(
     """
     sys_of = {tid: s for s, ids in og_tanks_by_system.items() for tid in ids}
 
+    # With an explicit forward horizon the growth allowance is MEASURED, so the
+    # flat stand-in margin must not also be applied -- that would double-count it.
+    sys_fill = _BALANCE_SYS_FILL_FWD if headroom_days > 0 else _BALANCE_SYS_FILL
+
     def loads():
+        """Per-system biomass and feed. With `headroom_days` > 0 these are the
+        loads at the END of the horizon -- what the SystemLimitsAudit actually
+        measures -- rather than the start-of-week loads the caps were being
+        checked against while a week of growth landed unchecked in between."""
         sb = collections.defaultdict(float)
         sf = collections.defaultdict(float)
         for s, ids in og_tanks_by_system.items():
             for tid in ids:
                 t = state.tanks_by_id.get(tid)
                 if t is not None and not t.is_empty:
-                    sb[s] += t.biomass_kg   # STARVE biomass still counts to caps
-                    if t.stage != STAGE_STARVE:   # but STARVE fish eat nothing
-                        sf[s] += realized_feed_kg_day(
-                            t.avg_wt_g, t.biomass_kg, batch_meta.get(t.batch_id),
-                            tables, wl)
+                    bm = batch_meta.get(t.batch_id)
+                    if t.stage == STAGE_STARVE:
+                        # Purge fish are OFF FEED and their weight is FROZEN at
+                        # the incoming weight (operator ruling) -- no growth to
+                        # project, and they eat nothing, but the standing biomass
+                        # still counts against the system's biomass cap.
+                        sb[s] += t.biomass_kg
+                        continue
+                    w, bio = _grown_forward(t.avg_wt_g, t.biomass_kg, bm,
+                                            tables, wl, headroom_days)
+                    sb[s] += bio
+                    sf[s] += realized_feed_kg_day(w, bio, bm, tables, wl)
         return sb, sf
 
     moves = 0
@@ -3224,13 +3286,13 @@ def _balance_loads(
         surplus_kg = src.biomass_kg - src.max_biomass_kg * _BALANCE_TARGET_FRAC
         if level:
             # Relieve the hot system's BINDING cap (biomass and/or feed) to
-            # _BALANCE_SYS_FILL of cap — whichever is over.
+            # sys_fill of cap — whichever is over.
             _bc, _fc = cap_lookup(wl, worst_sys)
             if _bc and sb[worst_sys] > _bc:
-                surplus_kg = max(surplus_kg, sb[worst_sys] - _bc * _BALANCE_SYS_FILL)
+                surplus_kg = max(surplus_kg, sb[worst_sys] - _bc * sys_fill)
             if _fc and intensity > 0 and sf[worst_sys] > _fc:
                 surplus_kg = max(surplus_kg,
-                                 (sf[worst_sys] - _fc * _BALANCE_SYS_FILL) / intensity)
+                                 (sf[worst_sys] - _fc * sys_fill) / intensity)
         if surplus_kg <= 1.0:
             stuck.add(src.tank_id)
             continue
@@ -3245,8 +3307,8 @@ def _balance_loads(
             if not eligible:
                 continue
             tbc, tfc = cap_lookup(wl, s2)
-            bio_head = (tbc * _BALANCE_SYS_FILL - sb[s2]) if tbc else 1e18
-            feed_head = (tfc * _BALANCE_SYS_FILL - sf[s2]) if tfc else 1e18
+            bio_head = (tbc * sys_fill - sb[s2]) if tbc else 1e18
+            feed_head = (tfc * sys_fill - sf[s2]) if tfc else 1e18
             if bio_head <= 0 or feed_head <= 0:
                 continue
             for tid2 in ids:
@@ -5172,6 +5234,8 @@ def phase_d_emit_events(
                     _sys_cap, _rebal_buf, batch_meta, tables, _og_sys,
                     _grow_sys, _og_tanks, _bal_budget,
                     level=bool(getattr(control, "rebalance_level", False)),
+                    headroom_days=int(
+                        getattr(control, "rebalance_headroom_days", 0) or 0),
                     reserved=_reserved_og,
                     min_transfer=getattr(control, "min_transfer_count", 0.0) or 0.0,
                     min_keep=control.min_tank_control or 0.0,
