@@ -2042,6 +2042,54 @@ the 6N drain order). Re-run either with `python -m tools.measure_leveling`.
 
 ---
 
+### 13.3 The monthly lever check (2026-08-31)
+
+At the top of **Analyze**, before the engine tournament: run your config against
+a couple of declared alternatives on **this month's PR**, ranked on the
+constraints. Two minutes.
+
+**Why it exists.** Four levers were measured across eight starting states in
+August 2026 — `cap_repair_budget`, `rebalance_headroom_days`, and two 6N drain
+orderings — and *all four were rejected as defaults*. Not because they do
+nothing, but because each helps some starting states and hurts others. Running
+the same three legs across those eight states gives eight different answers:
+
+| starting state | verdict |
+|---|---|
+| 2026-01-31 | keep current |
+| 2026-03-31 | + rebalancer — floor misses 13 → 9 |
+| 2026-05-31 | + cap repair — feed 35 → 8 system-weeks, no floor cost |
+| 2026-06-30 | + cap repair — floor 5 → 4 |
+| 2026-07-31 | + cap repair — floor **10 → 3** |
+| 8.13 PR | + cap repair — floor **5 → 0** |
+| 8.23 PR | keep current |
+| live workbook | keep current |
+
+There is no better default to find. There is a cheap per-month answer.
+
+**How it ranks.** Constraint-first, and score is never consulted:
+
+1. a **hard gate** failure disqualifies outright (conservation, never-an-empty-week, 6N one-way)
+2. the **contract floor** — weeks below `min_harvest_per_week`, then the worst week in fish. This is a sales commitment: a leg that misses it more often loses however good the rest looks
+3. **per-system feed** breaches
+4. the **handling budget**
+
+A leg with a far better score and a worse floor still loses. The score column is
+shown, labelled *"not decisive"*, and read by nobody.
+
+**"Keep what you have" is a first-class verdict**, printed as loudly as a winner.
+Differences smaller than the measured sensitivity band are not differences —
+neutral perturbations swing the worst harvest week by 8,629 fish on a
+deterministic engine, so anything inside that is the plan's own chaos.
+
+**It never writes config.** When a leg wins, the check names the settings and
+tells you to apply them yourself in Configure → Control. The decision, and the
+audit trail, stay yours.
+
+Headless equivalent: `python -m tools.measure_leveling --pr <PR> --combos @legs.json`.
+
+---
+
 ## 14. Accuracy (forecast vs actuals) — grading the biology
 
 > **Measurement tooling (2026-08-21).** Four CLI tools now grade the model

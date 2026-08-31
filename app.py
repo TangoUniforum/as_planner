@@ -7540,6 +7540,81 @@ def _adoption_gate(cand, sig: str, slot: str, box=None) -> bool:
         f"**{cand['label']}**", key=f"ana_ack_{_k}"))
 
 
+def _monthly_lever_check(uploaded, targets):
+    """The monthly two-way check: run a SHORT set of declared lever legs on THIS
+    month's PR and say which holds the contract best — or that nothing beats what
+    you already have.
+
+    This is not a search. Four levers were measured across eight starting states
+    in August 2026 and all four rejected as defaults, because each helps some
+    starting states and hurts others. There is no better default to find; there
+    is a cheap per-month answer. See forecast/monthly_check.py for the rules and
+    docs/LEVELING_TRADE_2026-08-30.md for the measurements.
+
+    It never writes config. The operator applies a winner by hand in Configure,
+    which keeps the decision — and the audit trail — theirs.
+    """
+    from forecast import monthly_check as _mc
+    st.subheader("🗓️ Monthly lever check")
+    st.caption(
+        "Runs your config against a couple of declared alternatives on THIS "
+        "PR and ranks them on the CONSTRAINTS — hard gates, then the weekly "
+        "contract floor, then per-system feed, then handling. Score is shown "
+        "but never decides. No setting is right for every month: measured "
+        "across eight starting states, each lever helped some and hurt others, "
+        "so this is a per-month question with a 2-minute answer."
+    )
+    with st.expander("What it runs, and why each leg is a candidate"):
+        for leg in _mc.LEGS:
+            ov = ", ".join(f"{k}={v}" for k, v in leg["overrides"].items()) or "—"
+            st.markdown(f"**{leg['name']}** (`{ov}`) — {leg['why']}")
+        st.caption(_mc.noise_caveat())
+
+    _key = "_monthly_check_res"
+    if st.button("Run the monthly check (~2 min)", key="_btn_monthly_check"):
+        work = Path(tempfile.mkdtemp(prefix="as_mcheck_"))
+        in_path = work / (uploaded.name or "input.xlsm")
+        in_path.write_bytes(uploaded.getvalue())
+        try:
+            from tools.measure_leveling import measure as _measure
+        except Exception as e:                                # noqa: BLE001
+            st.error(f"Could not load the measurement harness: {e}")
+            return
+        rows = []
+        bar = st.progress(0.0, text="Starting…")
+        for i, leg in enumerate(_mc.LEGS):
+            bar.progress(i / len(_mc.LEGS), text=f"Running {leg['name']}…")
+            try:
+                rows.extend(_measure(
+                    str(in_path), [leg], str(CONFIG_DIR), str(SCENARIO_DIR),
+                    str(work), f"mc{i}", targets))
+            except Exception as e:                            # noqa: BLE001
+                rows.append({"name": leg["name"], "error": f"{type(e).__name__}: {e}"})
+        bar.progress(1.0, text="Done")
+        st.session_state[_key] = rows
+
+    rows = st.session_state.get(_key)
+    if not rows:
+        return
+    v = _mc.decide(rows)
+    if v.keep_current:
+        st.success(
+            f"**Keep your current settings.** {v.reason}")
+    else:
+        st.info(f"**{v.winner}** looks better on this PR — {v.reason}.")
+        _ov = next((l["overrides"] for l in _mc.LEGS if l["name"] == v.winner), {})
+        st.caption(
+            "Nothing has been changed. To use it, set these in **Configure → "
+            "Control** yourself, then re-run: "
+            + ", ".join(f"`{k} = {val}`" for k, val in _ov.items()))
+    st.dataframe(_mc.summary_rows(rows), width="stretch", hide_index=True)
+    for note in v.notes:
+        st.caption(f"• {note}")
+    for name, why in v.disqualified:
+        st.warning(f"**{name}** — {why}")
+    st.caption(_mc.noise_caveat())
+
+
 def _analyze():
     import hashlib
     from datetime import datetime as _dtn
@@ -7568,6 +7643,12 @@ def _analyze():
                                    "config/economics.yaml")
     if not (_ok_t and _ok_e):
         return
+
+    # The cheap, decisive question first: which LEVERS for this month? It is a
+    # 2-minute check, it answers what an operator actually asks monthly, and it
+    # is independent of the engine tournament below.
+    _monthly_lever_check(uploaded, targets)
+    st.divider()
     _t_bits = []
     _t_bits.append(f"🎯 {len((targets or {}).get('monthly', {}))} monthly + "
                    f"{len((targets or {}).get('yearly', {}))} yearly target(s)"
