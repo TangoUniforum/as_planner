@@ -44,7 +44,7 @@ from . import window_weeks
 # v4 = system_overshoot is magnitude-weighted (mean excess over cap), not a
 # count of cells over it. A cached v3 value means something DIFFERENT and
 # must never be normalised alongside a v4 one.
-METRICS_SCHEMA = "metrics-v5-floor-scored"
+METRICS_SCHEMA = "metrics-v6-system-peak-monotone"
 
 # Knob grid: (label, {control-knob: value}); baseline first. Every variant
 # inherits the caller's config (both leveling defaults — rebalance_level +
@@ -594,10 +594,28 @@ def _system_overshoot(wb):
     A cell over on BOTH biomass and feed contributes its WORSE dimension, not
     the sum: the constraint that binds is the one you hit first, and adding them
     would double-count a single overloaded system.
+
+    PEAK-COUPLED since metrics-v6, and this is the important part. The mean
+    ALONE is not monotone with the `system_feed` gate, and the two disagreed on
+    a real board: the 8.23.26 tuned winner cut TOTAL over-cap feed 22% while
+    spreading it over 5 MORE system-weeks and pushing the worst system 1.318x ->
+    1.331x. The gate called that worse; this score called it better, by
+    -0.3962 of a -0.3085 winning margin -- so the term decided the tournament
+    AGAINST the gate a human reads. A search would exploit that far harder than
+    a 6-candidate board did: spreading breaches thinner was free score.
+
+    So the term is `mean excess + WORST cell's excess`. A plan can no longer buy
+    a lower total by driving one system further past its ceiling. The peak
+    varies little across a pool (~1.32x on this PR) while the mean varies a lot,
+    so in practice the peak gates WHICH plans are comparable and the mean
+    separates the ones that tie -- deliberately, because a feed cap is a
+    physical delivery rate: a system 33% over cannot be averaged back into
+    feeding its fish. Operator decision, 2026-08-30.
     """
     if "SystemLimitsAudit" not in wb.sheetnames:
         return 0.0
     excess = 0.0
+    peak = 0.0
     tot = 0
     for d in _table(
             wb["SystemLimitsAudit"],
@@ -616,7 +634,8 @@ def _system_overshoot(wb):
         if has_fc and isinstance(f, (int, float)) and f > fc:
             e = max(e, f / fc - 1.0)
         excess += e
-    return (excess / tot) if tot else 0.0
+        peak = max(peak, e)
+    return ((excess / tot) + peak) if tot else 0.0
 
 
 def _is_purge_row(row, si, sti):
@@ -790,8 +809,10 @@ def _system_peak(wb):
     """The single HOTTEST (system, week) load across biomass AND feed, as a
     fraction of cap (OG6N depuration excluded). Minimizing this = no hot spots —
     keep every system's load as low as possible, evenly. Unlike system_overshoot
-    (a COUNT of breaches), this is the worst peak, so the optimizer can drive the
-    tallest spike down even while it stays under cap."""
+    (excess ABOVE cap), this reads the peak LOAD whether or not it breaches, so
+    the optimizer can drive the tallest spike down even while it stays under
+    cap. Weight 0 in every preset: since v6 system_overshoot carries the peak
+    that matters (the over-cap part), and this stays a readout."""
     if "SystemLimitsAudit" not in wb.sheetnames:
         return 0.0
     peak = 0.0

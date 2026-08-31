@@ -58,13 +58,28 @@ Three measured examples from this codebase:
 it. A gate alone cannot separate two failing plans; a score alone never tells
 anyone.
 
+**And the halves must AGREE IN DIRECTION** — added 2026-08-30, the hard way.
+Both halves existed for per-system feed and they still ranked plans opposite
+ways, because they aggregated differently: the gate counted breaching cells and
+reported the worst, the score averaged excess over all cells. The 8.23.26 tuned
+winner cut TOTAL over-cap feed 22% while adding 5 breaching system-weeks and
+pushing the worst system 1.318x -> 1.331x — and won the tournament on that one
+term (-0.3962 of a -0.3085 margin) while its gate read FAIL. Six candidates were
+enough to surface it; a 486-run search would have driven straight into it,
+because spreading breaches thinner was free score.
+
+So the check before adding a phase is not "does the row have two entries" but
+**"can the score improve while the gate worsens?"** If yes, the pair is not a
+pair. `system_overshoot` is `mean excess + worst cell's excess` since
+metrics-v6, which makes it monotone with its gate.
+
 State as of 2026-08-30 — the precondition is met:
 
 | constraint | gate | score term |
 |---|---|---|
 | facility biomass | `biomass_cap` | `biomass_overshoot` |
 | per-tank density | `density_quality` | `density_overshoot` |
-| per-system feed/biomass | `system_feed` | `system_overshoot` (magnitude-weighted) |
+| per-system feed/biomass | `system_feed` | `system_overshoot` (magnitude + peak, v6) |
 | contract floor | `harvest_floor` + no-regression guard | `harvest_floor_gap` |
 | processing limit | `harvest_cap` | `harvest_overshoot` |
 | handling budget | `handling_budget` | `transfers_per_fish` |
