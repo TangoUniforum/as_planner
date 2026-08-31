@@ -44,7 +44,7 @@ from . import window_weeks
 # v4 = system_overshoot is magnitude-weighted (mean excess over cap), not a
 # count of cells over it. A cached v3 value means something DIFFERENT and
 # must never be normalised alongside a v4 one.
-METRICS_SCHEMA = "metrics-v4-system-overshoot-magnitude"
+METRICS_SCHEMA = "metrics-v5-floor-scored"
 
 # Knob grid: (label, {control-knob: value}); baseline first. Every variant
 # inherits the caller's config (both leveling defaults — rebalance_level +
@@ -150,6 +150,7 @@ COMPONENTS = [
     "density_overshoot",   # per-tank density over-cap (compliance)
     "system_peak",         # hottest single (system, week) load — the HOT SPOT
     "crowded_biomass_fraction",  # product QUALITY: grow-out biomass reared over the welfare line
+    "harvest_floor_gap",   # CONTRACT: mean shortfall below min_harvest_per_week
 ]
 
 # Selectable emphasis presets (component -> weight; 0 drops out).
@@ -157,28 +158,28 @@ EMPHASIS_PRESETS = {
     # Lumpiness/fluctuation is the headline complaint, so flatness (var) and
     # not-breaching (overshoot) dominate; closeness-to-the-limit (util_gap) is
     # secondary (don't waste capacity, but never at the cost of breaching).
-    "Walk the line": {"biomass_var": 3, "harvest_var": 3,
+    "Walk the line": {"harvest_floor_gap": 3, "biomass_var": 3, "harvest_var": 3,
                       "biomass_overshoot": 2, "harvest_overshoot": 2,
                       "system_overshoot": 2, "density_overshoot": 2,
                       "biomass_util_gap": 1,
                       "feed_load": 0.5, "feed_var": 0.5, "transfers_per_fish": 0.5},
-    "Flatten biomass": {"biomass_var": 3, "biomass_overshoot": 2, "harvest_var": 2,
+    "Flatten biomass": {"harvest_floor_gap": 2, "biomass_var": 3, "biomass_overshoot": 2, "harvest_var": 2,
                         "biomass_util_gap": 1, "harvest_overshoot": 1,
                         "system_overshoot": 1, "density_overshoot": 1,
                         "feed_var": 0.5, "feed_load": 0.5, "transfers_per_fish": 0.25},
-    "Minimize feed": {"feed_load": 3, "feed_var": 2, "system_overshoot": 2,
+    "Minimize feed": {"harvest_floor_gap": 2, "feed_load": 3, "feed_var": 2, "system_overshoot": 2,
                       "biomass_var": 1, "biomass_util_gap": 0.5, "biomass_overshoot": 0.5,
                       "density_overshoot": 1,
                       "harvest_var": 0.5, "harvest_overshoot": 0.5,
                       "transfers_per_fish": 0.5},
-    "Minimize handling": {"transfers_per_fish": 3, "biomass_var": 1, "harvest_var": 1,
+    "Minimize handling": {"harvest_floor_gap": 2, "transfers_per_fish": 3, "biomass_var": 1, "harvest_var": 1,
                           "biomass_util_gap": 1, "biomass_overshoot": 1,
                           "harvest_overshoot": 1, "system_overshoot": 1,
                           "density_overshoot": 1, "feed_load": 0.5, "feed_var": 0.5},
     # Respect caps: minimize ALL over-cap excursions (per-system feed/biomass,
     # per-tank density, facility biomass + harvest) above everything else — the
     # emphasis for judging the leveling knob's compliance trade.
-    "Respect caps": {"system_overshoot": 3, "density_overshoot": 3,
+    "Respect caps": {"harvest_floor_gap": 2, "system_overshoot": 3, "density_overshoot": 3,
                      "biomass_overshoot": 2, "harvest_overshoot": 2,
                      "biomass_var": 1, "harvest_var": 1,
                      "feed_load": 0.5, "feed_var": 0.5,
@@ -187,7 +188,7 @@ EMPHASIS_PRESETS = {
     # EVEN as possible (minimize the peak per-system load + all CVs), minimize feed
     # and handling — and explicitly DROP biomass_util_gap, the "press to the cap"
     # reward, because the goal here is the opposite (run cool, lots of headroom).
-    "Minimize loads": {"system_peak": 3, "system_overshoot": 2,
+    "Minimize loads": {"harvest_floor_gap": 2, "system_peak": 3, "system_overshoot": 2,
                        "feed_load": 2, "feed_var": 2,
                        "biomass_var": 2, "transfers_per_fish": 2,
                        "harvest_var": 1, "harvest_overshoot": 1,
@@ -197,12 +198,14 @@ EMPHASIS_PRESETS = {
     # density line above all else, then compliance + flatness — and DROP the
     # "press to the cap" reward (util_gap), because gentler rearing is the goal,
     # not packing. The deliberate counterweight to throughput/footprint.
-    "Product quality": {"crowded_biomass_fraction": 3, "density_overshoot": 2,
+    "Product quality": {"harvest_floor_gap": 2, "crowded_biomass_fraction": 3, "density_overshoot": 2,
                         "system_overshoot": 1, "biomass_overshoot": 1,
                         "biomass_var": 1, "harvest_var": 1,
                         "transfers_per_fish": 0.5, "feed_load": 0.5,
                         "feed_var": 0.5, "biomass_util_gap": 0},
-    "Balanced": {c: 1 for c in COMPONENTS},
+    "Balanced": {**{c: 1 for c in COMPONENTS},
+                 # the contract outweighs a generic "everything equally"
+                 "harvest_floor_gap": 3},
 }
 DEFAULT_EMPHASIS = "Walk the line"
 
@@ -275,7 +278,14 @@ class Metrics:
     # tournament's probe treats None as UNKNOWN, never as a pass.
     harvest_zero_weeks: "int | None" = None
     harvest_min_week: "float | None" = None
-    # --- the CONTRACT FLOOR (min_harvest_per_week), measured but NOT scored ---
+    # --- the CONTRACT FLOOR (min_harvest_per_week), measured AND scored ---
+    # SCORED since 2026-08-30, at the operator's explicit instruction. It was
+    # deliberately left out so as not to re-weight anyone's objective silently;
+    # the cost of that caution was that a guard had to VETO what the objective
+    # kept choosing -- a guard can reject a plan but cannot steer toward a
+    # better one, and the tuner drove the worst week to 11,510 fish against a
+    # 30,000 floor before one stopped it. `harvest_floor_gap` is the gradient
+    # the guard lacked.
     # The steady-harvest contract is a weekly FLOOR, and "not literally zero"
     # (harvest_zero_weeks) is only its degenerate case. Measured 2026-08-12 on
     # the 7.29 PR: across a 40-variant controller search the worst harvest week
@@ -1052,11 +1062,33 @@ def score_variants(variants, weights) -> None:
     variants participate in normalization (a rejected variant never skews
     another's score). Normalization is per-component max over OK variants."""
     ok = [v for v in variants if v.conservation_ok]
-    maxima = {c: max((v.metrics.component(c) for v in ok), default=0.0) for c in COMPONENTS}
+
+    def _raw(v, c):
+        """A component's value, or None when it was never measured."""
+        try:
+            x = v.metrics.component(c)
+        except AttributeError:
+            return None
+        return None if x is None else float(x)
+
+    maxima = {c: max((x for x in (_raw(v, c) for v in ok) if x is not None),
+                     default=0.0)
+              for c in COMPONENTS}
     for v in variants:
-        v.norm = {c: (v.metrics.component(c) / maxima[c]) if maxima[c] > 0 else 0.0
-                  for c in COMPONENTS}
-        v.score = sum(weights.get(c, 0.0) * v.norm[c] for c in COMPONENTS)
+        norm = {}
+        for c in COMPONENTS:
+            x = _raw(v, c)
+            if x is None:
+                # NOT MEASURED IS NOT ZERO. A missing value scored as 0 reads as
+                # "perfect on this axis" and would let an unmeasured variant win
+                # on the strength of what nobody checked -- the same trap the
+                # gates avoid by reporting N/A rather than PASS. Score it as the
+                # WORST observed instead, so absence can never be an advantage.
+                norm[c] = 1.0 if maxima[c] > 0 else 0.0
+            else:
+                norm[c] = (x / maxima[c]) if maxima[c] > 0 else 0.0
+        v.norm = norm
+        v.score = sum(weights.get(c, 0.0) * norm[c] for c in COMPONENTS)
 
 
 def _as_float(x):
