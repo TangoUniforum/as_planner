@@ -41,7 +41,10 @@ from . import window_weeks
 # under old rules (the 2026-08 lesson: stale cached metrics defeat a metrics
 # fix silently). v2 = harvest-compliance counts exclude operator-scripted
 # manual-window weeks (forecast.window_weeks).
-METRICS_SCHEMA = "metrics-v3-harvest-floor"
+# v4 = system_overshoot is magnitude-weighted (mean excess over cap), not a
+# count of cells over it. A cached v3 value means something DIFFERENT and
+# must never be normalised alongside a v4 one.
+METRICS_SCHEMA = "metrics-v4-system-overshoot-magnitude"
 
 # Knob grid: (label, {control-knob: value}); baseline first. Every variant
 # inherits the caller's config (both leveling defaults — rebalance_level +
@@ -564,12 +567,28 @@ def _weekly_move_counts(wb):
 
 
 def _system_overshoot(wb):
-    """Fraction of (system, week) cells over their per-system biomass OR feed cap.
-    The per-system compliance dimension the leveling knob targets — the optimizer
-    needs this to 'see' whether leveling actually helps."""
+    """Mean per-(system, week) EXCESS over the per-system biomass or feed cap.
+
+    The per-system compliance dimension the leveling knob targets — the
+    optimizer needs this to 'see' whether leveling actually helps.
+
+    MAGNITUDE-WEIGHTED since metrics-v4. It used to be the FRACTION OF CELLS
+    over cap, which counts a system 2% over exactly the same as one 32% over.
+    That made the score blind to severity precisely where severity is the whole
+    question: the per-system feed gate reports `worst 1.318x`, and the score
+    could not see that number at all, so a plan squeaking past on many systems
+    could rank worse than one badly over on a few. Each cell now contributes how
+    far over it actually sits, so relieving the worst system is worth more than
+    relieving the mildest — which is the behaviour the leveling knob is for.
+
+    A cell over on BOTH biomass and feed contributes its WORSE dimension, not
+    the sum: the constraint that binds is the one you hit first, and adding them
+    would double-count a single overloaded system.
+    """
     if "SystemLimitsAudit" not in wb.sheetnames:
         return 0.0
-    over = tot = 0
+    excess = 0.0
+    tot = 0
     for d in _table(
             wb["SystemLimitsAudit"],
             lambda r: r and r[0] == "Week" and len(r) > 1 and r[1] == "System",
@@ -581,11 +600,13 @@ def _system_overshoot(wb):
         if not (has_bc or has_fc):
             continue
         tot += 1
-        bover = has_bc and isinstance(b, (int, float)) and b > bc
-        fover = has_fc and isinstance(f, (int, float)) and f > fc
-        if bover or fover:
-            over += 1
-    return (over / tot) if tot else 0.0
+        e = 0.0
+        if has_bc and isinstance(b, (int, float)) and b > bc:
+            e = max(e, b / bc - 1.0)
+        if has_fc and isinstance(f, (int, float)) and f > fc:
+            e = max(e, f / fc - 1.0)
+        excess += e
+    return (excess / tot) if tot else 0.0
 
 
 def _is_purge_row(row, si, sti):
