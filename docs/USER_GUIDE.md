@@ -1431,7 +1431,9 @@ you choose a *whole* plan — never a splice.
 
 - **What runs.** Controller (~30s), **Controller — hybrid** (~40s, the default
   planning method — §4.5), **Controller + LNS** (~30s) and the Global
-  heuristic LP (~4 min) always; the
+  heuristic LP (**~4–35 min — PR-dependent**; quoted at ~4 min from an earlier
+  scenario, measured at ~35 min on the 8.23.26 PR, so measure it on yours before
+  planning around it) always; the
   optimal CP-SAT placement is a checkbox that is **on by default** — uncheck
   it for a fast two-method compare. The CP-SAT leg is quoted at ~30 min but gives
   **each week its own solver budget**, so the cost scales with your horizon: on a

@@ -44,9 +44,13 @@ _METHODS = _methods.REGISTRY
 # breaks the hard steady-harvest contract rule. See forecast/methods.py.
 _DEFAULT_METHOD = "controller-hybrid"
 # Operator-facing runtime hints + which methods the board runs unprompted.
+# global-lp was quoted at "~4 min" from an earlier scenario and MEASURED at ~35
+# min on the 8.23.26 PR (2026-08-31) -- 10x out. An understated hint is worse
+# than a vague one: the operator concludes the app has hung and kills a run that
+# was working. Both Global figures are ranges now, and both scale with horizon.
 _TYPICAL = {"controller": "~30 s", "controller-hybrid": "~40 s",
-            "controller-lns": "~30 s", "global-lp": "~4 min",
-            "global-milp": "~30 min+"}
+            "controller-lns": "~30 s", "global-lp": "~4-35 min (PR-dependent)",
+            "global-milp": "~30-90+ min (scales with horizon)"}
 # Behind the opt-in checkbox (slow, and benchmarks only -- see the label).
 # MUST stay a subset of _BOARD_ORDER: when the roster dropped to the three
 # controller arms on 2026-08-27 (84d3e90) this set stopped intersecting it,
