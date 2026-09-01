@@ -7768,14 +7768,14 @@ def _analyze():
     import hashlib
     from datetime import datetime as _dtn
     from forecast import analysis as _ana
-    st.header("🧭 Analyze — find my best plan")
+    # No header here: _decide() already titled the page, and a second one made
+    # the tab read as a separate mode inside a mode. The caption also named
+    # Compare & Choose and Optimize as "modes" after they became tabs.
     st.caption(
-        "The whole decision in one flow: run every planning engine, tune the "
-        "knobs on top, judge every candidate on the **hard-rule checklist** "
-        "(conservation, never-an-empty-week, caps, your harvest targets), and "
-        "recommend ONE plan. The modes it composes (Compare & Choose, "
-        "Optimize) stay available for steering any phase by hand — finished "
-        "runs are shared, nothing runs twice.")
+        "Run every planning engine, tune the knobs on top, judge every "
+        "candidate on the **hard-rule checklist**, and recommend ONE plan. "
+        "**Most months this tab is the whole answer** — the other two are here "
+        "to steer a phase by hand if you disagree with it.")
 
     _cfg_ok = _config_ready() and _scenario_ready()
     _pr_ok = pr is not None and pr["ok"]
