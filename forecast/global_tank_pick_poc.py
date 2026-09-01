@@ -1370,8 +1370,22 @@ def pick_tanks(
                                       and is_purge_mode(control, ws)))
                               else "SW")
                 if not sixn_exit_allowed(_src_sys, _src_stage):
-                    if dest_tank not in sixn_set:
-                        return False
+                    # NO DESTINATION EXEMPTION (2026-09-01). This used to allow
+                    # the move when `dest_tank in sixn_set`, on the reasoning
+                    # that 6N -> 6N is pair rotation. sixn_exit_allowed grants
+                    # no such exemption: it locks a tank mid-commitment
+                    # (STARVE) whatever the destination, and the R7 gate counts
+                    # every TransferPlan row leaving a 6N tank. So the
+                    # exemption made this guard DISAGREE with both the shared
+                    # predicate and the gate, while the comment above claimed
+                    # "both engines are held to one definition of R7".
+                    #
+                    # Measured on the 8.23.26 PR (global-lp and global-milp,
+                    # 2026-09-01): 2027-W37 moved 300 fish 65 -> 69 and 1,773
+                    # fish 67 -> 69, batch B51, all three tanks STARVE. Both
+                    # engines produced the identical pair, and both were
+                    # reported as legal here while the gate hard-failed them.
+                    return False
                 ok, _ = move_allowed(tank_sys.get(s_entry[0], ""),
                                      tank_sys.get(dest_tank, ""), s_entry[2])
                 return ok
@@ -1393,15 +1407,29 @@ def pick_tanks(
                         s = avail_s[0]
                         _ok, _why = move_allowed(tank_sys.get(s[0], ""),
                                                  tank_sys.get(dest, ""), s[2])
-                        if (s[0] in sixn_set) and (dest not in sixn_set):
+                        if s[0] in sixn_set:
                             # move_allowed does not speak about 6N, so say it
-                            # here or the breach is reported with an empty reason
+                            # here or the breach is reported with an empty
+                            # reason. Covers 6N -> 6N as well as 6N -> growout:
+                            # both leave a tank mid-commitment, and the R7 gate
+                            # counts both.
+                            _dest_6n = dest in sixn_set
                             _why = ("R7: 6N is ONE-WAY — fish leave depuration "
-                                    "only by harvest. These fish will be "
-                                    "harvested WITHOUT completing the purge "
-                                    "hold. No legal source existed for this "
-                                    "destination, so the move is emitted to "
-                                    "conserve fish.")
+                                    "only by harvest. "
+                                    + ("This is a 6N -> 6N move: the fish stay "
+                                       "off feed, but they are handled "
+                                       "mid-purge and the tank they left was "
+                                       "still committed. ROOT CAUSE: the "
+                                       "batch's 6N tank set SHRANK this week "
+                                       "while a cohort was only partly "
+                                       "released, so the survivors had nowhere "
+                                       "to sit. "
+                                       if _dest_6n else
+                                       "These fish will be harvested WITHOUT "
+                                       "completing the purge hold. ")
+                                    + "No legal source existed for this "
+                                      "destination, so the move is emitted to "
+                                      "conserve fish.")
                         topology_warnings.append(
                             f"TOPOLOGY VIOLATION - {wl}: batch {batch_id} "
                             f"{tank_sys.get(s[0])}-{s[0]} -> "
