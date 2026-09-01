@@ -1394,7 +1394,7 @@ def sixn_trapped_review(out_path) -> Optional[dict]:
     try:
         if "BatchLocations" not in wb.sheetnames:
             return None
-        hdr, spells = None, collections.defaultdict(list)
+        hdr, rows_by_tb = None, collections.defaultdict(list)
         for r in wb["BatchLocations"].iter_rows(values_only=True):
             if hdr is None:
                 if r and str(r[0]).strip() == "Week":
@@ -1412,13 +1412,48 @@ def sixn_trapped_review(out_path) -> Optional[dict]:
             cnt, wt = _v("Count (fish)"), _v("AvgWt (kg)")
             if not isinstance(cnt, (int, float)) or cnt <= 0:
                 continue
-            spells[(str(_v("Tank")), str(_v("Batch")))].append(
+            rows_by_tb[(str(_v("Tank")), str(_v("Batch")))].append(
                 (str(_v("Week")), float(cnt),
                  float(wt) if isinstance(wt, (int, float)) else 0.0))
     finally:
         wb.close()
-    if not spells:
+    if not rows_by_tb:
         return None
+    # A (tank, batch) pair can occupy the same tank MANY times legitimately: a
+    # large batch moves through 6N over several rotations, filling, purging and
+    # draining each time. Counting occupancy ROWS therefore over-reports badly
+    # -- it read B45 in tank 61 as "held 8 weeks" when it was four separate
+    # two-week purges (operator caught this, 2026-08-31).
+    #
+    # A real SPELL is one unbroken residency: consecutive weeks whose count only
+    # ever FALLS. A count that rises is a new fill, which ends the spell and
+    # starts another -- and so is a gap in the weeks. Mortality-only decay
+    # across consecutive weeks with no refill is exactly the stuck signature
+    # (tank 69: 53,006 -> 51,516 over 58 unbroken weeks).
+    def _wk_index(label):
+        try:
+            y, w = label.split("-W")
+            return int(y) * 53 + int(w)
+        except (ValueError, AttributeError):
+            return None
+
+    spells = {}
+    for key, rows in rows_by_tb.items():
+        rows = sorted(rows, key=lambda r: (_wk_index(r[0]) or 0))
+        cur = []
+        for i, row in enumerate(rows):
+            if cur:
+                gap = None
+                a, b = _wk_index(cur[-1][0]), _wk_index(row[0])
+                if a is not None and b is not None:
+                    gap = b - a
+                refilled = row[1] > cur[-1][1] + 0.5
+                if gap != 1 or refilled:
+                    spells[(key, len(spells))] = cur
+                    cur = []
+            cur.append(row)
+        if cur:
+            spells[(key, len(spells))] = cur
     stuck = [(k, v) for k, v in spells.items()
              if len(v) >= SIXN_STUCK_WARN_WEEKS]
     bad = [(k, v) for k, v in stuck if len(v) >= SIXN_STUCK_FAIL_WEEKS]
@@ -1428,8 +1463,8 @@ def sixn_trapped_review(out_path) -> Optional[dict]:
         "stuck": len(stuck),
         "badly_stuck": len(bad),
         "longest_weeks": len(worst[1]) if worst else 0,
-        "longest_tank": worst[0][0] if worst else None,
-        "longest_batch": worst[0][1] if worst else None,
+        "longest_tank": worst[0][0][0] if worst else None,
+        "longest_batch": worst[0][0][1] if worst else None,
         "fish": sum(v[-1][1] for _k, v in bad),
         "tonnes": sum(v[-1][1] * v[-1][2] for _k, v in bad) / 1000.0,
     }

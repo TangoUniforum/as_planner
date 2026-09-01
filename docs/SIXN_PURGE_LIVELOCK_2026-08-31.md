@@ -33,7 +33,33 @@ end, and every hard gate passes — conservation, no-empty-week and 6N one-way a
 PASS in all runs. It is a plan that **cannot physically happen**: salmon held off
 feed for a year are dead. The arithmetic balances and the plan is still not real.
 
-## Scale
+## SCALE — CORRECTED 2026-08-31 (the first figures were 2.5x too high)
+
+The original detector counted occupancy ROWS per (tank, batch). A large batch
+legitimately moves through 6N over SEVERAL rotations — filling, purging and
+draining each time — so that read normal rotation as one long spell. Caught by
+the operator: batch B45 in tank 61 was reported "held 8 weeks" when it was four
+separate two-week purges, with the count RESETTING upward between them.
+
+A real spell is one unbroken residency: consecutive weeks whose count only ever
+falls. A rise is a new fill; a gap ends the spell. Mortality-only decay across
+unbroken weeks is the stuck signature.
+
+| state | first reported | corrected | longest | verdict |
+|---|---|---|---|---|
+| 2026-03-31 | 402 t | **402 t** | 58 wks | FAIL |
+| 2026-07-31 | 1,463 t | **493 t** | 54 wks | FAIL |
+| 8.13 PR | 915 t | **183 t** | 53 wks | FAIL |
+| 2026-01-31 | 143 t | **143 t** | 11 wks | FAIL |
+| 8.23 PR | 199 t | **0 t** | — | PASS |
+| 2026-05-31 / 2026-06-30 / LIVE | 0 t | 0 t | — | PASS |
+| **total** | 3,121 t | **1,222 t** | | |
+
+The defect is unchanged and still real — tank OG6N-69 held 53,006 fish across 58
+unbroken weeks, decaying only by mortality. What changed is how much of the
+facility it affects: four states, not five, and 1,222 t rather than 3,121 t.
+
+## Scale (as first reported — superseded by the table above)
 
 Occupancy spells of ≥8 weeks in STARVE (a legal purge is 1–2 weeks), shipped
 config, eight starting states:
