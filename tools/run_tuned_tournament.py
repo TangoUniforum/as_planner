@@ -74,7 +74,7 @@ class _FileCache(dict):
                       f"this run")
 
 
-def _grade(out_path, cfg: dict, targets) -> dict:
+def _grade(out_path, cfg: dict, targets, engine_family: str = "") -> dict:
     """Headless mirror of the app's per-candidate grading: metrics + each
     method's OWN conservation proof + harvest extras -> the analysis gate
     checklist. Returns {metrics, verdict, harvest, gates, ctx}."""
@@ -123,6 +123,8 @@ def _grade(out_path, cfg: dict, targets) -> dict:
         # The budget the counts above were measured against, so the gate text
         # names the operator's real number instead of a hardcoded 15.
         "move_cap": mv_cap,
+        # Declared asymmetry: see analysis._gate_handling_budget.
+        "engine_family": engine_family,
         "peak_pct_of_cap": peak_pct,
         "targets_review": tr,
         "density_review": _ana.density_review(str(out_path)),

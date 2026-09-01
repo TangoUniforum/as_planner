@@ -7262,6 +7262,13 @@ def _compare_and_choose():
                            if res.get("ok") else f"{mlabel} — failed"),
                     state="complete" if res.get("ok") else "error")
             res["_label"] = mlabel
+            # Which FAMILY produced this plan. The handling-budget gate needs
+            # it: Global reads neither max_transfers_per_week nor
+            # handling_mortality_pct, so grading it on move counts compares a
+            # budgeted planner with an unbudgeted one. Stamped from the
+            # registry, never sniffed from the label string.
+            _mm = _METHODS.get(mkey)
+            res["_engine_family"] = getattr(_mm, "engine", "") if _mm else ""
             _ensure_board_score(res, mlabel)
             store[mkey] = {"sig": msig, "res": res}   # persists NOW, per method
             _board_persist(mkey)                       # ...and to DISK
@@ -7569,6 +7576,8 @@ def _ana_grade(res, targets, econ):
         "density_review": dr,
         "convergence": cvr,
         "system_feed": sfr,
+        # Declared asymmetry: see _gate_handling_budget.
+        "engine_family": res.get("_engine_family"),
         "sixn_trapped": tpr,
     }
     return {"gates": _ana.evaluate_gates(ctx), "targets_review": tr,
@@ -8021,6 +8030,13 @@ def _analyze(skip_lever_check=False):
                         label=f"{_l} — {ln[:100]}"))
                 _ms.update(state="complete" if res.get("ok") else "error")
             res["_label"] = mlabel
+            # Which FAMILY produced this plan. The handling-budget gate needs
+            # it: Global reads neither max_transfers_per_week nor
+            # handling_mortality_pct, so grading it on move counts compares a
+            # budgeted planner with an unbudgeted one. Stamped from the
+            # registry, never sniffed from the label string.
+            _mm = _METHODS.get(mkey)
+            res["_engine_family"] = getattr(_mm, "engine", "") if _mm else ""
             _ensure_board_score(res, mlabel)
             store[mkey] = {"sig": msig, "res": res}
             _board_persist(mkey)

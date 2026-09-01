@@ -2155,6 +2155,53 @@ because of it.
 
 ---
 
+### 13.5 Controller and Global are not interchangeable (2026-09-01)
+
+A parity audit compared what each engine family actually enforces. The headline:
+**the two do not plan in the same space**, and some numbers must not be compared
+across them.
+
+| operator rule | `placement.py` | Global modules |
+|---|---|---|
+| `max_transfers_per_week` — the weekly handling budget | 4 sites | **0** |
+| `handling_mortality_pct` — 0.01% per deposit | 2 sites | **0** |
+| `min_tank_control` — the remnant floor | 38 sites | **0** |
+| `min_harvest_weight_g` | 16 sites | 3 (L1 only, not the tank pick) |
+
+The controller defers its quality passes to hold **15 moves a week** and pays
+handling mortality on **every deposit**. Global's pick emits transfers with no
+budget consulted anywhere, and its destination count equals its source count
+exactly — **its moves are unbudgeted and free.**
+
+**Consequence: anything bought with transfers is not comparable across
+families.** Spreading load between systems is exactly what transfers buy, so a
+Global arm's per-system feed result is not a like-for-like improvement on a
+controller's. The `handling_budget` gate now reports **N/A** for Global rather
+than PASS/WARN/FAIL, because grading it on move counts implied it was playing
+the same game and merely playing it worse.
+
+**Why this is declared and not fixed.** It is not fixable by making the gate
+hard: the controller itself exceeds 15 moves on 5 of 8 test months, because
+essential moves are exempt by design and it had no alternative. Nor is it fixable
+in Global's pick. L1 decides quantities and is **tank-blind**; the pick sees
+tanks but, by the rule drawn from six failed attempts — *"may REORDER, may not
+RE-QUANTIFY"* — has no authority to refuse a move or shrink a deposit. One such
+attempt destroyed 696 fish. Charging handling mortality or enforcing a budget at
+the pick are both re-quantifications.
+
+Making the two genuinely comparable would mean putting the pick inside the
+L1/L3 convergence loop, so tank-level findings feed back into quantities. That
+is a design decision, not a bug fix.
+
+**Reading a mixed board.** Conservation, empty weeks, the contract floor, the
+biomass cap and R7 are engine-independent and compare cleanly. Transfer counts,
+handling metrics, and per-system feed do not. On the 8.23.26 PR, `global-milp`
+reached 9 feed-breaching system-weeks against the controller's 67 — a striking
+number, and one bought partly with handling the controller was forbidden to
+spend.
+
+---
+
 ## 14. Accuracy (forecast vs actuals) — grading the biology
 
 > **Measurement tooling (2026-08-21).** Four CLI tools now grade the model

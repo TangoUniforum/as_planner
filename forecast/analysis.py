@@ -1523,6 +1523,34 @@ def _gate_handling_budget(ctx):
     warn = ctx.get("weeks_moves_warn")
     if over is None and warn is None:
         return "N/A", "weekly transfer counts unavailable"
+    # NOT APPLICABLE TO THE GLOBAL FAMILY (2026-09-01, after the parity audit).
+    # Verified by AST + textual search: max_transfers_per_week appears 4 times
+    # in placement.py and ZERO times in any global_* module or
+    # tools/run_global_forecast.py; handling_mortality_pct likewise (2 vs 0), so
+    # a Global move is both unbudgeted AND free.
+    #
+    # Grading it PASS/WARN/FAIL implied Global was playing the same game and
+    # merely playing it worse. It is not playing it: the controller defers
+    # quality passes to hold 15 moves/week and pays 0.01% on every deposit,
+    # while Global's pick emits transfers with no budget consulted anywhere.
+    # Judging both on one number made the controller look profligate for
+    # obeying a rule its rival ignored.
+    #
+    # It is NOT fixable by making this gate hard, and not by enforcing the
+    # budget in the pick. L1 decides quantities and is TANK-BLIND; the pick
+    # sees tanks and, by the rule the design doc draws from six failed attempts
+    # ("may REORDER, may not RE-QUANTIFY"), has no authority to refuse a move
+    # or shrink a deposit -- one such attempt destroyed 696 fish. So this is a
+    # DECLARED asymmetry, not a defect to be papered over.
+    if str(ctx.get("engine_family") or "").lower() == "global":
+        return "N/A", (
+            "this engine does not read max_transfers_per_week or "
+            "handling_mortality_pct — its moves are unbudgeted and free. Its "
+            "transfer count, and anything bought with transfers (per-system "
+            "feed balance especially), is NOT comparable with a Controller "
+            "arm's, which plans inside a "
+            + (f"{int(ctx.get('move_cap') or 0)}-move " if ctx.get("move_cap") else "")
+            + "weekly budget and pays handling mortality on every deposit")
     over, warn = int(over or 0), int(warn or 0)
     cap = int(ctx.get("move_cap") or 0)
     cap_s = f"{cap}-move " if cap else ""
