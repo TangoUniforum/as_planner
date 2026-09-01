@@ -4689,7 +4689,7 @@ engine may assume unscripted pre-start staging, so comparisons are honest
 about it first).
 
 **What binds them.** Conservation and tank continuity bind every method
-equally. The rest is graded, not enforced: Compare & Choose shows four
+equally. The rest is graded, not enforced: Compare engines shows four
 hard-rule badges (conserves · fully placed · no empty week · under cap), and
 Analyze's checklist adds the density and handling-budget gates, which are
 **flagged, never disqualifying**, plus the **6N one-way rule (R7), which is
@@ -5237,7 +5237,7 @@ with st.sidebar:
         "Computer power", min_value=10, max_value=100, value=40, step=10,
         format="%d%%", key="cpu_pct",
         help="How much of this computer the heavy runs may use — the Global "
-             "optimal (CP-SAT) solver (also inside Compare & Choose) and the "
+             "optimal (CP-SAT) solver (also inside Decide -> Compare engines) and the "
              "Optimize sweeps. Higher = faster runs, but other applications "
              "may feel slower (and Optimize sweeps use more memory) while a "
              "run is going. A plain controller Run forecast is "
@@ -5294,76 +5294,61 @@ with st.sidebar:
             "and the honest list of known limits.",
         ],
         help="Listed in the order you normally work: Configure once, then Run "
-             "forecast every day. Analyze answers 'which plan?' end to end; "
-             "Compare & Choose and Optimize are the two halves of that "
-             "question you can steer by hand (Compare & Choose changes the "
-             "ENGINE, Optimize changes the KNOBS of one engine). How it works "
-             "is the plain-language rulebook — read it once before trusting "
-             "or challenging a plan.",
+             "forecast every day. Decide answers 'which plan?' — the monthly "
+             "lever check, the engine board and knob tuning, worked top to "
+             "bottom in one place. How it works is the plain-language rulebook "
+             "— read it once before trusting or challenging a plan.",
         key="app_mode",
     )
     with st.expander("ℹ️ Which mode? — the order of operations"):
         st.markdown(
             "**The workflow, in order:** set up **Configure** once (models, "
-            "facility, targets, prices) → run **Analyze** to pick and tune the "
-            "best plan and **⭐ Promote** it → then **Run forecast** (or "
-            "Analyze's ⚡ Quick run) is the everyday step. **Compare & Choose** "
-            "and **Optimize** are the two halves of the Analyze decision, "
-            "available on their own when you want to steer one by hand.\n\n"
-            "- **Configure (models & control)** — hand-edit the biology curves, "
-            "the tank list, the batch schedule, the per-week limits, every "
-            "control knob, and your harvest targets + price bands. Saved to "
-            "`config/` + `scenario/` YAML, which is the source of truth for "
-            "every run. Every field has a tooltip explaining what it does, its "
-            "unit, and what it trades off.\n"
+            "facility, targets, prices) → run **Decide** to pick the plan and "
+            "**⭐ Promote** it → then **Run forecast** is the everyday step. "
+            "Most months Decide's first step says *keep what you have*, and "
+            "you go straight to Run forecast.\n\n"
+            "- **Configure (models & control)** — hand-edit the biology "
+            "curves, the tank list, the batch schedule, the per-week limits, "
+            "every control knob, and your harvest targets + price bands. "
+            "Saved to `config/` + `scenario/` YAML, the source of truth for "
+            "every run. Knobs are grouped by what you own, hardest commitment "
+            "first, and every field has a tooltip with its unit and "
+            "trade-off.\n"
             "- **Run forecast** — runs the pipeline with your **current** "
             "Control knobs and your **currently picked method**, and produces "
-            "the plan + reports. This is the everyday mode. *\"Run with tuned "
-            "knobs\"* just means a normal Run **after** Analyze/Optimize has "
-            "saved better knobs into your config.\n"
-            "- **Analyze (find my best plan)** — the one-flow version of the "
-            "whole decision: every engine + a knob search + the hard-rule "
-            "checklist (conservation and never-an-empty-week are the two HARD "
-            "rules; caps, handling, your harvest targets, revenue and the "
-            "per-batch density lens are scored but never disqualifying) → one "
-            "recommendation card with **Adopt** (use it now) and **Promote** "
-            "(make it the Quick-run default). The stocking-for-quality "
-            "frontier lives here too. Finished runs are cached to disk and "
-            "shared with Compare & Choose, so nothing runs twice.\n"
-            "- **Compare & Choose (all methods)** — runs the *different "
-            "engines* (Controller plain / hybrid / +LNS, Global LP, Global "
-            "CP-SAT) on one PR, grades them on several lenses (fewest moves, "
-            "steadiest harvest, between/within-system balance, density, "
-            "welfare, footprint) with hard-rule badges, and lets you pick "
-            "which whole plan becomes the report. **This is where the "
-            "planning method is chosen** — ▶ Run forecast re-runs whatever you "
-            "picked here. Unlike Optimize (same engine, different knobs), this "
-            "compares *engines*.\n"
-            "- **Optimize (multi-objective)** — sweeps the **controller "
-            "family's** knobs against several goals at once (flat biomass, "
-            "feed, handling, cap compliance) on a *selectable* weighted "
-            "objective, ranks the settings, and can apply the best. It finds "
-            "knob *combinations* a one-knob-at-a-time sweep can't. It does not "
-            "tune the Global engines — those have no tunable knobs (see "
-            "Analyze's run-budget table).\n"
+            "the plan + reports. This is the everyday mode.\n"
+            "- **Decide (which plan should I run?)** — one page, three steps. "
+            "**1 Check**: the monthly lever check, ~2 minutes, ranked on the "
+            "CONSTRAINTS (hard gates → the weekly contract floor → per-system "
+            "feed → handling; score is shown and never decides). Most months "
+            "it says *keep what you have*, and that is a real answer, not a "
+            "failed run. **2 Search**: every engine plus a knob search, every "
+            "candidate graded on the twelve-gate checklist, ending in one "
+            "recommendation with **Adopt** and **Promote**. **3 Drill in** "
+            "(only if you disagree): *Compare engines* puts the planners side "
+            "by side on eight lenses and lets you set a NON-winning engine as "
+            "your default; *Tune knobs* sweeps one engine against weights you "
+            "choose. Finished runs are shared — nothing runs twice.\n"
             "- **Accuracy (forecast vs actuals)** — the only mode that grades "
             "the *biology* rather than the plan. Upload a forecast workbook "
             "you produced earlier plus the ProductionReport that came after "
             "it, and it reports how far each batch's predicted weight and "
             "count missed reality, and whether the misses lean one way. Costs "
-            "nothing to run and changes nothing: it reads two files. It cannot "
-            "grade harvest execution or freshwater — see the mode's own "
-            "limits list.\n"
+            "nothing to run and changes nothing: it reads two files. It "
+            "cannot grade harvest execution or freshwater — see the mode's "
+            "own limits list.\n"
             "- **How it works (the rules)** — the plain-language rulebook: "
-            "every pipeline layer (inputs → manual window → freshwater → entry "
-            "→ placement → harvest → depuration → audits), what each decides, "
-            "what it may never do, which checks bind it, and the honest "
-            "known-limits list. Read it once before trusting or challenging a "
-            "plan.\n\n"
-            "*(The old Tune mode retired — its density distribution + severe-batch "
-            "readout is now a checklist gate + drill-in on the Analyze board, and "
-            "the stocking frontier moved there with it. The headless density sweep "
-            "is still available via `tools/tune_sweep.py`.)*"
+            "every pipeline layer (inputs → manual window → freshwater → "
+            "entry → placement → harvest → depuration → audits), what each "
+            "decides, what it may never do, which checks bind it, and the "
+            "honest known-limits list.\n\n"
+            "*(Retired modes: **Tune** (2026-08-06) — its density readout is "
+            "a checklist gate + drill-in, the stocking frontier moved with "
+            "it, and `tools/tune_sweep.py` still runs headless. **Analyze**, "
+            "**Compare & Choose** and **Optimize** (2026-08-31) — merged into "
+            "Decide as the three steps above; nothing was lost, and "
+            "tests/test_decide_mode.py pins each capability. See USER_GUIDE "
+            "13.1 and 13.4.)*"
         )
     st.divider()
 
@@ -5404,13 +5389,47 @@ with st.sidebar:
     _chosen_m = _method_obj(_chosen)
     st.caption(f"Method: **{_chosen_m.label}**")
     if _chosen == _DEFAULT_METHOD:
-        st.caption("The default. It is the only method measured to harvest "
-                   "something every single week — the plain Controller has an "
-                   "empty week on 5 of 6 real PRs. Compare & Choose runs every "
-                   "method and lets you pick a different one.")
+        # The hybrid is the default because its L1 guide harvests LESS in fat
+        # weeks so fish still exist for lean ones — the fix for empty harvest
+        # weeks (the plain Controller left one on 5 of 6 real PRs).
+        #
+        # But its purge lever REFUSES ITSELF when sixn_level_drains is off
+        # (hybrid_guide.py: that knob is the guard against over-filling one 6N
+        # pair, and the hybrid must not be what removes it). With the shipped
+        # config the arm then produces a plan BYTE-IDENTICAL to the plain
+        # controller -- measured 2026-08-31, 0 of 33 metrics differed. Claiming
+        # a difference the operator cannot get is how the "Feed leveling ON"
+        # panel went wrong; say which case they are actually in.
+        _lev_on = False
+        if _cfg_ok:
+            try:
+                from forecast.config_io import load_control
+                _lev_on = bool(getattr(load_control(CONFIG_DIR),
+                                       "sixn_level_drains", False))
+            except Exception:                            # noqa: BLE001
+                _lev_on = False
+        if _lev_on:
+            st.caption(
+                "The default. Its long-horizon guide harvests LESS in fat weeks "
+                "so fish still exist for lean ones — the fix for empty harvest "
+                "weeks (the plain Controller leaves one on 5 of 6 real PRs). "
+                "**Decide → Compare engines** runs every method and lets you "
+                "pick a different one.")
+        else:
+            st.caption(
+                "The default — but note its **purge lever is currently "
+                "refused**, because *Level 6N purge drains* is off (that knob "
+                "guards against over-filling one 6N pair, and the hybrid may "
+                "not be what removes it). With the lever refused this arm "
+                "plans identically to **Controller — reactive greedy**: "
+                "measured 2026-08-31, not one of 33 metrics differed. Turn "
+                "*Level 6N purge drains* on in Configure to get the hybrid "
+                "behaviour, or read this as the plain controller. "
+                "**Decide → Compare engines** runs every method.")
     else:
-        st.caption("Picked on the Compare & Choose board. Pick another there, "
-                   "or re-select the hybrid to go back to the default.")
+        st.caption("Picked on the **Decide → Compare engines** board. Pick "
+                   "another there, or re-select the hybrid to go back to the "
+                   "default.")
     if _cfg_ok:
         # Guarded because this runs in EVERY mode, before the mode dispatch: an
         # unreadable control.yaml here used to blank the whole app, including
@@ -6452,7 +6471,8 @@ def _optimizer():
             f"Your picked plan is **{_chm.label}** (a Global engine). Optimize "
             f"sweeps and validates the **controller-family** engine, so a "
             f"recommendation saved here was not measured on your picked plan — "
-            f"re-run **Compare & Choose** after saving to see its effect there.")
+            f"re-run **Decide -> Compare engines** after saving to see its effect "
+            f"there.")
 
     _hist = optimize.read_run_log(n=15)
     if _hist:
@@ -7169,7 +7189,7 @@ def _ensure_board_score(res: dict, label: str) -> None:
 
 
 def _compare_and_choose():
-    st.header("⚖️ Compare & Choose — run the methods, pick the plan")
+    st.header("⚖️ Compare engines — run the methods, pick the plan")
     st.caption(
         "Runs the planning methods on your PR, grades them on several lenses, and "
         "lets **you** pick which plan becomes the report — and which method ▶ Run "
@@ -8263,7 +8283,7 @@ def _analyze(skip_lever_check=False):
         st.caption("No analysis yet — click ▶ above. Roughly "
                    f"{'1½–2 h' if include_milp else '45–75 min'} hands-off; "
                    "finished engine legs are reused across re-runs and shared "
-                   "with Compare & Choose.")
+                   "with Decide -> Compare engines.")
         return
     if ana["sig"] != _sweep_inputs_sig():
         st.warning("⚠ This analysis was computed on a **different PR or "
