@@ -147,8 +147,16 @@ Real sizes, measured:
 
 - controller knob space = 5 knobs -> **162 combinations**
 - 3 controller arms -> **486 runs ≈ 2 h** at ~15 s — genuinely exhaustive
-- `global-lp` ~4 min/run -> 162 runs ≈ 11 h
-- `global-milp` ~30 min/run -> 162 runs ≈ **81 h** — needs a coarse sub-grid
+- `global-lp` **~35 min/run measured on the 8.23.26 PR** (2026-08-31), not the
+  ~4 min this line used to claim — an order of magnitude out. 162 runs would be
+  ~4 days, not 11 hours.
+- `global-milp` ~30 min/run was measured on a different PR and should be treated
+  as a floor, not an estimate, until re-measured — if it scales like LP did, a
+  full grid is a multi-day job.
+
+**Measure the Global runtime on YOUR PR before planning around it.** Both
+figures above were quoted from an earlier scenario and one of them was wrong by
+10x, which is enough to turn an afternoon into a week.
 
 **Operator inputs are never searched.** `UNTUNABLE_KNOBS` holds 16 of them
 (`min_harvest_weight_g`, `max_harvest_per_week`, `tran_og_default_tanks`, the
