@@ -5194,8 +5194,30 @@ st.set_page_config(
 )
 
 st.title("AS Production Forecast — NEXT (v2)")
-st.caption("Development build on branch `v2/roster-and-emphasis`. "
-           "Your production app is the one under OneDrive; this one is safe to break.")
+# WHICH COPY AM I? Derived from where the file actually lives, never hardcoded.
+# The hardcoded version said "your production app is the one under OneDrive;
+# this one is safe to break" — true in the dev checkout, and a LIE the moment
+# that code was ported INTO the OneDrive copy, where it told the operator their
+# live tool was the disposable one. Caught by opening the app, 2026-09-01;
+# no test could see it. The branch name is read from git for the same reason.
+def _which_copy() -> str:
+    _here = Path(__file__).resolve()
+    _is_prod = "onedrive" in str(_here).lower()
+    try:
+        import subprocess
+        _br = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                             cwd=str(_here.parent), capture_output=True,
+                             text=True, timeout=3).stdout.strip() or "?"
+    except Exception:                                    # noqa: BLE001
+        _br = "?"
+    if _is_prod:
+        return (f"**Production build** — branch `{_br}`. This is the live tool "
+                f"under OneDrive: changes here affect the plan you ship.")
+    return (f"Development build on branch `{_br}`. Your production app is the "
+            f"one under OneDrive; this one is safe to break.")
+
+
+st.caption(_which_copy())
 st.caption(
     "Upload an input workbook, run the planner, review the results, "
     "and download a new workbook with all tabs populated. "
