@@ -31,17 +31,37 @@ def test_the_mode_list_is_five_and_offers_decide():
         assert not any(o.startswith(gone.rstrip(" (")) for o in opts), gone
 
 
-def test_decide_renders_all_three_as_tabs():
-    """The wrapper must actually call all three, or a capability is unreachable
-    however present its code is."""
-    body = SRC[SRC.index("def _decide():"):SRC.index("def _analyze():")]
-    for fn in ("_analyze()", "_compare_and_choose()", "_optimizer()"):
+def _decide_body():
+    i = SRC.index("def _decide():")
+    j = SRC.index("def _decide_targets():")
+    return SRC[i:j]
+
+
+def test_decide_renders_every_capability_owner():
+    """All three must actually be called, or a capability is unreachable
+    however present its code is. Tabs or expanders — the shape may change, the
+    reachability may not."""
+    body = _decide_body()
+    for fn in ("_analyze(", "_compare_and_choose()", "_optimizer()"):
         assert fn in body, f"Decide does not render {fn}"
-    assert "st.tabs(" in body
 
 
-def test_the_three_functions_still_exist_untouched():
-    for fn in ("def _analyze():", "def _compare_and_choose():", "def _optimizer():"):
+def test_the_drill_ins_are_collapsed_not_chosen_up_front():
+    """The 2026-08-31 tab version rearranged the decisions instead of removing
+    them: the operator still had to pick a tab before asking anything. Compare
+    and Tune answer FOLLOW-UP questions, so they belong behind expanders under
+    the result, not beside it."""
+    body = _decide_body()
+    assert "st.expander(" in body
+    i_search = body.index("_analyze(")
+    for follow_up in ("_compare_and_choose()", "_optimizer()"):
+        assert body.index(follow_up) > i_search, (
+            f"{follow_up} renders before the search — it is a follow-up "
+            f"question, not the first one")
+
+
+def test_the_three_functions_still_exist():
+    for fn in ("def _analyze(", "def _compare_and_choose():", "def _optimizer():"):
         assert fn in SRC, fn
 
 
@@ -96,9 +116,15 @@ def test_the_retirement_is_documented():
 
 
 def test_decide_leads_with_the_cheap_question():
-    """The monthly lever check is 2 minutes and most months says 'keep what you
-    have'; the engine tournament is far heavier. Recommend must come first."""
-    body = SRC[SRC.index("def _decide():"):SRC.index("def _analyze():")]
-    order = [body.index(x) for x in ("_analyze()", "_compare_and_choose()",
-                                     "_optimizer()")]
-    assert order == sorted(order), "tab order should be recommend -> compare -> tune"
+    """The lever check is ~2 minutes and most months says 'keep what you have';
+    the engine search is far heavier. Check must come before Search."""
+    body = _decide_body()
+    assert body.index("_monthly_lever_check(") < body.index("_analyze("), (
+        "the 2-minute check must run before the heavy search")
+
+
+def test_the_lever_check_is_not_rendered_twice():
+    """Step 1 owns it; _analyze must be told to skip it, or the page shows the
+    same panel and the same button twice."""
+    assert "skip_lever_check" in SRC
+    assert "_analyze(skip_lever_check=True)" in _decide_body()

@@ -2098,7 +2098,27 @@ fitted before they could ask it. Two of them ran the same engine legs over the
 same roster writing the same cache, so the split cost a decision without buying
 anything.
 
-They are now tabs of **Decide**, in the order the question is actually answered:
+They are now one **numbered flow** in Decide, worked top to bottom:
+
+| step | what it asks | typical answer |
+|---|---|---|
+| **1 · Check** | has anything changed this month? (~2 min) | *keep what you have* |
+| **2 · Search** | which engine and knobs win on this PR? | confirms the plan you already run |
+| **3 · Drill in** | only if you disagree with step 2 | not opened |
+
+Steps 1 and 2 are the month's work. After that the everyday step is just
+**▶ Run forecast**, until something changes.
+
+**The first version got this wrong** and is worth recording: it made the three
+modes three *tabs*, which rearranged the decisions instead of removing them —
+you still had to choose a tab before you could ask anything, and picking a plan
+in one tab did not feed the next. The operator's correction, on first use:
+*"from one tab I can run the sweep for all, then pick the default to feed
+forecast."* Compare's lenses and the knob sweep answer **follow-up** questions
+("why did this win?", "what if I weighted it differently?"), so they are now
+expanders under the result rather than siblings chosen up front.
+
+Where each former mode went:
 
 | tab | question | was |
 |---|---|---|

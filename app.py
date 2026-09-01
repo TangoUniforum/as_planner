@@ -7720,51 +7720,84 @@ def _monthly_lever_check(uploaded, targets):
 
 
 def _decide():
-    """One entry point for "which plan should I run?".
+    """One screen, in the order the question is actually answered.
 
-    Analyze, Compare & Choose and Optimize answered three views of ONE question,
-    and an operator had to know which mode fitted before they could ask it. Two
-    of them ran the same engine legs over the same roster writing the same cache
-    (app.py Analyze phase 1 vs the Compare run loop), so the split cost a
-    decision without buying anything.
+    The first cut of this merged three MODES into three TABS, which rearranged
+    the decisions instead of removing them — the operator still had to choose a
+    tab before they could ask anything, and picking a plan in one tab did not
+    feed the next. Their words: "from one tab I can run the sweep for all, then
+    pick the default to feed forecast, and I can do that every time — or if I am
+    happy with the default then just run forecast every time."
 
-    This is deliberately a WRAPPER, not a rewrite. The three functions are
-    unchanged and rendered as tabs, so all thirteen capabilities the mode audit
-    found living only in Compare and Optimize survive BY CONSTRUCTION — the
-    between-system and within-system CV lenses, the tank-footprint and
-    fastest-run lenses, the raw density peak, the per-method metric readout,
-    setting the standing engine to a NON-winning method, picking a plan while
-    writing nothing to config, the force re-run, the ~100-second engine-only
-    path, the partial-roster warning, the CP-SAT solve-depth control (which
-    Analyze itself reads), and naming a failed engine leg with its error.
+    So the page is now a numbered FLOW:
 
-    The repo's documented failure mode is retiring a mode and quietly losing
-    what only it could do (USER_GUIDE 13.1). A wrapper cannot do that; a deeper
-    integration could, and is a separate decision made with the tests in
-    tests/test_decide_mode.py holding the line.
+        1  CHECK   the monthly lever check (~2 min; usually "keep what you have")
+        2  SEARCH  run the engines and the knob search, graded on the checklist
+        3  ADOPT   set the default that the everyday Run forecast uses
 
-    Tab order is the order the question is actually answered: which LEVERS this
-    month (cheap, 2 minutes, and most months the answer is "keep what you
-    have"), then which ENGINE, then which KNOBS.
+    Compare's eight lenses and the knob sweep are DRILL-INS underneath, not
+    sibling tabs chosen up front: they answer "why did this win?" and "what if I
+    weighted it differently?", which are follow-up questions, not the first one.
+    Every capability is still reachable (tests/test_decide_mode.py pins them);
+    what changed is that nothing has to be chosen before the work starts.
     """
     st.header("🧭 Decide — which plan should I run?")
     st.caption(
-        "Three views of one question. **Recommend** runs every engine, tunes "
-        "the knobs and grades every candidate against the checklist — start "
-        "here. **Compare engines** puts the planners side by side on eight "
-        "lenses. **Tune knobs** sweeps one engine's settings on an objective "
-        "you choose. Finished runs are shared between them; nothing runs twice."
+        "Work down the page. Most months step 1 says *keep what you have* and "
+        "step 2 confirms the plan you already run — then you are done until "
+        "next month, and the everyday step is just **▶ Run forecast**."
     )
-    _tabs = st.tabs(["Recommend a plan", "Compare engines", "Tune knobs"])
-    with _tabs[0]:
-        _analyze()
-    with _tabs[1]:
+
+    st.markdown("### 1 · Check — has anything changed this month?")
+    st.caption(
+        "Two minutes. Your config against a couple of declared alternatives on "
+        "THIS PR, ranked on the constraints. Most months the answer is *keep "
+        "what you have*, and that is a real answer, not a failed run."
+    )
+    _monthly_lever_check(uploaded, _decide_targets())
+    st.divider()
+
+    st.markdown("### 2 · Search — which engine and knobs win on this PR?")
+    st.caption(
+        "Runs every planning engine, searches its knobs, and grades every "
+        "candidate on the twelve-gate checklist. The recommendation and the "
+        "adopt/promote buttons are at the end of this step."
+    )
+    _analyze(skip_lever_check=True)
+    st.divider()
+
+    st.markdown("### 3 · Drill in — only if you disagree with step 2")
+    st.caption(
+        "Neither of these is needed for a normal month. Open one when you want "
+        "to know WHY a plan won, or to steer the search yourself."
+    )
+    with st.expander("⚖️ Compare engines on eight lenses — "
+                     "and set a NON-winning engine as your default"):
+        st.caption(
+            "The board behind the recommendation: handling, harvest steadiness, "
+            "balance across and within systems, density, welfare, tank "
+            "footprint and run time. Use it when the winning plan is not the "
+            "one you want to run, for a reason the score cannot see.")
         _compare_and_choose()
-    with _tabs[2]:
+    with st.expander("🎛️ Tune knobs on one engine with your own weights"):
+        st.caption(
+            "Sweeps the controller family against an objective you choose, with "
+            "a Pareto view of the trade. Note it tunes the CONTROLLER — if your "
+            "chosen plan is a Global engine, knobs found here were not measured "
+            "on it.")
         _optimizer()
 
 
-def _analyze():
+def _decide_targets():
+    """Targets for the lever check, read the same way _analyze reads them."""
+    from forecast import analysis as _ana
+    try:
+        return _ana.load_targets(CONFIG_DIR)
+    except Exception:                                    # noqa: BLE001
+        return None
+
+
+def _analyze(skip_lever_check=False):
     import hashlib
     from datetime import datetime as _dtn
     from forecast import analysis as _ana
@@ -7793,11 +7826,12 @@ def _analyze():
     if not (_ok_t and _ok_e):
         return
 
-    # The cheap, decisive question first: which LEVERS for this month? It is a
-    # 2-minute check, it answers what an operator actually asks monthly, and it
-    # is independent of the engine tournament below.
-    _monthly_lever_check(uploaded, targets)
-    st.divider()
+    # Step 1 of the Decide flow owns the lever check; _analyze still renders it
+    # when reached directly (a legacy deep-link), so the capability never
+    # depends on which entry point was used.
+    if not skip_lever_check:
+        _monthly_lever_check(uploaded, targets)
+        st.divider()
     _t_bits = []
     _t_bits.append(f"🎯 {len((targets or {}).get('monthly', {}))} monthly + "
                    f"{len((targets or {}).get('yearly', {}))} yearly target(s)"
