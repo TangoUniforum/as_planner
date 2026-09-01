@@ -1375,7 +1375,7 @@ def sixn_trapped_review(out_path) -> Optional[dict]:
 
     MEASURED 2026-08-31: tank OG6N-69 held 53,006 fish from 2026-W16 to
     2027-W20 — 58 rotations, frozen off feed, never harvested. Across eight
-    starting states, 3,121 live tonnes were trapped in five of them.
+    starting states, 1,222 live tonnes were trapped in four of them.
 
     Conservation does NOT catch this: nothing is lost, the fish simply stand at
     horizon end, and every hard gate passes. It is a plan that cannot physically

@@ -137,7 +137,7 @@ class ControlParams:
     # MEASURED on 8 starting states, 2026-08-31: this livelocks. OG6N-69 held
     # 53,006 fish from 2026-W16 to 2027-W20 -- 58 consecutive rotations, frozen
     # at 4.371 kg, off feed, bleeding ~79 fish/week to mortality and never
-    # harvested. 5 of the 8 states trap fish this way, up to 1,463 t live on the
+    # harvested. 4 of the 8 states trap fish this way, up to 493 t live on the
     # July'26 close. It is not a conservation fault (nothing is lost; the fish
     # stand at horizon end) -- it is a PHYSICALLY IMPOSSIBLE plan, since salmon
     # held off feed for a year are dead. It also manufactures the sub-floor
@@ -153,7 +153,7 @@ class ControlParams:
     # close to a full week's limit that promise can never be kept: any earlier
     # harvest in the week leaves too little room, and the same thing happens on
     # every rotation after. Measured: 53,006 fish held from 2026-W16 to
-    # 2027-W20, and 5 of 8 starting states trap fish this way.
+    # 2027-W20, and 4 of 8 starting states trap fish this way.
     # Draining biggest-first WITHIN the pair (`sixn_drain_largest_first`) only
     # half-fixes it -- it cannot help when the budget was already spent before
     # the pair was reached (one measured week had 60 fish of headroom left).

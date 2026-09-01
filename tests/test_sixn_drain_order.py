@@ -1,4 +1,4 @@
-"""The 6N purge pipeline can trap fish forever, and neither drain-order fix works.
+"""The 6N purge pipeline can trap fish forever; both drain-order fixes cost the floor.
 
 THE DEFECT (measured 2026-08-31, 8 starting states, still OPEN)
 --------------------------------------------------------------
@@ -17,25 +17,36 @@ sub-floor harvest week: a trapped tank means its pair partner drains ALONE, whic
 is the 7,129 = min_tank_control (7,000) x _REMNANT_KEEP_PAD (1.02) eroded by a
 week of mortality, seen across unrelated starting states.
 
-Scale across the eight states: 3,121 live tonnes trapped, 5 of 8 states affected.
+Scale across the eight states: 1,222 live tonnes trapped, 4 of 8 states affected.
 
 WHY THE TWO OBVIOUS FIXES ARE OFF
 ---------------------------------
 `sixn_drain_largest_first` (drain the pair's biggest tank first) and
 `sixn_overdue_drain_weeks` (a tank past N weeks in purge gets first claim on the
-week and is exempt from the hold) both cut TOTAL trapped biomass by about a
-third -- 3,121 t -> 2,171 t / 2,224 t -- and both are incoherent per state:
+week and is exempt from the hold) are OFF -- but note the reason narrowed once
+the detector was fixed.
 
-    state          trapped t          weeks below floor      worst week
-                base  od4  od4+big   base  od4  od4+big   base   od4     od4+big
-    2026-01-31   143   859      0      7    12       7    7,763  7,589   7,763
-    2026-03-31   402     0     34     13    12       8    7,129  7,129   8,825
-    2026-07-31 1,463   793  1,484     10     5      16    7,125 16,740   1,684
-    8.13 PR      915   320    507      5     3       0    7,261  7,261  30,012
+RE-MEASURED with the corrected detector. Trapped biomass, tonnes:
 
-Each variant's worst failure is somewhere the other succeeds: od4 TRIPLES trapped
-fish on 2026-01-31 while clearing 2026-03-31; od4+big clears 2026-01-31 while
-driving July'26's worst harvest week to 1,684 fish and its floor misses to 16.
+    state         base   od4   od4+big        weeks below floor (base/od4/od4+big)
+    2026-01-31     143     0         0        7 / 12 / 7
+    2026-03-31     402     0         0       13 / 12 / 8
+    2026-07-31     493   110        30       10 /  5 / 16
+    8.13 PR        183    32       244        5 /  3 / 0
+    TOTAL        1,222   142       274
+
+So the BENEFIT is much larger than first reported: od4 removes 88% of the
+trapped biomass (1,222 -> 142 t), not "about a third" -- that understatement was
+an artifact of the row-counting detector, not a property of the fix.
+
+They stay off on the FLOOR, which is the sales contract and unaffected by the
+detector bug: od4 takes 2026-01-31 from 7 to 12 weeks below the weekly minimum,
+and od4+big takes July'26 from 10 to 16 and drives its worst week to 1,684 fish.
+Better on three states, materially worse on one, is not a default.
+
+WORTH RECONSIDERING rather than closed: a variant that keeps od4's trapped-fish
+gain without the 2026-01-31 floor regression would be a real fix, and the gain
+is now known to be worth chasing.
 
 Reordering WHICH tank drains only moves the blockage, because the binding fact is
 that a 53,000-fish tank cannot coexist with any other harvest inside a 55,000
@@ -81,8 +92,10 @@ def test_the_livelock_is_recorded_not_fixed():
     knob is ever adopted it must come with a fresh 8-state measurement, because
     both measured variants regress at least one state badly."""
     assert _field("sixn_drain_largest_first").default is False, (
-        "adopting this needs a re-measure: it made 2026-01-31 worse on every "
-        "axis and left 507-713 t still trapped on the two worst states")
+        "adopting this needs a fresh 8-state measure: it made 2026-01-31 worse "
+        "on every axis, and it is the weaker of the two on trapped fish")
     assert _field("sixn_overdue_drain_weeks").default == 0, (
-        "adopting this needs a re-measure: it tripled trapped biomass on "
-        "2026-01-31 (143 t -> 859 t)")
+        "adopting this needs a fresh 8-state measure: it removes 88% of the "
+        "trapped biomass (1,222 -> 142 t) but takes 2026-01-31 from 7 to 12 "
+        "weeks below the weekly contract floor. The gain is real; the floor "
+        "cost is what disqualifies it as a DEFAULT")

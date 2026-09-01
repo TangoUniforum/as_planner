@@ -59,23 +59,6 @@ The defect is unchanged and still real — tank OG6N-69 held 53,006 fish across 
 unbroken weeks, decaying only by mortality. What changed is how much of the
 facility it affects: four states, not five, and 1,222 t rather than 3,121 t.
 
-## Scale (as first reported — superseded by the table above)
-
-Occupancy spells of ≥8 weeks in STARVE (a legal purge is 1–2 weeks), shipped
-config, eight starting states:
-
-| state | spells | longest | fish | tonnes live |
-|---|---|---|---|---|
-| 2026-07-31 | 11 | 54 wks | 363,116 | **1,463** |
-| 8.13 PR | 7 | 53 wks | 222,146 | 915 |
-| 2026-03-31 | 2 | 58 wks | 101,033 | 402 |
-| 8.23 PR | 1 | 8 wks | 54,940 | 199 |
-| 2026-01-31 | 1 | 11 wks | 30,294 | 143 |
-| 2026-05-31 / 2026-06-30 / **LIVE Forecast.xlsm** | 0 | — | — | — |
-| **total** | | | | **3,121 t** |
-
-The live workbook is clean, so this is not an active crisis on the file in use.
-
 ## It manufactures the sub-floor harvest weeks
 
 A trapped tank means its **pair partner drains alone**. That lone drain is the
@@ -99,23 +82,31 @@ and it is manufactured by a rule — not a shortage of fish. In one such week
 
 Eight states, shipped config as baseline:
 
+RE-MEASURED with the corrected detector:
+
 | state | trapped t (base / od4 / od4+big) | weeks below floor | worst week |
 |---|---|---|---|
-| 2026-01-31 | 143 / **859** / 0 | 7 / **12** / 7 | 7,763 / 7,589 / 7,763 |
-| 2026-03-31 | 402 / **0** / 34 | 13 / 12 / **8** | 7,129 / 7,129 / **8,825** |
+| 2026-01-31 | 143 / **0** / **0** | 7 / **12** / 7 | 7,763 / 7,589 / 7,763 |
+| 2026-03-31 | 402 / **0** / **0** | 13 / 12 / **8** | 7,129 / 7,129 / **8,825** |
 | 2026-05-31 | 0 / 0 / 0 | 3 / 3 / 3 | unchanged |
 | 2026-06-30 | 0 / 0 / 0 | 5 / 5 / 5 | unchanged |
-| 2026-07-31 | 1,463 / **793** / 1,484 | 10 / **5** / **16** | 7,125 / **16,740** / **1,684** |
-| 8.13 PR | 915 / **320** / 507 | 5 / 3 / **0** | 7,261 / 7,261 / **30,012** |
-| 8.23 PR | 199 / 199 / 199 | 3 / 3 / 3 | unchanged |
+| 2026-07-31 | 493 / **110** / **30** | 10 / **5** / **16** | 7,125 / **16,740** / **1,684** |
+| 8.13 PR | 183 / **32** / 244 | 5 / 3 / **0** | 7,261 / 7,261 / **30,012** |
+| 8.23 PR | 0 / 0 / 0 | 3 / 3 / 3 | unchanged |
 | LIVE | 0 / 0 / 0 | 2 / 2 / 2 | unchanged |
-| **total trapped** | **3,121 / 2,171 / 2,224** | | |
+| **total trapped** | **1,222 / 142 / 274** | | |
 
-Both cut total trapped biomass by about a third, and both are **incoherent per
-state**. Each variant's worst failure lands where the other succeeds: `od4`
-triples trapped fish on 2026-01-31 (143 → 859 t) while clearing 2026-03-31
-entirely; `od4+big` clears 2026-01-31 to zero while driving July'26's worst
-harvest week to **1,684 fish** and its floor misses to 16 weeks.
+**The benefit is much larger than first reported.** `od4` removes **88%** of the
+trapped biomass (1,222 → 142 t) and clears two states outright. The earlier
+"about a third" was an artifact of the row-counting detector, not a property of
+the fix.
+
+What disqualifies them as defaults is the **contract floor**, which the detector
+bug never touched: `od4` takes 2026-01-31 from 7 to 12 weeks below the weekly
+minimum, and `od4+big` takes July'26 from 10 to 16 and drives its worst week to
+**1,684 fish**. Better on three states and materially worse on one is not a
+default — but a variant keeping od4's gain without the 2026-01-31 regression
+would be a real fix, and the gain is now known to be worth chasing.
 
 An earlier within-pair-only variant behaved the same way — it fully cleared
 2026-03-31 (+38,289 fish harvested) and took 8.13 to zero floor misses, but made
@@ -140,11 +131,21 @@ A 6N tank is drained WHOLE. So any make-room dump of a tank above
 whatever the drain order. It is born un-harvestable. That is why every fix so
 far only half-worked — all of them are downstream of the tank being created.
 
-Confirmed by the fill-side clamp: `sixn_level_drains` halves the trapped
-biomass (July'26 1,463 → 800 t, 8.13 PR 915 → 477 t) and improves the contract
-floor markedly (floor misses 10 → 4 and 5 → 1) — and leaves **the biggest tank
-unchanged**, 89,397 → 91,276. It caps the pair's weekly fill; it does not stop a
-whole oversized growout tank being dumped in.
+Confirmed by the fill-side clamp. `sixn_level_drains` (re-measured with the
+corrected detector) cuts trapped biomass by **70–80%** — July'26 493 → 145 t,
+8.13 PR 183 → 32 t — and improves the contract floor markedly, floor misses
+10 → 4 and 5 → 1. It also costs: per-system feed worsens on both (58 → 64,
+50 → 69) and 8.13 exceeds the 15-move handling budget at 17.
+
+And it leaves **the biggest tank unchanged**, 89,397 → 91,276. It caps the
+pair's weekly fill; it cannot stop a whole oversized growout tank being dumped
+in. The trapped-fish gain comes from not over-stuffing a pair week to week, not
+from fixing the dump — which is why the root cause below still stands.
+
+The feed cost has a mechanism, not just a correlation: capping the fill leaves
+the surplus in GROW-OUT, where fish keep eating, instead of moving them into 6N
+where they go off feed. Steadier harvest is bought with feed load, by choosing
+where the fish wait.
 
 **Note** `sixn_level_drains` is in `UNTUNABLE_KNOBS` — an operator input, held
 out of every automated search on purpose. It was measured here through

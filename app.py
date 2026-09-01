@@ -805,7 +805,7 @@ _CONTROL_HELP = {
         "Rescue fish stuck in purge. A 6N tank whose fish would not fit in "
         "the week's remaining processing budget is held for the next "
         "rotation - but a nearly-full tank never fits, so it can be held "
-        "forever (measured: 53,006 fish held 58 weeks off feed; 5 of 8 test "
+        "forever (measured: 53,006 fish held 58 weeks off feed; 4 of 8 test "
         "months trap fish this way). Set to N and a tank that has purged "
         "longer than N weeks drains anyway, using the exceptional relief "
         "band. 0 = off, the shipped behaviour. Unit: weeks.",
