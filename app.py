@@ -4231,6 +4231,11 @@ def _edit_targets_prices():
             st.session_state["_tgt_prefill"] = {
                 m: round(_plan_kg.get(m, 0.0)) for m in _months
                 if m not in _partial}
+            # A keyed data_editor keeps its OWN state: handing it a new
+            # DataFrame does nothing on screen. Bump the nonce so the widget is
+            # rebuilt, or Prefill silently appears to do nothing.
+            st.session_state["_tgt_nonce"] = \
+                st.session_state.get("_tgt_nonce", 0) + 1
 
     _seed = st.session_state.pop("_tgt_prefill", None)
     _src = _seed if _seed is not None else t["monthly"]
@@ -4253,10 +4258,13 @@ def _edit_targets_prices():
             "Month (YYYY-MM)",
             help="Calendar month this target applies to, e.g. 2026-11. Run a "
                  "forecast to get a drop-down of real months instead."))
+    st.markdown("**Monthly targets** — type in the **Target (kg)** column. "
+                "Add a row with the **+** at the bottom of the table; clear a "
+                "cell to remove that month's target.")
     mdf = st.data_editor(
         pd.DataFrame(_rows_m),
         num_rows="dynamic", hide_index=True, use_container_width=True,
-        key="tgt_monthly",
+        key="tgt_monthly_%d" % st.session_state.get("_tgt_nonce", 0),
         column_config={
             "Month": _month_col,
             "Plan (t)": st.column_config.NumberColumn(
