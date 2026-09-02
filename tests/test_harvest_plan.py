@@ -117,3 +117,53 @@ def test_no_suggestion_for_a_trivial_gap():
 def test_no_suggestion_without_a_target():
     r = hp.MonthRow("2026-12", 376_000.0, None, ("2026-W49",), None, None)
     assert hp.suggest_band(r, 3.2) is None
+
+
+def test_capping_a_month_does_not_clear_its_floor():
+    """None means CLEAR, which is a real instruction. Using it for 'leave
+    alone' made a cap edit silently delete that month's minimum — caught on the
+    first write to a live limits.yaml."""
+    existing = {("2026-W41", hp.METRIC_MIN): 30_000.0}
+    new, _ = hp.merge_overrides(
+        existing, [("2026-10", ("2026-W41",), hp.LEAVE, 44_000.0)])
+    assert new[("2026-W41", hp.METRIC_MIN)] == 30_000.0, "floor was cleared"
+    assert new[("2026-W41", hp.METRIC_MAX)] == 44_000.0
+
+
+def test_none_still_clears_when_that_is_what_you_mean():
+    existing = {("2026-W41", hp.METRIC_MIN): 30_000.0}
+    new, _ = hp.merge_overrides(
+        existing, [("2026-10", ("2026-W41",), None, hp.LEAVE)])
+    assert ("2026-W41", hp.METRIC_MIN) not in new
+
+
+def test_bands_cap_the_fat_months_and_refuse_to_floor_the_lean_ones():
+    """Raising a floor cannot create fish. Capping defers fish that exist."""
+    over = hp.MonthRow("2026-10", 683_600.0, 600_000.0,
+                       tuple("2026-W%d" % n for n in (41, 42, 43, 44)), None, None)
+    short = hp.MonthRow("2026-12", 375_800.0, 700_000.0,
+                        tuple("2026-W%d" % n for n in (49, 50, 51, 52)), None, None)
+    edits, notes = hp.bands_for_targets([over, short], 3.306)
+    months = [e[0] for e in edits]
+    assert "2026-10" in months, "an over-target month must be capped"
+    assert "2026-12" not in months, "a short month must NOT get a forced floor"
+    assert any("cannot create fish" in n for n in notes)
+    # and the cap must be a MAX, leaving the floor untouched
+    e = next(x for x in edits if x[0] == "2026-10")
+    assert isinstance(e[2], hp._Leave) and e[3] is not None
+
+
+def test_floors_are_available_but_only_on_request_and_carry_the_warning():
+    short = hp.MonthRow("2026-12", 375_800.0, 700_000.0,
+                        ("2026-W49", "2026-W50"), None, None)
+    edits, notes = hp.bands_for_targets([short], 3.306, set_floors=True)
+    assert edits and edits[0][2] is not None
+    assert any("sales contract" in n for n in notes)
+
+
+def test_a_month_inside_tolerance_is_left_alone():
+    r = hp.MonthRow("2026-09", 598_700.0, 600_000.0,
+                    ("2026-W37", "2026-W38"), None, None)
+    edits, notes = hp.bands_for_targets([r], 3.306, tolerance_pct=5.0)
+    assert not edits
+    assert any("within tolerance" in n for n in notes)

@@ -37,6 +37,22 @@ METRIC_MIN = "min_harvest_per_week"
 METRIC_MAX = "max_harvest_per_week"
 
 
+class _Leave:
+    """Sentinel: 'do not touch this metric'.
+
+    None already means 'CLEAR this override', which is a real instruction. Using
+    None for both made a cap edit silently DELETE that month's floor -- caught
+    the first time bands_for_targets wrote to a live limits.yaml, where capping
+    September also cleared its minimum. Two different intentions need two
+    different values.
+    """
+    def __repr__(self):
+        return "LEAVE"
+
+
+LEAVE = _Leave()
+
+
 @dataclass
 class MonthRow:
     month: str                      # 'YYYY-MM'
@@ -150,6 +166,8 @@ def merge_overrides(existing: dict, edits: list[tuple]) -> tuple[dict, list]:
     log = []
     for month, weeks, mn, mx in edits:
         for metric, val in ((METRIC_MIN, mn), (METRIC_MAX, mx)):
+            if isinstance(val, _Leave):
+                continue                      # not this edit's business
             for w in weeks:
                 key = (w, metric)
                 if val is None:
@@ -187,3 +205,68 @@ def suggest_band(row: MonthRow, avg_fish_kg: float) -> Optional[str]:
                 f"cap on the fat month you want to defer from.")
     return (f"over by {gap / 1000:,.0f} t — about {fish:,.0f} fish/week could "
             f"defer. LOWER this month's cap to push them later.")
+
+
+# ---------------------------------------------------------------------------
+# Turning a TARGET into the BAND that chases it
+# ---------------------------------------------------------------------------
+# A target grades; a band steers. This is the bridge, and it is deliberately
+# ASYMMETRIC, because the two directions are not equally possible:
+#
+#   OVER target  -> LOWER that month's max_harvest_per_week. This works. The
+#                   surplus fish are alive and at weight; capping the week
+#                   defers them into a later one.
+#
+#   UNDER target -> raising min_harvest_per_week does NOT create fish. On the
+#                   8.23.26 PR, December is 324 t short while 400,000+ fish sit
+#                   just under the 3,500 g minimum harvest weight. A floor
+#                   written there is a sales commitment the facility cannot
+#                   meet, and min_harvest_per_week is exactly the contract the
+#                   whole checklist is built to protect.
+#
+# So the default is CAP THE FAT MONTHS and let the deferred fish arrive in the
+# lean ones. Floors are offered only behind an explicit flag, and always with
+# the feasibility warning attached.
+
+def bands_for_targets(rows, avg_fish_kg: float, *, set_floors: bool = False,
+                      tolerance_pct: float = 5.0) -> tuple[list, list]:
+    """(edits, notes) — per-week band edits that chase the monthly targets.
+
+    `edits` feeds merge_overrides directly. `notes` is what the operator must
+    read BEFORE applying: every month that cannot be fixed by a band, and why.
+    """
+    edits, notes = [], []
+    if avg_fish_kg <= 0:
+        return [], ["No average fish weight available — cannot convert tonnes "
+                    "to fish/week. Run a forecast first."]
+    for r in rows:
+        if r.target_kg is None or not r.weeks:
+            continue
+        gap = r.gap_kg or 0.0
+        tol = abs(r.target_kg) * (tolerance_pct / 100.0)
+        if abs(gap) <= tol:
+            notes.append(f"{r.month}: within tolerance ({gap / 1000:+,.0f} t) "
+                         f"— left alone")
+            continue
+        per_week = r.target_kg / avg_fish_kg / len(r.weeks)
+        if gap > 0:
+            # over target: cap the weeks so the surplus defers
+            edits.append((r.month, r.weeks, LEAVE, round(per_week)))
+            notes.append(
+                f"{r.month}: over by {gap / 1000:,.0f} t → cap "
+                f"{per_week:,.0f} fish/week across {len(r.weeks)} week(s). "
+                f"Those fish defer into later months.")
+        elif set_floors:
+            edits.append((r.month, r.weeks, round(per_week), LEAVE))
+            notes.append(
+                f"{r.month}: short {abs(gap) / 1000:,.0f} t → floor "
+                f"{per_week:,.0f} fish/week. WARNING: a floor does not create "
+                f"fish. If they are not at harvest weight the plan will miss "
+                f"it anyway, and min_harvest_per_week is your sales contract.")
+        else:
+            notes.append(
+                f"{r.month}: short {abs(gap) / 1000:,.0f} t — NOT written. "
+                f"Raising a floor cannot create fish; this month is filled by "
+                f"capping an earlier fat month so its fish defer into it, or "
+                f"it is simply not achievable this cycle.")
+    return edits, notes

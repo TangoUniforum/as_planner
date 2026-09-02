@@ -4131,12 +4131,28 @@ def _harvest_plan_panel():
         from forecast.scenario_io import load_limits
         _fl, _sl = load_limits(SCENARIO_DIR, load_control(CONFIG_DIR))
         weeks = sorted({r.get("week") for r in rows_h if r.get("week")})
+        # Stitch the ProductionReport's elapsed-month actuals exactly as
+        # _forecast_months does, or this panel calls the first month "partial"
+        # while the editor beside it calls the same month whole.
+        _st_kg = _pr_month_to_date_kg()
+        if _st_kg and (t or {}).get("basis", "hog") == "hog":
+            from forecast.config_io import load_control as _lc2
+            _y2 = float(getattr(_lc2(CONFIG_DIR), "default_hog_yield", 0.0) or 0.0)
+            _st_kg = _st_kg * _y2 if _y2 > 0 else 0.0
+        monthly = dict(monthly)
+        _first = min(monthly) if monthly else None
+        if _first and _st_kg:
+            monthly[_first] = monthly.get(_first, 0.0) + _st_kg
         rows = _hp.build_rows(monthly, t, weeks, _fl.overrides)
+        if _first and _st_kg:
+            rows = [r for r in rows]        # keep order; first month is whole now
     except Exception as e:                                   # noqa: BLE001
         st.warning(f"Could not read the last run for this panel: {e}")
         return
 
     partial = _hp.partial_months(rows)
+    if _st_kg and rows:
+        partial = set(partial) - {rows[0].month}
     st.markdown("**Where your last plan landed** — and the lever that moves it")
     st.caption(
         "Targets **grade** a plan; they steer nothing. What redistributes "
@@ -4185,6 +4201,128 @@ def _harvest_plan_panel():
                 _s = _hp.suggest_band(r, _avg)
                 if _s:
                     st.markdown(f"- **{r.month}** — {_s}")
+    st.divider()
+
+
+def _target_solver_panel():
+    """Close the loop: adjust the weekly band until the plan hits the targets.
+
+    Targets grade; bands steer. This is the only place the two are joined, and
+    it is a BUTTON rather than an automatic step because it rewrites
+    scenario/limits.yaml -- the file that shapes every future run.
+
+    It caps, it never floors. Capping a fat month defers fish that already
+    exist; raising a floor cannot create fish, and min_harvest_per_week is the
+    sales contract. A month that is short because its fish are under harvest
+    weight cannot be fixed here, and the result says so instead of pretending.
+    """
+    from forecast import analysis as _ana
+    t = _ana.load_targets(CONFIG_DIR)
+    if not (t and t.get("monthly")):
+        return
+    if uploaded is None:
+        st.caption("Upload a ProductionReport to solve the bands against it.")
+        return
+    st.markdown("**Hit these targets** — solve the per-week band")
+    st.caption(
+        "Runs the forecast, measures each month against your target, adjusts "
+        "the weekly harvest cap, and repeats — keeping the BEST attempt, not "
+        "the last, because this planner is chaos-sensitive. It only ever CAPS "
+        "a month that is over: capping defers fish that exist, whereas raising "
+        "a floor cannot create them. Roughly 30 s per iteration. Nothing is "
+        "written until you press Apply.")
+    c1, c2 = st.columns(2)
+    iters = c1.number_input("Iterations", 2, 12, 6, 1, key="slv_iters",
+                            help="Each one is a full forecast run (~30 s). "
+                                 "Measured on the 8.23.26 PR: most of the gain "
+                                 "arrives by iteration 3-4, then it settles.")
+    gain = c2.slider("Correction strength", 0.3, 1.0, 0.7, 0.1, key="slv_gain",
+                     help="How hard each step corrects. 1.0 overshoots and can "
+                          "oscillate; 0.7 measured stable. Lower is slower but "
+                          "steadier.")
+    if st.button("🎯 Solve the bands to hit my targets", key="slv_go"):
+        import tempfile
+        from tools.solve_targets import solve as _solve
+        work = Path(tempfile.mkdtemp(prefix="as_solveui_"))
+        in_path = work / (uploaded.name or "input.xlsm")
+        in_path.write_bytes(uploaded.getvalue())
+        bar = st.progress(0.0, text="Starting…")
+        rows_log = []
+
+        def _p(i, n, rec):
+            rows_log.append(rec)
+            bar.progress((i + 1) / n,
+                         text=("iteration %d/%d — deviation %.0f t, worst "
+                               "%.1f%%" % (i + 1, n, rec["total_dev_kg"] / 1000.0,
+                                           rec["worst_pct"])))
+        res = _solve(str(in_path), str(CONFIG_DIR), str(SCENARIO_DIR),
+                     str(work / "out"), iters=int(iters),
+                     tolerance_pct=float(t.get("tolerance_pct", 5.0)),
+                     gain=float(gain), progress=_p)
+        bar.progress(1.0, text="Done")
+        st.session_state["_slv_res"] = res
+
+    res = st.session_state.get("_slv_res")
+    if not res:
+        return
+    if res.get("error"):
+        st.warning(res["error"])
+        return
+    b = res.get("best")
+    if not b:
+        st.warning("No iteration completed — see the run log.")
+        return
+    tol = float(t.get("tolerance_pct", 5.0))
+    inside = sum(1 for pct in b["per_month_pct"].values() if abs(pct) <= tol)
+    st.success(
+        "Best: iteration %d — total deviation **%.0f t**, worst **%.1f%%**, "
+        "**%d of %d** month(s) inside your %.0f%% tolerance."
+        % (b["iter"] + 1, b["total_dev_kg"] / 1000.0, b["worst_pct"],
+           inside, len(b["per_month_pct"]), tol))
+    st.dataframe(
+        [{"Month": m,
+          "Plan (t)": round(b["monthly_kg"].get(m, 0.0) / 1000.0, 1),
+          "Target (t)": round(res["targets"][m] / 1000.0, 1),
+          "Deviation %": round(pct, 1),
+          "Inside tolerance": "yes" if abs(pct) <= tol else "NO"}
+         for m, pct in sorted(b["per_month_pct"].items())],
+        width="stretch", hide_index=True)
+    st.caption(
+        "A month that stays short after solving is usually not a control "
+        "problem: capping other months cannot create fish that are below the "
+        "minimum harvest weight. Check the plan's mature inventory before "
+        "assuming the band is at fault.")
+    with st.expander("Every iteration — did it converge, or wander?"):
+        st.dataframe(
+            [{"Iteration": h["iter"] + 1,
+              "Total deviation (t)": round(h.get("total_dev_kg", 0) / 1000.0, 1),
+              "Worst %": round(h.get("worst_pct", 0), 1),
+              "Weeks below floor": h.get("weeks_below_floor"),
+              "Worst harvest week": h.get("min_week"),
+              "Capped weeks": h.get("n_capped_weeks")}
+             for h in res.get("history", []) if "error" not in h],
+            width="stretch", hide_index=True)
+        st.caption(
+            "Watch the floor columns as well as the deviation. A band that "
+            "hits the tonnage while pushing weeks under the weekly contract "
+            "floor has traded the harder rule for the softer one.")
+    if st.button("💾 Apply these bands to Limits", key="slv_apply",
+                 type="primary",
+                 help="Writes ONLY the capped weeks into scenario/limits.yaml, "
+                      "merging with any bands you set by hand. Nothing else in "
+                      "the file is touched."):
+        from forecast.config_io import load_control as _lc
+        from forecast.scenario_io import (load_limits as _ll, load_batches as _lb,
+                                          dump_scenario as _ds)
+        _ctl = _lc(CONFIG_DIR)
+        _fl, _sl = _ll(SCENARIO_DIR, _ctl)
+        _before = len(_fl.overrides)
+        _fl.overrides = dict(b["overrides"])
+        _ds(SCENARIO_DIR, batches=_lb(SCENARIO_DIR),
+            facility_limits=_fl, system_limits=_sl)
+        st.success(
+            "Applied — %d week-override(s), was %d. Run the forecast again to "
+            "plan against them." % (len(_fl.overrides), _before))
     st.divider()
 
 
@@ -4266,8 +4404,14 @@ def _edit_targets_prices():
                                      if v is not None else None))}
                for k, v in sorted(_src.items())]
     if not _rows_m:
-        _rows_m = [{"Month": (_months[0] if _months else ""),
-                    "Plan (t)": None, "Target (t)": None}]
+        if _months:
+            _rows_m = [{"Month": m,
+                        "Plan (t)": round(_plan_kg.get(m, 0.0) / 1000.0, 1),
+                        "Target (t)": None}
+                       for m in _months if m not in _partial]
+        if not _rows_m:
+            _rows_m = [{"Month": (_months[0] if _months else ""),
+                        "Plan (t)": None, "Target (t)": None}]
     _opts = sorted(set(_months) | {r["Month"] for r in _rows_m if r.get("Month")})
     _month_col = (
         st.column_config.SelectboxColumn(
@@ -4280,9 +4424,10 @@ def _edit_targets_prices():
             "Month (YYYY-MM)",
             help="Calendar month this target applies to, e.g. 2026-11. Run a "
                  "forecast to get a drop-down of real months instead."))
-    st.markdown("**Monthly targets** — type in the **Target (kg)** column. "
-                "Add a row with the **+** at the bottom of the table; clear a "
-                "cell to remove that month's target.")
+    st.markdown("**Monthly targets** — every whole month of your run is listed "
+                "with what the plan delivered. Type your commitment in the "
+                "**Target (t)** column, in **tonnes**, for the months you care "
+                "about; leave the rest blank. Then press **Save** below.")
     _mdf_in = pd.DataFrame(_rows_m)
     # An all-empty column is dtype object, and a NumberColumn over an object
     # column renders READ-ONLY — the operator opens the tab with no targets set
@@ -4327,6 +4472,7 @@ def _edit_targets_prices():
         })
 
     st.divider()
+    _target_solver_panel()
     st.markdown("**Price per fish size** — turns harvest into revenue on the "
                 "Analyze board. Each harvest event is priced by its average "
                 "fish weight; harvest falling in **no band is reported as "
