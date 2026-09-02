@@ -2202,6 +2202,48 @@ spend.
 
 ---
 
+### 13.6 Targets GRADE. The weekly band STEERS. (2026-09-01)
+
+The single most confusing thing about this tool, now stated on the screen where
+it matters.
+
+**`config/targets.yaml` is read by the grading layer and by no planner module.**
+Setting a December target of 600 t tells you the plan missed by 224 t. It does
+not move one fish. That is by design — the targets gate is *penalised, never
+disqualifying* — but an operator who sets a target, re-runs, sees nothing change
+and concludes the tool is broken has been misled by the interface.
+
+**What actually redistributes tonnage is the per-week harvest band:**
+`min_harvest_per_week` / `max_harvest_per_week` overridden for a given week in
+`scenario/limits.yaml` (Configure → **Limits**). Those resolve through
+`caps.resolve_facility_cap` into the controller, so capping a fat month's weeks
+genuinely defers fish into a lean one. It is the same mechanism as the
+FacilityLimits bands in the VBA tool.
+
+**Configure → Targets & prices** now opens with *"Where your last plan landed"*:
+each month's planned tonnage, your target beside it, the gap, and the per-week
+band currently in force — so targets are set against real numbers rather than
+guessed, and the lever is named in the same view.
+
+Three details it is careful about:
+
+* **A month whose weeks disagree shows no band.** Blank means unset **or
+  mixed**; a month with some weeks capped and others not has no single number,
+  and inventing one would invite an edit that silently flattens the difference.
+* **Partial months are flagged.** The first and last month of a horizon are
+  short by arithmetic. Reading them as troughs is a real trap — an August run
+  ends with a 217 t October that is simply the horizon stopping.
+* **The fish-per-week readout is arithmetic, not advice.** This plan is
+  chaos-sensitive (a deliberately neutral knob moves the worst harvest week by
+  8,629 fish), so it reports the SIZE of a gap and never claims a setting will
+  close it. A shortfall also says where the fish would have to come from,
+  because raising a floor does not create them.
+
+**The loop:** run a forecast → read where it landed → set targets so the gate
+reports the gap → set the band in Limits to move it → re-run.
+
+---
+
 ## 14. Accuracy (forecast vs actuals) — grading the biology
 
 > **Measurement tooling (2026-08-21).** Four CLI tools now grade the model

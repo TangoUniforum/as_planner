@@ -4021,16 +4021,104 @@ def _config_io_section():
                 st.error(f"Import failed: {e}")
 
 
+def _harvest_plan_panel():
+    """Where the last plan LANDED, what you WANT, and the lever that moves it.
+
+    Targets GRADE; the per-week harvest band STEERS. `config/targets.yaml` is
+    read by the grading layer and by no planner module, so a target moves no
+    fish -- while `min/max_harvest_per_week` overridden per week in
+    scenario/limits.yaml resolves through caps.resolve_facility_cap into the
+    controller. An operator who sets a target, sees nothing move and concludes
+    the tool is broken has been misled by the interface.
+
+    This panel puts all three on one screen and says which is which.
+    """
+    from forecast import analysis as _ana, harvest_plan as _hp
+    res = st.session_state.get("result")
+    if not (res and res.get("ok") and res.get("output_path")):
+        st.info(
+            "**Run a forecast first.** This panel shows where your last plan "
+            "landed by month, so you can set targets against real numbers "
+            "instead of guessing — and it shows the per-week band that "
+            "actually moves tonnage.")
+        return
+    try:
+        rows_h = _ana.harvest_rows(res["output_path"])
+        t = _ana.load_targets(CONFIG_DIR)
+        monthly, _yearly = _ana.harvest_by_period(
+            rows_h, basis=(t or {}).get("basis", "hog"))
+        from forecast.config_io import load_control
+        from forecast.scenario_io import load_limits
+        _fl, _sl = load_limits(SCENARIO_DIR, load_control(CONFIG_DIR))
+        weeks = sorted({r.get("week") for r in rows_h if r.get("week")})
+        rows = _hp.build_rows(monthly, t, weeks, _fl.overrides)
+    except Exception as e:                                   # noqa: BLE001
+        st.warning(f"Could not read the last run for this panel: {e}")
+        return
+
+    partial = _hp.partial_months(rows)
+    st.markdown("**Where your last plan landed** — and the lever that moves it")
+    st.caption(
+        "Targets **grade** a plan; they steer nothing. What redistributes "
+        "tonnage is the per-week harvest band (`min/max_harvest_per_week`), "
+        "which the controller genuinely plans against — cap a fat month's "
+        "weeks and those fish defer into a lean one. Set targets below to see "
+        "the gap; set the band in **Limits** to close it."
+    )
+    _tot_kg = sum(r.actual_kg for r in rows)
+    _tot_fish = sum(float(r.get("count") or 0) for r in rows_h)
+    _avg = (_tot_kg / _tot_fish) if _tot_fish else 0.0
+    st.dataframe(
+        [{"Month": r.month + (" (partial)" if r.month in partial else ""),
+          "Plan (t)": round(r.actual_kg / 1000.0, 1),
+          "Target (t)": (round(r.target_kg / 1000.0, 1)
+                         if r.target_kg is not None else None),
+          "Gap (t)": (round(r.gap_kg / 1000.0, 1)
+                      if r.gap_kg is not None else None),
+          "Status": r.status,
+          "Weeks": len(r.weeks),
+          "Band min/wk": r.min_override,
+          "Band max/wk": r.max_override}
+         for r in rows],
+        width="stretch", hide_index=True)
+    if partial:
+        st.caption(
+            f"⚠ {', '.join(sorted(partial))} "
+            f"{'is' if len(partial) == 1 else 'are'} only partly inside the "
+            f"horizon — short by arithmetic, not a trough. Do not set a target "
+            f"against a partial month.")
+    st.caption(
+        "*Band min/wk / max/wk* show the per-week override where every week of "
+        "that month agrees. Blank means unset **or mixed** — a month with some "
+        "weeks capped and others not has no single number, and this panel will "
+        "not invent one.")
+    _gaps = [r for r in rows
+             if r.gap_kg is not None and r.month not in partial]
+    if _gaps and _avg > 0:
+        with st.expander("How big is each gap, in fish per week?"):
+            st.caption(
+                "Arithmetic, not a recommendation. This plan is "
+                "chaos-sensitive — a knob that should barely matter moves the "
+                "worst harvest week by 8,629 fish — so treat these as the SIZE "
+                "of the gap, never as a setting that will work.")
+            for r in sorted(_gaps, key=lambda x: (x.gap_kg or 0)):
+                _s = _hp.suggest_band(r, _avg)
+                if _s:
+                    st.markdown(f"- **{r.month}** — {_s}")
+    st.divider()
+
+
 def _edit_targets_prices():
     """Harvest targets + price bands — the ANALYSIS overlay. These score and
     judge plans (Analyze mode's checklist + revenue) but change no engine
     output, so saving here never invalidates cached runs."""
     from forecast import analysis as _ana
 
+    _harvest_plan_panel()
     st.markdown("**Harvest targets** — monthly / yearly harvest the plan "
                 "should deliver. Judged with a tolerance and **penalized, "
-                "never disqualifying**: Analyze flags shortfalls and prefers "
-                "plans that meet them, but a miss doesn't hide a plan.")
+                "never disqualifying**: the checklist flags shortfalls and "
+                "prefers plans that meet them, but a miss doesn't hide a plan.")
     _ok, t = _read_or_explain(lambda: _ana.load_targets(CONFIG_DIR),
                               "config/targets.yaml")
     if not _ok:
