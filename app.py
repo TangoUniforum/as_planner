@@ -4050,7 +4050,20 @@ def _forecast_months():
         weeks = sorted({r.get("week") for r in rows if r.get("week")})
         partial = _hp.partial_months(_hp.build_rows(monthly, t, weeks, {}))
         monthly = dict(monthly)
+        # BASIS. harvest_by_period returns HOG kg unless the targets say
+        # gross; read_pr_period gives GROSS kg. Adding them straight made the
+        # first month read 669 t against an honest hog figure of ~592 t —
+        # a 13% overstatement on the month a target is most likely set against.
+        _basis = (t or {}).get("basis", "hog")
         stitched = _pr_month_to_date_kg()
+        if stitched and _basis == "hog":
+            from forecast.config_io import load_control as _lc
+            _yield = float(getattr(_lc(CONFIG_DIR), "default_hog_yield", 0.0)
+                           or 0.0)
+            # No yield configured -> do NOT guess. Stitching gross into a hog
+            # column would overstate the month; showing the forecast tail alone
+            # merely understates it, and the caption says which you are seeing.
+            stitched = stitched * _yield if _yield > 0 else 0.0
         first = min(monthly) if monthly else None
         if first and stitched:
             monthly[first] = monthly.get(first, 0.0) + stitched
@@ -4255,9 +4268,10 @@ def _edit_targets_prices():
     if not _rows_m:
         _rows_m = [{"Month": (_months[0] if _months else ""),
                     "Plan (t)": None, "Target (t)": None}]
+    _opts = sorted(set(_months) | {r["Month"] for r in _rows_m if r.get("Month")})
     _month_col = (
         st.column_config.SelectboxColumn(
-            "Month", options=_months, required=False,
+            "Month", options=_opts, required=False,
             help="Which month this target applies to. The drop-down lists your "
                  "last run's months, so a target cannot land on a month the "
                  "plan does not cover — which would silently grade nothing.")
@@ -4269,8 +4283,16 @@ def _edit_targets_prices():
     st.markdown("**Monthly targets** — type in the **Target (kg)** column. "
                 "Add a row with the **+** at the bottom of the table; clear a "
                 "cell to remove that month's target.")
+    _mdf_in = pd.DataFrame(_rows_m)
+    # An all-empty column is dtype object, and a NumberColumn over an object
+    # column renders READ-ONLY — the operator opens the tab with no targets set
+    # and finds nowhere to type. Force float so the cells are editable from the
+    # very first visit.
+    for _c in ("Target (t)", "Plan (t)"):
+        if _c in _mdf_in.columns:
+            _mdf_in[_c] = pd.to_numeric(_mdf_in[_c], errors="coerce").astype(float)
     mdf = st.data_editor(
-        pd.DataFrame(_rows_m),
+        _mdf_in,
         num_rows="dynamic", hide_index=True, use_container_width=True,
         key="tgt_monthly_%d" % st.session_state.get("_tgt_nonce", 0),
         column_config={
