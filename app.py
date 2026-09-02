@@ -4021,6 +4021,73 @@ def _config_io_section():
                 st.error(f"Import failed: {e}")
 
 
+def _forecast_months():
+    """(months, plan_kg_by_month, partial_months, stitched_kg) from the last run.
+
+    Free-text month entry invites 2026-13, "Nov", and months outside the
+    horizon -- all of which store fine and then grade NOTHING, because the gate
+    only judges months the plan covers. Offering the run's OWN months makes a
+    mistyped target impossible.
+
+    The first month is STITCHED with the ProductionReport's elapsed-month
+    actuals. A run starting 2026-08-24 covers only the tail of August, so the
+    forecast alone reports 264 t for a month that actually landed 669 t once
+    the PR's 405 t (1-23 Aug) is counted. A monthly target is a business
+    commitment for the WHOLE month, so without the stitch the first month
+    always reads as a catastrophic miss. read_pr_period exists for this and its
+    docstring permits the reporting layer to use it -- the audits deliberately
+    must not, because feeding actuals into them would mask real defects.
+    """
+    from forecast import analysis as _ana, harvest_plan as _hp
+    res = st.session_state.get("result")
+    if not (res and res.get("ok") and res.get("output_path")):
+        return [], {}, set(), 0.0
+    try:
+        t = _ana.load_targets(CONFIG_DIR)
+        rows = _ana.harvest_rows(res["output_path"])
+        monthly, _y = _ana.harvest_by_period(
+            rows, basis=(t or {}).get("basis", "hog"))
+        weeks = sorted({r.get("week") for r in rows if r.get("week")})
+        partial = _hp.partial_months(_hp.build_rows(monthly, t, weeks, {}))
+        monthly = dict(monthly)
+        stitched = _pr_month_to_date_kg()
+        first = min(monthly) if monthly else None
+        if first and stitched:
+            monthly[first] = monthly.get(first, 0.0) + stitched
+            partial = set(partial) - {first}      # now a WHOLE month
+        return sorted(monthly), monthly, partial, stitched
+    except Exception:                                        # noqa: BLE001
+        return [], {}, set(), 0.0
+
+
+def _pr_month_to_date_kg() -> float:
+    """Gross kg the ProductionReport says was already harvested this month.
+
+    Zero when the PR carries no batch-period rows -- the caller then shows the
+    forecast-only figure rather than a guess.
+    """
+    pr = st.session_state.get("_pr")
+    if not (pr and pr.get("ok") and uploaded is not None):
+        return 0.0
+    try:
+        import io as _io
+        import openpyxl
+        from forecast.production_report import find_pr_sheet, read_pr_period
+        wb = openpyxl.load_workbook(_io.BytesIO(uploaded.getvalue()),
+                                    read_only=True, data_only=True)
+        try:
+            period = read_pr_period(find_pr_sheet(wb), pr.get("closing"))
+        finally:
+            wb.close()
+        if period is None:
+            return 0.0
+        return float(sum(getattr(b, "harv_gross_kg", 0.0) or 0.0
+                         for b in (getattr(period, "batches", None)
+                                   or {}).values()))
+    except Exception:                                        # noqa: BLE001
+        return 0.0
+
+
 def _harvest_plan_panel():
     """Where the last plan LANDED, what you WANT, and the lever that moves it.
 
@@ -4137,20 +4204,71 @@ def _edit_targets_prices():
                                "within this % under it counts as CLOSE (a "
                                "soft warning) instead of MISSED. Unit: %. "
                                "Default 5.")
+    _months, _plan_kg, _partial, _stitched = _forecast_months()
+    if not _months:
+        st.info(
+            "**No forecast run yet in this session** — month entry stays free "
+            "text until there is one. Run a forecast and this becomes a "
+            "drop-down of that plan's own months, with what it actually "
+            "delivered beside each, so targets are set against real numbers "
+            "instead of typed into a blank box.")
+    else:
+        _bits = ["%d month(s) from your last run" % len(_months)]
+        if _stitched:
+            _bits.append(
+                "%s includes %s t already harvested this month per the "
+                "ProductionReport, so it is a WHOLE month rather than the "
+                "forecast's tail" % (_months[0], format(round(_stitched / 1000.0), ",")))
+        if _partial:
+            _bits.append("%s still only partly inside the horizon — do not "
+                         "target %s" % (", ".join(sorted(_partial)),
+                                        "it" if len(_partial) == 1 else "them"))
+        st.caption(" · ".join(_bits))
+        if st.button("Prefill targets from the last run", key="tgt_prefill",
+                     help="Copies what the plan actually delivered into every "
+                          "whole month, so you edit from reality. Nothing is "
+                          "saved until you press Save below."):
+            st.session_state["_tgt_prefill"] = {
+                m: round(_plan_kg.get(m, 0.0)) for m in _months
+                if m not in _partial}
+
+    _seed = st.session_state.pop("_tgt_prefill", None)
+    _src = _seed if _seed is not None else t["monthly"]
+    _rows_m = [{"Month": k,
+                "Plan (t)": (round(_plan_kg[k] / 1000.0, 1)
+                             if k in _plan_kg else None),
+                "Target_kg": v}
+               for k, v in sorted(_src.items())]
+    if not _rows_m:
+        _rows_m = [{"Month": (_months[0] if _months else ""),
+                    "Plan (t)": None, "Target_kg": None}]
+    _month_col = (
+        st.column_config.SelectboxColumn(
+            "Month", options=_months, required=False,
+            help="Which month this target applies to. The drop-down lists your "
+                 "last run's months, so a target cannot land on a month the "
+                 "plan does not cover — which would silently grade nothing.")
+        if _months else
+        st.column_config.TextColumn(
+            "Month (YYYY-MM)",
+            help="Calendar month this target applies to, e.g. 2026-11. Run a "
+                 "forecast to get a drop-down of real months instead."))
     mdf = st.data_editor(
-        pd.DataFrame([{"Month": k, "Target_kg": v}
-                      for k, v in sorted(t["monthly"].items())]
-                     or [{"Month": "", "Target_kg": None}]),
+        pd.DataFrame(_rows_m),
         num_rows="dynamic", hide_index=True, use_container_width=True,
         key="tgt_monthly",
         column_config={
-            "Month": st.column_config.TextColumn(
-                "Month (YYYY-MM)",
-                help="Calendar month this target applies to, e.g. 2026-11."),
+            "Month": _month_col,
+            "Plan (t)": st.column_config.NumberColumn(
+                "Plan (t)", disabled=True, format="%.1f",
+                help="What your last run actually delivered that month, for "
+                     "reference. Read-only: this is the plan, not a target."),
             "Target_kg": st.column_config.NumberColumn(
                 "Target (kg)", min_value=0.0, step=1000.0,
                 help="Harvest the plan should deliver that month, in the "
-                     "chosen basis (hog/gross). Unit: kg."),
+                     "chosen basis (hog/gross). Unit: kg — 600 t is 600000. "
+                     "Targets GRADE the plan; to MOVE tonnage set the per-week "
+                     "band in Limits."),
         })
     ydf = st.data_editor(
         pd.DataFrame([{"Year": k, "Target_kg": v}
