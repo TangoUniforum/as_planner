@@ -1265,9 +1265,23 @@ def _gate_system_feed(ctx):
             f"{sf['worst_system']}; {sf['systems_breaching']} system(s) affected "
             f"— {where}")
     if sf["worst"] > 1.10 or sf["over_pct"] > 25.0:
-        return "FAIL", (tail + ". The feed system cannot deliver this: check "
-                        "the rebalancer budget, whose relief pass shaves "
-                        "over-cap systems and does nothing when set to 0")
+        # The old text sent the operator straight at rebalance_balance_budget,
+        # "whose relief pass shaves over-cap systems and does nothing when set
+        # to 0". True mechanically, and BAD ADVICE: measured across 8 starting
+        # states 2026-08-31, turning that pass on trades the softer rule for the
+        # harder one -- weeks below the weekly CONTRACT floor went 3 -> 8 on the
+        # 8.23.26 PR and 10 -> 16 on July'26. Four levers were measured against
+        # this gate and all four were rejected as defaults, so there is no knob
+        # to reach for; what there is, is a per-month check.
+        return "FAIL", (tail + ". The feed system cannot deliver this. There is "
+                        "no default setting that fixes it: four levers were "
+                        "measured across 8 starting states (2026-08-31) and "
+                        "every one traded this away against the weekly "
+                        "contract floor — the rebalancer took floor misses "
+                        "3 -> 8 on this PR. Run **Decide → step 1, the monthly "
+                        "lever check** to see what THIS month's PR can afford; "
+                        "most months the honest answer is to keep what you "
+                        "have and carry the breach")
     return "WARN", tail
 
 
