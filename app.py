@@ -4229,7 +4229,7 @@ def _edit_targets_prices():
                           "whole month, so you edit from reality. Nothing is "
                           "saved until you press Save below."):
             st.session_state["_tgt_prefill"] = {
-                m: round(_plan_kg.get(m, 0.0)) for m in _months
+                m: round(_plan_kg.get(m, 0.0) / 1000.0, 1) for m in _months
                 if m not in _partial}
             # A keyed data_editor keeps its OWN state: handing it a new
             # DataFrame does nothing on screen. Bump the nonce so the widget is
@@ -4238,15 +4238,23 @@ def _edit_targets_prices():
                 st.session_state.get("_tgt_nonce", 0) + 1
 
     _seed = st.session_state.pop("_tgt_prefill", None)
+    # The file stores KILOGRAMS; the editor speaks TONNES, because the Plan
+    # column beside it is tonnes and a screen that mixes the two invites
+    # someone to type 600 meaning 600 t into a kg box (a 1000x error, in the
+    # column that states a sales commitment). A prefill seed is already tonnes;
+    # values loaded from targets.yaml are kg and get converted here.
+    _seed_is_tonnes = _seed is not None
     _src = _seed if _seed is not None else t["monthly"]
     _rows_m = [{"Month": k,
                 "Plan (t)": (round(_plan_kg[k] / 1000.0, 1)
                              if k in _plan_kg else None),
-                "Target_kg": v}
+                "Target (t)": (float(v) if _seed_is_tonnes
+                               else (round(float(v) / 1000.0, 1)
+                                     if v is not None else None))}
                for k, v in sorted(_src.items())]
     if not _rows_m:
         _rows_m = [{"Month": (_months[0] if _months else ""),
-                    "Plan (t)": None, "Target_kg": None}]
+                    "Plan (t)": None, "Target (t)": None}]
     _month_col = (
         st.column_config.SelectboxColumn(
             "Month", options=_months, required=False,
@@ -4271,27 +4279,29 @@ def _edit_targets_prices():
                 "Plan (t)", disabled=True, format="%.1f",
                 help="What your last run actually delivered that month, for "
                      "reference. Read-only: this is the plan, not a target."),
-            "Target_kg": st.column_config.NumberColumn(
-                "Target (kg)", min_value=0.0, step=1000.0,
+            "Target (t)": st.column_config.NumberColumn(
+                "Target (t)", min_value=0.0, step=10.0, format="%.1f",
                 help="Harvest the plan should deliver that month, in the "
-                     "chosen basis (hog/gross). Unit: kg — 600 t is 600000. "
-                     "Targets GRADE the plan; to MOVE tonnage set the per-week "
-                     "band in Limits."),
+                     "chosen basis (hog/gross). Unit: TONNES, matching the "
+                     "Plan column beside it — type 600 for 600 t. Stored as "
+                     "kg in config/targets.yaml. Targets GRADE the plan; to "
+                     "MOVE tonnage set the per-week band in Limits."),
         })
     ydf = st.data_editor(
-        pd.DataFrame([{"Year": k, "Target_kg": v}
+        pd.DataFrame([{"Year": k, "Target (t)": round(float(v) / 1000.0, 1)}
                       for k, v in sorted(t["yearly"].items())]
-                     or [{"Year": "", "Target_kg": None}]),
+                     or [{"Year": "", "Target (t)": None}]),
         num_rows="dynamic", hide_index=True, use_container_width=True,
         key="tgt_yearly",
         column_config={
             "Year": st.column_config.TextColumn(
                 "Year (YYYY)",
                 help="Calendar year this target applies to, e.g. 2027."),
-            "Target_kg": st.column_config.NumberColumn(
-                "Target (kg)", min_value=0.0, step=10000.0,
+            "Target (t)": st.column_config.NumberColumn(
+                "Target (t)", min_value=0.0, step=100.0, format="%.1f",
                 help="Harvest the plan should deliver that year, in the "
-                     "chosen basis (hog/gross). Unit: kg."),
+                     "chosen basis (hog/gross). Unit: TONNES — type 7000 for "
+                     "7,000 t. Stored as kg in config/targets.yaml."),
         })
 
     st.divider()
@@ -4347,26 +4357,29 @@ def _edit_targets_prices():
     if st.button("💾 Save targets & prices", key="tgt_save", type="primary"):
         import re as _re
         monthly, yearly, errs = {}, {}, []
+        # The editor speaks TONNES; targets.yaml stores KILOGRAMS. Convert at
+        # exactly this boundary, once, so the file format is unchanged and
+        # every reader (the gate, the tools, older configs) still sees kg.
         for rec in _records(mdf):
-            mth, kg = str(rec.get("Month") or "").strip(), rec.get("Target_kg")
-            if not mth and kg in (None, ""):
+            mth, tn = str(rec.get("Month") or "").strip(), rec.get("Target (t)")
+            if not mth and tn in (None, ""):
                 continue
             if not _re.fullmatch(r"20\d{2}-(0[1-9]|1[0-2])", mth):
                 errs.append(f"bad month '{mth}' (want YYYY-MM)")
-            elif kg in (None, ""):
+            elif tn in (None, ""):
                 errs.append(f"month {mth} has no target")
             else:
-                monthly[mth] = float(kg)
+                monthly[mth] = float(tn) * 1000.0
         for rec in _records(ydf):
-            yr, kg = str(rec.get("Year") or "").strip(), rec.get("Target_kg")
-            if not yr and kg in (None, ""):
+            yr, tn = str(rec.get("Year") or "").strip(), rec.get("Target (t)")
+            if not yr and tn in (None, ""):
                 continue
             if not _re.fullmatch(r"20\d{2}", yr):
                 errs.append(f"bad year '{yr}' (want YYYY)")
-            elif kg in (None, ""):
+            elif tn in (None, ""):
                 errs.append(f"year {yr} has no target")
             else:
-                yearly[yr] = float(kg)
+                yearly[yr] = float(tn) * 1000.0
         bands = []
         # The grid edits only default prices — carry each band's per-month
         # overrides through the save (matched by weight range), or a UI save
