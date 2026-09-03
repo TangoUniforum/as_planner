@@ -2798,24 +2798,39 @@ def _mw_fw_intake(state, ctx, rows, labels, date_for):
         st.caption(f"Entry grade → **bigger {big_n:,.0f} ≈ {big_avg / 1000:.2f} kg** · "
                    f"**smaller {small_n:,.0f} ≈ {small_avg / 1000:.2f} kg**")
 
-    occ = {x.tank_id for x in rows if x.week_label == wlabel and x.count > 0}
-    # R1: FW arrivals enter ONLY the entry tier (OG1/2) — the pool offers
-    # empty entry-tier tanks, never OG3+.
+    # tank -> the batch occupying it at this week (None keys = empty tank)
+    occ_b = {x.tank_id: x.batch_id
+             for x in rows if x.week_label == wlabel and x.count > 0}
+    # R1: FW arrivals enter ONLY the entry tier (OG1/2) — never OG3+, never 6N.
+    # Within that tier a tank is offered when it is EMPTY or already holds THIS
+    # cohort. Same-cohort top-up is not mixing (operator rule, 2026-09-02), and
+    # the engine agrees: events.TranOGEntry.apply merges a same-batch landing
+    # exactly as Transfer.apply always has. Before this, a split batch could be
+    # locked out entirely — on the 2026-08-31 PR all twelve entry tanks were
+    # occupied, two of them by B49 itself, so B49's own 250,225 freshwater fish
+    # had nowhere to go and the Add button could never enable.
     from forecast.tiers import is_entry as _is_entry
-    empty_og = [t.tank_id for t in _mw_tanks(state)
-                if t.type == "OG" and t.tank_id not in SIXN_ALL_TANKS
-                and _is_entry(t.system_id)
-                and t.tank_id not in occ]
-    if not empty_og:
-        st.caption("⚠ No empty entry-tier (OG1/2) tank at this week — FW "
-                   "arrivals may only enter OG1/2 (rule R1); free entry tanks "
-                   "first (move their fish forward).")
+    open_og = [t.tank_id for t in _mw_tanks(state)
+               if t.type == "OG" and t.tank_id not in SIXN_ALL_TANKS
+               and _is_entry(t.system_id)
+               and (t.tank_id not in occ_b or occ_b[t.tank_id] == bid)]
+    _same = [t for t in open_og if t in occ_b]
+    if not open_og:
+        st.caption("⚠ No entry-tier (OG1/2) tank available at this week — FW "
+                   "arrivals may only enter OG1/2 (rule R1), in a tank that is "
+                   "empty or already holds this same cohort. Free an entry tank "
+                   "first (move its fish forward).")
+    elif _same:
+        st.caption(f"Tanks already holding **{bid}** are offered too "
+                   f"({', '.join(str(t) for t in _same)}) — topping up a tank "
+                   f"with its own cohort is not mixing. The arriving fish blend "
+                   f"in at a count-weighted average weight.")
     dfmt = _mw_dest_fmt(state, _mw_occ_at(rows, wlabel))
     big_picks = st.multiselect(
-        "Tank(s) for the BIGGER grade", options=empty_og,
+        "Tank(s) for the BIGGER grade", options=open_og,
         format_func=dfmt, key=f"mw_fw_big_{sfx}")
     # A tank can't hold both grades — drop the big picks from the small options.
-    small_opts = [t for t in empty_og if t not in big_picks]
+    small_opts = [t for t in open_og if t not in big_picks]
     small_picks = st.multiselect(
         "Tank(s) for the SMALLER grade", options=small_opts,
         format_func=dfmt, key=f"mw_fw_small_{sfx}")
@@ -4065,6 +4080,14 @@ def _forecast_months():
             # merely understates it, and the caption says which you are seeing.
             stitched = stitched * _yield if _yield > 0 else 0.0
         first = min(monthly) if monthly else None
+        # ...and it must be credited to the PR's OWN month. A forecast whose
+        # first harvest month is later than the PR's closing month would
+        # otherwise receive another month's fish.
+        _pr = st.session_state.get("_pr") or {}
+        _cl = _pr.get("closing")
+        _pr_month = ("%04d-%02d" % (_cl.year, _cl.month)) if _cl else None
+        if first and stitched and _pr_month and first != _pr_month:
+            stitched = 0.0
         if first and stitched:
             monthly[first] = monthly.get(first, 0.0) + stitched
             partial = set(partial) - {first}      # now a WHOLE month
@@ -4093,6 +4116,19 @@ def _pr_month_to_date_kg() -> float:
         finally:
             wb.close()
         if period is None:
+            return 0.0
+        # ONLY a PR that closes PART-WAY through its month has anything to
+        # contribute. A month-end PR means the forecast starts on the 1st, so
+        # its first month is ALREADY whole -- stitching then adds the PREVIOUS
+        # month's harvest to it. Measured: the 2026-07-31 corpus PR carries
+        # 534,905 kg gross (433 t HOG) of JULY fish, which this would have
+        # credited to AUGUST and then labelled August complete, in the exact
+        # column an operator reads before typing a sales commitment.
+        #
+        # The rule is not new -- excel_io.py:693 and :1839 already gate the same
+        # merge on it, and PRPeriod.is_mid_month exists for the purpose. This
+        # code simply failed to ask. (I/O audit, 2026-09-02.)
+        if not getattr(period, "is_mid_month", False):
             return 0.0
         return float(sum(getattr(b, "harv_gross_kg", 0.0) or 0.0
                          for b in (getattr(period, "batches", None)
@@ -5581,14 +5617,33 @@ def _acc_calibration_section():
 # Page setup
 # ============================================================
 
+def _copy_label() -> str:
+    """"LIVE" or "NEXT (v2)", derived from where this file LIVES.
+
+    Pairs with `_which_copy` below, and exists for the same reason. That one
+    was fixed to derive the banner from the path; the TITLE and the browser tab
+    were left hardcoded, so the ported production copy announced itself as
+    "NEXT (v2)" in its heading while the banner directly underneath correctly
+    read "Production build". Two contradictory claims, one screen. Caught by
+    opening the app, 2026-09-02 — the same way the first one was, and again by
+    nothing a test could see.
+
+    It matters most in the TAB title: both copies get run at once, on different
+    ports, and the tab strip is the only place an operator can tell which
+    window is about to change the plan they ship.
+    """
+    return ("LIVE" if "onedrive" in str(Path(__file__).resolve()).lower()
+            else "NEXT (v2)")
+
+
 st.set_page_config(
-    page_title="AS Forecast — NEXT (v2)",
+    page_title=f"AS Forecast — {_copy_label()}",
     page_icon="🐟",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-st.title("AS Production Forecast — NEXT (v2)")
+st.title(f"AS Production Forecast — {_copy_label()}")
 # WHICH COPY AM I? Derived from where the file actually lives, never hardcoded.
 # The hardcoded version said "your production app is the one under OneDrive;
 # this one is safe to break" — true in the dev checkout, and a LIE the moment
@@ -6775,6 +6830,83 @@ def _daily_harvest_table(he_df):
     return pd.DataFrame(rows, columns=cols), total_pos, blank_pos
 
 
+def _feed_weekly(out_path):
+    """(DataFrame, notes) — whole-facility feed per week against THAT week's cap.
+
+    Feed is summed from WeeklyReport's per-batch `Feed (kg)`, which is every
+    tank the plan holds, so freshwater and 6N are included rather than only the
+    grow-out systems. The cap is `feed_per_day` resolved per week from the
+    workbook's OWN RunConfig snapshot (falling back to the Control default), so
+    the line drawn here is the limit that run actually planned against — a
+    reused workbook can never be judged against someone else's limits, and the
+    cap genuinely moves (the live scenario drops it to 27,500 kg/day from
+    2026-W37).
+
+    The comparison is per DAY because that is how the constraint is written:
+    a feed system delivers so many kg per day, so a week's total is only
+    meaningful divided by seven.
+    """
+    import openpyxl
+    import yaml
+    try:
+        wb = openpyxl.load_workbook(out_path, read_only=True, data_only=True)
+    except Exception as e:                                     # noqa: BLE001
+        return pd.DataFrame(), f"could not open the workbook ({e})"
+    try:
+        if "WeeklyReport" not in wb.sheetnames:
+            return pd.DataFrame(), "this workbook has no WeeklyReport sheet"
+        hdr, per_week = None, {}
+        for row in wb["WeeklyReport"].iter_rows(values_only=True):
+            if hdr is None:
+                labs = [str(c).strip() if c else "" for c in row]
+                if "Week" in labs and "Batch" in labs:
+                    hdr = labs
+                continue
+            g = (lambda n: row[hdr.index(n)]
+                 if n in hdr and hdr.index(n) < len(row) else None)
+            w, f = g("Week"), g("Feed (kg)")
+            if w and isinstance(f, (int, float)):
+                per_week[str(w)] = per_week.get(str(w), 0.0) + float(f)
+        # Per-week caps + the default, from the run's own stamp.
+        caps_by_week, default_cap = {}, 0.0
+        try:
+            from forecast.config_snapshot import read_config_snapshot
+            blocks = read_config_snapshot(wb) or {}
+            ctl = yaml.safe_load(blocks.get("config/control.yaml") or "") or {}
+            default_cap = float(ctl.get("max_feed_per_day_kg") or 0.0)
+            lim = yaml.safe_load(
+                blocks.get("scenario/limits.yaml") or "") or {}
+            for r_ in (lim.get("facility") or []):
+                if r_.get("metric") == "feed_per_day":
+                    caps_by_week[str(r_["week"])] = float(r_["value"])
+        except Exception:                                      # noqa: BLE001
+            pass
+    finally:
+        wb.close()
+    if not per_week:
+        return pd.DataFrame(), "the WeeklyReport carries no Feed (kg) column"
+    rows = []
+    for w in sorted(per_week):
+        kg = per_week[w]
+        cap_day = caps_by_week.get(w, default_cap)
+        per_day = kg / 7.0
+        rows.append({
+            "Week": w,
+            "Feed (kg/week)": round(kg),
+            "Feed (kg/day)": round(per_day),
+            "Cap (kg/day)": round(cap_day) if cap_day else None,
+            "% of cap": (round(per_day / cap_day * 100.0, 1)
+                         if cap_day else None),
+            "Over": ("OVER" if cap_day and per_day > cap_day else ""),
+        })
+    note = ("caps read from the run's own RunConfig snapshot"
+            if caps_by_week else
+            ("no per-week feed caps in this run — showing the Control default"
+             if default_cap else
+             "no feed cap configured, so nothing is drawn to compare against"))
+    return pd.DataFrame(rows), note
+
+
 def _quick_viz(r):
     """Inline visualization of a forecast result (used in the Optimize tab so the
     optimized run can be visualized without switching modes). Charts the harvest-
@@ -7943,7 +8075,12 @@ def _ana_grade(res, targets, econ):
     if targets:
         monthly, yearly = _ana.harvest_by_period(
             rows, basis=targets.get("basis", "hog"))
-        tr = _ana.review_targets(monthly, yearly, targets)
+        # Pass the REAL horizon, not one inferred from harvest: a stale target
+        # left in targets.yaml from an earlier cycle would otherwise be graded
+        # 0-vs-target and counted as a miss the plan never had a chance at.
+        tr = _ana.review_targets(
+            monthly, yearly, targets,
+            horizon_weeks=_ana.plan_weeks(res["output_path"]))
     rev = _ana.revenue_for(rows, econ) if (econ and rows) else None
     dcached = res.get("_ana_density")
     if not dcached or dcached.get("rid") != rid or dcached.get("schema") != _schema:
@@ -7991,6 +8128,12 @@ def _ana_grade(res, targets, econ):
         # since forever by _harvest_extras and written to the RunComparison
         # sheet — but until 2026-08-12 read by no gate and no score component.
         "weeks_below_floor": h.get("weeks_below_min"),
+        # Per-week floor detail, so the gate can judge each week against
+        # the floor the OPERATOR set for it rather than the Control default.
+        "floor_shortfall_fish": h.get("floor_shortfall_fish"),
+        "floors_from": h.get("floors_from"),
+        "worst_floor_week": h.get("worst_floor_week"),
+        "worst_floor_gap": h.get("worst_floor_gap"),
         "min_week": h.get("min_week"),
         "min_harvest": h.get("min_harvest"),
         "weeks_over_harvest_cap": (m.weeks_over_harvest_cap
@@ -8695,6 +8838,13 @@ def _analyze(skip_lever_check=False):
     # re-validated against the current METRICS_SCHEMA before it's trusted.
     _pr_now = hashlib.md5(uploaded.getvalue()).hexdigest()
     _skipped_stale = []
+    # WHY a leg is not on the board. The reason was already computed for every
+    # exclusion path and then discarded on all but one of them, so a tuned
+    # tournament whose legs failed to grade reported only "No graded candidates
+    # survived — check the engine round above", and the engine round shows run
+    # stdout, not the grading error. The operator was told to look where the
+    # answer was not. (Reported from the live tool, 2026-09-02.)
+    _excluded: list[tuple[str, str]] = []
     for k in ana["engine_keys"]:
         done = store.get(k)
         if not _ana.board_leg_current(done, _board_method_sig(k, _pr_now)):
@@ -8702,6 +8852,10 @@ def _analyze(skip_lever_check=False):
                 _lbl = (done["res"].get("_label", k)
                         if isinstance(done.get("res"), dict) else k)
                 _skipped_stale.append(_lbl)
+                _excluded.append((_lbl, "computed on different inputs "
+                                        "(PR/config/scenario) — re-run it"))
+            else:
+                _excluded.append((str(k), "never ran"))
             continue
         _ensure_board_score(done["res"], done["res"].get("_label", k))
         if done["res"].get("ok") and done["res"].get("_score"):
@@ -8713,9 +8867,15 @@ def _analyze(skip_lever_check=False):
         elif done["res"].get("ok"):
             # An engine leg that RAN but couldn't be graded must not vanish
             # without a word (Compare & Choose st.error()s the same state).
+            _why = done["res"].get("_score_err", "unknown")
             st.warning(f"{done['res'].get('_label', k)}: grading failed "
-                       f"({done['res'].get('_score_err', 'unknown')}) — left "
-                       f"off the candidate board.")
+                       f"({_why}) — left off the candidate board.")
+            _excluded.append((done["res"].get("_label", k),
+                              f"ran, but grading failed: {_why}"))
+        else:
+            _excluded.append((done["res"].get("_label", k),
+                              f"the run failed: "
+                              f"{done['res'].get('error') or 'no output produced'}"))
     if _skipped_stale:
         st.warning(f"{len(_skipped_stale)} stock engine leg(s) were computed on "
                    f"different inputs (PR/config/scenario) and are left OFF the "
@@ -8738,16 +8898,40 @@ def _analyze(skip_lever_check=False):
             # Re-grades from the cached workbook when the stored _score
             # predates the current METRICS_SCHEMA (or didn't survive disk).
             _ensure_board_score(_tr, _tr.get("_label", f"{_tk} (tuned)"))
+        _tlbl = (_tr or {}).get("_label", f"{_tk} (tuned)")
         if _tr and _tr.get("ok") and _tr.get("_score"):
             cands.append({"key": _tk,
-                          "label": _tr.get("_label", f"{_tk} (tuned)"),
+                          "label": _tlbl,
                           "overrides": _te.get("overrides") or {},
                           "res": _tr,
                           "prov": _provenance_line(
                               _tr, sig=ana.get("sig", ""),
                               fresh=_res_is_fresh(_tr))})
+        elif _tr and _tr.get("ok"):
+            _why = _tr.get("_score_err", "unknown")
+            st.warning(f"{_tlbl}: grading failed ({_why}) — left off the "
+                       f"candidate board.")
+            _excluded.append((_tlbl, f"ran, but grading failed: {_why}"))
+        else:
+            _excluded.append((_tlbl, f"the tuned run failed: "
+                                     f"{(_tr or {}).get('error') or 'no output produced'}"))
     if not cands:
-        st.error("No graded candidates survived — check the engine round above.")
+        st.error("No graded candidates survived — here is what happened to "
+                 "each one.")
+        if _excluded:
+            st.dataframe(
+                [{"Candidate": lbl, "Why it is not on the board": why}
+                 for lbl, why in _excluded],
+                width="stretch", hide_index=True)
+            st.caption(
+                "A run that FAILED needs the engine log; a run that graded "
+                "badly is a different problem from one that could not be "
+                "graded at all. Hard-gate failures do NOT land here — a "
+                "candidate that runs and grades still reaches the board and "
+                "shows red gates.")
+        else:
+            st.caption("No engine legs were stored at all — press ▶ to run "
+                       "them.")
         return
     for c in cands:
         g = _ana_grade(c["res"], targets, econ)
@@ -9228,14 +9412,65 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
     bio_df = _rv_memo("bio_df", _rid,
                       lambda: pd.DataFrame(r.get("biology_projection", [])))
 
-    tab_over, tab_batch, tab_period, tab_harvest, tab_yearly, tab_plan = st.tabs([
+    (tab_over, tab_batch, tab_period, tab_harvest, tab_feed, tab_yearly,
+     tab_plan) = st.tabs([
         "Overview",
         "Per-Batch",
         "Period Summary",
         "Harvest",
+        "Feed",
         "Yearly",
         "Plan",
     ])
+
+    # ============================================================
+    # Feed — whole-facility kg/week against that week's delivery cap
+    # ============================================================
+    with tab_feed:
+        st.subheader("Feed — whole facility, week by week")
+        _fdf, _fnote = _feed_weekly(r.get("output_path"))
+        if _fdf.empty:
+            st.info(f"No feed series available — {_fnote}.")
+        else:
+            _over = _fdf[_fdf["Over"] == "OVER"] if "Over" in _fdf else _fdf.iloc[0:0]
+            _peak = _fdf.loc[_fdf["Feed (kg/day)"].idxmax()]
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Peak feed", f"{_peak['Feed (kg/day)']:,.0f} kg/day",
+                      help=f"in {_peak['Week']}")
+            c2.metric("Weeks over the cap", f"{len(_over)}",
+                      help="the feed system cannot deliver these weeks as planned")
+            _wpct = _fdf["% of cap"].max() if "% of cap" in _fdf else None
+            c3.metric("Worst week",
+                      (f"{_wpct:,.0f}% of cap" if _wpct is not None else "—"))
+            _plot = _fdf.dropna(subset=["Cap (kg/day)"]) if "Cap (kg/day)" in _fdf else _fdf
+            fig = px.bar(_fdf, x="Week", y="Feed (kg/day)",
+                         title="Facility feed per day, by week")
+            if not _plot.empty:
+                # The cap MOVES, so it is drawn as a series, never one flat line.
+                fig.add_scatter(x=_plot["Week"], y=_plot["Cap (kg/day)"],
+                                mode="lines", name="cap (kg/day)",
+                                line=dict(dash="dot"))
+            fig.update_layout(height=380, xaxis_title="",
+                              yaxis_title="kg/day")
+            st.plotly_chart(fig, use_container_width=True)
+            st.caption(
+                f"Feed is summed from every tank the plan holds — freshwater "
+                f"and 6N included, not just grow-out — and compared PER DAY, "
+                f"because that is how the limit is written. The dotted line is "
+                f"each week's own cap ({_fnote}). A week over the line is one "
+                f"the feed system cannot deliver as planned; the checklist's "
+                f"per-system feed gate breaks the same overage down by system.")
+            if len(_over):
+                st.warning(
+                    f"{len(_over)} week(s) plan more feed than the facility can "
+                    f"deliver, worst {_over['% of cap'].max():,.0f}% of cap in "
+                    f"{_over.loc[_over['% of cap'].idxmax(), 'Week']}.")
+            st.dataframe(_fdf, width="stretch", hide_index=True)
+            st.download_button(
+                "Download the weekly feed series (CSV)",
+                _fdf.to_csv(index=False).encode("utf-8"),
+                file_name="feed_weekly.csv", mime="text/csv",
+                key="feed_csv_dl")
 
     # ============================================================
     # Tab 1: Overview — Advisory + occupancy heatmap

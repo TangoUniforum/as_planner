@@ -191,6 +191,30 @@ def working_day_month_split(event_date, forecast_start=None) -> dict[tuple[int, 
     return out
 
 
+def iso_week_month_split(event_date) -> dict[tuple[int, int], float]:
+    """(year, month) -> 1.0 for the month of the ISO week's MONDAY.
+
+    THE HARVEST MONTH CONVENTION (operator decision, 2026-09-02). A week's
+    harvest belongs, whole and undivided, to the month its Monday falls in.
+
+    The alternative -- `working_day_month_split`, which prorates a boundary
+    week across its Mon-Fri days -- is the more faithful description of when
+    fish physically leave the plant, and it is still correct for that purpose.
+    It is the wrong basis for a SALES number, because the contract counts a
+    week in the month of its Monday, and a plan graded on one convention while
+    committed on the other silently disagrees with itself.
+
+    Measured on the 2026-07-31 run before this change: the two conventions put
+    the same 7,919 t in different months, by as much as 97 t in a single month
+    (2026-08 reads 416.0 t by Monday and 328.6 t by working day) against
+    monthly targets of 570-700 t. Totals are identical either way -- this moves
+    no fish and changes no biomass, only which month reports it.
+    """
+    d = _as_date(event_date)
+    monday = d - timedelta(days=d.weekday())
+    return {(monday.year, monday.month): 1.0}
+
+
 def calendar_day_month_split(week_start, days: int = 7) -> dict[tuple[int, int], float]:
     """(year, month) -> fraction of a weekly DAILY flow in that calendar month.
 
@@ -199,7 +223,7 @@ def calendar_day_month_split(week_start, days: int = 7) -> dict[tuple[int, int],
     (default 7) and each day credited to its own month. A week wholly inside a
     month yields `{month: 1.0}`; a boundary week splits by calendar-day count
     (e.g. 3 days in July, 4 in August -> 3/7, 4/7). Contrast
-    `working_day_month_split`, used for harvest (a Mon-Fri-only flow).
+    `iso_week_month_split`, the harvest/sales convention.
     """
     ws = _as_date(week_start)
     n = max(1, days)

@@ -98,7 +98,13 @@ def _grade(out_path, cfg: dict, targets, engine_family: str = "") -> dict:
         rows = _ana.harvest_rows(str(out_path))
         monthly, yearly = _ana.harvest_by_period(
             rows, basis=targets.get("basis", "hog"))
-        tr = _ana.review_targets(monthly, yearly, targets)
+        # The real horizon, so a stale target cannot penalise a candidate for
+        # a month it was never asked to plan. Every candidate is scored on the
+        # same horizon, so this does not tilt the comparison — it stops all of
+        # them carrying the same phantom shortfall.
+        tr = _ana.review_targets(
+            monthly, yearly, targets,
+            horizon_weeks=_ana.plan_weeks(str(out_path)))
     try:
         sixn_out = _ana.sixn_outbound_transfers(
             str(out_path), str(cfg.get("sixn_production_start") or ""))
@@ -112,6 +118,12 @@ def _grade(out_path, cfg: dict, targets, engine_family: str = "") -> dict:
         "zero_weeks_excluded": harv.get("window_weeks_excluded"),
         # The CONTRACT FLOOR, beside the degenerate empty-week rule.
         "weeks_below_floor": harv.get("weeks_below_min"),
+        # Per-week floor detail, so the gate can judge each week against
+        # the floor the OPERATOR set for it rather than the Control default.
+        "floor_shortfall_fish": harv.get("floor_shortfall_fish"),
+        "floors_from": harv.get("floors_from"),
+        "worst_floor_week": harv.get("worst_floor_week"),
+        "worst_floor_gap": harv.get("worst_floor_gap"),
         "min_week": harv.get("min_week"),
         "min_harvest": min_hv or None,
         "weeks_over_harvest_cap": m.weeks_over_harvest_cap,
@@ -209,7 +221,11 @@ def main(argv=None) -> int:
             print(f"   FAILED rc={rc} — excluded from the board")
             summary["methods"][m.key] = {"status": "run-failed", "rc": rc}
             continue
-        g = _grade(actual, cfg, targets)
+        # The engine family, so _gate_handling_budget can apply its DECLARED
+        # asymmetry. Omitted since the helper gained the parameter, which
+        # left every headless grade running as "" -- a Global candidate was
+        # graded on a handling budget that is a Controller-only concept.
+        g = _grade(actual, cfg, targets, m.engine)
         fails = _tour.hard_gate_fails(g["gates"])
         print(f"   gates [{_gate_str(g['gates'])}] hard-fails: {fails or 'none'}"
               f"  ({elapsed:.0f}s)")
@@ -282,7 +298,7 @@ def main(argv=None) -> int:
             print(f"   verification FAILED rc={rc2} — competing at stock only")
             msum["verify"] = "failed"
             continue
-        g2 = _grade(actual2, cfg, targets)
+        g2 = _grade(actual2, cfg, targets, tuned_m.engine)
         lbl = _tour.tuned_label(m.label, winner, m.overrides)
         print(f"   gates [{_gate_str(g2['gates'])}]  ({el2:.0f}s)  -> {lbl}")
         msum["verify"] = "ok"

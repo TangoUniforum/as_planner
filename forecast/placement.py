@@ -1423,6 +1423,7 @@ def _transit_entry_to_pair(
     tables,
     sixn_move_in_feed,
     avoid=frozenset(),
+    weekly_min=None,
 ) -> float:
     """Route market-ready ENTRY-tier fish into the 6N fill pair the legal way.
 
@@ -1460,8 +1461,9 @@ def _transit_entry_to_pair(
     # taking them early costs more growth than a grow-out draw). Cap the
     # whole transit at the padded FLOOR; demand above the floor is served by
     # the grow-out cascade alone, exactly as it was pre-rules.
-    goal = min(goal, float(control.min_harvest_per_week or goal)
-               * _SIXN_FILL_MORTALITY_PAD)
+    _floor_src = (float(weekly_min) if weekly_min
+                  else float(control.min_harvest_per_week or goal))
+    goal = min(goal, _floor_src * _SIXN_FILL_MORTALITY_PAD)
     if min_hv <= 0 or goal <= already_moved:
         return 0.0
     from statistics import NormalDist as _ND
@@ -1547,7 +1549,8 @@ def _transit_entry_to_pair(
         added += _hopped
 
     # ---- Stage 2: GRADED transit of near-ripe entry tanks (floor only) -----
-    _floor_goal = min(goal, float(control.min_harvest_per_week or goal)
+    _floor_goal = min(goal, (float(weekly_min) if weekly_min
+                             else float(control.min_harvest_per_week or goal))
                       * _SIXN_FILL_MORTALITY_PAD)
     _min_tr = getattr(control, "min_transfer_count", 0.0) or 0.0
     if already_moved + added < _floor_goal and grade_events is not None:
@@ -1634,6 +1637,7 @@ def _run_sixn_purge_week(
     tables: Optional[BiologyTables] = None,
     sixn_move_in_feed: Optional[dict] = None,
     grade_events=None,
+    weekly_min: Optional[float] = None,
 ) -> Optional[tuple[int, int]]:
     """Run one week of the 6N purge pipeline (3-pair fallow rotation).
 
@@ -1820,7 +1824,17 @@ def _run_sixn_purge_week(
     #    when sufficient production inventory exists. (Computed BEFORE the
     #    source-batch pick so the entry forward-transit below knows the goal
     #    even when the grow-out pool is empty.)
-    min_h = control.min_harvest_per_week or 0
+    # THE FLOOR IS PER WEEK. `weekly_min` is the resolved
+    # min_harvest_per_week for the week this fill will DRAIN into, passed by
+    # the caller. Reading the Control DEFAULT here made the fill -- and so the
+    # floor-filling graded peel, whose clamp is _floor = min(_min_fill, target)
+    # -- stop at the global number regardless of what the operator committed
+    # to. Measured on the 2026-08-31 PR: operator floor 53,000 for 2026-W47,
+    # _min_fill = 30,000 x 1.002 = 30,060, pair drained 30,030 two weeks later.
+    # Falsy (None or 0) keeps the Control default, so a week with no override
+    # resolves bit-identically to before.
+    min_h = (float(weekly_min) if weekly_min
+             else (control.min_harvest_per_week or 0))
     # RELIEF SEMANTICS (operator correction 2026-08-09): the fill is DEMAND-
     # driven (move_in_target from the controller) and CAPPED at the weekly
     # processing limit — max_harvest_per_week is a constraint the harvest
@@ -2069,7 +2083,7 @@ def _run_sixn_purge_week(
             state, batch_meta, control, week_label, week_start_date,
             fill_pair, target, count_moved, transfer_events, grade_events,
             warnings, reserved, tables, sixn_move_in_feed,
-            avoid=_avoid_imminent)
+            avoid=_avoid_imminent, weekly_min=min_h)
 
     # GRADE-TO-MIN floor fill: when the whole-tank move-in + entry transit leave
     # the resting pair below the harvest FLOOR (min_h), peel just enough of the
@@ -4702,6 +4716,14 @@ def phase_d_emit_events(
         if purge_this_week:
             sixn_resting_pair = _run_sixn_purge_week(
                 state=state,
+                # The floor of the week this fill DRAINS into (t+lead), not
+                # this week's -- see the drain_idx note above: "move-in drives
+                # harvest at week t+lead". Falls back to this week's floor at
+                # the horizon tail, then to the Control default.
+                weekly_min=((resolve_facility_cap(
+                    METRIC_MIN_HARVEST, sorted_weeks[drain_idx],
+                    facility_limits, control)
+                    if drain_idx < len(sorted_weeks) else None) or min_hv),
                 pair_queue=sixn_pair_queue,
                 week_label=week_label,
                 week_start_date=week_start_date,
@@ -4994,8 +5016,11 @@ def phase_d_emit_events(
                     # harvest goes dark purge_days later (measured: the
                     # 2028-W43 zero on the 7.9.26 PR — every ripe fish sat in
                     # tanks averaging 3.33-3.48 kg vs the 3.5 kg gate).
+                    # Per-week floor here too: inert on today's scenario
+                    # (no min_harvest_per_week rows past 2026-W53) but a rule
+                    # the operator writes must mean the same thing everywhere.
                     _floor_p = min(_entry_target,
-                                   float(control.min_harvest_per_week
+                                   float(min_hv or control.min_harvest_per_week
                                          or _entry_target)
                                    * _SIXN_FILL_MORTALITY_PAD)
                     if _entered < _floor_p:

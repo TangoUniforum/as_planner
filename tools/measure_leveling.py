@@ -110,7 +110,7 @@ def measure(pr, combos, config_dir, scenario_dir, out_dir, tag, targets=None,
             print("  [%s] %-34s rc=%d" % (tag, name, rc), flush=True)
             continue
         cfg = {**base, **ov}
-        g = _grade(out, cfg, targets)
+        g = _grade(out, cfg, targets, m.engine)
         mt, gates = g["metrics"], g["gates"]
         sf = _ana.system_feed_review(out) or {}
         cv = _ana.convergence_review(out) or {}

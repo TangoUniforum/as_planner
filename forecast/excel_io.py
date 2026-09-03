@@ -652,14 +652,17 @@ def write_harvest_plan_report(
     batch — Units, Av Weight - Kg HOG, Biomass - Tons HOG — with monthly values
     and a year total. Blank cells for months with no harvest.
 
-    Boundary weeks (a week straddling a month boundary) are split between the
-    two months by WORKING-DAY fraction (see time_grid.working_day_month_split),
-    so a smooth weekly harvest maps to its true ~21-22 working-day share per
-    month instead of dumping the whole week into the week-start's month.
+    A week's harvest belongs WHOLE to the month of its ISO Monday
+    (time_grid.iso_week_month_split) -- the sales contract's own convention,
+    settled by the operator 2026-09-02. It previously prorated boundary weeks
+    across their Mon-Fri days, which describes when fish physically leave the
+    plant but is not how the month is counted; the two put up to 97 t of the
+    same harvest in different months, so a target set off this sheet was graded
+    against a different number. Totals are unaffected either way.
     """
     from collections import defaultdict
     from datetime import date as _date
-    from .time_grid import working_day_month_split
+    from .time_grid import iso_week_month_split
 
     if sheet_name in wb.sheetnames:
         del wb[sheet_name]
@@ -672,12 +675,12 @@ def write_harvest_plan_report(
     for ev in harvest_events:
         hog_yield = facility_limits_hog.get(iso_week_label(ev.event_date), default_hog_yield)
         hog_kg = ev.count * ev.avg_wt_g / 1000.0 * hog_yield
-        # Split the week's harvest across the months its Mon-Fri working days
-        # fall into (boundary weeks split by working-day fraction). No
-        # forecast_start clip: manual override-window harvests are dated BEFORE
-        # the shifted forecast_start, and clipping would dump a whole boundary
-        # week into one month/year (same class as the Daily Harvest Schedule bug).
-        for (yr, mo), frac in working_day_month_split(ev.event_date).items():
+        # The week's harvest goes WHOLE to its ISO Monday's month — the sales
+        # contract convention. There is no boundary split to clip, so the
+        # forecast_start hazard that the working-day version had to avoid
+        # (manual override-window harvests dated before the shifted start)
+        # cannot arise here.
+        for (yr, mo), frac in iso_week_month_split(ev.event_date).items():
             e = agg[(yr, ev.batch_id, mo)]
             e["count"] += ev.count * frac
             e["hog_kg"] += hog_kg * frac
@@ -1740,15 +1743,18 @@ def write_monthly_report(
     # Roll the weekly ledger up to calendar months, splitting any week that
     # straddles a month boundary into its true month. CONTINUOUS flows (growth,
     # feed, mortality, cull, input, transfers) happen every calendar day, so they
-    # split by CALENDAR-DAY fraction. HARVEST happens only Mon-Fri, so it splits
-    # by WORKING-DAY fraction -- identical to the HarvestPlan Report, so the two
-    # sheets' monthly harvest now tie out exactly. The two fractions differ on
-    # boundary weeks, so the month-boundary Open/Close is advanced by the harvest
-    # part and the non-harvest part SEPARATELY, each at its own cumulative
-    # fraction. Close is therefore exactly open + (the month's actual flows), so
-    # the monthly Count_Check / Bio_Check stay ~0 (the ledger stays internally
-    # consistent) even though harvest and the daily flows attribute differently.
-    from .time_grid import calendar_day_month_split, working_day_month_split
+    # split by CALENDAR-DAY fraction. HARVEST is counted by the sales contract's
+    # convention -- the whole week to its ISO Monday's month -- identical to the
+    # HarvestPlan Report, so the two sheets' monthly harvest tie out exactly.
+    # The two fractions still differ on boundary weeks, so the month-boundary
+    # Open/Close is advanced by the harvest part and the non-harvest part
+    # SEPARATELY, each at its own cumulative fraction. Close is therefore exactly
+    # open + (the month's actual flows), so the monthly Count_Check / Bio_Check
+    # stay ~0 (the ledger stays internally consistent) even though harvest and
+    # the daily flows attribute differently. That property comes from using each
+    # flow's OWN fraction for both the flow and the open/close advance, not from
+    # the particular fractions, so it survives the convention change.
+    from .time_grid import calendar_day_month_split, iso_week_month_split
     from datetime import date as _date
     FLOW_KEYS = ("gross_growth", "net_prod", "feed", "mort_count", "mort_bio",
                  "harv_count", "harv_gross", "harv_hog", "cull_count", "cull_bio",
@@ -1785,7 +1791,7 @@ def write_monthly_report(
                       f"missing from the monthly totals")
                 continue
             split_c = calendar_day_month_split(wkd)   # daily flows
-            split_w = working_day_month_split(wkd)     # harvest (no fs clip —
+            split_w = iso_week_month_split(wkd)        # harvest (no fs clip —
             #        pre-start manual weeks must split by working day like the rest)
             oc, ob = w["open_count"], w["open_bio"]
             hc, hg = w["harv_count"], w["harv_gross"]

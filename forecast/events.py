@@ -83,10 +83,20 @@ class TranOGEntry:
             if tank is None:
                 warns.append(f"TranOG {self.batch_id}: unknown tank #{dest.tank_id}")
                 continue
-            if not tank.is_empty:
+            # SAME-COHORT TOP-UP (operator rule, 2026-09-02). A cohort may
+            # land in a tank that already holds ITSELF; only a DIFFERENT batch
+            # is mixing. This is not a new idea in this file — Transfer.apply
+            # has always merged same-batch destinations the same way, with the
+            # same INV-1 message and the same count-weighted blend. TranOG was
+            # simply the one path that refused every occupied tank, which is
+            # why a batch split across freshwater and seawater (B49 on the
+            # 2026-08-31 PR: 47,743 fish already in OG1S-14 + OG2S-24, 250,225
+            # still in FW) had nowhere legal to land once the entry tier filled.
+            if not tank.is_empty and tank.batch_id != self.batch_id:
                 warns.append(
-                    f"TranOG {self.batch_id}: tank {tank.location_id} not empty "
-                    f"(holds batch {tank.batch_id})"
+                    f"TranOG {self.batch_id}: dest {tank.location_id} holds a "
+                    f"DIFFERENT batch {tank.batch_id} (INV-1) — a cohort may "
+                    f"share a tank only with itself"
                 )
                 continue
             if tank.type != "OG":
@@ -95,13 +105,46 @@ class TranOGEntry:
                     f"(type={tank.type})"
                 )
                 continue
-            tank.assign(
-                batch_id=self.batch_id,
-                count=dest.count,
-                avg_wt_g=dest.avg_wt_g,
-                cv_pct=dest.cv_pct,
-                stage=STAGE_SW,
-            )
+            if not tank.is_empty:
+                # These two guards bind ONLY on the top-up branch, so an EMPTY
+                # destination behaves exactly as before and no existing run
+                # changes. They are not optional: 6N depuration tanks are
+                # type "OG", so the check above does NOT exclude them, and
+                # `not tank.is_empty` was until now the only thing stopping a
+                # hand-written event from topping up an occupied 6N tank.
+                # Removing that without this guard would drive a hole straight
+                # through the 6N purge rule and the pair architecture.
+                if tank.system_id not in OG12_SYSTEMS:
+                    warns.append(
+                        f"TranOG {self.batch_id}: top-up refused — "
+                        f"{tank.location_id} ({tank.system_id}) is not entry "
+                        f"tier; FW arrivals may enter ONLY OG1/2 (rule R1)"
+                    )
+                    continue
+                if tank.stage != STAGE_SW:
+                    warns.append(
+                        f"TranOG {self.batch_id}: top-up refused — "
+                        f"{tank.location_id} is stage {tank.stage}, not on feed"
+                    )
+                    continue
+            if tank.is_empty:
+                tank.assign(
+                    batch_id=self.batch_id,
+                    count=dest.count,
+                    avg_wt_g=dest.avg_wt_g,
+                    cv_pct=dest.cv_pct,
+                    stage=STAGE_SW,
+                )
+            else:
+                # Count-weighted mean weight, identical to Transfer.apply.
+                # Biomass is conserved by construction: the new mean times the
+                # new count equals the sum of the two biomasses.
+                new_count = tank.count + dest.count
+                if new_count > 0:
+                    tank.avg_wt_g = (
+                        tank.count * tank.avg_wt_g
+                        + dest.count * dest.avg_wt_g) / new_count
+                tank.count = new_count
             placed += dest.count
 
         planned = sum(d.count for d in self.destinations)

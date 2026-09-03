@@ -339,8 +339,124 @@ def summarize_hydration(state: FacilityState) -> dict:
 # PR period flows — the part of the closing month already ELAPSED
 # ============================================================
 
-# Zero-indexed positions in the ProductionReport row tuple. The sheet is a
-# fixed export from the site system; these mirror the header row it ships with.
+# LEGACY positional fallback, used ONLY when a sheet carries no recognisable
+# header row. These positions are correct for the 2026-02-onward layout and
+# WRONG for older exports -- which is why _resolve_pr_columns exists and this
+# map is the last resort, not the first.
+#: Field -> the EXACT header label it ships under, lowercased and space-collapsed.
+#: Matching is by LABEL, never by position -- see _resolve_pr_columns.
+_PR_LABELS = {
+    "open_count":     ("opening count",),
+    "close_count":    ("closing count",),
+    "open_bio_kg":    ("opening biomass [kg]", "opening biomass"),
+    "open_avg_wt_g":  ("opening avg weight",),
+    "growth_kg":      ("gross growth in period",),
+    "feed_kg":        ("feed amount in period",),
+    "harv_count":     ("harvested count (incl discards) in period",),
+    "harv_gross_kg":  ("gross harvested biomass, incl. discards [kg] in period",
+                       "gross harvested biomass, incl. discards [kg]",
+                       "gross harvested biomass, incl. discards"),
+    "mort_bio_kg":    ("mortality biomass in period",),
+    "mort_count":     ("mortality count in period",),
+    "cull_bio_kg":    ("culling biomass in period",),
+    "cull_count":     ("culling count in period",),
+    "dev_count":      ("deviation count in period",),
+}
+
+#: Fields whose absence is survivable. `dev_count` is the site system's own
+#: count-correction term and simply does not exist in the pre-2026 layout;
+#: reading it as 0 is correct there (no correction was recorded). Every OTHER
+#: field is a real flow, and guessing one is how a facility harvesting 550 t a
+#: month came to report 439 kg.
+_PR_OPTIONAL = frozenset({"dev_count"})
+
+#: The elapsed-period FLOWS -- the only reason read_pr_period exists. A sheet
+#: carrying none of them is a state-only export with nothing to report, which
+#: is different from a sheet that has flows this reader failed to locate. The
+#: first returns None; the second raises. Collapsing the two would either break
+#: state-only sheets or restore the silence this whole change removes.
+_PR_FLOW_FIELDS = frozenset({
+    "growth_kg", "feed_kg", "harv_count", "harv_gross_kg",
+    "mort_count", "mort_bio_kg", "cull_count", "cull_bio_kg"})
+
+
+class PRLayoutError(ValueError):
+    """The sheet has a header, but not the columns this reader needs.
+
+    Raised rather than absorbed. A forecast built on a PR whose harvest column
+    could not be identified is worse than no forecast: it looks finished.
+    """
+
+
+def _norm_label(v) -> str:
+    return " ".join(str(v or "").split()).strip().lower()
+
+
+def _layout_error(missing, labels_found) -> str:
+    """Say which column is missing, what it should be called, and the nearest
+    thing actually on the sheet.
+
+    The first version dumped all ~25 labels and left the reader to spot the
+    difference. When a vendor renames one column -- `Feed amount in period` to
+    `Feed qty in period` -- the whole diagnosis is that one pair, and burying it
+    in a wall of text turns a 10-second fix into a hunt. Naming the near-miss
+    makes the report self-diagnosing: the fix is to add the new spelling to
+    _PR_LABELS, and the message tells you exactly what to add.
+    """
+    import difflib
+    have = sorted(l for l in (labels_found or ()) if l)
+    lines = []
+    for field in sorted(missing):
+        wanted = _PR_LABELS.get(field, ())
+        near = difflib.get_close_matches(wanted[0] if wanted else field,
+                                         have, n=2, cutoff=0.6)
+        lines.append("  %s — expected %r%s" % (
+            field,
+            wanted[0] if wanted else "?",
+            ("; the sheet has %s — renamed?"
+             % " or ".join(repr(x) for x in near)) if near
+            else "; nothing on the sheet resembles it"))
+    return ("ProductionReport header is missing %d required column(s):\n%s\n"
+            "Refusing to read the sheet. The positional fallback would return "
+            "a plausible-looking number from whichever column happens to sit "
+            "there, which is the failure this check exists to prevent. If the "
+            "report has simply been renamed, add the new spelling to "
+            "_PR_LABELS in forecast/production_report.py.\n"
+            "All %d labels found: %s"
+            % (len(lines), "\n".join(lines), len(have),
+               ", ".join(have)[:800]))
+
+
+def _resolve_pr_columns(header_row) -> tuple[dict, list]:
+    """(field -> column index, missing fields) resolved BY LABEL.
+
+    The ProductionReport ships in at least three layouts and the positional map
+    below is only correct for the newest. Measured across the 21-report corpus
+    (2026-09-02): on the 2025 layout, position 23 is `Biological FCR in period`
+    where the code expected `Feed amount`, and position 29 is `Harvest deviation
+    count` where it expected `Gross harvested biomass`. A site harvesting
+    ~550 t/month therefore read as 439-8,973 kg, with monthly feed of -7 to 23
+    kg, silently -- no error, just wrong numbers, in the reader every forecast,
+    ledger and backtest is built on.
+
+    Returning the missing list rather than raising lets the caller decide: a
+    forecast can proceed without `dev_count`, but nothing should proceed while
+    silently inventing a harvest figure.
+    """
+    idx, seen = {}, {}
+    for j, cell in enumerate(header_row or ()):
+        lab = _norm_label(cell)
+        if lab:
+            seen.setdefault(lab, j)
+    for field, labels in _PR_LABELS.items():
+        for lab in labels:
+            if lab in seen:
+                idx[field] = seen[lab]
+                break
+    missing = [f for f in _PR_LABELS if f not in idx and f not in _PR_OPTIONAL]
+    return idx, missing
+
+
 _PR_COL = {
     "open_count": 5, "close_count": 6, "open_bio_kg": 7, "open_avg_wt_g": 9,
     "growth_kg": 20, "feed_kg": 23,
@@ -460,10 +576,11 @@ def read_pr_period(ws, closing_date) -> Optional[PRPeriod]:
     if ws is None or closing_date is None:
         return None
     batches: dict[str, PRBatchPeriod] = {}
+    colmap: Optional[dict] = None
 
     def _num(row, key) -> float:
-        i = _PR_COL[key]
-        if i >= len(row):
+        i = (colmap or _PR_COL).get(key)
+        if i is None or i >= len(row):
             return 0.0
         v = row[i]
         try:
@@ -474,6 +591,21 @@ def read_pr_period(ws, closing_date) -> Optional[PRPeriod]:
     for row in ws.iter_rows(values_only=True):
         if len(row) < 4:
             continue
+        if colmap is None:
+            # Resolve the columns from the header row the sheet ships with,
+            # by LABEL. Detected by content rather than by position, because
+            # the header does not sit on the same row in every export.
+            _labs = {_norm_label(c) for c in row if c}
+            if "opening count" in _labs and "closing count" in _labs:
+                colmap, _missing = _resolve_pr_columns(row)
+                if not (set(colmap) & _PR_FLOW_FIELDS):
+                    # State-only export: no flow columns to find, so there is
+                    # nothing for this reader to return and nothing ambiguous
+                    # about it.
+                    return None
+                if _missing:
+                    raise PRLayoutError(_layout_error(_missing, _labs))
+                continue
         c3 = row[2]
         if not (isinstance(c3, str) and "Fish group name" in c3):
             continue
@@ -498,5 +630,14 @@ def read_pr_period(ws, closing_date) -> Optional[PRPeriod]:
         )
     if not batches:
         return None
+    if colmap is None:
+        # No recognisable header anywhere in the sheet. Positional is then the
+        # only option left, but it is a GUESS and must say so out loud -- this
+        # is the exact silence that let 15 of 21 corpus reports read their
+        # harvest out of the deviation-count column.
+        print("  WARNING: ProductionReport has no recognisable header row; "
+              "falling back to fixed column positions, which are correct only "
+              "for the 2026-02-onward layout. Check the harvest and feed "
+              "figures before trusting this run.")
     d = closing_date.date() if hasattr(closing_date, "date") else closing_date
     return PRPeriod(closing_date=d, batches=batches)

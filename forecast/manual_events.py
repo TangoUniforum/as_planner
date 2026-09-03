@@ -438,7 +438,23 @@ def _apply_fw_to_og(state, ev: ManualEvent, idx: int, fw_count, fw_avg_wt_g,
         if t.type != "OG":
             return [f"{tag}: dest #{d.tank} ({t.location_id}) is not an OG tank"], 0.0
         if not t.is_empty:
-            return [f"{tag}: dest {t.location_id} not empty (holds {t.batch_id})"], 0.0
+            # Same-cohort top-up is allowed; mixing is not. Mirrors
+            # events.TranOGEntry.apply exactly — the two must agree or the
+            # editor accepts what the run then refuses.
+            if t.batch_id != batch_id:
+                return [f"{tag}: dest {t.location_id} holds a DIFFERENT batch "
+                        f"{t.batch_id} (INV-1) — a cohort may share a tank "
+                        f"only with itself"], 0.0
+            if not is_entry(t.system_id):
+                # 6N tanks are type "OG" too, so the type check above does not
+                # exclude them. Without this, relaxing emptiness would let a
+                # hand-written event top up an occupied 6N purge tank.
+                return [f"{tag}: dest {t.location_id} ({t.system_id}) is not in "
+                        f"the entry tier — FW arrivals may enter ONLY OG1/2 "
+                        f"(rule R1)"], 0.0
+            if t.stage != "SW":
+                return [f"{tag}: dest {t.location_id} is stage {t.stage}, not "
+                        f"on feed — cannot receive a FW intake"], 0.0
     if fw_count <= 0:
         return [f"{tag}: FW batch {batch_id} has no fish at this week"], 0.0
 
@@ -834,9 +850,16 @@ def _describe_applied_event(ev, idx, wk_name, transfers, harvests, tranogs,
 
 
 def _validate_fw_to_og_structural(scratch, ev) -> list[str]:
-    """Cheap structural checks for an fw_to_og (dest tanks empty entry-tier OG
-    + batch set) that don't need the FW projection. Shared by both validation
-    paths."""
+    """Cheap structural checks for an fw_to_og that don't need the FW
+    projection. Shared by both validation paths.
+
+    A destination must be an entry-tier OG tank that is either EMPTY or already
+    holds THIS cohort (same-cohort top-up, operator rule 2026-09-02). The
+    `is_entry` branch below deliberately sits AHEAD of the emptiness branch in
+    the same elif chain: a 6N tank fails `is_entry` first and can never reach
+    the relaxed test. Do not reorder them — that ordering is the 6N guarantee
+    at this site.
+    """
     w: list[str] = []
     for d in ev.destinations:
         t = scratch.tanks_by_id.get(d.tank)
@@ -847,8 +870,13 @@ def _validate_fw_to_og_structural(scratch, ev) -> list[str]:
         elif not is_entry(t.system_id):
             w.append(f"❌ dest {t.location_id} ({t.system_id}) is not in the "
                      f"entry tier — FW arrivals may enter ONLY OG1/2 (rule R1)")
-        elif not t.is_empty:
-            w.append(f"dest {t.location_id} not empty (holds {t.batch_id})")
+        elif not t.is_empty and t.batch_id != ev.batch:
+            w.append(f"❌ dest {t.location_id} holds a DIFFERENT batch "
+                     f"{t.batch_id} — a cohort may share a tank only with "
+                     f"itself (INV-1)")
+        elif not t.is_empty and t.stage != "SW":
+            w.append(f"❌ dest {t.location_id} is stage {t.stage}, not on feed "
+                     f"— cannot receive a FW intake")
     if not ev.batch:
         w.append("fw_to_og requires a FW batch")
     return w

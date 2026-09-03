@@ -211,42 +211,153 @@ def harvest_by_period(rows: list[dict], basis: str = "hog"
     return monthly, yearly
 
 
-def review_targets(monthly: dict, yearly: dict, targets: dict) -> dict:
+def plan_weeks(out_path) -> list:
+    """Every week the plan COVERS, in order — including weeks it harvests nothing.
+
+    Not derivable from the harvest rows, and the difference is not academic.
+    Measured on the 2026-07-31 run: the plan spans 60 weeks and harvests in
+    58, blacking out 2026-W31 and 2026-W33. Inferring the horizon from harvest
+    therefore leaves 2026-08 looking only PARTLY covered, so an August target
+    goes unjudged — the gate falls silent on the month a blackout just damaged,
+    which is precisely the month it exists to flag.
+
+    Read from WeeklyReport, whose header is located by CONTENT and whose column
+    is located by LABEL, for the same reason the ProductionReport reader is:
+    a positional guess against a sheet that has moved before is how wrong
+    numbers arrive with no signal attached.
+    """
+    import openpyxl
+    try:
+        wb = openpyxl.load_workbook(out_path, read_only=True, data_only=True)
+    except Exception:                                          # noqa: BLE001
+        return []
+    try:
+        if "WeeklyReport" not in wb.sheetnames:
+            return []
+        col, seen = None, []
+        for row in wb["WeeklyReport"].iter_rows(values_only=True):
+            if col is None:
+                labs = [str(c).strip().lower() if c else "" for c in row]
+                if "week" in labs and "batch" in labs:
+                    col = labs.index("week")
+                continue
+            if col < len(row):
+                v = row[col]
+                if v and str(v) not in seen:
+                    seen.append(str(v))
+        return sorted(seen)
+    finally:
+        wb.close()
+
+
+def full_periods(week_labels) -> tuple[set, set]:
+    """(months, years) the plan's horizon covers COMPLETELY.
+
+    A period is judgeable only when every ISO week belonging to it is in the
+    plan. The horizon's first and last month are almost always partial -- a run
+    starting 2026-08-24 holds one week of August -- and grading a whole-month
+    target against a one-week slice reports a collapse that never happened.
+    """
+    weeks = {str(w) for w in (week_labels or ()) if w}
+    if not weeks:
+        return set(), set()
+    months: dict = {}
+    for wl in weeks:
+        m = week_to_month(wl)
+        if m:
+            months.setdefault(m, set()).add(wl)
+    full_m = set()
+    for m, have in months.items():
+        y, mo = int(m[:4]), int(m[5:7])
+        need = set()
+        d = _dt.date(y, mo, 1)
+        while d.month == mo:
+            if d.weekday() == 0:                      # ISO weeks start Monday
+                iy, iw, _ = d.isocalendar()
+                need.add("%04d-W%02d" % (iy, iw))
+            d += _dt.timedelta(days=1)
+        if need and need <= have:
+            full_m.add(m)
+    full_y = {y for y in {m[:4] for m in months}
+              if all("%s-%02d" % (y, k) in full_m for k in range(1, 13))}
+    return full_m, full_y
+
+
+def review_targets(monthly: dict, yearly: dict, targets: dict,
+                   horizon_weeks=None) -> dict:
     """Score actuals against targets — PENALIZED, not hard-gated (operator
     decision): a miss beyond tolerance is flagged, never disqualifying.
 
-    Only periods the plan's horizon actually reaches are judged: a target for
-    a month with zero recorded harvest AND no neighboring in-horizon month is
-    still judged (0 vs target) IF any harvest month >= it exists — i.e. we
-    judge every target period up to the last month with any harvest, so a
-    blackout month inside the horizon shows as MISSED, while targets beyond
-    the horizon end are N/A rather than false misses.
+    Only periods the plan's horizon actually COVERS are judged. There are three
+    ways a target can fall outside it, and all three are N/A rather than a
+    miss, because the plan was never given the chance to hit them:
 
-    Returns {rows: [{period, target_kg, actual_kg, pct, status}],
+        beyond horizon   the run ends before the period
+        before horizon   the run starts after it — a STALE target, left in
+                         config/targets.yaml from an earlier cycle
+        partial period   the horizon covers only part of the month or year
+
+    The middle case is why `horizon_weeks` exists. Measured 2026-09-02 on the
+    live config: a single leftover month turned a real 237 t shortfall into
+    837 t and dropped worst_pct from 79% to 0% — the number this gate reports
+    and the tournament grades on. Targets accumulate as the horizon rolls
+    forward, so it fires by itself every cycle.
+
+    Pass `horizon_weeks` (the plan's week labels) whenever you have them; both
+    callers do. Without it the bounds are INFERRED from the periods that
+    recorded harvest, which is weaker: a genuine blackout in the first month
+    would move the inferred start and hide a real miss.
+
+    A blackout month INSIDE the horizon is still judged MISSED — that is a real
+    failure and the whole point of the gate.
+
+    Returns {rows: [{period, target_kg, actual_kg, pct, status, note}],
              judged, met, close, missed, worst_pct, total_shortfall_kg}."""
     tol = float(targets.get("tolerance_pct", 5.0))
-    horizon_end_m = max(monthly) if monthly else ""
-    horizon_end_y = max(yearly) if yearly else ""
+    full_m, full_y = full_periods(horizon_weeks)
+    # Fallback bounds, used only when the caller could not supply the horizon.
+    lo_m, hi_m = (min(monthly), max(monthly)) if monthly else ("", "")
+    lo_y, hi_y = (min(yearly), max(yearly)) if yearly else ("", "")
     rows = []
 
-    def _judge(period, target_kg, actual_kg, in_horizon):
+    def _scope(period, full, lo, hi):
+        """(in_horizon, why-not) for one period."""
+        if horizon_weeks:
+            if period in full:
+                return True, ""
+            if not full:
+                return False, "no horizon"
+            return False, ("before horizon" if period < min(full)
+                           else "beyond horizon" if period > max(full)
+                           else "partial period")
+        if not hi:
+            return False, "no horizon"
+        if period < lo:
+            return False, "before horizon"
+        if period > hi:
+            return False, "beyond horizon"
+        return True, ""
+
+    def _judge(period, target_kg, actual_kg, in_horizon, note):
         if not in_horizon:
             return {"period": period, "target_kg": target_kg,
-                    "actual_kg": actual_kg, "pct": None, "status": "N/A"}
+                    "actual_kg": actual_kg, "pct": None, "status": "N/A",
+                    "note": note}
         pct = (actual_kg / target_kg * 100.0) if target_kg > 0 else 100.0
         status = ("MET" if pct >= 100.0 - 1e-9
                   else "CLOSE" if pct >= 100.0 - tol else "MISSED")
         return {"period": period, "target_kg": target_kg,
-                "actual_kg": actual_kg, "pct": pct, "status": status}
+                "actual_kg": actual_kg, "pct": pct, "status": status,
+                "note": ""}
 
     for period in sorted(targets.get("monthly") or {}):
+        ok, why = _scope(period, full_m, lo_m, hi_m)
         rows.append(_judge(period, targets["monthly"][period],
-                           monthly.get(period, 0.0),
-                           bool(horizon_end_m) and period <= horizon_end_m))
+                           monthly.get(period, 0.0), ok, why))
     for period in sorted(targets.get("yearly") or {}):
+        ok, why = _scope(period, full_y, lo_y, hi_y)
         rows.append(_judge(period, targets["yearly"][period],
-                           yearly.get(period, 0.0),
-                           bool(horizon_end_y) and period <= horizon_end_y))
+                           yearly.get(period, 0.0), ok, why))
 
     judged = [r for r in rows if r["status"] != "N/A"]
     shortfall = sum(max(0.0, r["target_kg"] - r["actual_kg"]) for r in judged)
@@ -254,6 +365,12 @@ def review_targets(monthly: dict, yearly: dict, targets: dict) -> dict:
     return {
         "rows": rows,
         "judged": len(judged),
+        # Surfaced, not swallowed. A target that never gets graded should be
+        # noticed and cleaned up, not quietly ignored every cycle.
+        "skipped": {w: sum(1 for r in rows if r.get("note") == w)
+                    for w in ("before horizon", "beyond horizon",
+                              "partial period")
+                    if any(r.get("note") == w for r in rows)},
         "met": sum(1 for r in judged if r["status"] == "MET"),
         "close": sum(1 for r in judged if r["status"] == "CLOSE"),
         "missed": sum(1 for r in judged if r["status"] == "MISSED"),
@@ -1087,23 +1204,70 @@ def _gate_harvest_floor(ctx):
     scope = (f" ({ex} operator-scripted window week(s) excluded)" if ex else "")
     worst = ctx.get("min_week")
     worst_txt = (f", worst week {float(worst):,.0f}" if worst is not None else "")
+    # PER-WEEK basis, when the measurement had it. Naming the total shortfall
+    # and the worst single week turns "3 weeks below 30,000" into a number an
+    # operator can act on: on the 2026-08-31 PR the honest reading was 8 weeks
+    # and 125,924 fish, every one of them against a floor the operator had
+    # written into scenario/limits.yaml themselves.
+    _short = float(ctx.get("floor_shortfall_fish") or 0.0)
+    _wweek = ctx.get("worst_floor_week")
+    _wgap = float(ctx.get("worst_floor_gap") or 0.0)
+    if ctx.get("floors_from") == "workbook":
+        scope += " (judged against each week's OWN floor, not the default)"
+        if _short > 0:
+            worst_txt += (f"; {_short:,.0f} fish short in total"
+                          + (f", worst {_wweek} by {_wgap:,.0f}"
+                             if _wweek else ""))
+    # Name the floor only when there IS one number. With per-week floors in
+    # play, quoting the Control default beside a per-week verdict is the same
+    # conflation this gate was just fixed for.
+    _fl = ("its week's" if ctx.get("floors_from") == "workbook"
+           else f"{float(floor):,.0f}-fish")
     if n == 0:
-        return "PASS", (f"every planner week meets the {float(floor):,.0f}-fish "
+        return "PASS", (f"every planner week meets {_fl} "
                         f"contract floor{worst_txt}{scope}")
-    return "WARN", (f"{n} planner week(s) below the {float(floor):,.0f}-fish "
+    return "WARN", (f"{n} planner week(s) below {_fl} "
                     f"contract floor{worst_txt} — the steady-harvest contract "
                     f"is the hardest business rule; compare candidates on this "
                     f"number, not only on 'never an empty week'{scope}")
 
 
 def _gate_biomass_cap(ctx):
-    p = ctx.get("peak_pct_of_cap")
+    """Peak standing biomass against the cap THAT WEEK actually had.
+
+    The facility cap is not a constant. On the live scenario it is 3.80M by
+    default and the operator drops it to 3.65M from 2026-W37, and
+    `scenario/limits.yaml` is built to express exactly that (one `facility` row
+    per week and metric). Dividing the horizon PEAK by a single cap therefore
+    asks the wrong question: the biggest week and the tightest week need not be
+    the same week.
+
+    Measured 2026-09-02 on the 2026-07-31 run: the peak is 4.222M in 2026-W36,
+    while the cap was still 3.80M — 111.1%. But the worst RATIO is 114.0%, in a
+    later week measured against 3.65M. The gate understated its own finding by
+    three points. On this run both readings are over 110 so the verdict did not
+    move; a run peaking at 3.75M after W37 is the case that does move it —
+    102.7% of the 3.65M cap it must obey (WARN) reads as 98.7% of 3.80M (PASS).
+
+    So the per-week series is preferred wherever it exists. It is not a second
+    mechanism: `convergence_review` already resolves the cap week by week from
+    the Advisory sheet's own Biomass_Excess column — the same column the
+    operator reads — so the gate and the workbook cannot disagree. The scalar
+    is kept only as a fallback for contexts that carry no series, and the text
+    names which basis produced the number so the two are never confused.
+    """
+    cr = ctx.get("convergence") or {}
+    p = cr.get("worst_pct")
+    basis = "of its week's cap"
+    if p is None:
+        p = ctx.get("peak_pct_of_cap")
+        basis = "of cap (flat — per-week series unavailable)"
     if p is None:
         return "N/A", "peak biomass unavailable"
     p = float(p)
     if p <= 100.0:
-        return "PASS", f"peak {p:.1f}% of cap"
-    return ("WARN" if p <= 110.0 else "FAIL"), f"peak {p:.1f}% of cap"
+        return "PASS", f"peak {p:.1f}% {basis}"
+    return ("WARN" if p <= 110.0 else "FAIL"), f"peak {p:.1f}% {basis}"
 
 
 def _gate_convergence(ctx):

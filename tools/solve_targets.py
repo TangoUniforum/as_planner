@@ -189,7 +189,8 @@ def solve(pr_path, config_dir, scenario_dir, out_dir, *, iters=6,
             try:
                 from tools.run_tuned_tournament import _grade
                 from forecast.config_io import control_to_dict
-                g = _grade(wb, control_to_dict(ctl), targets)
+                g = _grade(wb, control_to_dict(ctl), targets,
+                           ctl_method.engine)
                 hv = g["harvest"]
             except Exception:                                    # noqa: BLE001
                 pass

@@ -42,6 +42,35 @@ from forecast.excel_io import write_run_comparison  # noqa: E402
 from forecast.window_weeks import manual_window_weeks  # noqa: E402
 
 
+def _per_week_floors(wb) -> dict:
+    """{week_label: min_harvest_per_week} from the workbook's own RunConfig
+    snapshot. Empty dict when the workbook carries no snapshot (older outputs,
+    and Global's stamp-only sheet) — the caller then falls back to the Control
+    default, which is the pre-2026-09-02 behaviour and no worse than it was.
+    """
+    try:
+        import yaml
+        from forecast.config_snapshot import read_config_snapshot
+        blocks = read_config_snapshot(wb) or {}
+    except Exception:                                          # noqa: BLE001
+        return {}
+    text = blocks.get("scenario/limits.yaml") or blocks.get("limits.yaml")
+    if not text:
+        return {}
+    try:
+        data = yaml.safe_load(text) or {}
+    except Exception:                                          # noqa: BLE001
+        return {}
+    out = {}
+    for row in (data.get("facility") or []):
+        try:
+            if row.get("metric") == "min_harvest_per_week":
+                out[str(row["week"])] = float(row["value"])
+        except Exception:                                      # noqa: BLE001
+            continue
+    return out
+
+
 def _harvest_extras(out_path, min_harvest):
     """Harvest-contract counts from a produced workbook's HarvestPlan: total
     weeks, min/max weekly fish, weeks below the min-harvest floor, and zero-
@@ -57,22 +86,52 @@ def _harvest_extras(out_path, min_harvest):
     try:
         weeks, fish = _opt._harvest_weekly_series(wb)
         window = manual_window_weeks(wb)
+        floors = _per_week_floors(wb)
     finally:
         wb.close()
-    planner = ([x for w, x in zip(weeks, fish) if w not in window]
-               if window else fish)
+    pairs = ([(w, x) for w, x in zip(weeks, fish) if w not in window]
+             if window else list(zip(weeks, fish)))
+    planner = [x for _w, x in pairs]
     if not fish:
         return {"n_weeks": 0, "min_week": 0.0, "max_week": 0.0,
                 "weeks_below_min": 0, "zero_weeks": 0, "min_harvest": min_harvest,
-                "window_weeks_excluded": 0}
+                "window_weeks_excluded": 0, "floor_shortfall_fish": 0.0,
+                "floors_from": "none", "worst_floor_week": None,
+                "worst_floor_gap": 0.0}
+
+    # THE FLOOR IS PER WEEK. `min_harvest` is only the Control default; the
+    # operator sets the real contract week by week in scenario/limits.yaml, and
+    # until 2026-09-02 this function compared EVERY week to the scalar and
+    # never read those rows. Measured on the 2026-08-31 PR: the checklist
+    # reported "3 weeks below the 30,000 floor" while 8 weeks were below the
+    # floors the operator had actually written — 125,924 fish short, all of it
+    # in the November-December trough the operator was trying to diagnose. The
+    # gate was hiding the very thing it exists to surface.
+    #
+    # The floors are read from the workbook's OWN RunConfig snapshot, so they
+    # are by construction the ones that run planned against — no caller has to
+    # pass them, and a reused workbook cannot be judged against someone else's
+    # limits.
+    def _floor_for(w):
+        v = floors.get(w)
+        return float(v) if v else (float(min_harvest) if min_harvest else 0.0)
+
+    below = [(w, x, _floor_for(w)) for w, x in pairs
+             if _floor_for(w) and x < _floor_for(w)]
+    shortfall = sum(f - x for _w, x, f in below)
+    worst = max(below, key=lambda t: t[2] - t[1]) if below else None
     return {
         "n_weeks": len(fish),
         "min_week": min(planner) if planner else 0.0,
         "max_week": max(fish),
-        "weeks_below_min": (sum(1 for x in planner if x < min_harvest)
-                            if min_harvest else 0),
+        "weeks_below_min": len(below),
         "zero_weeks": sum(1 for x in planner if x < 1.0),
         "min_harvest": min_harvest,
+        # New, and reported so a shortfall can never again be invisible.
+        "floor_shortfall_fish": shortfall,
+        "floors_from": "workbook" if floors else "flat",
+        "worst_floor_week": (worst[0] if worst else None),
+        "worst_floor_gap": ((worst[2] - worst[1]) if worst else 0.0),
         "window_weeks_excluded": len(fish) - len(planner),
     }
 
