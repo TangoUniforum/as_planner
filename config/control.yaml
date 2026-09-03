@@ -7,52 +7,40 @@ scenario_name: Forecast
 max_feed_per_day_kg: 34000.0
 max_biomass_kg: 3800000.0
 max_harvest_per_week: 55000.0
-min_harvest_weight_g: 3500.0
+min_harvest_weight_g: 3300.0
 min_harvest_per_week: 30000.0
 min_tank_control: 7000.0
 default_hog_yield: 0.81
-facility_biomass_deviation_pct: 0.005
+facility_biomass_deviation_pct: 0.01
 handling_mortality_pct: 0.01
 sixn_growth: false
 sixn_production_start: '2028-01-01'
 sixn_transition_weeks: 0
 tran_og_default_tanks: 2
-global_buffer_pct: 0.05
-# How cleanly a real grader separates sizes, 0-1. 1.0 = a perfect cut at the
-# threshold; lower leaves the two graded populations OVERLAPPING near the cut
-# line, which is what actually happens on a transfer grade. VBA default 0.85.
-# GLOBAL engine only. false = model the REAL 6N handover (L1 primes only from
-# the fish actually in 6N at forecast start). true = the older idealisation that
-# assumed a steady-state-full 6N by drawing harvest-ready fish out of grow-out --
-# smooth from week 1, but the tank picker cannot physically realise it, which is
-# what produced the 39,094-fish 6N-rule violation.
+global_buffer_pct: 0.1
 global_assume_primed_6n: false
 grade_efficiency: 0.85
-
-# --- Density relief / consolidation policy -----------------------------------
-# Hand-tuned on one workbook (2026-08-21) and NOT proven optimal — the reference
-# fixture and the real workbook disagreed about the best values. Swept by the
-# optimizer; these defaults are the hand-tuned values.
-# chronic_pressure_frac MUST stay clear of density_relief_pct: a trigger sitting
-# exactly on the level relief drives tanks TO makes them flip on noise.
-chronic_pressure_frac: 0.92
+chronic_pressure_frac: 0.95
 chronic_pressure_weeks: 4
-chronic_relief_pct: 0.80
+chronic_relief_pct: 0.8
 chronic_max_frees_per_week: 1
-density_relief_pct: 0.90
-consolidation_fill_pct: 0.80
+density_relief_pct: 0.9
+consolidation_fill_pct: 0.8
 starvation_period_days: 7
 harvest_relief_pct: 0.1
 max_transfers_per_week: 15
 min_transfer_count: 7000.0
 harvest_grade_to_min: true
+sixn_drain_largest_first: false
+sixn_overdue_drain_weeks: 0
 sixn_level_drains: false
 density_target_pct: 0.9
 density_welfare_threshold_kg_m3: 85.0
 rebalance_varqty_budget: 20
 rebalance_split_budget: 8
-rebalance_balance_budget: 30
+rebalance_balance_budget: 0
 rebalance_level: true
+rebalance_headroom_days: 0
 cap_repair_budget: 0
 harvest_setpoint_lookahead_weeks: 0.75
 harvest_level_load: true
@@ -67,5 +55,5 @@ hybrid_follow: full
 hybrid_follow_band: 0.05
 hybrid_guide_min_frac: 0.25
 hybrid_guide_smooth_weeks: 0
-hybrid_purge_lever: false
-hybrid_production_lever: false
+hybrid_purge_lever: true
+hybrid_production_lever: true

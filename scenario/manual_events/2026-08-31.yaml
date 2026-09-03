@@ -1,55 +1,55 @@
-# Manual starting-state events for the PR closing 2026-08-13 (operator-authored,
+# Manual starting-state events for the PR closing 2026-08-31 (operator-authored,
 # PR-SPECIFIC — a different PR gets its own file). Applied to the PR-hydrated
 # week-0 state BEFORE the forecast runs forward. See forecast/manual_events.py.
 events:
-- type: harvest
-  week: 2
-  from_tank: 65
-  destinations: []
-  count: null
-  batch: null
-  mode: transfer
-  notes: ''
-- type: harvest
-  week: 3
-  from_tank: 61
-  destinations: []
-  count: null
-  batch: null
-  mode: transfer
-  notes: ''
-- type: harvest
-  week: 3
-  from_tank: 67
-  destinations: []
-  count: null
-  batch: null
-  mode: transfer
-  notes: ''
 - type: og_to_6n
-  week: 2
-  from_tank: 44
+  week: 1
+  from_tank: 51
   destinations:
-  - tank: 63
+  - tank: 71
     count: null
     avg_wt_g: null
   count: null
   batch: null
   mode: transfer
   notes: ''
-- type: og_to_6n
+- type: harvest
+  week: 1
+  from_tank: 63
+  destinations: []
+  count: null
+  batch: null
+  mode: transfer
+  notes: ''
+- type: harvest
   week: 2
-  from_tank: 56
-  destinations:
-  - tank: 69
-    count: null
-    avg_wt_g: null
+  from_tank: 71
+  destinations: []
+  count: null
+  batch: null
+  mode: transfer
+  notes: ''
+- type: harvest
+  week: 1
+  from_tank: 69
+  destinations: []
   count: null
   batch: null
   mode: transfer
   notes: ''
 - type: og_to_6n
-  week: 3
+  week: 1
+  from_tank: 54
+  destinations:
+  - tank: 65
+    count: 10000.0
+    avg_wt_g: null
+  count: 10000.0
+  batch: null
+  mode: transfer
+  notes: ''
+- type: og_to_6n
+  week: 1
   from_tank: 31
   destinations:
   - tank: 65
@@ -60,8 +60,8 @@ events:
   mode: transfer
   notes: ''
 - type: og_to_6n
-  week: 4
-  from_tank: 51
+  week: 2
+  from_tank: 54
   destinations:
   - tank: 61
     count: null
@@ -70,44 +70,22 @@ events:
   batch: null
   mode: transfer
   notes: ''
-- type: og_transfer
-  week: 1
-  from_tank: 24
+- type: og_to_6n
+  week: 2
+  from_tank: 62
   destinations:
-  - tank: 32
-    count: null
+  - tank: 61
+    count: 20000.0
     avg_wt_g: null
-  count: null
-  batch: null
-  mode: transfer
-  notes: ''
-- type: og_transfer
-  week: 3
-  from_tank: 11
-  destinations:
-  - tank: 44
-    count: null
-    avg_wt_g: null
-  count: null
-  batch: null
-  mode: transfer
-  notes: ''
-- type: og_transfer
-  week: 3
-  from_tank: 14
-  destinations:
-  - tank: 56
-    count: null
-    avg_wt_g: null
-  count: null
+  count: 20000.0
   batch: null
   mode: transfer
   notes: ''
 - type: fw_to_og
-  week: 4
+  week: 1
   from_tank: null
   destinations:
-  - tank: 11
+  - tank: 24
     count: null
     avg_wt_g: null
     size_class: big
@@ -115,11 +93,7 @@ events:
     count: null
     avg_wt_g: null
     size_class: small
-  - tank: 24
-    count: null
-    avg_wt_g: null
-    size_class: small
-  count: 280000.0
+  count: 240000.0
   batch: B49
   mode: transfer
   notes: ''

@@ -1,9 +1,8 @@
-# Harvest targets — judged by Analyze's checklist ONLY when values are present.
-# OPERATOR PRINCIPLE (2026-08-09): empty targets = the pipeline's results stand
-# UNADULTERATED (the targets gate reports N/A, never judges). After reviewing
-# results, enter real contract numbers here or in Configure -> Targets & prices
-# to overlay judgment — edits re-judge existing results instantly, no re-runs.
 basis: hog
-tolerance_pct: 5.0
-monthly: {}
+tolerance_pct: 1.0
+monthly:
+  2026-09: 610000.0
+  2026-10: 720000.0
+  2026-11: 690000.0
+  2026-12: 675000.0
 yearly: {}
