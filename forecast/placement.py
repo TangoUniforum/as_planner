@@ -1241,7 +1241,13 @@ def _try_graded_move_in(
 
     retain_in_source=True (grade-to-min top-up): the small (< harvest-weight)
     tail STAYS in the source tank — no separate retention tank needed; only the
-    big tail is peeled to the 6N pickup. Honors min_transfer_count (don't peel a
+    big tail is peeled to the 6N pickup. Honors min_grade_count -- the peel's OWN floor, which inherits
+    min_transfer_count when unset. The two are different rules: min_transfer_count
+    is the minimum for PUMPING A WHOLE GROUP, min_grade_count is the smallest
+    ripe tail worth putting through a grader, and min_tank_control (unchanged,
+    enforced below) is what may be LEFT BEHIND. Conflating the first two is what
+    blocked this peel entirely: the ripe tails here are 3,000-6,800 fish spread
+    over 8-12 tanks, every one of them under a 7,000 pump minimum. (don't peel a
     sub-min group out) and min_tank_control (don't leave a sub-min dribble).
 
     Walks FIFO across batches; for each production tank where the
@@ -1276,7 +1282,17 @@ def _try_graded_move_in(
     # SKIPPED, not allowed to end the search — a small nearly-ripe tank was
     # blocking big peelable tanks right behind it and returning 0 (the
     # 2026-W44 empty fill: a 6.4k tank at 3.43 kg shadowed 40k tanks at 3.38).
-    _min_tr = getattr(control, "min_transfer_count", 0.0) or 0.0
+    # PEEL MINIMUM. `min_transfer_count` (7,000) is the minimum for PUMPING a
+    # whole tank's surplus out in the density rebalancer; it is NOT the minimum
+    # for a graded tail, and reusing it here made the peel take nothing whenever
+    # the ripe fish stood as 3-7k tails spread over 8-12 tanks. The graded peel
+    # now has its OWN floor, `min_grade_count`. UNSET inherits min_transfer_count
+    # (the historical shared number, so the default is unchanged); set it to a
+    # number -- 0 for no floor at all -- to separate the two. See ControlParams
+    # for the measured trade at each gate weight.
+    _mgc = getattr(control, "min_grade_count", None)
+    _min_peel = float(_mgc) if _mgc is not None else float(
+        getattr(control, "min_transfer_count", 0.0) or 0.0)
     chosen = None
     for b in fifo:
         cands = [
@@ -1292,16 +1308,37 @@ def _try_graded_move_in(
             frac_t = frac_above(t.avg_wt_g, t.cv_pct or 16.0, min_hv)
             if frac_t < min_fraction:
                 continue
-            peel_t = t.count * frac_t
-            if max_count is not None:
-                peel_t = min(peel_t, max_count)
-            if peel_t < max(1.0, _min_tr):
-                continue   # tail under min_transfer — try the next tank
+            # ORDER: test the SOURCE TANK'S OWN TAIL for movability, and only
+            # THEN apply the surgical cap to decide how much of it to take.
+            # The old order tested the CAPPED amount, so a shortfall smaller
+            # than the peel minimum could never be closed by grading no matter
+            # how much market-weight fish stood in the tank -- the cap (a
+            # statement about how much this week's floor NEEDS) was being used
+            # as if it were a statement about whether the tank can be graded.
+            tail_t = t.count * frac_t
+            if tail_t < max(1.0, _min_peel):
+                continue   # no graded tail here worth a grader — next tank
+            # Take only what the floor still needs. Sub-minimum takes are
+            # ACCEPTED deliberately, not clamped up to `_min_peel` and not
+            # skipped: the handling budget counts EVENTS, not fish, so a
+            # 900-fish peel and a 7,000-fish peel cost the operator the same
+            # single move; the minimum's purpose (is a grading operation worth
+            # rigging for this tank at all?) is a property of the tank's TAIL
+            # and has already been answered above. Clamping up would harvest
+            # more than the floor needs -- giving up grow-out yield, pushing
+            # against the level-drains clamp, and risking the weekly harvest
+            # cap -- to buy nothing on the budget that actually binds. And a
+            # smaller take leaves a FATTER remnant in the source, so it helps
+            # the thin-tank constraint rather than hurting it.
+            take_t = min(tail_t, max_count) if max_count is not None else tail_t
+            if take_t < 1.0:
+                continue   # degenerate: not worth a handling event
             # REMNANT FLOOR (both modes): the small tail becomes a standing
             # tank population — in the SOURCE (retain_in_source) or in the
             # retention tank. Either way a sub-min tail would strand a
-            # remnant, so skip the candidate.
-            if 0 < (t.count - peel_t) < (control.min_tank_control or 0):
+            # remnant, so skip the candidate. Tested against what is ACTUALLY
+            # taken, which is what the source tank is actually left with.
+            if 0 < (t.count - take_t) < (control.min_tank_control or 0):
                 continue   # would leave a sub-min dribble behind
             chosen = t
             break

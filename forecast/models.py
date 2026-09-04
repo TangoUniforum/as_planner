@@ -113,6 +113,36 @@ class ControlParams:
     # min_tank_control (7000) or 10000 to suppress small partial transfers; whole-
     # tank consolidation moves are unaffected.
     min_transfer_count: float = 0.0
+    # PEEL MINIMUM (fish): the smallest GRADED TAIL worth running a grader for.
+    # THREE different rules used to be spelled with the same 7,000, and only two
+    # of them are the same kind of thing:
+    #   min_tank_control    = how thin a tank may be LEFT (a standing population);
+    #   min_transfer_count  = the smallest partial group worth PUMPING a whole
+    #                         tank's surplus out as, in the density rebalancer;
+    #   min_grade_count     = the smallest RIPE TAIL worth GRADING out of a tank
+    #                         on a floor-fill week -- a different operation with
+    #                         different economics (the grader is already rigged
+    #                         for the 6N move-in; the marginal cost is one
+    #                         handling event, not a pump setup).
+    # Reusing the whole-tank pump minimum for the graded peel made the peel take
+    # NOTHING whenever the ripe fish stood as 3-7k tails spread over 8-12 tanks
+    # (measured on B45/B46, 2026-W44..W53 -- the window feeding Nov-Jan), so the
+    # floor went unfilled while plenty of market-weight fish were in the water.
+    # MEASURED 2026-09-03 on the 8.31 PR: at the live
+    # 3,300 g gate the VALUE does not matter -- 0 / 3,000 / 7,000 produce the
+    # identical plan, because every peel candidate already has a >=7k tail
+    # there, and the whole measured gain (+12.9 t, floor misses 3 -> 1) comes
+    # from the cap-ORDERING fix in placement._try_graded_move_in. At a 3,500 g
+    # gate the value bites hard and the trade is real but NOT free: 0-1,000
+    # reaches rest-of-2026 2,700.5 t (+118 t, thin tank-weeks 9 -> 0) while
+    # pushing a 2027-W39 grow-out tank to 115.6 kg/m3 and the weekly move peak
+    # to 17. So this ships UNSET.
+    # None (unset) = inherit `min_transfer_count` -- the historical shared
+    # number, and the only setting measured to hold every hard gate at BOTH
+    # gate weights. A number (0 included) is the explicit graded-tail floor;
+    # 0 = no floor at all (the tail must still clear min_fraction of the tank
+    # and leave a legal remnant behind). Unit: fish.
+    min_grade_count: Optional[float] = None
     # GRADE-TO-MIN (opt-in): on a 6N purge week where whole mature tanks can't fill
     # the harvest floor, peel the over-weight TAIL from near-market tanks into a free
     # pair tank (big -> 6N purge) with the small tail to a free OG retention tank,

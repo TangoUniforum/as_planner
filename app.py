@@ -215,6 +215,12 @@ def _active_config_summary(cd: dict) -> list[tuple]:
     if (g("min_transfer_count") or 0) > 0:
         rows.append(("Min transfer size", f"{g('min_transfer_count'):,.0f} fish",
             "rebalancer won't split a smaller sub-group out of a tank"))
+    # Shown whenever it is SET, 0 included — "0 = no floor" is a decision the
+    # operator made and should be able to see, not an absence.
+    if g("min_grade_count") is not None:
+        rows.append(("Min graded-tail size", f"{g('min_grade_count'):,.0f} fish",
+            "a floor-fill peel needs a ripe tail at least this big; a SEPARATE "
+            "rule from Min transfer size (grader, not pump). 0 = no floor"))
     if (g("cap_repair_budget") or 0) > 0:
         rows.append(_lever_row("cap_repair_budget", "End-of-week cap repair"))
     # Anything that reads as set but is NOT shaping the plan gets its own rows,
@@ -635,6 +641,20 @@ _CONTROL_HELP = {
         "= fewer, larger transfers but slightly more crowding left "
         "unrelieved; 0 = no floor. Whole-tank moves are unaffected. Unit: "
         "fish.",
+    "min_grade_count":
+        "The smallest RIPE TAIL the planner may grade out of a tank on a week "
+        "that is short of the harvest floor. This is NOT the same rule as 'Min "
+        "transfer size': that one is about rigging a PUMP to move a whole "
+        "tank's surplus, this one is about the grader that is already running "
+        "for the week's 6N move-in. Set it too high and the floor goes "
+        "unfilled while market-weight fish sit in the water as tails too small "
+        "to qualify. Leave it BLANK to inherit 'Min transfer size' (the "
+        "historical behaviour); enter a number to separate the two, 0 meaning "
+        "no floor at all (the tail must still be at least 10% of the tank and "
+        "must leave a legal remnant behind). MEASURED: at a 3,300 g harvest "
+        "gate the value changes nothing; at 3,500 g, blanking it down to 0 "
+        "buys ~118 t of 2026 harvest but pushes a 2027 grow-out tank over the "
+        "density cap — check the density gate before you keep it. Unit: fish.",
     "max_transfers_per_week":
         "The weekly HANDLING BUDGET: the most tank-to-tank transfer moves the "
         "crew should perform in one week. When a week's essential moves (6N "
@@ -995,6 +1015,7 @@ _CONTROL_LABEL = {
     "min_harvest_weight_g": "Min harvest weight (g)",
     "min_tank_control": "Force-empty floor (fish)",
     "min_transfer_count": "Min transfer size (fish)",
+    "min_grade_count": "Min graded-tail size (fish)",
     "max_transfers_per_week": "Handling budget (moves / week)",
     "default_hog_yield": "Default HOG yield",
     "facility_biomass_deviation_pct": "Biomass setpoint band (R24)",
@@ -1192,6 +1213,7 @@ _CONTROL_GROUPS = [
      ["max_feed_per_day_kg", "max_biomass_kg", "max_harvest_per_week",
       "harvest_relief_pct", "min_harvest_per_week", "min_harvest_weight_g",
       "min_tank_control", "max_transfers_per_week", "min_transfer_count",
+      "min_grade_count",
       "tran_og_default_tanks", "density_target_pct",
       "density_welfare_threshold_kg_m3", "default_hog_yield",
       "grade_efficiency", "handling_mortality_pct"]),
