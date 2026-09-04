@@ -232,6 +232,107 @@ def resolve_facility_cap(
     return val if val > 0 else None
 
 
+def override_coverage_gaps(facility_limits, control, week_labels):
+    """Weeks in the horizon where a metric the operator IS steering per week
+    has no row, so the week silently takes the Control default.
+
+    DETECTION ONLY. This resolves nothing and changes no cap; it reports.
+    `resolve_facility_cap` keeps falling back exactly as before, which is the
+    correct behaviour -- an absent row genuinely means "use the default".
+
+    The trap it names is narrower than "a week has no row". A metric with ZERO
+    overrides is a deliberate choice: the default IS the operator's answer and
+    there is nothing to warn about. A metric the operator has been setting week
+    by week and then STOPS is the dangerous shape, because the weeks past the
+    last row inherit a number nobody chose for them.
+
+    Found on the 2026-08-31 PR: biomass and feed_per_day rows stopped at
+    2026-W53 simply because that is where entry stopped, so everything from
+    2027-W01 silently took the design/post-expansion defaults (34,000 kg/day
+    against the 27,500 being entered). That was worth ~131 t of horizon
+    production the plan did not have.
+
+    Returns a list of dicts, one per affected metric, ordered by metric name:
+    `metric`, `default`, `n_covered`, `n_missing`, `first_missing`,
+    `last_covered`, `missing_weeks` (capped at 12 for reporting).
+    """
+    labels = [str(w) for w in (week_labels or [])]
+    if not labels:
+        return []
+    in_horizon = set(labels)
+    defaults = {
+        METRIC_BIOMASS: control.max_biomass_kg,
+        METRIC_FEED_DAY: control.max_feed_per_day_kg,
+        METRIC_MAX_HARVEST: control.max_harvest_per_week,
+        METRIC_MIN_HARVEST: control.min_harvest_per_week,
+        METRIC_HOG_YIELD: control.default_hog_yield,
+    }
+    covered = {}
+    for key in (getattr(facility_limits, "overrides", None) or {}):
+        try:
+            week, metric = key
+        except (TypeError, ValueError):
+            continue
+        covered.setdefault(metric, set()).add(str(week))
+
+    out = []
+    for metric in sorted(covered):
+        if metric not in defaults:
+            continue                       # not a facility cap (e.g. the OG factor)
+        have = covered[metric] & in_horizon
+        if not have:
+            continue                       # rows exist but none inside this horizon
+        missing = [w for w in labels if w not in covered[metric]]
+        if not missing:
+            continue                       # fully covered -- the good case
+        first_cov, last_cov = min(have), max(have)
+        n_before = sum(1 for w in missing if w < first_cov)
+        n_after = sum(1 for w in missing if w > last_cov)
+        out.append({
+            "metric": metric,
+            "default": defaults[metric],
+            "n_covered": len(have),
+            "n_missing": len(missing),
+            "first_missing": missing[0],
+            "first_covered": first_cov,
+            "last_covered": last_cov,
+            "n_before": n_before,
+            "n_after": n_after,
+            "n_interior": len(missing) - n_before - n_after,
+            "missing_weeks": missing[:12],
+        })
+    return out
+
+
+def coverage_gap_notes(facility_limits, control, week_labels):
+    """`override_coverage_gaps` rendered as ValidationLog lines.
+
+    Empty list when every steered metric covers the horizon, so a clean run
+    stays silent.
+    """
+    notes = []
+    for g in override_coverage_gaps(facility_limits, control, week_labels):
+        # WHERE the gap sits changes what it means, so say it. Weeks after the
+        # last row is the dangerous shape (entry stopped); weeks before the
+        # first row usually just means the rows start mid-horizon on purpose.
+        shape = []
+        if g["n_before"]:
+            shape.append("%d before %s" % (g["n_before"], g["first_covered"]))
+        if g["n_after"]:
+            shape.append("%d after %s" % (g["n_after"], g["last_covered"]))
+        if g["n_interior"]:
+            shape.append("%d inside the covered span" % g["n_interior"])
+        notes.append(
+            "PER-WEEK COVERAGE - %s: rows cover %s..%s (%d of %d horizon "
+            "week(s)); %s take the Control default %g. An absent row means "
+            "\"use the default\", so this matters only if that default is not "
+            "what you intend for those weeks - check it rather than assume it."
+            % (g["metric"], g["first_covered"], g["last_covered"],
+               g["n_covered"], g["n_covered"] + g["n_missing"],
+               " and ".join(shape) or "%d week(s)" % g["n_missing"],
+               g["default"]))
+    return notes
+
 def og_sgr_factors(facility_limits) -> dict[str, float]:
     """`{week_label: factor}` for the per-week OG growth factor.
 

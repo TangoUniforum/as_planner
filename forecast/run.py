@@ -1026,6 +1026,7 @@ def main(
     # against the PER-WEEK resolved caps. Pure measurement — see
     # analysis.realized_plan_audit.
     from .analysis import realized_plan_audit
+    from . import caps as _caps_mod
     from .time_grid import forecast_week_labels
     # The manual window sits BEFORE the planner's start: `control.forecast_start`
     # has already been advanced past it, so the window is the `window_n` weeks
@@ -1042,6 +1043,24 @@ def main(
         placement.harvest_events, placement.transfer_events,
         facility_limits, control, window_weeks=_window_labels)
 
+    # PER-WEEK COVERAGE. A metric the operator steers week by week, whose rows
+    # STOP before the horizon ends, hands the remaining weeks a number nobody
+    # chose -- on the 2026-08-31 PR that was worth ~131 t of horizon production.
+    # Detection only: resolution is unchanged, and a metric with no rows at all
+    # stays silent because the default is then the deliberate answer.
+    try:
+        _coverage_notes = _caps_mod.coverage_gap_notes(
+            facility_limits, control,
+            forecast_week_labels(fs_date, control.horizon_weeks))
+    except Exception as _cov_err:                                  # noqa: BLE001
+        # Loud, never silent: a broken check must not look like a clean run.
+        _coverage_notes = [f"PER-WEEK COVERAGE - check failed: {_cov_err!r}"]
+    if _coverage_notes:
+        print(f"\n  PER-WEEK COVERAGE ({len(_coverage_notes)} metric(s) fall "
+              f"back mid-horizon - also in the ValidationLog):")
+        for _m in _coverage_notes:
+            print(f"    {_m}")
+
     write_validation_log(
         wb,
         residuals=residuals,
@@ -1051,7 +1070,8 @@ def main(
         density_violations=density_violations,
         invariant_warnings=(list(hydration_warns) + list(inv_warns)
                             + list(manual_warns) + list(fw_calib_warns)
-                            + _guide_notes + _realized_warns),
+                            + _guide_notes + _realized_warns
+                            + _coverage_notes),
         placed_batches={r.batch_id for r in placement.batch_locations},
     )
     write_daily_harvest_schedule(
