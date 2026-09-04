@@ -497,7 +497,8 @@ def _clear_all_editor_state():
     session_state from before the import.
     """
     _reset_keys("bio_growth", "bio_mort", "bio_feed", "bio_cull",
-                "fac_df", "batch_df", "flim_wide", "slim_wide")
+                "fac_df", "batch_df", "flim_wide", "slim_wide",
+                "sysdef_grid", "modedef_grid")
     for k in ("bio_models", "_lim_weeks", "_tmpl_bytes", "_tmpl_fp"):
         st.session_state.pop(k, None)
 
@@ -3608,7 +3609,14 @@ def _edit_limits():
     # leave the operator with nothing editable at all).
     weeks = _limit_week_cols(fl_cur, sl_cur)
 
-    if "sysdef_grid" not in st.session_state:
+    # Rebuild when ANY of these is missing, never on one sentinel: callers
+    # clear different subsets (a config import drops the wide grids, Save and
+    # Reload drop all of them), and a single sentinel let a surviving key
+    # suppress the rebuild that the others still needed -- which is how
+    # _lim_weeks came to be read after something had popped it.
+    if any(k not in st.session_state for k in
+           ("sysdef_grid", "modedef_grid", "flim_wide", "slim_wide",
+            "_lim_weeks")):
         st.session_state["sysdef_grid"] = pd.DataFrame(
             _system_defaults_records(sl.defaults, systems, sl_metrics)
         ).astype({m: "float64" for m in sl_metrics})
