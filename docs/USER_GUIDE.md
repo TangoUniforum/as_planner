@@ -88,12 +88,15 @@ Lower in the sidebar (visible in every mode, but it governs **▶ Run forecast**
 the app shows **which planning method is currently picked**, and — when it is
 the default — why. You change it on **Compare & Choose** (§7.4), not here. The
 shipped default is **Controller — hybrid (L1-guided harvest)** — but note that
-`config/control.yaml` ships **both of its guide levers off**
-(`hybrid_purge_lever`, `hybrid_production_lever`), so the L1 guide is computed
-and then steers nothing: as shipped this arm plans exactly what the plain
-Controller plans. Turn the levers on to get the harvest-shaping described in
-§4.5 — the purge lever additionally needs `sixn_level_drains`, or the guide
-refuses it.
+and it **does steer** — two independent routes turn its levers on and
+either alone suffices: `config/control.yaml` ships `hybrid_purge_lever: true`
+and `hybrid_production_lever: true`, **and** the `controller-hybrid` method
+pins both `True` in its own overrides, so setting the config values back to
+`false` would not make that arm inert. The **production** half is live; the
+**purge** half is refused outright while `sixn_level_drains: false`, and the
+guide logs that refusal to the ValidationLog. So what you run today is the
+*production-lever-alone* arm — see §4.5. (Until 2026-09-03 this section said
+the arm was inert. That was wrong, and it predated the 2026-08-27 pins.)
 
 ### CLI
 ```
@@ -138,7 +141,7 @@ Facility-wide knobs read into `ControlParams`:
 | `harvest_relief_pct` | pressure-relief band used to **judge** a plan: derived absolute ceiling = `max_harvest_per_week × (1 + relief)` = 60,500. **No engine reads this knob** — the planner's own weekly ceiling is the limit itself; weeks land in the relief band when a whole 6N pair had to drain or an INV-5 force-empty overdrew (that overage is borrowed back from the next week). What the knob decides is how such weeks are SCORED: the Analyze checklist shows amber at 1–3 relief weeks and red beyond 3 — or on any week past the derived ceiling — telling you to ramp harvests up earlier instead. It also drives the manual-window over-ceiling lint. 0 = no band | 0.10 |
 | `min_harvest_per_week` | weekly harvest floor | 30,000 |
 | `max_transfers_per_week` | weekly HANDLING BUDGET (transfer moves/week). A "move" = one distinct src→dst tank transfer with fish in it, exactly what a TransferPlan `Transfer` row shows (same-week duplicate legs are merged into one row; 0-fish float-residue legs are dropped; TranOG/Grade rows are not moves) — the engine's internal budget counts the **same unit**. Once a week's moves reach the budget, the deferrable quality passes (plan-diff *evening* top-ups, even-out, balancer, variable-quantity, remnant sweep) wait for a calmer week and the leveling resumes there; essential moves (6N rotation fills, arrival make-room/vacates, plan-diff *source drains* — tanks another batch takes over) are never blocked. A week can still end 1-2 moves OVER the budget, because the essential passes run LAST: the deferrable work spends the budget out to the cap and the essential moves that follow land on top. Two anticipatory layers that close that gap are BUILT but shipped **off** (`_ANTICIPATE_ARRIVAL_RESERVE` / `_ANTICIPATE_PACING_DEFER` in `placement.py` — engineering switches, not knobs, with no config key): a 4-arm x 3-PR x 2-knob-set ablation measured that they buy full budget compliance by starving the quality rebalancer, and pay for it out of the **harvest floor** — on the operator's own PR, weeks under `min_harvest_per_week` go 3 -> 5 and the shortfall more than doubles, and on one PR a 69,677-fish week lands past the 60,500 relief ceiling. Steady harvest outranks handling, so the plan may show a 16-17 move week instead. An overrun on the handling gate (WARN >12 / FAIL >15) means the week's quality work and essential work together exceeded the budget — most often a TranOG arrival week coinciding with a 6N rotation fill. 0 = off. **Two scope limits worth knowing:** the *split* pass is NOT budget-gated (the `_rebalance_systems_realized` split pass, which takes its own `split_budget` and does not consult the weekly move budget), and the **Global engines never read this knob at all** — expect Global plans well over the budget, flagged only by the (soft) handling gate | 15 |
-| `min_harvest_weight_g` | minimum weight a fish can be harvested at | 3,500 |
+| `min_harvest_weight_g` | minimum weight a fish can be harvested at — a **tank is eligible when its MEAN reaches this**, which is why a tank averaging 3,438 g holds ~92,000 fish individually over 3,500 g and still cannot be harvested whole (§4.5, the graded peel exists for exactly that). **No dataclass default** — `ControlParams` declares it without one, so `config/control.yaml` is the only source. **Live value 3,300** since 2026-09-03: measured on the 8.31 PR it takes rest-of-2026 from 2,582 t to 2,715 t and the weekly-contract shortfall from 65,470 fish to 5,686, at the cost of five December-trough weeks shipping at 3.43–3.48 kg live (nothing below 3.4 kg). Beware 3,150 — a 600 t hole sits there | *(none — must be set)* |
 | `min_tank_control` | force-empty floor (fish): a harvest/transfer leaving fewer than this empties the tank (INV-5) | 7,000 |
 | `min_transfer_count` | min rebalancer transfer size (fish): the density/load balancer won't split a sub-group **smaller than this OUT** of a tank (the OUT-side mirror of `min_tank_control`). **0 = OFF.** Suppresses tiny partial moves — trades fewer transfers for more *marginal* density over-cap (the small moves were doing fine-grained relief); whole-tank consolidation moves are unaffected | 0 (off) |
 | `min_grade_count` | min GRADED-TAIL size (fish) for the floor-fill peel — a **different rule** from the two 7,000s beside it. `min_tank_control` says how thin a tank may be **left**; `min_transfer_count` says how small a group is worth rigging a **pump** for; this says how small a ripe tail is worth running the **grader** for, on a week that is short of the harvest floor. They shared one number until 2026-09, which made the peel take **nothing** whenever the ripe fish stood as 3-7k tails spread over 8-12 tanks. **Blank = inherit `min_transfer_count`** (the historical behaviour, and the only setting measured to hold every hard gate at both 3,300 g and 3,500 g). A number is the explicit floor; **0 = no floor** (the tail must still be ≥ `min_fraction` = 10% of the tank and must leave a legal remnant). MEASURED 2026-09-03 on the 8.31 PR: at a **3,300 g** harvest gate the value is inert — 0 / 3,000 / 7,000 give the identical plan; at **3,500 g** it bites, and dropping it to 0 buys rest-of-2026 2,582 → 2,700 t with thin tank-weeks 9 → 0, but pushes a 2027-W39 grow-out tank to 115.6 kg/m³ and the weekly move peak to 17. Check the density and handling gates before keeping a low value | blank (inherit) |
@@ -170,7 +173,7 @@ Facility-wide knobs read into `ControlParams`:
 | `cap_repair_budget` | **end-of-week cap repair (opt-in, OFF by default)** — every *other* rebalancing pass runs before the week's growth is applied, but the reports measure the state *after* it, so a system left just under its cap grows back over with nothing left to catch it. This pass runs last, on the state that is actually reported, and moves the least it can out of any system still over its feed/biomass cap into the coldest system that can legally take it. Big, clean per-system gain; the cost lands on the **harvest floor**, and it is high-variance across ProductionReports — it was adopted and then **withdrawn** within a day (see §7.3). Off is the shipped setting; if you try it, try **8** and judge it on your own PR's worst harvest week, not on the per-system numbers | 0 (off) |
 | `harvest_setpoint_lookahead_weeks` | **VESTIGIAL** — superseded by the dual-limit setpoint (§4.1/§4.3); kept for config back-compat but **not read** by the engine. Use `facility_biomass_deviation_pct` to set how close to the cap to run | 0.75 (ignored) |
 | `harvest_level_load` | **harvest smoother (ON by default)** — enforce `max_harvest_per_week` as a HARD ceiling + pre-harvest earlier so harvest is flat and biomass stays under cap. Paired with `rebalance_level`, which otherwise spikes harvest (see §4.3). Set `false` for old reactive behavior | **true** |
-| `hybrid_follow` | **L1 HARVEST GUIDE — `full` in the shipped config, but INERT as shipped: both guide levers (`hybrid_purge_lever` / `hybrid_production_lever`) are `false`, so the envelope is computed and then ignored — the plan you get is the plain controller's (§4.5).** Runs the Global engine's whole-horizon L1 harvest envelope first and, once a lever is on, feeds it to the controller as a per-week target band. To make it steer, turn on **`hybrid_production_lever`** — measured best alone on the real workbook (weeks under the contract floor 20 → 14, vs 20 → 16 with both). `hybrid_purge_lever` also needs `sixn_level_drains: true` (which likewise ships `false`) or the guide refuses it outright, since level drains are the guard against over-filling one 6N pair. The ceiling half is the point: it tells the reactive controller to harvest **less** in fat weeks so those fish are still there for lean ones — the one thing it can never decide for itself (all its own levers are `max()`). *Measured, 6 real PRs:* **totally empty harvest weeks 6 → 0**, weeks below floor 22.5 → 9.0, worst week 0 → 16,148 fish; **cost** peak biomass 102.6 → 107.1% of cap, peak density 102 → 124. `off` = old reactive-only behaviour. `floor` is **not** a no-op (that claim was retracted 2026-08-12) but it is **dominated** — measured on the 7.29 PR it produces a genuinely different plan (worst week 23,754 vs `off`'s 20,526) yet **11** weeks below the contract floor, worse than `off`'s 9 and far worse than `full`'s 3. Applying only the guide's floor half raises the lean weeks it can reach while leaving the controller free to over-harvest the fat ones; the **ceiling** half is what actually banks fish for later. Use `full` | `full` (dataclass default `off`) |
+| `hybrid_follow` | **L1 HARVEST GUIDE — `full` in the shipped config, and STEERING.** Two independent routes turn it on and either alone is enough: `config/control.yaml` ships `hybrid_purge_lever: true` and `hybrid_production_lever: true`, **and** the `controller-hybrid` arm pins both `True` in its own `overrides` (`forecast/methods.py`) — so setting the config values back to `false` would still leave that arm steering. Runs the Global engine's whole-horizon L1 harvest envelope first and feeds it to the controller as a per-week target band. The **production** half is live. The **purge** half is refused outright while `sixn_level_drains: false` (level drains are the guard against over-filling one 6N pair, and the guide may not remove it), so what you run today is the production-lever-alone arm — the applicable measurement is weeks under the contract floor 20 → 14, not the both-levers 20 → 16. Note the guide's ceiling half applies only on weeks L1 itself calls production weeks and while the facility is under its hard cap; elsewhere it degrades to floor-only. The ceiling half is the point: it tells the reactive controller to harvest **less** in fat weeks so those fish are still there for lean ones — the one thing it can never decide for itself (all its own levers are `max()`). *Measured, 6 real PRs:* **totally empty harvest weeks 6 → 0**, weeks below floor 22.5 → 9.0, worst week 0 → 16,148 fish; **cost** peak biomass 102.6 → 107.1% of cap, peak density 102 → 124. `off` = old reactive-only behaviour. `floor` is **not** a no-op (that claim was retracted 2026-08-12) but it is **dominated** — measured on the 7.29 PR it produces a genuinely different plan (worst week 23,754 vs `off`'s 20,526) yet **11** weeks below the contract floor, worse than `off`'s 9 and far worse than `full`'s 3. Applying only the guide's floor half raises the lean weeks it can reach while leaving the controller free to over-harvest the fat ones; the **ceiling** half is what actually banks fish for later. Use `full` | `full` (dataclass default `off`) |
 | `hybrid_follow_band` | how tightly the controller tracks the guide (± fraction). Chosen by a 90-cell paired sweep as the most **stable** setting: holds 0–1 empty weeks under neutral perturbation where wider bands drift to 3–4 | **0.05** |
 | `harvest_smooth_lookahead_weeks` | level-load window K — weeks of coming-due biomass to spread the pre-harvest over | 6 |
 | `harvest_level_target` | flat fish/week floor when level-loading (unset/null = auto from realized growth) | null |
@@ -197,8 +200,22 @@ this is a safe way to stress-test or re-plan.
 
 ### 3.3a Facility capacity limits (`scenario/limits.yaml`, **Configure → Limits**)
 A capacity is a fact about the facility — how much fish a system can hold, how
-much feed its line can deliver. It changes rarely, so you state it **once** and
-it applies to every week of every horizon.
+much feed its line can deliver. It changes rarely, so for a **system** you state
+it **once** and it applies to every week of every horizon.
+
+> ⚠️ **The two grids on this page resolve differently, and the difference has
+> cost real tonnage.** A **system** cap falls back: per-week row → system+mode
+> default → system default → no cap at all. A **facility** cap has no
+> "stated once" tier — it is per-week row → **the `config/control.yaml`
+> default**, full stop (`caps.resolve_facility_cap`). So a facility metric you
+> steer week by week silently reverts to the Control default the moment your
+> rows run out. On the 2026-08-31 PR the `biomass` and `feed_per_day` rows
+> stopped at 2026-W53, so all of 2027 planned against the 3,800,000 kg /
+> 34,000 kg/day **design** figures while the operator was entering the
+> 3,650,000 / 27,500 **derate** — worth ~131 t of horizon production, silently.
+> Since 2026-09-03 the run says so: a `PER-WEEK COVERAGE` line in the
+> ValidationLog names any facility metric whose rows stop before the horizon
+> ends (§5). It reports; it changes no cap.
 
 **Configure → Limits** has three parts:
 
@@ -209,8 +226,10 @@ it applies to every week of every horizon.
 | **Per-week system exceptions** (collapsed, advanced) | A cap for ONE unusual week — a shutdown, a trial, maintenance. Blank is the normal state. | Almost never. |
 
 The **Facility limits** grid below those three carries the per-week facility
-numbers — the harvest floor/ceiling, HOG yield, and one entry that is not a cap
-at all:
+numbers. It holds **six** metrics, not the harvest ones alone: `biomass` and
+`feed_per_day` (the whole-facility totals, which are *also* where a temporary
+derate against the Control design figure is expressed), `max_harvest_per_week`,
+`min_harvest_per_week`, `hog_yield`, and one entry that is not a cap at all:
 
 > **`sgr_correction_og` — the per-week OG growth factor.** The weeks you know
 > the site will not achieve the modelled growth. `1.0` (or blank) is the model;
@@ -703,13 +722,17 @@ matters.
 
 ### 4.5 The L1 harvest guide (the hybrid — **ON by default**): `hybrid_follow`
 
-This is the *intended* answer to *"never an empty harvest week"* — but **as shipped it
-is inert.** `hybrid_follow: full` is on in `config/control.yaml`, so the L1 guide is
-computed; both levers that let it steer are shipped **off** (`hybrid_purge_lever: false`,
-`hybrid_production_lever: false`), and the purge lever is refused outright while
-`sixn_level_drains: false`. A default run therefore plans as the plain controller. To get
-the behaviour described below, set `hybrid_production_lever: true` for the production path,
-and `hybrid_purge_lever: true` **plus** `sixn_level_drains: true` for the purge path.
+This is the *intended* answer to *"never an empty harvest week"*, and **it is
+live.** `hybrid_follow: full` is on in `config/control.yaml`, and both levers that let
+it steer ship `true` (`hybrid_purge_lever`, `hybrid_production_lever`) — as well as
+being pinned `True` by the `controller-hybrid` method's own overrides, which win over
+`control.yaml` for that arm. The **production** path therefore steers on every
+non-purge week. The **purge** path does not: the guide refuses it outright while
+`sixn_level_drains: false`, because level drains are the guard against over-filling one
+6N pair, and the refusal is written to the ValidationLog. To enable the purge path too,
+set `sixn_level_drains: true`. Note the guide's *ceiling* half — the half that actually
+banks fish — applies only on weeks L1 itself calls production weeks and while the
+facility is under its hard cap; elsewhere it degrades to floor-only.
 
 **Why the reactive controller can't fix this itself.** Every lever it owns is a
 `max()` — it can always harvest *more*, never less. So when a fat week arrives it
@@ -729,12 +752,12 @@ never allowed below `min_harvest_per_week`.
 
 **Measured across 6 real July-2026 PRs** (2026-08-03, after the zero-harvest-week
 metric fix) — **with `hybrid_purge_lever` and `hybrid_production_lever` both ON.
-`config/control.yaml` now ships both `false`**, and the guide is acted on in exactly
-three places (`forecast/placement.py`), every one of which tests a lever — so on the
-shipped config the L1 envelope is computed and then steers nothing, and a default run
-plans identically to the plain controller. The **hybrid (default)** column below is
-therefore *not* what the shipped config produces; turn the two levers on to get the
-behaviour described above. The figures also predate the 2026-08-20/21 changes
+`config/control.yaml` ships both `true`**, and the guide is acted on in exactly
+three places (`forecast/placement.py`), every one of which tests a lever. Because the
+purge lever is refused while `sixn_level_drains: false`, the configuration you actually
+run is the **production-lever-alone** arm: the applicable measurement is *weeks under
+the contract floor 20 → 14*, not the both-levers *20 → 16*. The figures predate the
+2026-08-20/21 changes
 (handling mortality on every deposit, `grade_efficiency` 0.85, Thursday purge move-in,
 6N one-batch-one-tank), all of which move the weekly harvest series, and have not been
 reproduced since. The `peak tank density` row was measured before **R8** stopped
@@ -787,7 +810,7 @@ so you can always see the two side by side.
 | **Advisory** | per-week capacity table: biomass/feed vs caps + excess + OK/REDUCE | capacity headroom + over-cap weeks |
 | **FacilityMap** | tank × week grid (cell = "Batch# AvgWt/Density"); **below it**: per-system × week **feed (kg/day)** and **biomass (kg)** blocks, each with a FACILITY total row | occupancy at a glance + per-system load vs caps |
 | **BatchLocations** | per-(week, batch, tank) occupancy | raw realized placement |
-| **ValidationLog** | numbered warnings (# / Category / Detail), incl. FW-calibration + bottleneck (annotated with resolution) and the **realized-plan** categories below | diagnostics — **read the `(realized plan)` categories first** |
+| **ValidationLog** | numbered warnings (# / Category / Detail), incl. FW-calibration + bottleneck (annotated with resolution), **`INFO - Per-week coverage`** (below) and the **realized-plan** categories below | diagnostics — **read the `(realized plan)` categories first** |
 | **InputConservationAudit** | per batch: placed/dropped, harvested, standing, **FW reconciliation** (planned vs realized seawater entry) + **closed FW mass-balance** (`first_FW_count` vs `realized_TranOG + FW_mort + FW_cull`; §6 #6) | conservation + FW calibration gaps |
 | **TankContinuityAudit** | per-(tank, week) balance + **facility conservation summary** | 0-drift proof |
 | **ReconciliationReport / SystemLimitsAudit** | per-batch open/close balance (count reconciles **exactly** via recorded realized biology; biomass within tolerance) / per-system realized biomass + feed vs cap, flagged `BIOMASS_OVER` / `FEED_OVER` | deeper audits — *TankContinuityAudit is the authoritative 0-drift biomass check* |
@@ -823,6 +846,38 @@ so you can always see the two side by side.
 > per-day rate).
 
 > **`… (realized plan)` categories — judge the plan, not a pass inside it.**
+#### `INFO - Per-week coverage (weeks on a Control default)`
+
+Shipped 2026-09-03. One line per **facility** metric whose per-week rows in
+`scenario/limits.yaml` **stop before the horizon ends**, e.g.
+
+> `PER-WEEK COVERAGE - biomass: rows cover 2026-W36..2026-W53 (18 of 85 horizon
+> week(s)); 67 after 2026-W53 take the Control default 3,800,000. An absent row
+> means "use the default", so this matters only if that default is not what you
+> intend for those weeks - check it rather than assume it.`
+
+Read it as a **disclosure, not a defect** — falling back is correct behaviour
+and an absent row genuinely does mean "use the default". What it removes is the
+silence: on the 2026-08-31 PR the `biomass` and `feed_per_day` rows stopped at
+2026-W53, so 2027 planned against the *design* figures (3,800,000 kg /
+34,000 kg/day) while the operator was entering the *derate* (3,650,000 /
+27,500) — a difference of ~131 t of horizon production that nothing announced.
+
+Three things keep it worth reading rather than noise:
+
+- it is **silent for a metric with no rows at all**, because there the Control
+  default *is* your deliberate answer;
+- it reports the **shape** of the gap — weeks *after* your last row mean entry
+  stopped, weeks *before* your first usually mean the rows start mid-horizon on
+  purpose;
+- `sgr_correction_og` is **excluded**: it has no Control default to fall back
+  to, so coverage is not a question for it.
+
+It is **detection only**. `caps.resolve_facility_cap` is unchanged and still
+falls back exactly as before; the note reaches `invariant_warnings`, a
+report-layer list the planner never reads. Verified on the 8.31 PR: with and
+without the check, 85 harvest weeks compared, **0 differ, 0.0 fish**.
+
 > Most ValidationLog entries are raised *mid-plan* by whichever pass first
 > noticed a problem. That is useful for tracing, but it is **not** the answer to
 > "which weeks are short?" — the passes that run afterwards (make-room,
@@ -1524,9 +1579,10 @@ you choose a *whole* plan — never a splice.
 > envelope is whole-horizon, their *placement* solves ONE WEEK AT A TIME seeded by
 > last week's occupancy — no more foresight than the controller. The lever that
 > actually measured is the L1 guide's steering flags: `config/control.yaml` ships
-> `hybrid_purge_lever` and `hybrid_production_lever` **false**, so the
-> `controller-hybrid` arm computes the guide and then steers nothing; turning the
-> production lever on took weeks under the contract floor 20 → 14 on the real
+> `hybrid_purge_lever` and `hybrid_production_lever` **true**, and the
+> `controller-hybrid` arm pins both `True` itself, so that arm steers; with the purge
+> lever refused by `sixn_level_drains: false`, what runs is the production lever
+> alone — worth weeks under the contract floor 20 → 14 on the real
 > workbook with **zero** empty harvest weeks (re-measured 2026-08-21). The
 > regression `test_no_harvest_craters` guards this invariant.
 
@@ -1538,13 +1594,14 @@ you choose a *whole* plan — never a splice.
 - The harvest spike and the biomass overage are **two symptoms of one cause** — the
   stocking plan vs the facility's combined hold (cap) + process (55k/week) capacity.
   You can trade one for the other; eliminating both needs a stocking change.
-- **The default planning method is the L1-guided hybrid (§4.5) — but as shipped it
-  steers nothing.** `hybrid_follow: full` builds the L1 harvest envelope, yet the two
-  levers that apply it, `hybrid_purge_lever` and `hybrid_production_lever`, both ship
-  `false`, and `placement.py` reads the guide only behind those gates. A default run
-  therefore plans identically to the plain controller, and you get the reactive
-  behaviour: it can only ever harvest *more*, never less, so it cannot save fish for a
-  lean week it has no way of seeing. Turn both levers on to actually buy the envelope —
+- **The default planning method is the L1-guided hybrid (§4.5), and it steers.**
+  `hybrid_follow: full` builds the L1 harvest envelope, and the two levers that apply
+  it, `hybrid_purge_lever` and `hybrid_production_lever`, both ship `true` — and are
+  pinned `True` by the arm itself. The production path is live; the purge path is
+  refused while `sixn_level_drains: false`. What you lose by that refusal is the 6N
+  staging half, not the envelope: the ceiling still tells the controller to harvest
+  *less* in fat weeks on production weeks under the cap. Set `sixn_level_drains: true`
+  to buy the purge half as well —
   the purge one also needs `sixn_level_drains`, which ships `false` too. Measured on the
   real workbook with the live scenario, that takes weeks under the contract floor from
   20 → 16 with both levers, or 20 → 14 with the production lever alone, with zero empty

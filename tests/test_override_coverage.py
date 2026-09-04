@@ -122,3 +122,49 @@ def test_an_empty_horizon_is_not_an_error(control):
     fl = _limits({("2026-W40", METRIC_FEED_DAY): 27500.0})
     assert caps.override_coverage_gaps(fl, control, []) == []
     assert caps.override_coverage_gaps(fl, control, None) == []
+
+
+def test_the_note_lands_in_its_own_validationlog_category():
+    """DEFECT (found by execution, same day it shipped): the note text matched
+    no branch of write_validation_log's category chain, so it fell into the
+    catch-all `WARNING - Hydration` -- telling an operator scanning the log
+    that their ProductionReport had read badly, when in fact a facility metric
+    had simply run out of per-week rows. Exactly the mis-filing the
+    FW-calibration branch above it was written to correct."""
+    import openpyxl
+
+    from forecast.excel_io import write_validation_log
+
+    note = ("PER-WEEK COVERAGE - biomass: rows cover 2026-W36..2026-W53 "
+            "(18 of 85 horizon week(s)); 67 after 2026-W53 take the Control "
+            "default 3,800,000.")
+    wb = openpyxl.Workbook()
+    write_validation_log(wb, invariant_warnings=[note])
+    cats = [row[1] for row in wb["ValidationLog"].iter_rows(values_only=True)
+            if row and len(row) > 2 and row[2] and "PER-WEEK COVERAGE" in str(row[2])]
+    assert cats, "the coverage note never reached the ValidationLog"
+    assert "Per-week coverage" in str(cats[0]), (
+        "coverage note filed as %r -- it must have its own category, not the "
+        "hydration catch-all, which misreads as 'your PR is bad'" % cats[0])
+
+
+def test_a_capacity_is_not_rendered_in_scientific_notation(control):
+    """DEFECT: `%g` rendered 3800000.0 as `3.8e+06` in a log line about
+    kilograms of fish. An operator cannot check a number they cannot read.
+
+    Asserted on the RENDERED NOTE, not on the helper: a first draft of this
+    test called `_fmt_cap` directly, and a negative control showed it still
+    passed with the call site reverted to `%g`. A guard that does not fail on
+    the defect it names is not a guard."""
+    from forecast.caps import _fmt_cap
+    assert _fmt_cap(3800000.0) == "3,800,000"
+    assert _fmt_cap(34000.0) == "34,000"
+    assert _fmt_cap(0.87) == "0.87"      # hog_yield stays readable too
+
+    fl = _limits({(w, METRIC_BIOMASS): 3650000.0
+                  for w in WEEKS if w.startswith("2026")})
+    note = caps.coverage_gap_notes(fl, control, WEEKS)[0]
+    assert "e+0" not in note, "capacity rendered in scientific notation: %s" % note
+    assert format(control.max_biomass_kg, ",.0f") in note, (
+        "the note must name the default in a form an operator can read: %s"
+        % note)

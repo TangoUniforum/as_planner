@@ -1,5 +1,27 @@
 # Per-week operator inputs — one number, honoured everywhere
 
+> **STATUS — superseded in part, later the same day (2026-09-03).** This note
+> was written in the morning, before three commits that answered its open
+> items. Read it for the reasoning; take the numbers from the commits.
+>
+> - **"What the peel still cannot do"** (the `min_transfer_count: 7000` wall)
+>   was FIXED in `0e36f87`. The floor-fill peel now has its own
+>   `min_grade_count` (unset = inherit `min_transfer_count`, so the default is
+>   unchanged), and the cap-before-minimum ordering was corrected. At the live
+>   3,300 g gate: floor misses 3 → 1, shortfall 5,686 → 1,172 fish.
+>   ⚠️ Still open: only ONE of the three graded peels was converted.
+>   `placement.py`'s entry-tier graded transit and the 2028 production-era
+>   stage both still read `min_transfer_count` and still cap before testing the
+>   minimum.
+> - **The live row counts** ("17 biomass, 17 feed_per_day") are stale.
+>   `576c21c` extended the derate across the whole horizon: 85 and 85, spanning
+>   2026-W36..2028-W15. The 16 `min_harvest_per_week` and 9 `sgr_correction_og`
+>   rows are unchanged.
+> - **The silent-fallback problem this note identified** is now detected at run
+>   time: `f50c278` added the `INFO - Per-week coverage` ValidationLog line,
+>   which names any facility metric whose rows stop before the horizon ends.
+>   Detection only — no cap resolves differently.
+
 **2026-09-03. Operator ruling, binding:**
 
 > "if we are defining a certain min count to harvest then the entire system

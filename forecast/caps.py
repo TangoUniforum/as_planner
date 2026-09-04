@@ -254,7 +254,12 @@ def override_coverage_gaps(facility_limits, control, week_labels):
 
     Returns a list of dicts, one per affected metric, ordered by metric name:
     `metric`, `default`, `n_covered`, `n_missing`, `first_missing`,
-    `last_covered`, `missing_weeks` (capped at 12 for reporting).
+    `first_covered`, `last_covered`, `missing_weeks` (capped at 12 for
+    reporting), and the gap SHAPE -- `n_before` (horizon weeks earlier than the
+    first row), `n_after` (later than the last) and `n_interior` (holes inside
+    the covered span). The shape is the useful part and is what
+    `coverage_gap_notes` reads: weeks AFTER the last row mean entry stopped,
+    weeks BEFORE the first usually mean the rows start mid-horizon on purpose.
     """
     labels = [str(w) for w in (week_labels or [])]
     if not labels:
@@ -304,6 +309,16 @@ def override_coverage_gaps(facility_limits, control, week_labels):
     return out
 
 
+def _fmt_cap(v):
+    """A capacity an operator can read: `%g` renders 3800000.0 as `3.8e+06`,
+    which is unreadable in a log line about kilograms of fish."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return str(v)
+    return format(f, ",.0f") if abs(f) >= 1000 else "%g" % f
+
+
 def coverage_gap_notes(facility_limits, control, week_labels):
     """`override_coverage_gaps` rendered as ValidationLog lines.
 
@@ -324,13 +339,13 @@ def coverage_gap_notes(facility_limits, control, week_labels):
             shape.append("%d inside the covered span" % g["n_interior"])
         notes.append(
             "PER-WEEK COVERAGE - %s: rows cover %s..%s (%d of %d horizon "
-            "week(s)); %s take the Control default %g. An absent row means "
+            "week(s)); %s take the Control default %s. An absent row means "
             "\"use the default\", so this matters only if that default is not "
             "what you intend for those weeks - check it rather than assume it."
             % (g["metric"], g["first_covered"], g["last_covered"],
                g["n_covered"], g["n_covered"] + g["n_missing"],
                " and ".join(shape) or "%d week(s)" % g["n_missing"],
-               g["default"]))
+               _fmt_cap(g["default"])))
     return notes
 
 def og_sgr_factors(facility_limits) -> dict[str, float]:

@@ -1241,14 +1241,14 @@ def _try_graded_move_in(
 
     retain_in_source=True (grade-to-min top-up): the small (< harvest-weight)
     tail STAYS in the source tank — no separate retention tank needed; only the
-    big tail is peeled to the 6N pickup. Honors min_grade_count -- the peel's OWN floor, which inherits
-    min_transfer_count when unset. The two are different rules: min_transfer_count
-    is the minimum for PUMPING A WHOLE GROUP, min_grade_count is the smallest
-    ripe tail worth putting through a grader, and min_tank_control (unchanged,
-    enforced below) is what may be LEFT BEHIND. Conflating the first two is what
-    blocked this peel entirely: the ripe tails here are 3,000-6,800 fish spread
-    over 8-12 tanks, every one of them under a 7,000 pump minimum. (don't peel a
-    sub-min group out) and min_tank_control (don't leave a sub-min dribble).
+    big tail is peeled to the 6N pickup. Honors min_grade_count -- the peel's
+    OWN floor, which inherits min_transfer_count when unset. THREE rules, three
+    questions: min_transfer_count asks may this group be PUMPED,
+    min_grade_count asks is this ripe tail worth a GRADER, and min_tank_control
+    (unchanged, enforced below) asks may this tank be LEFT this thin.
+    Conflating the first two blocked this peel entirely: the ripe tails here
+    are 3,000-6,800 fish spread over 8-12 tanks, every one under a 7,000 pump
+    minimum.
 
     Walks FIFO across batches; for each production tank where the
     average is below threshold but a fraction ≥ `min_fraction` of fish
@@ -1256,9 +1256,10 @@ def _try_graded_move_in(
     emits a `GradedHarvest`: the big portion goes to the purge pair
     main tank (pickup), the small portion to a free OG3+ tank
     (retention). Returns the count moved into pickup. Fires for one
-    tank max per week (single GradedHarvest event); the pair will be
-    refilled normally on later weeks as biology grows the remaining
-    fish past threshold.
+    tank max PER CALL (single GradedHarvest event) -- the caller loops
+    while the pair is still short of its floor, so one WEEK can carry
+    several; the pair is otherwise refilled normally on later weeks as
+    biology grows the remaining fish past threshold.
     """
     from statistics import NormalDist as _ND
     min_hv = control.min_harvest_weight_g

@@ -3252,6 +3252,16 @@ def write_validation_log(
             cat = ("WARNING - FW growth calibration (target unreachable)"
                    if ("CLAMPED" in w or "did not converge" in w)
                    else "INFO - FW growth calibration (fw_correction rewritten)")
+        elif w.startswith("PER-WEEK COVERAGE"):
+            # Weeks that silently take a Control default because the operator's
+            # per-week rows stop before the horizon ends. INFO, not WARNING:
+            # falling back is CORRECT behaviour and an absent row legitimately
+            # means "use the default" -- what was missing was visibility. It
+            # must not land in the "WARNING - Hydration" catch-all, which tells
+            # an operator scanning the log that their ProductionReport read
+            # badly. That is the same mis-filing the FW-calibration branch
+            # above exists to correct.
+            cat = "INFO - Per-week coverage (weeks on a Control default)"
         elif "INV-1" in w:
             cat = "WARNING - INV-1 (one-batch-per-tank)"
         elif "INV-5" in w:

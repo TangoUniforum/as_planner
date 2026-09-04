@@ -196,10 +196,21 @@ def _active_config_summary(cd: dict) -> list[tuple]:
          if str(g("hybrid_follow", "off")) == "full" else
          "reactive week-by-week harvest only — no long-horizon guide "
          "(measured to leave empty harvest weeks)"),
-        ("Caps", f"biomass {g('max_biomass_kg', 0):,.0f} kg · "
-                 f"feed {g('max_feed_per_day_kg', 0):,.0f} kg/day",
+        ("Caps (Control default)",
+         f"biomass {g('max_biomass_kg', 0):,.0f} kg · "
+         f"feed {g('max_feed_per_day_kg', 0):,.0f} kg/day",
          "the facility limits the plan must hold under (both counted "
-         "FW-inclusive)"),
+         "FW-inclusive). These are the CONTROL DEFAULTS, which is not "
+         "necessarily what the run used: a per-week row in "
+         "scenario/limits.yaml outranks them for that week, and the live "
+         "scenario overrides every horizon week (e.g. to a 27,500 kg/day "
+         "feed derate against a 34,000 design figure). This panel reads a "
+         "control dict alone — it deliberately does NOT open limits.yaml, "
+         "because it also renders a PAST run's RunConfig and pairing that "
+         "with today's limits would state something false about that run. "
+         "For what a given week actually resolved to, read the Limits "
+         "editor, and the ValidationLog's 'per-week coverage' line for "
+         "which weeks fell back to these defaults"),
         ("Harvest floor / limit",
          f"{g('min_harvest_per_week', 0):,.0f} – "
          f"{g('max_harvest_per_week', 0):,.0f} fish/wk"
@@ -623,9 +634,13 @@ _CONTROL_HELP = {
         "— red, meaning the plan should ramp its harvests up earlier. Unit: "
         "fraction of the limit.",
     "min_harvest_weight_g":
-        "The 3.5 kg sales gate: a fish must weigh at least this (live weight) "
-        "before it may be harvested. A business constant, not a tuning knob. "
-        "Unit: grams.",
+        "The sales gate: a TANK becomes harvestable when its MEAN live weight "
+        "reaches this. Note it is the tank's mean, not the individual fish — a "
+        "tank averaging 3,438 g can hold ~92,000 fish that are each over "
+        "3,500 g and still not be harvestable whole; the graded peel exists to "
+        "take that tail. A business constant, not a tuning knob: lowering it "
+        "lets EVERY tank in the facility go earlier, including ones that "
+        "genuinely hold small fish. Unit: grams.",
     "min_harvest_per_week":
         "The weekly harvest floor from the sales contracts: EVERY week must "
         "ship at least this many fish — never an empty week. This knob is a "
@@ -939,22 +954,29 @@ _CONTROL_HELP = {
         "for the lean ones, the one thing a week-by-week planner cannot see "
         "for itself. IT STEERS ONLY THROUGH THE TWO LEVERS BELOW ('guide "
         "lever: 6N staging (purge)' and 'guide lever: harvest cap "
-        "(production)'): config/control.yaml ships both OFF, so on the PLAIN "
-        "controller the guide is computed and then IGNORED. The "
-        "'Controller — hybrid' METHOD pins both levers ON (and "
-        "hybrid_follow='full'), and a method's pins are written OVER "
-        "control.yaml for its own run — so on THAT arm the guide really does "
-        "steer. The byte-identical measurement across 21 PRs (2026-08-21) "
-        "predates those pins (2026-08-27) and no longer describes it. The purge lever is refused outright whenever "
-        "'Level 6N purge drains' is off (it is, here). Switching the levers "
-        "on does work: on the real workbook weeks under the harvest floor "
+        "(production)'): with both off the guide is computed and then "
+        "IGNORED, with either on it steers. TWO independent routes turn them "
+        "on and either alone is enough — config/control.yaml ships both "
+        "`true`, AND the 'Controller — hybrid' METHOD pins both ON in its own "
+        "overrides (a method's pins are written OVER control.yaml for its own "
+        "run), so setting the config values back to false would NOT make that "
+        "arm inert. The plain 'Controller' method pins hybrid_follow='off', "
+        "so on that arm no guide is built at all. The byte-identical "
+        "measurement across 21 PRs (2026-08-21) predates those pins "
+        "(2026-08-27) and no longer describes this. The purge lever is "
+        "refused outright whenever 'Level 6N purge drains' is off (it is, "
+        "here) — so as configured today this is the PRODUCTION-LEVER-ALONE "
+        "arm, and that is the measurement row that applies. On the real "
+        "workbook weeks under the harvest floor "
         "fall 20 → 16 with both, 20 → 14 with the production lever alone, "
         "with no empty harvest weeks. Measured on 6 real PRs on 2026-08-03 "
         "WITH THE LEVERS ON, before four 2026-08-20/21 changes and not "
         "reproduced since: totally empty harvest weeks 6 → 0; the cost is a "
         "higher biomass peak (the held-back fish are still "
         "in the water). 'off' = old reactive-only planning (leaves empty "
-        "weeks). 'floor' = only lifts short weeks (a no-op in practice)."
+        "weeks). 'floor' = only lifts short weeks: NOT a no-op (that claim was "
+        "retracted 2026-08-12) but DOMINATED — it produces a genuinely "
+        "different plan that is worse than 'full' on the floor."
         + _VALIDATED,
     "hybrid_follow_band":
         "How tightly the weekly controller must follow the long-horizon "
@@ -981,8 +1003,9 @@ _CONTROL_HELP = {
         "decide whether the guide does anything at all: with BOTH levers off "
         "the guide is computed and then ignored, which made the "
         "'Controller — hybrid' method byte-identical to the plain controller. "
-        "Default is ON in code, but this install ships it OFF — check the box "
-        "below rather than assuming. Forced off whenever 'Level 6N purge "
+        "Default is ON in code AND this install ships it `true` — read the box "
+        "below for the live value rather than assuming either way. But it "
+        "is REFUSED at guide-build time whenever 'Level 6N purge "
         "drains' is off (that is a safety guard against over-filling one 6N "
         "pair, and the guide is not allowed to remove it). NOT TUNABLE: since "
         "2026-08-27 this lever is arm IDENTITY (methods.UNTUNABLE_KNOBS) and "
@@ -994,7 +1017,8 @@ _CONTROL_HELP = {
         "Lets the harvest guide steer the weekly harvest ceiling and off-feed "
         "entry once 6N is in grow-out mode. NOT a diagnostic switch — see the "
         "purge lever above: with both off the guide steers nothing. Default is "
-        "ON in code, but this install ships it OFF. Measured on the real "
+        "ON in code, and this install ships it `true` — read the box below "
+        "for the live value. Measured on the real "
         "workbook (2026-08-21): turning THIS lever on alone took weeks under "
         "the contract floor from 20 to 14, better than turning both on (16). "
         "NOT TUNABLE: like the purge lever it is arm IDENTITY "
@@ -3759,8 +3783,19 @@ def _edit_limits():
         for wk in weeks}
     with st.expander(f"Facility limits — per-week overrides "
                      f"({len(fl_cur)} set)", expanded=False):
-        st.caption("Whole-facility caps for one week. Blank = use the Control "
-                   "default for that metric.")
+        st.caption(
+            "Whole-facility caps, one column per week. **Blank = use the "
+            "Control default for that metric** — which is a different thing "
+            "from a blank in the System capacities grid above, where blank "
+            "means NO CAP AT ALL. A facility metric has no 'standing value' "
+            "tier: the week either has a row here or it takes the "
+            "config/control.yaml number, so rows that stop before the horizon "
+            "ends hand the remaining weeks a number nobody chose. The run "
+            "names those weeks in the ValidationLog under 'per-week "
+            "coverage'. And **0 is not blank**: `resolve_facility_cap` returns "
+            "`val if val > 0 else None`, so a typed 0 resolves to NO CAP AT "
+            "ALL for that week — not to the Control default, and not to 'no "
+            "harvest'. Leave a cell blank to mean 'use the default'.")
         if weeks:
             fdf = st.data_editor(
                 st.session_state["flim_wide"], hide_index=True,
