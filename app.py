@@ -6398,7 +6398,9 @@ def _run_with_workbook_bytes(
 
     # Read parsed outputs for visualization.
     output_bytes = out_path.read_bytes()
-    parsed = _parse_output_workbook(out_path)
+    # run_config_dir, never config_dir: the parser GRADES the workbook, so it
+    # must use the config the run actually ran on (see its docstring).
+    parsed = _parse_output_workbook(out_path, config_dir=run_config_dir)
     # Capture the EFFECTIVE config this run used, so the result can always show
     # what produced it. MUST read run_config_dir, not config_dir: with method
     # overrides it is the throwaway copy they were applied to, while config_dir
@@ -6445,8 +6447,29 @@ def _run_with_workbook_bytes(
     return parsed
 
 
-def _parse_output_workbook(path: Path) -> dict:
-    """Extract data from the saved workbook for the UI's visualization."""
+def _parse_output_workbook(path: Path, config_dir=None) -> dict:
+    """Extract data from the saved workbook for the UI's visualization.
+
+    `config_dir` is the config the RUN used -- `run_config_dir` at the call
+    site, which is a throwaway copy whenever method or knob overrides were
+    applied. It matters because this function GRADES the workbook: per-tank
+    density caps, the R8 purge/production boundary and the welfare line all
+    come from config, and reading the global one describes a plan that was not
+    the plan on screen. That is the same defect the `config_used` comment below
+    the call site records for placement_method, and five of nine callers pass a
+    non-global dir (optimize.config_dir_with_overrides for the knob search, the
+    tuned tournament's winner verification, Quick run).
+
+    Defaults to the global CONFIG_DIR so existing callers are unchanged.
+
+    Degradations are RETURNED in `config_notes`, not only printed: this runs
+    AFTER `redirect_stdout(captured)` closes, so a print here reaches the
+    server terminal and never the operator. The silent one mattered most -- an
+    unreadable control.yaml exempts every 6N tank from the density judgement
+    for the whole horizon and the screen showed an unqualified all-clear.
+    """
+    _cfg = config_dir or CONFIG_DIR
+    config_notes: list[str] = []
     wb = load_workbook(path, keep_vba=str(path).lower().endswith(".xlsm"),
                        data_only=False)
 
@@ -6458,7 +6481,7 @@ def _parse_output_workbook(path: Path) -> dict:
     growout_cap = 95.0
     try:
         from forecast.config_io import load_facility_config
-        _fac = load_facility_config(CONFIG_DIR)
+        _fac = load_facility_config(_cfg)
         for t in _fac.tanks:
             tank_caps[t.tank_id] = t.max_density_kg_m3
             sys_cap_biomass[t.system_id] = (
@@ -6477,6 +6500,10 @@ def _parse_output_workbook(path: Path) -> dict:
         print(f"WARN: facility config unreadable ({type(e).__name__}: {e}) — "
               f"density KPI/heatmap judged against the {growout_cap:g} kg/m³ "
               f"default cap")
+        config_notes.append(
+            f"facility config unreadable ({type(e).__name__}) — per-tank "
+            f"density caps unavailable; judged against the {growout_cap:g} "
+            f"kg/m³ grow-out default")
 
     # R8 needs the purge/production boundary, which lives in Control. If
     # Control is unreadable, fall back to PURGE: that reproduces the previous
@@ -6487,10 +6514,15 @@ def _parse_output_workbook(path: Path) -> dict:
     _ctl_kpi = None
     try:
         from forecast.config_io import load_control
-        _ctl_kpi = load_control(CONFIG_DIR)
+        _ctl_kpi = load_control(_cfg)
     except Exception as e:  # noqa: BLE001
         print(f"WARN: control config unreadable ({type(e).__name__}: {e}) — "
               f"6N density judged as PURGE (exempt) for the whole horizon")
+        config_notes.append(
+            f"control config unreadable ({type(e).__name__}) — 6N tanks were "
+            f"treated as PURGE (density-EXEMPT under R8) for the whole "
+            f"horizon, so any 6N crowding is NOT reflected in the density "
+            f"figures on this page")
 
     def _purge_kpi(ctl, when):
         if ctl is None or when is None:
@@ -6707,7 +6739,7 @@ def _parse_output_workbook(path: Path) -> dict:
         # `or default`: an unset/zero line means "the default 80", the SAME
         # resolution every other surface (board, optimizer, frontier) uses —
         # a 0 here would mark ALL biomass crowded on this KPI only.
-        _wl = float(load_control(CONFIG_DIR).density_welfare_threshold_kg_m3
+        _wl = float(load_control(_cfg).density_welfare_threshold_kg_m3
                     or WELFARE_DENSITY_KG_M3)
     except Exception as _e:  # noqa: BLE001
         # Was `pass`: the KPI then judged density against a line the operator
@@ -6726,6 +6758,7 @@ def _parse_output_workbook(path: Path) -> dict:
         "crowded_fish_weeks": _q_fw,
         "welfare_density": _wl,
         "welfare_density_note": _wl_note,
+        "config_notes": config_notes,
         "system_biomass_cap": sys_cap_biomass,
         "harvest_kg": harvest_kg,
         "harvest_count": harvest_count,
@@ -9692,6 +9725,11 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
         k4.metric("Total harvest", f"{r['harvest_kg']/1000:,.1f} t",
                   help="Sum of all harvest events across the horizon")
         k5.metric("Run time", f"{r['elapsed']:.1f}s")
+    # Grading degradations qualify EVERYTHING on this page, so they are stated
+    # here rather than printed: the parse runs after the stdout capture closes,
+    # so a print reaches the terminal and never the operator.
+    for _note in (r.get("config_notes") or []):
+        st.warning(f"⚠ **Density figures on this page are degraded** — {_note}")
     with top_dl:
         st.subheader("Output")
         st.download_button(
