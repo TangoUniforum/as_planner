@@ -1535,6 +1535,7 @@ def _transit_entry_to_pair(
         ok = _make_room_into_6n(
             state, hop, week_start_date, fill_pair,
             transfer_events, warnings, week_label,
+            harvest_cap=getattr(control, "max_harvest_per_week", None),
             reason=f"6N rotation fill via entry forward-transit (from {src_loc})",
             sixn_move_in_feed=sixn_move_in_feed, tables=tables,
             batch_meta=batch_meta, is_purge=True, avoid=avoid)
@@ -3899,6 +3900,38 @@ def _book_move_in_feed(accum: dict, batch_id: str, week_label: str,
         accum.get((batch_id, week_label, ftype), 0.0) + feed_kg)
 
 
+def _sixn_fill_slot_cap(state: FacilityState, tank_id: int, avg_wt_g: float,
+                        purge: bool = False, harvest_cap=None) -> float:
+    """Fish this 6N slot may take: the density cap AND what one week can process.
+
+    A depuration tank is fill -> hold -> drain THE WHOLE TANK, so the size of
+    the harvest is fixed when the tank is filled, two weeks before anyone sees
+    it. `_sixn_fill_capacity_fish` bounds a slot on kg/m3 only, which is why a
+    make-room dump could build a tank nothing could legally harvest: in
+    2026-W53 two separate calls each chose OG6N-63, it reached 102,459 fish at
+    201 kg/m3 (legal -- R8 exempts purge tanks from density), and in 2027-W02
+    it drained as one harvest against a 55,000 processing limit.
+
+    `harvest_cap` is `max_harvest_per_week`, NOT the relief ceiling: relief is
+    for exceptional weeks, not something to plan a fill against. What the tank
+    already holds is subtracted, so a second call in the same week sees what
+    the first one put there and moves to the next slot instead of stacking.
+
+    `harvest_cap=None` returns the density cap unchanged, so any path not
+    wired to this is byte-identical.
+    """
+    cap = _sixn_fill_capacity_fish(state, tank_id, avg_wt_g, purge=purge)
+    try:
+        hc = float(harvest_cap or 0.0)
+    except (TypeError, ValueError):
+        hc = 0.0
+    if hc <= 0:
+        return cap
+    _t = state.tanks_by_id.get(tank_id)
+    held = float(getattr(_t, "count", 0.0) or 0.0) if _t is not None else 0.0
+    return max(0.0, min(cap, hc - held))
+
+
 def _make_room_into_6n(
     state: FacilityState,
     src,
@@ -3913,6 +3946,7 @@ def _make_room_into_6n(
     batch_meta: Optional[dict] = None,
     is_purge: bool = False,
     avoid=frozenset(),
+    harvest_cap=None,
 ) -> bool:
     """PURGE-mode make-room: MOVE one growout tank's fish into a free 6N tank.
 
@@ -3963,8 +3997,9 @@ def _make_room_into_6n(
     for _i, _tk in enumerate(_usable):
         if _rem <= 0:
             break
-        _cap = _sixn_fill_capacity_fish(state, _tk.tank_id, _xfer_wt,
-                                        purge=is_purge)
+        _cap = _sixn_fill_slot_cap(state, _tk.tank_id, _xfer_wt,
+                                   purge=is_purge,
+                                   harvest_cap=harvest_cap)
         _a = _rem if _i == len(_usable) - 1 else min(_rem, _cap)
         if _a <= 0:
             continue
@@ -3994,6 +4029,26 @@ def _make_room_into_6n(
             _book_move_in_feed(sixn_move_in_feed, _src_batch,
                                week_label, _xfer_wt, _src_count,
                                tables, _bm)
+    # The no-drop fallback above can still stack a tank past what one week
+    # can process -- an overloaded purge tank beats a dropped arrival, and
+    # the operator ruling keeps that as the last resort. Say so: this is
+    # the week the harvest is decided, not the week it is noticed.
+    try:
+        _hc = float(harvest_cap or 0.0)
+    except (TypeError, ValueError):
+        _hc = 0.0
+    if _hc > 0:
+        for _a in _allocs:
+            _tk2 = state.tanks_by_id.get(_a.tank_id)
+            _now = float(getattr(_tk2, "count", 0.0) or 0.0)
+            if _now > _hc + 0.5:
+                warnings.append(
+                    f"{week_label}: 6N FILL OVER PROCESSING LIMIT — "
+                    f"{getattr(_tk2, 'location_id', _a.tank_id)} now holds "
+                    f"{_now:,.0f} fish against a {_hc:,.0f} weekly "
+                    f"processing limit; no other legal 6N slot had room, so "
+                    f"this tank cannot be drained in one week when its hold "
+                    f"ends. Expect a harvest-ceiling breach or a held drain.")
     _dest_desc = " + ".join(
         f"{state.tanks_by_id[_a.tank_id].location_id} ({_a.count:.0f})"
         for _a in _allocs)
@@ -5493,6 +5548,8 @@ def phase_d_emit_events(
                     if not _make_room_into_6n(
                             state, _src, _aw_start, sixn_resting_pair,
                             transfer_events, warnings, week_label,
+                            harvest_cap=getattr(
+                                control, "max_harvest_per_week", None),
                             reason=(f"anticipatory purge pacing — holding a tank "
                                     f"for TranOG arrival in {_wk} (needs "
                                     f"{_need_wk})"),
@@ -5814,6 +5871,8 @@ def phase_d_emit_events(
                             if not _make_room_into_6n(
                                     state, _src, ws_date, sixn_resting_pair,
                                     transfer_events, warnings, week_label,
+                                    harvest_cap=getattr(
+                                        control, "max_harvest_per_week", None),
                                     reason="reactive make-room for a TranOG arrival",
                                     sixn_move_in_feed=sixn_move_in_feed, tables=tables,
                                     batch_meta=batch_meta, is_purge=True,
