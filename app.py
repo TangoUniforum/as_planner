@@ -8350,20 +8350,38 @@ def _compare_and_choose():
                     f"  ·  within-sys CV {m.within_system.get('bio_cv_mean', 0):.3f}"
                     f"  ·  reared {m.mean_rearing_density:.0f} kg/m³ "
                     f"({m.crowded_biomass_fraction * 100:.0f}% crowded)")
+            # Choosing the method for every future run is the same act Adopt
+            # and Promote gate; it was the one door that did not. The panel
+            # renders in the wide column so the findings have room.
+            _bcand = _board_adoption_candidate(v)
+            _back = _adoption_gate(_bcand, (store.get(k) or {}).get("sig", ""),
+                                   f"board:{k}", c1)
             with c2:
                 if st.button("Use this plan", key=f"board_pick_{k}",
                              use_container_width=True):
-                    # Shallow copy: `v` IS the board's stored entry, so writing
-                    # _run_label straight onto it would relabel the board card
-                    # too (and any later annotation of the active result would
-                    # leak back into the store). The big payloads stay shared.
-                    st.session_state.result = {
-                        **v, "_run_label": f"Compare & Choose — {v['_label']}"}
-                    # This is where the planning method is chosen — ▶ Run
-                    # forecast re-runs THIS method from now on.
-                    st.session_state["_chosen_method"] = k
-                    st.session_state["_goto_run_mode"] = True
-                    st.rerun()
+                  from forecast import analysis as _anagate
+                  if _anagate.adoption_blocked(_bcand["breaches"], _back):
+                    st.error(
+                        "**The planning method was not changed.** "
+                        f"{_bcand['label']} fails "
+                        f"{len(_bcand['breaches'])} adoption check(s): "
+                        + "; ".join(_bcand["breaches"])
+                        + ". Tick the acknowledgement to run this method "
+                          "anyway — you can still view and download its plan "
+                          "without making it your method.")
+                  else:
+                      # Shallow copy: `v` IS the board's stored entry, so
+                      # writing _run_label straight onto it would relabel the
+                      # board card too (and any later annotation of the active
+                      # result would leak back into the store). The big
+                      # payloads stay shared.
+                      st.session_state.result = {
+                          **v, "_run_label": f"Compare & Choose — {v['_label']}"}
+                      # This is where the planning method is chosen — ▶ Run
+                      # forecast re-runs THIS method from now on.
+                      st.session_state["_chosen_method"] = k
+                      st.session_state["_goto_run_mode"] = True
+                      st.rerun()
 
 
 # ============================================================
@@ -8503,6 +8521,37 @@ def _ana_checklist(gates):
         hard = " **(hard rule)**" if g["hard"] else ""
         st.markdown(f"{_ANA_ICON.get(g['status'], '◽')} **{g['label']}**{hard}"
                     f" — {g['detail']}")
+
+
+def _board_adoption_candidate(v: dict) -> dict:
+    """Adapt one Compare & Choose board leg to the graded-candidate shape the
+    adoption gate reads, and COMPUTE its breaches.
+
+    Compare stores a leg as `{"_label", "_score": {gates, verdict, metrics},
+    ...}`; Analyze grades into `{"label", "res", "gates", "metrics",
+    "breaches"}`. The gate returns True on an empty `breaches`, and a board leg
+    has no such key at all -- so handing it `v` unchanged would return True for
+    every leg and read as protection while providing none. The breaches are
+    therefore computed here, on the board's own shape.
+
+    `adoption_variant` already resolves an UNGRADED leg to explicit None
+    measurements, which the eligibility predicates read as UNKNOWN and never as
+    a pass. That is the behaviour this adapter must not undo.
+
+    No contract-floor baseline is passed: the board has no stock reference for
+    a leg the way Analyze's candidate list does, so that one predicate is
+    simply not evaluated here rather than evaluated against a guess.
+    """
+    from forecast import analysis as _ana
+    sc = v.get("_score") or {}
+    cand = {
+        "label": v.get("_label") or "this plan",
+        "res": v,
+        "gates": sc.get("gates") or [],
+        "metrics": sc.get("metrics"),
+    }
+    cand["breaches"] = _ana.adoption_breaches(cand)
+    return cand
 
 
 def _adoption_refusal(cand, acknowledged: bool):
