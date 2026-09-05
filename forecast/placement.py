@@ -2000,6 +2000,49 @@ def _run_sixn_purge_week(
             # purge mode -> unbounded per-tank fill, so the FIRST tank in
             # _order absorbs the whole take and the pair's other tank stays
             # free for a genuinely DIFFERENT batch (count fidelity at harvest).
+            #
+            # MEASURED AND REJECTED 2026-09-04 (the THIRD failure in this
+            # block; the two above are quantity changes, this one was a
+            # DESTINATION change and it failed too). The unbounded capacity
+            # here is why a pair main can be stocked past what one week can
+            # harvest: R8 makes the purge density cap infinite on purpose, so
+            # `_sixn_fill_capacity_fish` returns inf and the sister-first split
+            # below never engages. The evidence for changing it looked strong
+            # -- across 6 PRs, 18 fills produced a tank over the processing
+            # limit and in 16 the pair's OWN SISTER was empty, so the overflow
+            # had somewhere to go at zero cost in fish.
+            #
+            # Feeding `_sixn_fill_slot_cap(..., harvest_cap=
+            # max_harvest_per_week)` into `_caps` (one line) makes the main
+            # finite and the existing split spill into the sister. Measured on
+            # 7 cases, before -> after:
+            #
+            #   LIVE config    HOG 11,401.4 -> 11,346.6 t, floor misses 2 -> 7,
+            #                  worst week 23,387 -> 18,086, biggest 6N tank
+            #                  54,967 -> 57,190, max moves/week 19 -> 21
+            #   8-31 bal8      ceiling 2 -> 0 but biggest 6N 66,736 -> 94,513
+            #   2026-06-30     ceiling 3 -> 0 but biggest 6N 65,398 -> 79,581
+            #   2026-07-31     ceiling 4 -> 5, biggest 6N 70,528 -> 79,189
+            #   2026-03-31     ceiling 2 -> 0, biggest 6N 106,556 -> 54,972 (good)
+            #   2026-05-31     ceiling 6 -> 0, biggest 6N 80,844 -> 54,972 (good)
+            #   2026-04-30     identical
+            #
+            # So it HELPED on 2 PRs, made the biggest 6N tank WORSE on 4, and
+            # damaged the shipping plan -- which the make-room fix had left
+            # byte-identical. Two mechanisms, both structural: bounding the
+            # main changes pair occupancy, which changes every later rotation
+            # (this planner is mode-discontinuous, not smooth); and once BOTH
+            # pair tanks reach the bound `_cap_total` hits 0 and the fill
+            # `break`s, so the surplus waits in grow-out and the harvest two
+            # weeks later is smaller -- the same cost the quantity attempts
+            # paid, arriving by a different route.
+            #
+            # DO NOT RETRY as a capacity bound here. If the oversized drain is
+            # worth fixing, the lever is the RESIDUE -- a pair main should not
+            # be receiving a fresh fill while still holding fish a partial
+            # drain left behind -- and that belongs at the drain, not here.
+            # (The make-room path IS bounded, see `_sixn_fill_slot_cap`; that
+            # one is a different code path and measured clean.)
             _purge_fill = is_purge_mode(control, week_start_date)
             _caps = [(tid, _sixn_fill_capacity_fish(state, tid, _xfer_wt,
                                                     purge=_purge_fill))
