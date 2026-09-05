@@ -1662,10 +1662,39 @@ def _rows_to_manual_events(rows):
             if not tok:
                 continue
             specs.append(_parse_dest_token(tok))
+        # A tank named twice builds two allocations for one destination. There
+        # is no reading of that which is the operator's intent, and downstream
+        # it silently becomes two separate deposits into the same tank.
+        _seen = [t for t, _c, _s in specs]
+        _dupes = sorted({t for t in _seen if _seen.count(t) > 1})
+        if _dupes:
+            raise ValueError(
+                "row %d (%s): destination tank%s %s listed more than once in "
+                "'%s' — give each tank one entry."
+                % (rows.index(r) + 1, typ, "s" if len(_dupes) > 1 else "",
+                   ", ".join(str(t) for t in _dupes), r.get("to_tanks")))
         notes = str(r.get("notes") or "")
         if typ in ("og_transfer", "og_to_6n"):
+            # `count` is the TOTAL to move, INCLUSIVE of whatever the
+            # explicit `tank:count` destinations already take — so the bare
+            # tanks share what is LEFT, not the whole column. Splitting the
+            # full total among them built 40,000 + 100,000 for a stated
+            # 100,000 and the engine moved all 140,000, logged OK. (The engine
+            # itself never reads `count` for these types: explicit counts are
+            # honoured and a bare destination takes the SOURCE tank's
+            # remainder. Leaving bare counts as None when there is no total —
+            # which is what every stored file does — keeps that path intact.)
             bare = [t for t, c, _s in specs if c is None]
-            per_bare = (count / len(bare)) if (bare and count is not None) else None
+            explicit = sum(c for _t, c, _s in specs if c is not None)
+            if count is not None and explicit > count + 0.5:
+                raise ValueError(
+                    "row %d (%s): the explicit destination counts add up to "
+                    "%s fish, which is more than the %s total in the Count "
+                    "column. Raise the total, or lower the per-tank amounts."
+                    % (rows.index(r) + 1, typ, format(explicit, ",.0f"),
+                       format(count, ",.0f")))
+            per_bare = (((count - explicit) / len(bare))
+                        if (bare and count is not None) else None)
             dests = [ManualDest(tank=t, count=(c if c is not None else per_bare),
                                 size_class=s)
                      for t, c, s in specs]
@@ -1725,6 +1754,14 @@ def _mw_events():
                  "it over the file** until the error above is fixed, or the "
                  "stored operations are lost.")
         st.session_state["mw_events"] = _evs if _ok else []
+        # PERSIST the failure. _read_or_explain's message is rendered ONCE, in
+        # this block, and Streamlit reruns the script on every interaction --
+        # after which this block short-circuits and the warning is gone while
+        # the empty working set remains. Without a flag that outlives the
+        # render, nothing downstream can tell "the file would not read" from
+        # "the operator cleared the window", and Save happily writes the empty
+        # one over their operations.
+        st.session_state["_mw_load_failed"] = not _ok
         st.session_state["_mw_events_pr"] = cur
         _mw_bump_grid()
     return st.session_state["mw_events"]
@@ -1737,7 +1774,11 @@ def _mw_bump_grid():
 
 
 def _mw_set(events):
+    # The single funnel for every deliberate change (grid edit, Reload, Clear),
+    # so it is also where the read-failure flag is retired: once the operator
+    # has replaced the working set they own its contents, empty or not.
     st.session_state["mw_events"] = list(events)
+    st.session_state["_mw_load_failed"] = False
     _mw_bump_grid()
 
 
@@ -3054,6 +3095,19 @@ def _mw_raw_grid(state):
 def _mw_save_bar(events, bad):
     from forecast.manual_events import dump_manual_events, load_manual_events
     n = len(events)
+    # A window that is empty because the file would not READ is not a window
+    # the operator chose. Restate it (the seeding block's message does not
+    # survive a rerun) and close the gate -- an empty SAVE here destroys the
+    # stored operations. A deliberately cleared window is untouched by this:
+    # _mw_set retires the flag.
+    _load_failed = bool(st.session_state.get("_mw_load_failed"))
+    if _load_failed:
+        st.error(
+            "**scenario/manual_events/ could not be READ**, so the window "
+            "below is empty because of that error — not because it is empty "
+            "on file. Saving is disabled so it cannot be written over your "
+            "stored operations. Fix the file and press ↻ Reload from file, "
+            "or press 🧹 Clear window if you genuinely want an empty window.")
     # -1 is _mw_validate's "validation itself crashed" sentinel — it has no
     # timeline row, so without this branch the bar says "fix the ❌ rows above"
     # while every row shows ✅ and the actual exception is displayed nowhere.
@@ -3072,8 +3126,11 @@ def _mw_save_bar(events, bad):
         st.warning(f"{len(bad)} operation(s) infeasible — fix the ❌ rows above "
                    f"before saving.")
     c1, c2, c3, _ = st.columns([1, 1, 1, 2])
-    if c1.button("💾 Save window", key="mw_save", disabled=bool(bad),
-                 help="Reject-at-entry: disabled while any operation is infeasible."):
+    if c1.button("💾 Save window", key="mw_save",
+                 disabled=bool(bad) or _load_failed,
+                 help="Reject-at-entry: disabled while any operation is "
+                      "infeasible, or while this PR's event file could not be "
+                      "read."):
         try:
             dump_manual_events(SCENARIO_DIR, events, pr_closing=_pr_closing())
             st.success(f"Saved {n} operation(s) for THIS PR (closing "
@@ -3089,7 +3146,8 @@ def _mw_save_bar(events, bad):
         if _ok_r:
             _mw_set(_evs_r)
             st.rerun()
-    if c3.button("🧹 Clear window", key="mw_clear", disabled=not n):
+    if c3.button("🧹 Clear window", key="mw_clear",
+                 disabled=(not n) and not _load_failed):
         _mw_set([])
         st.rerun()
 
@@ -4305,6 +4363,40 @@ def _harvest_plan_panel():
     st.divider()
 
 
+def _solver_apply_plan(on_disk, base, solved):
+    """Decide what applying a solved target band should do to the CURRENT file.
+
+    The band solver reports `best["overrides"]` (its full working map) and
+    `base_overrides` (the same map as it stood when the solve STARTED). The
+    difference between them is the only thing the solve actually decided; every
+    other key is just what happened to be in the file at the time. Assigning
+    the whole map back therefore reverts any edit made since -- which is what
+    the button did, while its help text promised the opposite.
+
+    Returns `(merged, added, removed, stale)`:
+      merged  the current file with ONLY the solve's own changes applied
+      added   keys the solve introduced or re-valued
+      removed keys the solve lifted
+      stale   keys the solve REASONED ABOUT whose on-disk value has since
+              changed (or been deleted) -- the band is advice about a facility
+              that no longer exists, so the caller refuses rather than merges
+
+    Pure: it decides, the caller writes. Never mutates its arguments.
+    """
+    on_disk = dict(on_disk or {})
+    base = dict(base or {})
+    solved = dict(solved or {})
+    added = {k: v for k, v in solved.items() if k not in base or base[k] != v}
+    removed = {k for k in base if k not in solved}
+    stale = {k for k, v in base.items()
+             if k not in on_disk or on_disk[k] != v}
+    merged = dict(on_disk)
+    for k in removed:
+        merged.pop(k, None)
+    merged.update(added)
+    return merged, added, removed, stale
+
+
 def _target_solver_panel():
     """Close the loop: adjust the weekly band until the plan hits the targets.
 
@@ -4418,12 +4510,28 @@ def _target_solver_panel():
         _ctl = _lc(CONFIG_DIR)
         _fl, _sl = _ll(SCENARIO_DIR, _ctl)
         _before = len(_fl.overrides)
-        _fl.overrides = dict(b["overrides"])
-        _ds(SCENARIO_DIR, batches=_lb(SCENARIO_DIR),
-            facility_limits=_fl, system_limits=_sl)
-        st.success(
-            "Applied — %d week-override(s), was %d. Run the forecast again to "
-            "plan against them." % (len(_fl.overrides), _before))
+        _merged, _added, _removed, _stale = _solver_apply_plan(
+            _fl.overrides, res.get("base_overrides"), b["overrides"])
+        if _stale:
+            st.error(
+                "**Not applied — scenario/limits.yaml has changed since this "
+                "band was solved.** %d week(s) the solve reasoned about now "
+                "hold a different value (%s%s). The band is advice about a "
+                "facility that no longer exists, so applying it would plan "
+                "against numbers nobody chose. Solve again to get a band for "
+                "the current limits."
+                % (len(_stale),
+                   ", ".join("%s %s" % k for k in sorted(_stale)[:3]),
+                   ", …" if len(_stale) > 3 else ""))
+        else:
+            _fl.overrides = _merged
+            _ds(SCENARIO_DIR, batches=_lb(SCENARIO_DIR),
+                facility_limits=_fl, system_limits=_sl)
+            st.success(
+                "Applied — %d week-override(s), was %d: %d band(s) written, "
+                "%d lifted, everything else in the file left untouched. Run "
+                "the forecast again to plan against them."
+                % (len(_fl.overrides), _before, len(_added), len(_removed)))
     st.divider()
 
 
