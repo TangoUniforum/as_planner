@@ -275,7 +275,21 @@ def _ingest_pr(uploaded):
     # was the one PR cache that did not. md5 of a few MB is ~milliseconds.
     import hashlib
     key = hashlib.md5(uploaded.getvalue()).hexdigest()
-    if st.session_state.get("_pr_key") == key:
+    # TWO keys, because two different questions are being cached. `_pr_key` is
+    # "which PR is this" and must stay PR-content only: _mw_events scopes the
+    # manual-window working set by it, so folding anything else in would look
+    # like a new PR and discard unsaved window edits.
+    #
+    # The VERDICT below is not about the PR alone -- it cross-checks the PR's
+    # tank and batch ids against facility.yaml and scenario/batches.yaml, so it
+    # is only valid for the config it was computed against. Keyed on the
+    # workbook alone, adding the very tank the error told you to add left the
+    # error standing for the rest of the session, and removing a referenced
+    # tank never raised one. `ok` gates downstream actions, so that is a stale
+    # verdict authorising a current action. Same reasoning, and the same
+    # fingerprint, as _hydrate_state_from_upload.
+    vkey = key + "|" + _config_fingerprint()
+    if st.session_state.get("_pr_val_key") == vkey:
         return st.session_state["_pr"]
     from datetime import datetime as _dt, timedelta as _td
     from forecast.excel_io import load_workbook
@@ -343,6 +357,7 @@ def _ingest_pr(uploaded):
     except Exception as e:  # noqa: BLE001
         res["errors"].append(f"Failed to read the workbook: {e}")
     st.session_state["_pr_key"] = key
+    st.session_state["_pr_val_key"] = vkey
     st.session_state["_pr"] = res
     return res
 
@@ -362,6 +377,56 @@ def _records(df):
     coerces numpy->native and NaN->None."""
     import json
     return json.loads(df.to_json(orient="records"))
+
+
+def _limits_grid_merge(seeded, grid, on_disk, covered):
+    """Three-way merge for the limits week grid, which is seeded ONCE.
+
+    `_edit_limits` builds flim_wide/slim_wide from limits.yaml only when a
+    session key is missing, then keeps them for the life of the session. Save
+    rebuilds the file from the grid for every week INSIDE the horizon, so any
+    row written to limits.yaml after the grid was seeded -- a config import,
+    the target-band solver, another surface, an edit on disk -- is reverted by
+    the next Save. Measured 2026-09-04: 402 deletions, 0 additions; the two
+    weeks outside the horizon survived because the preserver covers those.
+
+    Re-seeding is the wrong fix: it would discard the operator's unsaved edits,
+    which is the same class of loss pointing the other way. The grid knows what
+    it was SEEDED with, so:
+
+      * a cell that still equals its seed was never touched -> whatever is on
+        disk NOW stands;
+      * a cell that differs is a deliberate edit and wins -- including a blank,
+        which means "no override, use the Control default", so it deletes.
+
+    `covered` is the set of keys the grid is responsible for (its rows x its
+    week columns). Keys outside it belong to _preserved_*_limits and are not
+    considered here. Returns `(merged, conflicts)`, conflicts being cells that
+    moved on disk AND in the grid -- the grid wins, but the caller can say so
+    instead of resolving it silently. Pure; never mutates its arguments.
+    """
+    def _blank(v):
+        return v is None or (isinstance(v, float) and v != v)
+
+    def _same(a, b):
+        if _blank(a) or _blank(b):
+            return _blank(a) and _blank(b)
+        return abs(float(a) - float(b)) < 1e-9
+
+    merged = dict(on_disk or {})
+    conflicts = set()
+    for k in covered:
+        g = (grid or {}).get(k)
+        sd = (seeded or {}).get(k)
+        if _same(g, sd):
+            continue                      # untouched -> defer to disk
+        if not _same(merged.get(k), sd):
+            conflicts.add(k)              # both moved; the grid wins
+        if _blank(g):
+            merged.pop(k, None)
+        else:
+            merged[k] = float(g)
+    return merged, conflicts
 
 
 def _preserved_facility_limits(fl_cur, shown_weeks):
@@ -516,7 +581,8 @@ def _clear_all_editor_state():
     _reset_keys("bio_growth", "bio_mort", "bio_feed", "bio_cull",
                 "fac_df", "batch_df", "flim_wide", "slim_wide",
                 "sysdef_grid", "modedef_grid")
-    for k in ("bio_models", "_lim_weeks", "_tmpl_bytes", "_tmpl_fp"):
+    for k in ("bio_models", "_lim_weeks", "_lim_seeded_fl", "_lim_seeded_sl",
+              "_tmpl_bytes", "_tmpl_fp"):
         st.session_state.pop(k, None)
 
 
@@ -3718,9 +3784,14 @@ def _edit_limits():
     # Reload drop all of them), and a single sentinel let a surviving key
     # suppress the rebuild that the others still needed -- which is how
     # _lim_weeks came to be read after something had popped it.
+    # The seed snapshots join the sentinel deliberately: without them the Save
+    # merge falls back to seeded={}, where every filled cell "differs from its
+    # seed" and the grid wins wholesale -- which is exactly the behaviour that
+    # deleted 402 rows. A missing seed must force a rebuild, not a silent
+    # downgrade to the old semantics.
     if any(k not in st.session_state for k in
            ("sysdef_grid", "modedef_grid", "flim_wide", "slim_wide",
-            "_lim_weeks")):
+            "_lim_weeks", "_lim_seeded_fl", "_lim_seeded_sl")):
         st.session_state["sysdef_grid"] = pd.DataFrame(
             _system_defaults_records(sl.defaults, systems, sl_metrics)
         ).astype({m: "float64" for m in sl_metrics})
@@ -3736,6 +3807,11 @@ def _edit_limits():
              for s in systems for m in sl_metrics]
         ).astype({wk: "float64" for wk in weeks})
         st.session_state["_lim_weeks"] = weeks
+        # What the grid was built from. Save compares against this to tell an
+        # untouched cell from an edited one, so a row that reached the file
+        # after this moment is not reverted by a save that never saw it.
+        st.session_state["_lim_seeded_fl"] = dict(fl_cur)
+        st.session_state["_lim_seeded_sl"] = dict(sl_cur)
     weeks = st.session_state["_lim_weeks"]
 
     # ---------------- System capacities (the common case) ----------------
@@ -3909,15 +3985,27 @@ def _edit_limits():
             # those through untouched; the operator never saw them and cannot
             # have edited them. (Defaults have no week axis, so they are not
             # exposed to this hazard at all — which is the point of them.)
+            # Merge the grid against the file as it stands NOW, using the
+            # snapshot the grid was seeded from: an untouched cell defers to
+            # disk, an edited one wins. Without this a save reverts every row
+            # written since the grid was built (2026-09-04: 402 of them).
+            _fl_grid = {(wk, r["metric"]): r.get(wk)
+                        for r in _records(fdf) for wk in weeks}
+            _sl_grid = {(wk, r["system"], r["metric"]): r.get(wk)
+                        for r in _records(sdf) for wk in weeks}
+            _fl_merged, _fl_conf = _limits_grid_merge(
+                st.session_state.get("_lim_seeded_fl") or {}, _fl_grid,
+                {k: v for k, v in fl_cur.items() if k in _fl_grid}, set(_fl_grid))
+            _sl_merged, _sl_conf = _limits_grid_merge(
+                st.session_state.get("_lim_seeded_sl") or {}, _sl_grid,
+                {k: v for k, v in sl_cur.items() if k in _sl_grid}, set(_sl_grid))
             fl_recs = _preserved_facility_limits(fl_cur, weeks)
             sl_recs = _preserved_system_limits(sl_cur, weeks)
-            fl_recs += [{"week": wk, "metric": r["metric"], "value": float(r[wk])}
-                        for r in _records(fdf) for wk in weeks
-                        if r.get(wk) not in (None, "")]
-            sl_recs += [{"week": wk, "system": r["system"], "metric": r["metric"],
-                         "value": float(r[wk])}
-                        for r in _records(sdf) for wk in weeks
-                        if r.get(wk) not in (None, "")]
+            fl_recs += [{"week": wk, "metric": m, "value": float(v)}
+                        for (wk, m), v in _fl_merged.items()]
+            sl_recs += [{"week": wk, "system": sy, "metric": m,
+                         "value": float(v)}
+                        for (wk, sy, m), v in _sl_merged.items()]
             fl_recs.sort(key=lambda r: (r["week"], r["metric"]))
             sl_recs.sort(key=lambda r: (r["week"], r["system"], r["metric"]))
             new_sl = SystemLimits(
@@ -3932,6 +4020,14 @@ def _edit_limits():
                           system_limits=new_sl)
             _reset_keys("flim_wide", "slim_wide", "sysdef_grid", "modedef_grid")
             st.session_state.pop("_lim_weeks", None)
+            st.session_state.pop("_lim_seeded_fl", None)
+            st.session_state.pop("_lim_seeded_sl", None)
+            if _fl_conf or _sl_conf:
+                st.warning(
+                    "%d cell(s) had been changed on disk since this grid was "
+                    "opened AND edited here; your on-screen values were kept. "
+                    "Press ↻ Reload to see the file as it now stands."
+                    % (len(_fl_conf) + len(_sl_conf)))
             st.success("Saved scenario/limits.yaml")
             st.rerun()
         except Exception as e:  # noqa: BLE001
@@ -3939,6 +4035,8 @@ def _edit_limits():
     if b2.button("↻ Reload", key="reload_lim"):
         _reset_keys("flim_wide", "slim_wide", "sysdef_grid", "modedef_grid")
         st.session_state.pop("_lim_weeks", None)
+        st.session_state.pop("_lim_seeded_fl", None)
+        st.session_state.pop("_lim_seeded_sl", None)
         st.rerun()
 
 
@@ -4020,6 +4118,33 @@ def _sweep_inputs_sig() -> str:
         f"{st.session_state.get('_pr_key', '')}|{_config_fingerprint()}"
         f"|{_engine_fingerprint()}|{_opt_sig.METRICS_SCHEMA}"
         .encode()).hexdigest()
+
+
+def _advice_sig(task: str, targets) -> str:
+    """Identity of an ADVICE result — a monthly lever check, a solved target
+    band — so it can say which inputs it was computed on.
+
+    `_sweep_inputs_sig` is the right base (PR content + config/scenario +
+    engine source + metrics schema) and deliberately excludes TARGETS: targets
+    regrade an existing forecast without rerunning it, so folding them in would
+    throw away expensive engine results on a display edit.
+
+    These two tasks are different. The monthly check MEASURES against targets
+    and the band solver SOLVES for them, so targets are an input to the task
+    itself and must participate here. Dependency-specific identities, not one
+    blunt key.
+
+    Never raises: a diagnostic that can break a render is worse than none, so
+    an unexpected targets shape degrades to its repr rather than blowing up.
+    """
+    import hashlib
+    import json
+    try:
+        t = json.dumps(targets, sort_keys=True, default=repr)
+    except Exception:  # noqa: BLE001 — identity, not serialisation
+        t = repr(targets)
+    return hashlib.md5(
+        f"{task}|{_sweep_inputs_sig()}|{t}".encode()).hexdigest()
 
 
 class _WriteThroughCache(dict):
@@ -4453,9 +4578,9 @@ def _target_solver_panel():
                      tolerance_pct=float(t.get("tolerance_pct", 5.0)),
                      gain=float(gain), progress=_p)
         bar.progress(1.0, text="Done")
-        st.session_state["_slv_res"] = res
+        st.session_state["_slv_res_" + _advice_sig("solver", t)] = res
 
-    res = st.session_state.get("_slv_res")
+    res = st.session_state.get("_slv_res_" + _advice_sig("solver", t))
     if not res:
         return
     if res.get("error"):
@@ -6120,7 +6245,7 @@ with st.sidebar:
                      help="Remove the uploaded ProductionReport and the last run "
                           "result, to start a fresh forecast. Your config + "
                           "scenario (models, limits, batches) are kept."):
-            for _k in ("result", "_pr", "_pr_key"):
+            for _k in ("result", "_pr", "_pr_key", "_pr_val_key"):
                 st.session_state.pop(_k, None)
             # Bump the nonce so the file_uploader widget resets to empty.
             st.session_state["_pr_nonce"] = st.session_state.get("_pr_nonce", 0) + 1
@@ -8440,7 +8565,10 @@ def _monthly_lever_check(uploaded, targets):
             st.markdown(f"**{leg['name']}** (`{ov}`) — {leg['why']}")
         st.caption(_mc.noise_caveat())
 
-    _key = "_monthly_check_res"
+    # Keyed by the inputs it measured, not a constant: step 1 renders "Keep
+    # your current settings" in bold, and under a fixed key that verdict
+    # outlived the PR, config and targets it was measured against.
+    _key = "_monthly_check_res_" + _advice_sig("monthly", targets)
     if st.button("Run the monthly check (~2 min)", key="_btn_monthly_check"):
         work = Path(tempfile.mkdtemp(prefix="as_mcheck_"))
         in_path = work / (uploaded.name or "input.xlsm")
