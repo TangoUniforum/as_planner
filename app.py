@@ -8573,13 +8573,44 @@ def _board_adoption_candidate(v: dict) -> dict:
     """
     from forecast import analysis as _ana
     sc = v.get("_score") or {}
+    raw = sc.get("gates")
+
+    # THE SHAPES ARE NOT THE SAME, and assuming they were crashed the Compare
+    # tab on 2026-09-05 ('str' object has no attribute 'get'). Analyze grades
+    # into a LIST OF DICTS (key/status/hard/label/detail). `_board_score`
+    # builds a DICT of four human labels to booleans:
+    #     {"Conserves", "Fully placed", "No empty week", "Under cap"}
+    # Iterating that yields strings, and it carries no key/status/hard at all,
+    # so the Analyze shape cannot be recovered from it.
+    _gate_list, _flag_breaches = [], []
+    if isinstance(raw, dict):
+        # Board shape. Its flags cannot be judged by the gate loop, but three
+        # of them are disqualifying and must not vanish because the shape is
+        # inconvenient -- that is exactly the "missing measurement becomes a
+        # pass" hazard this gate exists to stop. `Under cap` is deliberately
+        # NOT here: the biomass gate is SOFT for Adopt/Promote too, and this
+        # door must apply the same rules as the other two, not stricter ones.
+        for _flag, _why in (
+                ("Conserves", "fish created or lost (hard rule)"),
+                ("Fully placed", "a batch was never placed — dropped fish"),
+                ("No empty week", "a planner week harvests nothing (hard rule)")):
+            if _flag in raw and not raw.get(_flag):
+                _flag_breaches.append("%s — %s" % (_flag, _why))
+    elif isinstance(raw, list):
+        _gate_list = [g for g in raw if isinstance(g, dict)]
+    elif raw:
+        # A shape neither branch understands. UNKNOWN is never a pass.
+        _flag_breaches.append(
+            "the board's gate summary is in an unrecognised form (%s), so its "
+            "rule checks could not be read" % type(raw).__name__)
+
     cand = {
         "label": v.get("_label") or "this plan",
         "res": v,
-        "gates": sc.get("gates") or [],
+        "gates": _gate_list,
         "metrics": sc.get("metrics"),
     }
-    cand["breaches"] = _ana.adoption_breaches(cand)
+    cand["breaches"] = _ana.adoption_breaches(cand) + _flag_breaches
     return cand
 
 
