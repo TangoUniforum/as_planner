@@ -5889,16 +5889,28 @@ def _acc_calibration_section():
     st.subheader("🧪 Freshwater calibration history")
     st.caption(
         "Every run with FW auto-calibration on back-solves each freshwater "
-        "batch's `fw_correction` — the factor that makes the model land on "
-        "the transfer target. A value of 0.77 means the model grew that batch "
-        "**23% faster than reality**. Those rewrites used to scroll past in "
-        "the run log and were never kept, so a correction needed every month "
-        "for six months looked exactly like a one-off. They are now appended "
-        "to `fw_calibration_history.jsonl` beside the optimize and adoption "
-        "logs. A batch flagged **persistent** below has needed the same "
-        "correction repeatedly — that is a standing model error to fix in the "
-        "biology config, not to re-correct every month. This is freshwater "
-        "only; it says nothing about seawater growth.")
+        "batch's `fw_correction` so the model lands exactly on that batch's "
+        "`tran_og_avg_wt_g` at its transfer date.\n\n"
+        "**Read this as a gap against the TRANSFER TARGET, not against "
+        "reality.** For a batch already transferred that target is an "
+        "observed weight; for every forward batch in the current scenario "
+        "it is a round planning figure (370 g), so the correction there "
+        "measures how far the model sits from the PLAN. Re-solving an "
+        "unchanged plan is not new evidence about the fish.\n\n"
+        "**And it scales the growth RATE, not the final weight** — the "
+        "two are not the same number. Compounded over a ~330-day "
+        "freshwater phase a 0.77 correction lands at roughly a QUARTER "
+        "of the uncorrected weight, not 23% below it. (Until 2026-09-04 "
+        "this caption read \"23% faster than reality\" — wrong on "
+        "both counts.)\n\n"
+        "**Runs (PRs)** counts independent observations, one per PR "
+        "closing; **Records** is the raw number of solves. They differ a "
+        "lot, because a knob search or a tuned tournament re-solves every "
+        "batch against the same PR hundreds of times: on the current log "
+        "121,307 records reduce to 516 distinct answers. A batch flagged "
+        "**persistent** has needed the same correction across several PR "
+        "closings — a standing model error to fix in the biology config. "
+        "This is freshwater only; it says nothing about seawater growth.")
     recs = _acc.read_calibration_log(str(_ROOT / _acc.DEFAULT_CALIB_LOG))
     if not recs:
         st.info("No calibration history yet — it starts filling on your next "
@@ -5908,7 +5920,8 @@ def _acc_calibration_section():
     st.caption(f"{len(recs):,} rewrites recorded across "
                f"{len({r.get('ts') for r in recs})} run(s).")
     st.dataframe(pd.DataFrame([{
-        "Batch": d["batch"], "Runs": d["runs"],
+        "Batch": d["batch"], "Runs (PRs)": d["runs"],
+        "Records": d.get("records"),
         "Configured": d["median_configured"],
         "Applied (median)": d["median_applied"],
         "Gap": d["gap"], "Spread": d["spread"],
@@ -5920,8 +5933,11 @@ def _acc_calibration_section():
         st.warning(
             f"⚠ Standing model error on {', '.join(persistent)} — the applied "
             f"correction has sat away from the configured value across "
-            f"several runs. Fix it in the biology config rather than letting "
-            f"auto-calibration re-discover it every month.")
+            f"several PR closings, not merely several runs of the same one. "
+            f"Fix it in the biology config rather than letting "
+            f"auto-calibration re-discover it every month — but where the "
+            f"target is a planning figure rather than an observed transfer "
+            f"weight, check the target before changing the biology.")
 
 
 # ============================================================

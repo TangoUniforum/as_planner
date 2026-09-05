@@ -980,14 +980,43 @@ def calibration_drift(records: list, min_runs: int = 3,
     """Per-batch drift view over the calibration history.
 
     ``persistent`` marks a batch whose applied correction has sat away from its
-    configured value across at least `min_runs` runs — i.e. the model has
-    needed the same correction repeatedly. That is a standing model error and
-    belongs in the biology config, not in a monthly re-correction.
+    configured value across at least `min_runs` INDEPENDENT OBSERVATIONS — i.e.
+    the model has needed the same correction month after month. That is a
+    standing model error and belongs in the biology config, not in a monthly
+    re-correction.
+
+    THE UNIT OF EVIDENCE IS THE PR CLOSING, not the record. Every run with FW
+    auto-calibration on appends one record per FW batch, and a knob search or a
+    tuned tournament runs the engine hundreds of times against ONE PR -- each
+    leg re-solving the same fixed target and logging the same answer again.
+    Measured on the real log (2026-09-04): 121,307 records across 52 batches,
+    but only 516 distinct (batch, PR, answer) triples -- a 235x inflation. B56
+    held 3,269 records and ONE answer. Counting records made "runs" a tally of
+    how often the operator pressed Run, made `persistent` true for any batch
+    with a gap, and let a single busy afternoon dominate that batch's own
+    median and spread.
+
+    Two solves against the same PR are the same measurement twice, however far
+    apart they ran, so each (batch, PR) keeps only its LATEST record. Records
+    predating the `pr_closing` field fall back to their timestamp, which is
+    what they were before knob searches existed. `records` reports the raw
+    count alongside `runs` so the difference is visible rather than silently
+    corrected away.
     """
-    by_batch: dict[str, list] = {}
+    by_batch: dict[str, dict] = {}
+    raw_counts: dict[str, int] = {}
     for r in records or []:
-        if r.get("batch"):
-            by_batch.setdefault(str(r["batch"]), []).append(r)
+        if not r.get("batch"):
+            continue
+        bid = str(r["batch"])
+        raw_counts[bid] = raw_counts.get(bid, 0) + 1
+        key = r.get("pr_closing") or r.get("ts")
+        slot = by_batch.setdefault(bid, {})
+        prev = slot.get(key)
+        if prev is None or str(r.get("ts") or "") >= str(prev.get("ts") or ""):
+            slot[key] = r
+    by_batch = {b: sorted(v.values(), key=lambda x: str(x.get("ts") or ""))
+                for b, v in by_batch.items()}
 
     out = []
     for bid, recs in sorted(by_batch.items()):
@@ -1003,6 +1032,7 @@ def calibration_drift(records: list, min_runs: int = 3,
         out.append({
             "batch": bid,
             "runs": len(recs),
+            "records": raw_counts.get(bid, len(recs)),
             "first_seen": recs[0].get("ts"),
             "last_seen": recs[-1].get("ts"),
             "median_applied": round(med_app, 4),
