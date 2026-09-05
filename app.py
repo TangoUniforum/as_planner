@@ -5589,10 +5589,23 @@ lift a plan above one that beats it on an earlier tier.""")
   cohort's tanks collide mid-grow-out, no planner knob fixes it — the remedy
   is stocking fewer fish (the stocking frontier in Analyze quantifies the
   trade).
-* **6N off-feed mortality is slightly under-counted per tank** — a
-  few-fish-per-week approximation that nets out facility-wide and is
-  deliberately left (correcting it destabilizes the facility-level balance
-  it currently cancels against).
+* **Fish in 6N depuration take no mortality, and the two ledgers say so
+  differently.** The engine deliberately exempts off-feed (`STARVE`) fish from
+  the growth-and-mortality expectation — they are there for about two weeks and
+  two attempts to change it made the plan worse. `ReconciliationReport` is
+  consistent with that and balances exactly: `Count_Delta` is 0 on every row,
+  and recomputing its identity from its own columns reproduces that to within
+  whole-fish rounding. **No fish are lost.** But `WeeklyReport` still reports
+  mortality on those weeks — about **1,000 fish over an 85-week horizon**, up
+  to 28 on a single batch-week — that the population never lost, so the two
+  sheets disagree in their Mortality column alone (Open, Cull, Harvest, Input
+  and Close match exactly). A second, smaller effect sits on ordinary grow-out
+  weeks: 77 of them differ by ~4 fish (314 in total, 0.007% of a batch), which
+  is whole-fish rounding applied per tank per day and summed. Measured
+  2026-09-04: the two do **not** cancel — +325 on grow-out weeks against −1,147
+  on off-feed weeks, leaving −822 across 385 of 1,191 ledger rows. Read
+  `ReconciliationReport` for conservation, not the WeeklyReport mortality
+  column.
 * **PR-hydrated purge fish can show short residency at horizon start** — a
   measurement artifact (their clock predates the forecast), exempted from
   the hold audit on purpose.""")
