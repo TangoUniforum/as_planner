@@ -32,7 +32,7 @@ max_transfers_per_week: 15
 min_transfer_count: 7000.0
 harvest_grade_to_min: true
 sixn_drain_largest_first: false
-sixn_overdue_drain_weeks: 0
+sixn_overdue_drain_weeks: 3
 sixn_level_drains: false
 density_target_pct: 0.9
 density_welfare_threshold_kg_m3: 85.0
