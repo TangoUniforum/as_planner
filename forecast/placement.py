@@ -1581,6 +1581,7 @@ def _transit_entry_to_pair(
                 tank_id=hop.tank_id, count=_take,
                 avg_wt_g=_es.avg_wt_g, cv_pct=_es.cv_pct)],
             leaves_source_empty=False,
+            channel="entry_transit",
         )
         warnings.extend(_hop_mv.apply(state))
         transfer_events.append(_hop_mv)
@@ -2180,6 +2181,7 @@ def _run_sixn_purge_week(
                 source_tank_id=src.tank_id,
                 destinations=_allocs,
                 source_avg_wt_g=src.avg_wt_g,  # debit source at week-open weight
+                channel="rotation_fill",       # the move_in_target channel
             )
             warns = ev.apply(state)
             warnings.extend(warns)
@@ -2464,6 +2466,7 @@ def _emit_transfers_for_batch_diff(
                     avg_wt_g=src_tank.avg_wt_g, cv_pct=src_tank.cv_pct,
                 )],
                 leaves_source_empty=False,
+                channel="_pair_surpluses",
             )
             warnings.extend(ev.apply(state))
             transfer_events.append(ev)
@@ -2511,6 +2514,7 @@ def _emit_transfers_for_batch_diff(
                 avg_wt_g=tank.avg_wt_g, cv_pct=tank.cv_pct,
             )],
             leaves_source_empty=True,
+            channel="_emit_transfers_for_batch_diff",
         )
         ev_warns = ev.apply(state)
         warnings.extend(ev_warns)
@@ -2593,6 +2597,7 @@ def _consolidate_harvest_prep(
                     tank_id=dst.tank_id, count=src.count,
                     avg_wt_g=src.avg_wt_g, cv_pct=src.cv_pct)],
                 leaves_source_empty=True,
+                channel="_consolidate_harvest_prep",
             )
             warnings.extend(ev.apply(state))
             transfer_events.append(ev)
@@ -2692,7 +2697,7 @@ def _consolidate_growout_to_free_tanks(
             continue                     # cannot FULLY vacate -> frees nothing
         ev = Transfer(batch_id=bid, event_date=event_date,
                       source_tank_id=src.tank_id, destinations=allocs,
-                      leaves_source_empty=True)
+                      leaves_source_empty=True, channel="_consolidate_growout_to_free_tanks")
         warnings.extend(ev.apply(state))
         transfer_events.append(ev)
         if ev.count_transferred > 0:
@@ -2782,6 +2787,7 @@ def _even_out_density(
                     avg_wt_g=src_tank.avg_wt_g, cv_pct=src_tank.cv_pct,
                 )],
                 leaves_source_empty=False,
+                channel="_equalize",
             )
             warnings.extend(ev.apply(state))
             transfer_events.append(ev)
@@ -2876,6 +2882,7 @@ def _even_out_density(
                     avg_wt_g=src.avg_wt_g, cv_pct=src.cv_pct,
                 )],
                 leaves_source_empty=False,
+                channel="_even_out_density",
             )
             warnings.extend(ev.apply(state))
             transfer_events.append(ev)
@@ -3341,6 +3348,7 @@ def _variable_quantity_rebalance(
                 avg_wt_g=src.avg_wt_g, cv_pct=src.cv_pct,
             )],
             leaves_source_empty=False,
+            channel="_variable_quantity_rebalance",
         )
         warnings.extend(ev.apply(state))
         transfer_events.append(ev)
@@ -3570,6 +3578,7 @@ def _balance_loads(
                 avg_wt_g=src.avg_wt_g, cv_pct=src.cv_pct,
             )],
             leaves_source_empty=False,
+            channel="_balance_loads",
         )
         warnings.extend(ev.apply(state))
         transfer_events.append(ev)
@@ -3740,6 +3749,7 @@ def _repair_over_cap_systems(
                     avg_wt_g=src.avg_wt_g, cv_pct=src.cv_pct,
                 )],
                 leaves_source_empty=False,
+                channel="_repair_over_cap_systems",
             )
             warnings.extend(ev.apply(state))
             transfer_events.append(ev)
@@ -3840,7 +3850,7 @@ def _consolidate_remnants(
         mv = Transfer(
             batch_id=_sb, event_date=event_date,
             source_tank_id=src.tank_id, destinations=allocs,
-            leaves_source_empty=True)
+            leaves_source_empty=True, channel="_consolidate_remnants")
         warnings.extend(mv.apply(state))
         transfer_events.append(mv)
         if mv.count_transferred > 0:
@@ -4104,6 +4114,7 @@ def _make_room_into_6n(
         # dest carries the grown transfer weight); in production mode
         # both are week-open so this is the same value (no-op).
         source_avg_wt_g=(src.avg_wt_g if is_purge else None),
+        channel="make_room",   # out of rotation: nothing sizes this against the setpoint
     )
     warnings.extend(_mv.apply(state))
     transfer_events.append(_mv)
@@ -5009,6 +5020,7 @@ def phase_d_emit_events(
                                 tank_id=_fg.tank_id, count=_esrc.count,
                                 avg_wt_g=_esrc.avg_wt_g, cv_pct=_esrc.cv_pct)],
                             leaves_source_empty=True,
+                            channel="phase_d_emit_events",
                         )
                         warnings.extend(_mv.apply(state))
                         transfer_events.append(_mv)
@@ -5170,6 +5182,7 @@ def phase_d_emit_events(
                                     tank_id=_fg.tank_id, count=_esrc.count,
                                     avg_wt_g=_esrc.avg_wt_g, cv_pct=_esrc.cv_pct)],
                                 leaves_source_empty=True,
+                                channel="phase_d_emit_events",
                             )
                             warnings.extend(_mv.apply(state))
                             transfer_events.append(_mv)
@@ -5861,7 +5874,7 @@ def phase_d_emit_events(
                         _cmv = Transfer(
                             batch_id=_sb, event_date=ws_date,
                             source_tank_id=_se.tank_id,
-                            destinations=_allocs, leaves_source_empty=True)
+                            destinations=_allocs, leaves_source_empty=True, channel="_consolidate_entry_forward")
                         warnings.extend(_cmv.apply(state))
                         transfer_events.append(_cmv)
                         if not state.tanks_by_id[_se.tank_id].is_empty:
@@ -6019,6 +6032,7 @@ def phase_d_emit_events(
                             tank_id=_dst.tank_id, count=_src_e.count,
                             avg_wt_g=_src_e.avg_wt_g, cv_pct=_src_e.cv_pct)],
                         leaves_source_empty=True,
+                        channel="phase_d_emit_events",
                     )
                     warnings.extend(_mv.apply(state))
                     transfer_events.append(_mv)

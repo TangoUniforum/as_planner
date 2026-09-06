@@ -408,7 +408,7 @@ def write_transfer_plan_output(
     ws.append([])
     ws.append([
         "Week", "Batch", "Type", "From_Tank", "To_Tank",
-        "Count (fish)", "Avg_Weight (kg)", "Grade", "CV (%)",
+        "Count (fish)", "Avg_Weight (kg)", "Grade", "CV (%)", "Channel",
     ])
 
     def _grade(dest):
@@ -423,7 +423,7 @@ def write_transfer_plan_output(
             rows.append((
                 ev.event_date, wk, ev.batch_id, "FW", dest.tank_id,
                 dest.count, dest.avg_wt_g / 1000.0, _grade(dest), dest.cv_pct,
-                "TranOG",
+                "TranOG", "",
             ))
     for ev in transfer_events:
         # GradedHarvest (Event 5) rides in transfer_events with a different shape
@@ -433,10 +433,12 @@ def write_transfer_plan_output(
             wk = iso_week_label(ev.event_date)
             rows.append((ev.event_date, wk, ev.batch_id, str(ev.source_tank_id),
                          ev.pickup_tank_id, ev.pickup_count,
-                         ev.pickup_avg_wt_g / 1000.0, "pickup", ev.cv_pct, "Grade"))
+                         ev.pickup_avg_wt_g / 1000.0, "pickup", ev.cv_pct, "Grade",
+                         "graded_harvest"))
             rows.append((ev.event_date, wk, ev.batch_id, str(ev.source_tank_id),
                          ev.retention_tank_id, ev.retention_count,
-                         ev.retention_avg_wt_g / 1000.0, "retention", ev.cv_pct, "Grade"))
+                         ev.retention_avg_wt_g / 1000.0, "retention", ev.cv_pct,
+                         "Grade", "graded_harvest"))
             continue
         ct = getattr(ev, "count_transferred", None)
         if ct is not None and ct <= 0:
@@ -446,7 +448,7 @@ def write_transfer_plan_output(
             rows.append((
                 ev.event_date, wk, ev.batch_id, str(ev.source_tank_id), dest.tank_id,
                 dest.count, dest.avg_wt_g / 1000.0, _grade(dest), dest.cv_pct,
-                "Transfer",
+                "Transfer", getattr(ev, "channel", None) or "",
             ))
     for ev in (grade_events or []):
         wk = iso_week_label(ev.event_date)
@@ -455,7 +457,7 @@ def write_transfer_plan_output(
             rows.append((
                 ev.event_date, wk, ev.batch_id, src_str, dest.tank_id,
                 dest.count, dest.avg_wt_g / 1000.0,
-                _grade(dest), dest.cv_pct, "Grade",
+                _grade(dest), dest.cv_pct, "Grade", "grade_event",
             ))
     # Merge same-week duplicate Transfer legs + drop sub-half-fish legs (see
     # docstring). Keyed on (date, week, batch, src, dst, grade); first row of
@@ -480,6 +482,14 @@ def write_transfer_plan_output(
             if tot > 0:
                 m[6] = (m[5] * m[6] + r[5] * r[6]) / tot
             m[5] = tot
+            # The merge key deliberately EXCLUDES the channel: one row is one
+            # physical pumping event and the handling budget counts rows, so
+            # splitting by channel would inflate the gate with moves nobody
+            # performs. Two channels landing the same src->dst in one week are
+            # therefore one row, marked so the attribution does not silently
+            # credit it to whichever leg happened to be built first.
+            if m[10] != r[10]:
+                m[10] = "mixed"
     rows = [tuple(r) for r in _out]
     rows.sort(key=lambda r: (r[0], r[2]))
 
@@ -491,8 +501,9 @@ def write_transfer_plan_output(
             round(r[6], 3),
             r[7],
             round(r[8], 1) if r[8] else None,
+            r[10],
         ])
-    widths = {1: 11, 2: 8, 3: 10, 4: 10, 5: 8, 6: 13, 7: 14, 8: 9, 9: 8}
+    widths = {1: 11, 2: 8, 3: 10, 4: 10, 5: 8, 6: 13, 7: 14, 8: 9, 9: 8, 10: 16}
     for c, w in widths.items():
         ws.column_dimensions[get_column_letter(c)].width = w
 

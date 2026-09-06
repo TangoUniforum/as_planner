@@ -282,7 +282,7 @@ def _apply_og_transfer(state, ev: ManualEvent, idx: int,
     tr = Transfer(
         batch_id=batch_id, event_date=(event_date or state.today),
         source_tank_id=ev.from_tank,
-        destinations=allocs, leaves_source_empty=False)
+        destinations=allocs, leaves_source_empty=False, channel="manual:_apply_og_transfer")
     warns.extend(f"{tag}: {w}" for w in tr.apply(state))
 
     if tr.count_transferred <= 0:
@@ -385,7 +385,7 @@ def _apply_og_to_6n(state, ev: ManualEvent, idx: int,
     tr = Transfer(
         batch_id=batch_id, event_date=(event_date or state.today),
         source_tank_id=ev.from_tank, destinations=allocs,
-        leaves_source_empty=False)
+        leaves_source_empty=False, channel="manual:_apply_og_to_6n")
     warns.extend(f"{tag}: {w}" for w in tr.apply(state))
 
     if tr.count_transferred <= 0:

@@ -221,6 +221,15 @@ class Transfer:
     # source at THIS weight (not the grown dest avg) so the source balances; the
     # 4-day growth then shows as real injected biomass on the frozen 6N tank.
     source_avg_wt_g: Optional[float] = None
+    # Which code path emitted this move. DIAGNOSTIC ONLY -- nothing reads it to
+    # decide anything, and it defaults to None so the ~30 construction sites that
+    # do not set it need no change. Set on the paths that can put fish into 6N,
+    # because the 6N inflow is the sum of several independent channels and the
+    # plan alone cannot tell them apart: measured on the live config, 16% more
+    # fish enter 6N in 2027 than the move-in controller asked for, and
+    # attributing that excess is impossible without knowing which path each
+    # move came from. Same optional-metadata pattern as source_avg_wt_g above.
+    channel: Optional[str] = None
     # Handling mortality charged on deposit, per destination tank id.
     # Populated by apply(); the caller folds it into realized mortality.
     handling_mort_by_tank: dict = field(default_factory=dict)
