@@ -223,12 +223,24 @@ class Transfer:
     source_avg_wt_g: Optional[float] = None
     # Which code path emitted this move. DIAGNOSTIC ONLY -- nothing reads it to
     # decide anything, and it defaults to None so the ~30 construction sites that
-    # do not set it need no change. Set on the paths that can put fish into 6N,
-    # because the 6N inflow is the sum of several independent channels and the
-    # plan alone cannot tell them apart: measured on the live config, 16% more
-    # fish enter 6N in 2027 than the move-in controller asked for, and
-    # attributing that excess is impossible without knowing which path each
-    # move came from. Same optional-metadata pattern as source_avg_wt_g above.
+    # do not set it need no change. Same optional-metadata pattern as
+    # source_avg_wt_g above.
+    #
+    # It exists because 6N inflow can arrive through several independent paths
+    # that TransferPlan renders identically, so the plan alone cannot say which
+    # one moved a given fish. Measured with it on the live config, the answer is
+    # reassuring: in 2027 rotation_fill is 100% of OG6N inflow -- the move-in
+    # controller is the ONLY thing filling depuration tanks that year, and it
+    # delivers 97.2% of what it asks for. The non-rotation channels are all
+    # deliberate and confined: the operator's manual starting window and
+    # graded_harvest staging in 2026, and _pair_surpluses in 2028 where 6N mains
+    # are grow-out by design after sixn_production_start.
+    #
+    # WHEN READING IT: filter by SYSTEM (OG6N), never by tank-id range. Tanks
+    # 62/64/66 are OG6S -- ordinary grow-out, not pipeline-owned (see the
+    # topology note at the top of placement.py). A range(61,72) filter silently
+    # includes them and manufactures a large fake "housekeeping leak into 6N"
+    # out of routine grow-out placements. It did.
     channel: Optional[str] = None
     # Handling mortality charged on deposit, per destination tank id.
     # Populated by apply(); the caller folds it into realized mortality.

@@ -1,11 +1,17 @@
 """Every move carries the code path that emitted it, and TransferPlan exports it.
 
-6N inflow is the sum of several independent channels, and the plan alone cannot
-tell them apart. Measured on the live config: 16% more fish enter 6N in 2027
-than the move-in controller asked for, and the obvious suspect (out-of-rotation
-make-room dumps) turned out to be 0.3% of horizon inflow -- 10,857 fish, one
-row. The real excess is grow-out housekeeping choosing a 6N tank as a
-destination. None of that was visible before the tag.
+6N inflow can arrive through several independent paths that TransferPlan renders
+identically, so the plan alone cannot say which one moved a given fish. With the
+tag, the live config answers clearly: in 2027 `rotation_fill` is 100% of OG6N
+inflow -- the move-in controller is the only thing filling depuration tanks that
+year, and it delivers 97.2% of its own ask. Out-of-rotation make-room dumps,
+the obvious suspect, are 10,857 fish across the WHOLE horizon and zero in 2027.
+
+READ IT BY SYSTEM (OG6N), NEVER BY TANK-ID RANGE. Tanks 62/64/66 are OG6S --
+ordinary grow-out, not pipeline-owned (placement.py topology note). A
+range(61,72) filter includes them and turns routine grow-out placements into a
+large fake "housekeeping leak into 6N": it reported +18.8% excess and five
+leaking paths where the truth is -2.8% and none.
 
 DIAGNOSTIC ONLY. Nothing reads `channel` to decide anything; it defaults to
 None so construction sites that do not set it need no change.
