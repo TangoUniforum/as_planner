@@ -58,6 +58,7 @@ def write_batch_locations(wb, batch_locations, sheet_name: str = "BatchLocations
     ws.append([
         "Week", "Week_Start", "Batch", "Tank", "System",
         "Count (fish)", "AvgWt (kg)", "Biomass (kg)", "Density (kg/m3)", "Stage",
+        "Purge_Fill_Date",
     ])
     for r in batch_locations:
         ws.append([
@@ -67,8 +68,9 @@ def write_batch_locations(wb, batch_locations, sheet_name: str = "BatchLocations
             round(r.biomass_kg, 0),
             round(r.density_kg_m3, 1),
             getattr(r, "stage", ""),
+            getattr(r, "purge_fill_date", None),
         ])
-    widths = {1: 11, 2: 12, 3: 8, 4: 6, 5: 9, 6: 12, 7: 11, 8: 13, 9: 14}
+    widths = {1: 11, 2: 12, 3: 8, 4: 6, 5: 9, 6: 12, 7: 11, 8: 13, 9: 14, 11: 16}
     for c, w in widths.items():
         ws.column_dimensions[get_column_letter(c)].width = w
 

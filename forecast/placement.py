@@ -539,6 +539,12 @@ class BatchLocationRow:
     biomass_kg: float
     density_kg_m3: float
     stage: str = ""   # tank stage; "STARVE" = in-place purge (no feed/growth)
+    # Purge clock for 6N tanks: the fill_date currently recorded against this
+    # tank in state.sixn_fill_date, or None for every non-6N tank. NOTE this is
+    # the tank's CURRENT clock, not the arrival date of the fish in the row --
+    # a same-batch top-up overwrites it (see _freeze_6n_dest), so a value that
+    # moves forward while the tank stays occupied IS the clock reset.
+    purge_fill_date: "date | None" = None
 
 
 @dataclass
@@ -6348,6 +6354,9 @@ def phase_d_emit_events(
                 biomass_kg=tank.biomass_kg,
                 density_kg_m3=tank.density_kg_m3,
                 stage=tank.stage,
+                purge_fill_date=(
+                    getattr(state, "sixn_fill_date", {}) or {}
+                ).get(tank.tank_id),
             ))
 
         prev_assignment = this_assignment
