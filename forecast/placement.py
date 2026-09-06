@@ -1991,6 +1991,42 @@ def _run_sixn_purge_week(
             # (INV-1). Later contributor batches keep the historical
             # sister-first order so they never collide with the first batch's
             # main.
+            # MEASURED AND REJECTED 2026-09-05. This test allows a top-up of a
+            # tank filled in an EARLIER week, and `_free_6n_slots` forbids
+            # exactly that for the make-room path, with a documented reason:
+            # a mid-purge tank's newcomers inherit its older drain clock, and
+            # the tank leaves as ONE harvest. It is how 2026-W51 came to plan
+            # 72,311 fish against a 55,000 limit --
+            #
+            #     2026-W48  tank 61 = B45 33,556   (residue, partial drain)
+            #     2026-W49  tank 61 = B45 72,347   (this fill topped it up)
+            #     2026-W51  drains 72,311 in one week
+            #
+            # -- with 67/69/71 empty throughout.
+            #
+            # Applying the same-fill_date rule here was built, tested and
+            # reverted. Measured against the ORIGINAL floors (an earlier
+            # 7-case run was contaminated by a same-day floor edit and looked
+            # far better than it was):
+            #
+            #   8.31 PR      identical
+            #   2026-05-31   identical
+            #   2026-07-31   identical, and STILL a 73,421-fish tank
+            #   2026-06-30   ceiling 2 -> 0, but floor misses 12 -> 20,
+            #                fish short 145,400 -> 350,447, HOG -540 t
+            #
+            # WHY IT FAILS, and it is not the rule's fault: refusing a
+            # destination here does not redirect the fish, it SHRINKS THE
+            # FILL, and a fill 20,000 fish smaller is a drain 20,000 fish
+            # smaller two weeks later. It converts an over-limit week into an
+            # under-floor week, and the contract floor is the harder rule. The
+            # make-room path can refuse a destination because it has others;
+            # the rotation fill is the thing that decides the quantity.
+            #
+            # Third failure in this block (see the two notes above). What none
+            # of the three has addressed is the RESIDUE ITSELF -- why a partial
+            # drain leaves fish behind in a pair main at all. That is a
+            # drain-side question and remains the only untried direction.
             def _dest_ok(tid, _b=move_in_batch):
                 tk = state.tanks_by_id.get(tid)
                 return tk is not None and (tk.is_empty or tk.batch_id == _b)
