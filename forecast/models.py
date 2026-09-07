@@ -196,6 +196,17 @@ class ControlParams:
     # purged long enough, so the two can not conflict.
     # A tank cannot be both overdue and legally held: that is the livelock.
     sixn_overdue_drain_weeks: int = 0
+    # PLAN-LEVEL TANK FEASIBILITY (off by default; the `controller-feasible`
+    # method pins it on). The canvas already detects, weeks ahead, that OG tank
+    # demand exceeds placeable supply -- and then plans past it: `bottlenecks`
+    # is handed to _build_facility_assignment_plan and only ever APPENDED to,
+    # never read. The demand it exceeds is not real need, it is the per-batch
+    # forward footprint (each SW week claims its own peak over the next 6), and
+    # every batch reserves independently with nothing arbitrating the total.
+    # With this on, the canvas hands those forward reservations back -- deepest
+    # slack first, NEVER below a batch's own current need -- until the week fits
+    # the facility it actually has.
+    plan_tank_feasibility: bool = False
     sixn_level_drains: bool = True
     # R31: per-tank density target as a fraction of the cap. Drives
     # precalc `tanks_needed_at_density_cap` sizing, the Phase D Grade-

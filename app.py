@@ -907,6 +907,24 @@ _CONTROL_HELP = {
         "over their caps into destinations with room, weighing crowding, feed "
         "and biomass together. Load leveling (below) shares this budget. "
         "Unit: moves/week.",
+    "plan_tank_feasibility":
+        "Plan within the tanks you actually have. Weeks ahead, the canvas "
+        "already detects that OG tank demand exceeds the tanks it can place "
+        "into - and then plans past it, because that detection is only "
+        "reported, never read. The excess is not real need: each batch's "
+        "weekly tank count is raised to its OWN peak over the next 6 weeks so "
+        "it can claim grow-out early, and every batch reserves independently "
+        "with nothing arbitrating the total. Turn this on and the canvas hands "
+        "those forward reservations back - deepest slack first, NEVER below a "
+        "batch's need this week - until the week fits. MEASURED ON 3 PRs AND "
+        "IT DOES NOT WIN: the tank-supply shortfall disappears, transfer legs "
+        "and ceiling breaches fall, and worst grow-out density improves "
+        "sharply on 2 of 3 (199 -> 110 kg/m3) - but tonnage slips on all "
+        "three, refused transfers RISE (the forward claim was doing real work: "
+        "give it back and batches get boxed in later), and 1-3 weeks per "
+        "horizon go over the 15-move handling budget. Off by default; the "
+        "'Controller - plan-feasible' method in Compare pins it on so you can "
+        "judge it against the others on your own PR.",
     "sixn_overdue_drain_weeks":
         "Rescue fish stuck in purge. A 6N tank whose fish would not fit in "
         "the week's remaining processing budget is held for the next "
@@ -1129,6 +1147,7 @@ _CONTROL_LABEL = {
     "density_welfare_threshold_kg_m3": "Welfare density line (kg/m³)",
     "rebalance_balance_budget": "Rebalancer moves / week",
     "rebalance_headroom_days": "Rebalancer forward headroom (days)",
+    "plan_tank_feasibility": "Plan within available tanks",
     "sixn_drain_largest_first": "6N: drain biggest tank first",
     "sixn_overdue_drain_weeks": "6N: force-drain after (weeks)",
     "rebalance_split_budget": "Split-pass moves / week",
@@ -1338,7 +1357,8 @@ _CONTROL_GROUPS = [
     ("⚙️ Engine internals",
      "Which planner runs and how hard it works. Rarely worth touching by hand — "
      "Decide tunes these for you.",
-     ["placement_method", "lns_max_moves", "hybrid_follow", "hybrid_follow_band",
+     ["plan_tank_feasibility",
+      "placement_method", "lns_max_moves", "hybrid_follow", "hybrid_follow_band",
       "hybrid_guide_min_frac", "hybrid_guide_smooth_weeks", "hybrid_purge_lever",
       "hybrid_production_lever", "global_buffer_pct", "global_assume_primed_6n",
       "auto_calibrate_fw", "auto_calibrate_fw_min", "auto_calibrate_fw_max"]),

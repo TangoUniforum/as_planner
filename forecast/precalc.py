@@ -151,6 +151,11 @@ class BatchWeekFact:
     # Lifecycle flags + harvest distribution math.
     is_tranog_week: bool
     fraction_above_min_harvest_weight: float
+    # `tanks_needed_at_density_cap` BEFORE the forward-footprint raise. The
+    # difference is a RESERVATION for this batch's own peak over the next few
+    # weeks, not a need this week -- and it is the only slack the feasibility
+    # pass may take back when the week's total exceeds the facility.
+    tanks_needed_base: int = 0
 
 
 @dataclass
@@ -510,6 +515,8 @@ def _build_batch_week_facts(
             bw_labels = sorted(wl for (b, wl) in out if b == batch_id)
             seq = [out[(batch_id, wl)] for wl in bw_labels]
             base = [f.tanks_needed_at_density_cap for f in seq]
+            for f, b in zip(seq, base):
+                f.tanks_needed_base = b
             for i, f in enumerate(seq):
                 if f.stage != "SW":
                     continue
@@ -623,6 +630,57 @@ def _build_weekly_system_facts(
                 biomass_cap=resolve_system_cap(METRIC_BIOMASS, label, sys, system_limits),
             )
     return out
+
+
+def _relieve_tank_supply(batch_week_facts: dict, bottlenecks: list) -> int:
+    """ACT on the tank_supply bottleneck instead of only reporting it.
+
+    The canvas detects, per week and weeks ahead, that OG tank demand exceeds
+    placeable supply. Before this, that detection was handed to
+    _build_facility_assignment_plan and never read -- `bottlenecks` appears in
+    that function four times, every one an .append(). The plan was built for
+    35 tanks in a facility with 33, Phase D could not realize the difference,
+    and the reactive layer below spent the rest of the horizon re-emitting
+    transfers out of tanks the batch never reached (measured on the 2026-08-31
+    PR: 209 of 522 refusals, 40%, name a tank the batch never occupies).
+
+    The excess is NOT need. `tanks_needed_at_density_cap` was raised to each
+    batch's own peak over the next _FOOTPRINT_LOOKAHEAD_WEEKS so a growing
+    batch claims grow-out early -- a good idea applied per batch with nothing
+    arbitrating the sum. This gives those reservations back, deepest slack
+    first, and NEVER below `tanks_needed_base`, the batch's own need this week.
+    A batch is therefore never squeezed into tipping its density; only the
+    forward claim is surrendered, and only as far as the week requires.
+
+    Returns the number of tank-reservations released (0 = nothing to do).
+    """
+    by_week: dict = {}
+    for (_b, wl), f in batch_week_facts.items():
+        if f.stage == "SW":
+            by_week.setdefault(wl, []).append(f)
+
+    released = 0
+    for bn in bottlenecks:
+        if getattr(bn, "kind", None) != "tank_supply":
+            continue
+        need = int(getattr(bn, "deficit", 0) or 0)
+        if need <= 0:
+            continue
+        pool = by_week.get(bn.week_label, ())
+        while need > 0:
+            slack = [f for f in pool
+                     if f.tanks_needed_at_density_cap > f.tanks_needed_base]
+            if not slack:
+                break        # nothing left that is a reservation, not a need
+            # Deepest reservation first; tie-break on the larger claim so the
+            # order is deterministic (never on dict iteration order).
+            f = max(slack, key=lambda x: (x.tanks_needed_at_density_cap
+                                          - x.tanks_needed_base,
+                                          x.tanks_needed_at_density_cap))
+            f.tanks_needed_at_density_cap -= 1
+            need -= 1
+            released += 1
+    return released
 
 
 def _detect_bottlenecks(
@@ -1475,6 +1533,20 @@ def build_precalc_canvas(
         horizon_labels, system_limits, system_facts,
     )
     bottlenecks = _detect_bottlenecks(weekly_facility, system_facts, control)
+
+    # PLAN-LEVEL FEASIBILITY (opt-in). Act on the shortfall just detected --
+    # hand back forward tank reservations until each week fits the facility --
+    # then rebuild the weekly facts and re-detect, so everything downstream
+    # (and the reported bottleneck list) sees the feasible plan, not the wish.
+    if getattr(control, "plan_tank_feasibility", False):
+        _released = _relieve_tank_supply(batch_week_facts, bottlenecks)
+        if _released:
+            weekly_facility = _build_weekly_facility_facts(
+                horizon_labels, forecast_start, control, facility_limits,
+                batch_week_facts,
+            )
+            bottlenecks = _detect_bottlenecks(
+                weekly_facility, system_facts, control)
 
     total_og_supply = sum(
         sf.tank_count for sf in system_facts.values() if sf.type == "OG"

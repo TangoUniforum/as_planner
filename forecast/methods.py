@@ -357,6 +357,32 @@ register(Method(
           "budget — its transfer count is comparable with the plain controller.",
 ))
 register(Method(
+    key="controller-feasible",
+    label="Controller — plan-feasible tanks",
+    family="Controller",
+    engine="controller",
+    # hybrid_follow pinned off for the same reason as `controller`: keep this
+    # arm's ONE variable the feasibility pass, not the hybrid.
+    overrides={"hybrid_follow": "off", "plan_tank_feasibility": True},
+    knob_grid=CONTROLLER_KNOB_GRID,
+    knob_space=CONTROLLER_KNOB_SPACE,
+    blurb="Controller whose CANVAS plans within the tanks that exist. The "
+          "canvas already detects, weeks ahead, that OG tank demand exceeds "
+          "placeable supply, then plans past it — the detection is handed to "
+          "the assignment planner and only ever appended to, never read. The "
+          "excess is not need: each SW week's tank count is raised to that "
+          "batch's own peak over the next 6 weeks, per batch, with nothing "
+          "arbitrating the sum. This arm hands those forward reservations "
+          "back — deepest slack first, never below a batch's need that week — "
+          "until each week fits. MEASURED ON 3 PRs, IT DOES NOT WIN: the "
+          "tank-supply shortfall goes to zero and transfer legs, ceiling "
+          "breaches and worst density mostly improve (199 -> 110 kg/m3 on "
+          "8/19), but tonnage slips on all three, refusals RISE, and 1-3 "
+          "weeks go over the handling budget. Kept in the lobby because it "
+          "isolates a real planning question on YOUR PR, not because it is "
+          "the better plan.",
+))
+register(Method(
     key="global-lp",
     label="Global — lexicographic LP",
     family="Global",
