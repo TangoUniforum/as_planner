@@ -1522,20 +1522,29 @@ def write_feed_forecast_monthly(
 
 # Open/Close ledger column headers (shared by Weekly + Monthly reports).
 #
-# Peak_Density LEGEND (stated in the sheet too): a ledger row is one BATCH-WEEK
+# Avg_Density LEGEND (stated in the sheet too): a ledger row is one BATCH-WEEK
 # and a batch normally sits in several tanks, so there is no single density for
-# the row. The column reports the WORST tank the batch occupied that week (max
-# over its BatchLocations rows) — the only aggregate that can be compared to the
-# per-tank cap, since a mean would hide a single over-cap tank inside a roomy
-# average. Blank (not 0) when the batch held no tank that week, e.g. a
-# freshwater week carried by the biology projection: an empty cell says "not
-# applicable", a 0 would say "density is fine", which is what this column used
-# to say on EVERY row.
+# the row. The column reports the batch's AVERAGE density that period -- its
+# total biomass over the total water it occupied (operator, 2026-09-07: "change
+# peak density to average density", reports only).
+#
+# It was the WORST tank (a max) until then, because a mean hides one over-cap
+# tank inside a roomy average. That signal has NOT been lost, it just lives
+# where it is actionable: ValidationLog's per-tank density lines, the
+# SystemLimitsAudit, and Batch Plan's own Density_Status / Peak_Density (xcap)
+# column -- none of which read this one. Nothing in the engine, the gates or
+# the audits reads this column at all; it is presentational.
+#
+# Blank (not 0) when the batch held no tank that period, e.g. a freshwater week
+# carried by the biology projection: an empty cell says "not applicable", a 0
+# would say "density is fine".
 _LEDGER_DENSITY_LEGEND = (
-    "Peak_Density (kg/m³) = the WORST tank this batch occupied in the period "
-    "(max over its tanks), not a mean — a mean would hide one over-cap tank "
-    "inside a roomy average. Blank = the batch held no tank that period "
-    "(e.g. a freshwater week)."
+    "Avg_Density (kg/m³) = this batch's AVERAGE density over the period — its "
+    "total biomass divided by the total water it occupied. It is not a peak: "
+    "a single over-cap tank does not show here. For that, see the per-tank "
+    "density lines in ValidationLog, the SystemLimitsAudit, or Batch Plan's "
+    "Density_Status. Blank = the batch held no tank that period (e.g. a "
+    "freshwater week)."
 )
 
 # Count_Check is the ledger's own residual, and it is NOT always zero. Two known
@@ -1573,7 +1582,7 @@ _MONTHLY_CHECK_LEGEND = (
 _LEDGER_COLS = [
     "Open_Count (fish)", "Open_AvgWt (g)", "Open_Bio (kg)",
     "Close_Count (fish)", "Close_AvgWt (g)", "Close_Bio (kg)",
-    "Peak_Density (kg/m³)", "SGR (%/day)", "Gross_Growth (kg)",
+    "Avg_Density (kg/m³)", "SGR (%/day)", "Gross_Growth (kg)",
     "Net_Production (kg)", "Feed (kg)", "SFR (%/day)",
     "Bio_FCR (ratio)", "Econ_FCR (ratio)",
     "Mort_Count (fish)", "Mort_Bio (kg)",
@@ -1611,7 +1620,7 @@ def _build_batch_week_ledger(
     # Realized close per (batch, week) from BatchLocations.
     rl: dict[tuple, dict] = defaultdict(
         lambda: {"count": 0.0, "bio": 0.0, "wt_sum": 0.0, "week_start": None,
-                 "peak_density": None})
+                 "dens_bio": 0.0, "dens_vol": 0.0})
     feed: dict[tuple, float] = defaultdict(float)
     for r in batch_locations:
         key = (r.batch_id, r.week_label)
@@ -1620,14 +1629,15 @@ def _build_batch_week_ledger(
         e["bio"] += r.biomass_kg
         e["wt_sum"] += r.avg_wt_g * r.count
         e["week_start"] = r.week_start
-        # WORST tank this batch occupied this week — see the Peak_Density
-        # legend on _LEDGER_COLS. None stays None when the batch has no tank
-        # rows at all (FW weeks), so the cell reads blank, not "0 = fine".
+        # AVERAGE density = total biomass / total water. Accumulate both terms
+        # rather than averaging densities: a mean OF densities weights a tiny
+        # tank the same as a big one. Water is derived per row as bio/density
+        # (BatchLocations carries no volume). Rows with no density contribute
+        # nothing, so a batch with no tanks keeps 0 water and reads blank.
         _d = getattr(r, "density_kg_m3", None)
-        if _d is not None:
-            _d = float(_d)
-            e["peak_density"] = (_d if e["peak_density"] is None
-                                 else max(e["peak_density"], _d))
+        if _d is not None and float(_d) > 0:
+            e["dens_bio"] += float(r.biomass_kg or 0.0)
+            e["dens_vol"] += float(r.biomass_kg or 0.0) / float(_d)
         # STARVE tank-weeks (6N depuration) eat nothing (helper returns 0).
         feed[key] += _row_feed_kg_day(r, batches, tables) * 7.0
     # 6N purge move-in fish ate 4 pre-transfer days in their source tank (now
@@ -1882,8 +1892,11 @@ def _build_batch_week_ledger(
                 "batch": b, "week": wk, "week_start": ws_date,
                 "open_count": oc, "open_wt": owt, "open_bio": obio,
                 "close_count": cc, "close_wt": cwt, "close_bio": cbio,
-                "peak_density": (rl[(b, wk)]["peak_density"]
-                                 if (b, wk) in rl else None),
+                "dens_bio": (rl[(b, wk)]["dens_bio"] if (b, wk) in rl else 0.0),
+                "dens_vol": (rl[(b, wk)]["dens_vol"] if (b, wk) in rl else 0.0),
+                "peak_density": (
+                    (rl[(b, wk)]["dens_bio"] / rl[(b, wk)]["dens_vol"])
+                    if (b, wk) in rl and rl[(b, wk)]["dens_vol"] > 0 else None),
                 "sgr": sgr, "gross_growth": gross_growth, "net_prod": net_prod,
                 "feed": f, "sfr": sfr, "bio_fcr": bio_fcr, "econ_fcr": econ_fcr,
                 "mort_count": mort_count, "mort_bio": mort_bio,
@@ -1915,6 +1928,105 @@ def _ledger_value_cells(d: dict) -> list:
     ]
 
 
+# --------------------------------------------------------------------------- #
+# Shared ledger emission: a FILTERABLE sheet and a GROUPED (printable) twin.
+#
+# Operator request 2026-09-07: a total row per period, and a blank line between
+# one period and the next. Those two wants conflict -- a blank row TERMINATES
+# Excel's contiguous range, so an autofilter stops at the first gap and the
+# sheet can no longer be filtered ("I like the ability to filter... not sure we
+# can do that with the blank row"). So each ledger is written twice:
+#
+#   <name>           per-batch rows + a TOTAL row per period, NO blanks, and a
+#                    real AutoFilter already applied over the header row.
+#   <name> Grouped   the same rows with a blank line between periods, for
+#                    reading and printing. Never filter this one.
+#
+# TOTALS are built from the ROUNDED per-batch cells, so the column ADDS UP ON
+# SCREEN. Summing the raw aggregates and rounding once is arithmetically truer
+# but leaves the total 1-2 fish off the visible rows (measured: 16 such gaps
+# across 21 months), and a ledger reconciled by eye must tie. The error is
+# under 2 fish in ~5,000,000.
+#
+# Flows SUM. Peak_Density takes the MAX -- two tanks at 90 kg/m3 is not 180.
+# Weights and every rate (SGR, SFR, both FCRs, Harv_AvgWt_HOG) are RECOMPUTED
+# from the period's totals: an average of ratios is not the ratio of the
+# aggregate.
+_LEDGER_SUM_IDX = (0, 2, 3, 5, 8, 9, 10, 14, 15, 16, 17, 18, 20, 21, 22, 23,
+                   24, 25, 26)
+_LEDGER_DENSITY_IDX = 6   # Avg_Density: biomass/water, never summed
+
+
+def _ledger_total_cells(t: dict) -> list:
+    from math import log
+    c = list(t["cells"])
+    oc, ob, cc, cb = c[0], c[2], c[3], c[5]
+    gg, npd, ff, hc = c[8], c[9], c[10], c[16]
+    ow = (ob / oc * 1000.0) if oc > 0 else 0.0
+    cw = (cb / cc * 1000.0) if cc > 0 else 0.0
+    avg_bio = (ob + cb) / 2.0
+    days = t["days"] or 7.0
+    c[1] = round(ow, 1)
+    c[4] = round(cw, 1)
+    c[_LEDGER_DENSITY_IDX] = (round(t["dens_bio"] / t["dens_vol"], 1)
+                              if t.get("dens_vol") else None)
+    c[7] = round((log(cw / ow) / days * 100.0) if ow > 0 and cw > 0 else 0.0, 4)
+    c[11] = round((ff / avg_bio / days * 100.0) if avg_bio > 0 else 0.0, 4)
+    c[12] = round((ff / gg) if gg > 0 else 0.0, 2)
+    c[13] = round((ff / npd) if npd > 0 else 0.0, 2)
+    c[19] = round((c[18] * 1000.0 / hc) if hc > 0 else 0.0, 1)
+    return c
+
+
+def _write_ledger_sheet(wb, sheet_name, legends, head_cols, entries,
+                        total_prefix, blanks: bool, filterable: bool) -> None:
+    """One ledger sheet. `entries` = (prefix_cells, value_cells, period, days)."""
+    if sheet_name in wb.sheetnames:
+        del wb[sheet_name]
+    ws = wb.create_sheet(sheet_name)
+    for line in legends:
+        ws.append([line])
+    ws.append([])
+    ws.append(list(head_cols))
+    header_row = len(legends) + 2
+
+    cur = None
+    tot = None
+
+    def _acc(cells, days, dbio, dvol):
+        nonlocal tot
+        if tot is None:
+            tot = {"cells": [0.0] * len(cells), "days": 0.0,
+                   "dens_bio": 0.0, "dens_vol": 0.0}
+        for i in _LEDGER_SUM_IDX:
+            tot["cells"][i] += (cells[i] or 0.0)
+        tot["days"] = max(tot["days"], days or 0.0)
+        # Density averages, it does not add: carry biomass and water and divide
+        # once, so the TOTAL is total-biomass-over-total-water.
+        tot["dens_bio"] += dbio or 0.0
+        tot["dens_vol"] += dvol or 0.0
+
+    for prefix, cells, period, days, dbio, dvol in entries:
+        if cur is not None and period != cur:
+            ws.append(total_prefix(cur) + _ledger_total_cells(tot))
+            if blanks:
+                ws.append([])
+            tot = None
+        cur = period
+        _acc(cells, days, dbio, dvol)
+        ws.append(list(prefix) + list(cells))
+    if cur is not None and tot is not None:
+        ws.append(total_prefix(cur) + _ledger_total_cells(tot))
+
+    if filterable and ws.max_row > header_row:
+        ws.auto_filter.ref = (f"A{header_row}:"
+                              f"{get_column_letter(len(head_cols))}{ws.max_row}")
+    else:
+        ws.auto_filter.ref = None   # explicit: a blank row ends a filter range
+    for c in range(1, len(head_cols) + 1):
+        ws.column_dimensions[get_column_letter(c)].width = 14
+
+
 def write_weekly_report(
     wb,
     batch_locations,
@@ -1940,15 +2052,6 @@ def write_weekly_report(
     ledger columns (open/close count-avgwt-bio, density, SGR, growth, feed, FCR,
     mortality, harvest, cull, transfers, and reconciliation checks).
     """
-    if sheet_name in wb.sheetnames:
-        del wb[sheet_name]
-    ws = wb.create_sheet(sheet_name)
-    ws.append([f"{sheet_name} - populated by RunForecast"])
-    ws.append([_LEDGER_DENSITY_LEGEND])
-    ws.append([_LEDGER_CHECK_LEGEND])
-    ws.append([])
-    ws.append(["Scenario", "Week", "Week_Start", "Batch"] + _LEDGER_COLS)
-
     rows = _build_batch_week_ledger(
         batch_locations, harvest_events, batch_week_states,
         transfer_events, batches, tables, hog_yield, hog_overrides,
@@ -1956,11 +2059,39 @@ def write_weekly_report(
         tranog_events=tranog_events, og_mort_states=og_mort_states,
         realized_biology=realized_biology, window_openings=window_openings,
         window_culls=window_culls)
-    for d in rows:
-        ws.append([scenario_name, d["week"], d["week_start"], d["batch"]]
-                  + _ledger_value_cells(d))
-    for c in range(1, 5 + len(_LEDGER_COLS)):
-        ws.column_dimensions[get_column_letter(c)].width = 14
+
+    # WEEK-MAJOR. _build_batch_week_ledger returns rows BATCH-major (all of
+    # B41's weeks, then all of B42's), which is fine for reading one batch's
+    # life but makes a per-week TOTAL meaningless -- the week changes on nearly
+    # every row, so grouping produced 1,189 "totals" of one row each. Sorting by
+    # (week, batch) is what makes a week total a week total, and it matches how
+    # MonthlyReport has always been ordered. Row CONTENT is unchanged; only the
+    # order is.
+    _starts = {}
+    entries = []
+    for d in sorted(rows, key=lambda r: (str(r["week"]), str(r["batch"]))):
+        if d.get("week_start") is not None:
+            _starts.setdefault(d["week"], d["week_start"])
+        entries.append(([scenario_name, d["week"], d["week_start"], d["batch"]],
+                        _ledger_value_cells(d), d["week"], d.get("days") or 7.0,
+                        d.get("dens_bio") or 0.0, d.get("dens_vol") or 0.0))
+
+    legends = [f"{sheet_name} - populated by RunForecast",
+               _LEDGER_DENSITY_LEGEND, _LEDGER_CHECK_LEGEND]
+    head = ["Scenario", "Week", "Week_Start", "Batch"] + _LEDGER_COLS
+
+    def _tp(week):
+        return [scenario_name, week, _starts.get(week), "TOTAL"]
+
+    _write_ledger_sheet(wb, sheet_name, legends, head, entries, _tp,
+                        blanks=False, filterable=True)
+    _write_ledger_sheet(wb, f"{sheet_name} Grouped",
+                        legends[:1] + ["Same rows as " + sheet_name +
+                                       ", with a blank line between weeks for "
+                                       "reading. Do NOT filter this sheet - a "
+                                       "blank row ends the filter range; filter "
+                                       + sheet_name + " instead."] + legends[1:],
+                        head, entries, _tp, blanks=True, filterable=False)
 
 
 def write_monthly_report(
@@ -1990,16 +2121,6 @@ def write_monthly_report(
     transfers, input) are summed; SGR/SFR/FCR are recomputed from the monthly
     aggregates. Columns mirror the weekly report minus Week_Start.
     """
-    if sheet_name in wb.sheetnames:
-        del wb[sheet_name]
-    ws = wb.create_sheet(sheet_name)
-    ws.append([f"{sheet_name} - populated by RunForecast"])
-    ws.append([_LEDGER_DENSITY_LEGEND + " Monthly = the max of the month's "
-               "weekly peaks (a boundary week counts in both months)."])
-    ws.append([_MONTHLY_CHECK_LEGEND])
-    ws.append([])
-    ws.append(["Scenario", "Month", "Batch"] + _LEDGER_COLS)
-
     from collections import defaultdict
     from math import log
 
@@ -2086,11 +2207,12 @@ def write_monthly_report(
                 a["close_count"] = oc + (cum_c + fc) * dc_n + (cum_w + fw) * dc_h
                 a["close_bio"] = ob + (cum_c + fc) * db_n + (cum_w + fw) * db_h
                 a["days"] += fc * 7.0
-                # Peak_Density is a MAX, never a prorated flow: the worst tank
-                # the batch held in the month is the worst tank it held in one
-                # of the month's weeks. A boundary week's peak counts for BOTH
-                # months it spans — a peak cannot be split without ceasing to
-                # be one.
+                # Avg_Density is not a prorated flow either: accumulate the
+                # month's biomass and water and divide once, so the month reads
+                # as total-biomass-over-total-water rather than a mean of weekly
+                # means. A boundary week contributes to BOTH months it spans.
+                a["dens_bio"] = a.get("dens_bio", 0.0) + (w.get("dens_bio") or 0.0)
+                a["dens_vol"] = a.get("dens_vol", 0.0) + (w.get("dens_vol") or 0.0)
                 _wpk = w.get("peak_density")
                 if _wpk is not None:
                     a["peak_density"] = (_wpk if a.get("peak_density") is None
@@ -2175,6 +2297,7 @@ def write_monthly_report(
             a["cull_count"], a["cull_bio"] = pb.cull_count, pb.cull_bio_kg
             rows_out.append((_pr_month, b, a))
 
+    _entries = []
     for mo, b, a in sorted(rows_out, key=lambda x: (x[0], x[1])):
         open_count, open_bio = a["open_count"], a["open_bio"]
         close_count, close_bio = a["close_count"], a["close_bio"]
@@ -2190,7 +2313,8 @@ def write_monthly_report(
             "batch": b, "week": mo, "week_start": None,
             "open_count": open_count, "open_wt": open_wt, "open_bio": open_bio,
             "close_count": close_count, "close_wt": close_wt, "close_bio": close_bio,
-            "peak_density": a.get("peak_density"),
+            "peak_density": ((a["dens_bio"] / a["dens_vol"])
+                             if a.get("dens_vol") else None),
             "sgr": sgr, "gross_growth": gross_growth, "net_prod": net_prod,
             "feed": f, "sfr": sfr,
             "bio_fcr": (f / gross_growth) if gross_growth > 0 else 0.0,
@@ -2203,9 +2327,27 @@ def write_monthly_report(
             "input_count": a["input_count"], "xfer_in": a["xfer_in"], "xfer_out": a["xfer_out"],
             "count_check": a["count_check"], "bio_check": a["bio_check"],
         }
-        ws.append([scenario_name, mo, b] + _ledger_value_cells(agg))
-    for c in range(1, 4 + len(_LEDGER_COLS)):
-        ws.column_dimensions[get_column_letter(c)].width = 14
+        _entries.append(([scenario_name, mo, b], _ledger_value_cells(agg),
+                         mo, a.get("days") or 7.0,
+                         a.get("dens_bio") or 0.0, a.get("dens_vol") or 0.0))
+
+    legends = [f"{sheet_name} - populated by RunForecast",
+               _LEDGER_DENSITY_LEGEND + " Monthly = the max of the month's "
+               "weekly peaks (a boundary week counts in both months).",
+               _MONTHLY_CHECK_LEGEND]
+    head = ["Scenario", "Month", "Batch"] + _LEDGER_COLS
+    _write_ledger_sheet(wb, sheet_name, legends, head, _entries,
+                        lambda mo: [scenario_name, mo, "TOTAL"],
+                        blanks=False, filterable=True)
+    _write_ledger_sheet(wb, f"{sheet_name} Grouped",
+                        legends[:1] + ["Same rows as " + sheet_name +
+                                       ", with a blank line between months for "
+                                       "reading. Do NOT filter this sheet - a "
+                                       "blank row ends the filter range; filter "
+                                       + sheet_name + " instead."] + legends[1:],
+                        head, _entries,
+                        lambda mo: [scenario_name, mo, "TOTAL"],
+                        blanks=True, filterable=False)
 
 
 def write_input_conservation_audit(

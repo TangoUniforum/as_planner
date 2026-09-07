@@ -73,6 +73,8 @@ TAB_COLOURS = {
     "Daily Harvest Schedule": TAB_PLAN,
     "HarvestReport": TAB_REPORT, "HarvestPlan Report": TAB_REPORT,
     "WeeklyReport": TAB_REPORT, "MonthlyReport": TAB_REPORT,
+    "WeeklyReport Grouped": TAB_REPORT, "MonthlyReport Grouped": TAB_REPORT,
+    "RealizationReport": TAB_AUDIT,
     "YearlySummary": TAB_REPORT, "BiologyProjection": TAB_REPORT,
     "FeedForecastWeekly": TAB_REPORT, "FeedForecastMonthly": TAB_REPORT,
     "Advisory": TAB_AUDIT, "ValidationLog": TAB_AUDIT,
@@ -217,7 +219,7 @@ def _last_data_col(ws, header_row: int) -> int:
 
 # ---------- the pass ----------
 
-def _format_table(ws, header_row: int) -> None:
+def _format_table(ws, header_row: int, autofilter: bool = True) -> None:
     ncol = _last_data_col(ws, header_row)
     nrow = ws.max_row
     raw = [ws.cell(header_row, c).value for c in range(1, ncol + 1)]
@@ -254,9 +256,15 @@ def _format_table(ws, header_row: int) -> None:
     ws.row_dimensions[header_row].height = 30
 
     ws.freeze_panes = ws.cell(header_row + 1, 1)
-    if nrow > header_row:
+    # A sheet that carries blank separator rows must NOT get a filter: a blank
+    # row ends the contiguous range, so the filter silently covers only the
+    # first group. The "<name> Grouped" ledgers are exactly that shape -- they
+    # exist to be read, and their filterable twin sits beside them.
+    if autofilter and nrow > header_row:
         ws.auto_filter.ref = (f"A{header_row}:"
                               f"{get_column_letter(ncol)}{nrow}")
+    elif not autofilter:
+        ws.auto_filter.ref = None
 
     if nrow <= header_row:
         return
@@ -370,6 +378,7 @@ def apply_workbook_formatting(wb, skip=SKIP) -> int:
         header_row = _find_header_row(ws)
         if header_row is None:
             continue
-        _format_table(ws, header_row)
+        _format_table(ws, header_row,
+                      autofilter=not ws.title.endswith(" Grouped"))
         done += 1
     return done
