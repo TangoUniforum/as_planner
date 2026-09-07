@@ -563,12 +563,18 @@ register(Method(
 # READMISSION CONDITION, so this is not a permanent exile: put it back in the
 # default roster when it passes every HARD gate. See
 # docs/GLOBAL_TANK_LIFECYCLE_DESIGN.md for what that needs.
-DEFAULT_ROSTER = ["controller", "controller-hybrid", "controller-lns"]
+# `controller-feasible` joins the DEFAULT roster, not just the registry: a
+# method the app's board and the tuned tournament never run is not "available",
+# it is invisible. It is off-by-default at the KNOB level (plan_tank_feasibility
+# false), so its presence here costs one more arm per tournament and changes no
+# plan anyone adopts unless they pick it.
+DEFAULT_ROSTER = ["controller", "controller-hybrid", "controller-lns",
+                  "controller-feasible"]
 
 # Everything registered, for callers that want the full sweep including the
 # gate-bound reference arms.
 FULL_ROSTER = ["controller", "controller-hybrid", "controller-lns",
-               "global-lp", "global-milp"]
+               "controller-feasible", "global-lp", "global-milp"]
 
 
 def get_roster(keys: "Optional[list[str]]" = None) -> "list[Method]":
