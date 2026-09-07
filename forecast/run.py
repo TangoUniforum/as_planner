@@ -1130,15 +1130,35 @@ def main(
         scenario_name=control.scenario_name, hog_yield=control.default_hog_yield,
         hog_overrides=facility_hog_overrides, forecast_start=control.forecast_start,
         realized_biology=getattr(placement, "realized_biology", None),
+        # OPENINGS AND ARRIVALS ARE A MATCHED PAIR -- pass both or neither.
+        #
+        # `window_openings` was previously omitted here (the WEEKLY ledger has
+        # always taken it), so a batch whose scripted harvest lands in a manual
+        # window opened the month at 0 and the harvest was subtracted from
+        # nothing: 2026-08 closed at -4,562 fish / -17,309 kg for B41 on the
+        # 2026-08-31 PR, and 2026-09 opened there. Negative fish on an
+        # operator-facing ledger.
+        #
+        # `tranog_events` was omitted DELIBERATELY, and correctly at the time:
+        # without openings the month opened at the PR's facility-wide figure,
+        # which already counts the arriving fish while they sat in freshwater,
+        # so crediting the arrival double-booked it -- measured then, 2026-08's
+        # Count_Check went 2,998 -> 292,998, exactly B49's 290,000 transfer.
+        #
+        # With openings supplied that no longer holds: a split batch now opens
+        # at its true SEAWATER state (B49: 47,743, not 287,599), so its
+        # freshwater arrival is NOT already counted and must be credited or the
+        # 250,225 fish that entered simply vanish. Measured on the same PR,
+        # 2026-08-31:
+        #     shipped (neither)   4 negative rows, worst Count_Check -18,221
+        #     openings only       0 negative,      worst        -250,118
+        #     BOTH                0 negative,      worst         -10,118
+        # Both is strictly better than either: the old double-book does not
+        # recur, B43's -18,221 and B41's -4,562 are gone, and every remaining
+        # row outside B49 is within 82 fish.
+        window_openings=prefix_openings,
         window_culls=prefix_fw_cull,
-        # NO tranog_events here, deliberately. In the WEEKLY ledger a TranOG is a
-        # genuine inflow into the OG track (the batch's OG opening is 0, so the
-        # arrival must be credited or the fish appear from nowhere). In the
-        # MONTHLY report the PR merge opens the month at the PR's FACILITY-WIDE
-        # opening, which already counts those fish while they sat in freshwater
-        # -- crediting the arrival again double-books it. Measured: passing them
-        # here took 2026-08's Count_Check from 2,998 to 292,998, exactly the
-        # 290,000 of B49's transfer.
+        tranog_events=placement.tranog_events,
         sixn_move_in_feed=getattr(placement, "sixn_move_in_feed", None),
         pr_period=_pr_period)
     write_reconciliation_report(

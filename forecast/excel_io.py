@@ -2112,6 +2112,7 @@ def write_monthly_report(
     pr_period=None,
     sheet_name: str = "MonthlyReport",
     realized_biology=None,
+    window_openings=None,
     window_culls=None,
 ) -> None:
     """Per-(month, batch) open/close production ledger (matches reference format).
@@ -2129,7 +2130,17 @@ def write_monthly_report(
         transfer_events, batches, tables, hog_yield, hog_overrides,
         sixn_move_in_feed=sixn_move_in_feed,
         tranog_events=tranog_events, og_mort_states=og_mort_states,
-        realized_biology=realized_biology, window_culls=window_culls)
+        realized_biology=realized_biology,
+        # The manual window's start-of-week openings, exactly as the WEEKLY
+        # ledger takes them. Omitting them here was an oversight, not a choice
+        # like the tranog_events line below: without it a batch whose scripted
+        # harvest lands in a window week opens the month at 0 and the harvest
+        # is subtracted from nothing, so the month CLOSES NEGATIVE. Measured on
+        # the 2026-08-31 PR: B41 opened 2026-W36 at 5,322 in WeeklyReport and at
+        # 0 here, and 2026-08 closed at -4,562 fish / -17,309 kg, which then
+        # became 2026-09's opening.
+        window_openings=window_openings,
+        window_culls=window_culls)
 
     # Roll the weekly ledger up to calendar months, splitting any week that
     # straddles a month boundary into its true month. CONTINUOUS flows (growth,
