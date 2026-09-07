@@ -1130,7 +1130,7 @@ def main(
         scenario_name=control.scenario_name, hog_yield=control.default_hog_yield,
         hog_overrides=facility_hog_overrides, forecast_start=control.forecast_start,
         realized_biology=getattr(placement, "realized_biology", None),
-        # OPENINGS AND ARRIVALS ARE A MATCHED PAIR -- pass both or neither.
+        # OPENINGS, ARRIVALS AND CULLS ARE ONE DECISION -- all three or none.
         #
         # `window_openings` was previously omitted here (the WEEKLY ledger has
         # always taken it), so a batch whose scripted harvest lands in a manual
@@ -1156,8 +1156,20 @@ def main(
         # Both is strictly better than either: the old double-book does not
         # recur, B43's -18,221 and B41's -4,562 are gone, and every remaining
         # row outside B49 is within 82 fish.
+        # ... and NO window_culls, for the reason stated on the weekly call
+        # above, which now applies here too. That comment ends "the MONTHLY
+        # report is facility-scope -- its PR opening counts those fish while
+        # they were still in freshwater -- so the cull belongs there". Passing
+        # window_openings RETIRED that premise: the month no longer opens at the
+        # PR's facility-wide figure, it opens at the batch's true SEAWATER state
+        # (B49: 47,743). Fish culled in freshwater were therefore never in the
+        # opening, and the TranOG credited above is already NET of them, so
+        # booking the cull removes them a second time.
+        # Measured on the 2026-08-31 PR, monthly sum|Count_Check|:
+        #     openings + tranog + culls   11,710   (B49 alone -10,118)
+        #     openings + tranog           1,592    (worst row -82)
+        # Both ledgers now make the same three choices at the same scope.
         window_openings=prefix_openings,
-        window_culls=prefix_fw_cull,
         tranog_events=placement.tranog_events,
         sixn_move_in_feed=getattr(placement, "sixn_move_in_feed", None),
         pr_period=_pr_period)
