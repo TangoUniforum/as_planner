@@ -195,6 +195,35 @@ def main(
         if b > 0 or o > 0:
             print(f"    {system:>5}: {b:>10,.0f} kg  in {o}/{total} tanks")
     fw_rolled = summarize_fw_records(fw_records)
+    # PR FW WEIGHT MISSING. A freshwater batch the PR gives a COUNT but no
+    # BIOMASS seeds the projection at 0 g, and FW growth is MULTIPLICATIVE --
+    # so it stays 0 g for its entire freshwater phase. Nothing downstream can
+    # recover it, and every symptom appears far from the cause: the FW
+    # calibration reports residual -100% / "did not converge", the batch's FW
+    # biomass and size-class split are fiction, and the TranOG reconcile to
+    # tran_og_count has no size distribution to rank, so before d3e3d43 it
+    # culled nobody and the batch entered seawater 24% over plan.
+    # Measured on the 2026-08-31 PR: B56, 563,234 fish across 46 hatchery units,
+    # every one 0.00 kg (B54 0.56 g, B55 0.21 g, B56 0.00 g -- the youngest
+    # batch, whose weight simply is not recorded yet).
+    # Detect, do not coerce: the operator is told exactly what is missing and
+    # where. Inventing a weight from the growth table would hide a data gap.
+    _fw_zero: dict[str, list] = {}
+    for (batch, _system), info in fw_rolled.items():
+        if info["count"] > 0 and info["biomass_kg"] <= 0:
+            e = _fw_zero.setdefault(batch, [0.0, 0])
+            e[0] += info["count"]
+            e[1] += info["units"]
+    for _b in sorted(_fw_zero):
+        _cnt, _units = _fw_zero[_b]
+        hydration_warns.append(
+            f"PR FW WEIGHT MISSING — {_b}: {_cnt:,.0f} fish across {_units} "
+            f"freshwater unit(s) carry 0 kg in the ProductionReport. Growth is "
+            f"multiplicative, so this batch projects 0 g for its whole FW phase "
+            f"— its TranOG weight, FW biomass and size-class split are not "
+            f"meaningful, and the reconcile to tran_og_count has no size "
+            f"distribution to cull against. Record a weight for those units."
+        )
     if fw_rolled:
         print(f"  FW in-flight rollup (not in TankState; representation TBD):")
         per_system: dict[str, dict] = {}

@@ -829,6 +829,19 @@ board are pinned `off` so you can always see them side by side.
 | **Diagnostics** | FW-calibration: per batch, the target vs projected pre-cull avg weight at TranOG, the residual, and a back-solved `Suggested_FW_Correction` | tuning `fw_correction` (§7 step 2) |
 | **RunConfig** | the exact config + scenario embedded in the output | reproducibility |
 
+> **`PR FW WEIGHT MISSING`** (console WARN + ValidationLog). A freshwater batch
+> the ProductionReport gives a COUNT but no BIOMASS seeds the projection at
+> 0 g, and FW growth is **multiplicative** — so it stays 0 g for its whole
+> freshwater phase. Its TranOG weight, FW biomass and size-class split are not
+> meaningful, and the reconcile to `tran_og_count` has no size distribution to
+> cull against. Seen on the 2026-08-31 PR: **B56, 563,234 fish across 46
+> hatchery units, every one 0.00 kg** (B54 reads 0.56 g, B55 0.21 g — B56 is
+> simply the youngest batch, whose weight is not recorded yet). **Fix it in the
+> PR**: record a weight for those units. The planner will not invent one, and
+> the symptoms otherwise appear far from the cause — as an "FW survival
+> calibration gap" in InputConservationAudit and a `residual −100% / did not
+> converge` row in Diagnostics.
+
 > **Reading RealizationReport.** Every other check in the workbook verifies
 > either *conservation* (nothing is lost) or an *outcome* (floors, empty weeks,
 > caps, handling budget). A move the planner emitted and the engine refused
