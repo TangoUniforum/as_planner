@@ -242,6 +242,21 @@ class Transfer:
     # includes them and manufactures a large fake "housekeeping leak into 6N"
     # out of routine grow-out placements. It did.
     channel: Optional[str] = None
+    # Why apply() refused the WHOLE event, and against what. Both populated by
+    # apply(); None when the event applied (wholly or partly). DIAGNOSTIC ONLY.
+    #
+    # A refused Transfer is invisible to every check this project had: it is
+    # perfectly conservative (nothing is lost, so the continuity and input
+    # audits pass), it trips no gate (no floor, no empty week, no cap, and it
+    # does not consume the handling budget, which counts APPLIED pairs), and
+    # write_transfer_plan_output drops it as "not part of the actionable plan".
+    # It shows up only as a warning line among hundreds. These two fields are
+    # what lets the realization report say which of the planner's decisions did
+    # not happen, and collapse repeats: on the 2026-08-31 PR, 528 refusals are
+    # 73 distinct (batch, tank, reason) facts, 86% of them repeats of a
+    # divergence that never repairs itself.
+    refusal_reason: Optional[str] = None
+    refusal_detail: Optional[str] = None
     # Handling mortality charged on deposit, per destination tank id.
     # Populated by apply(); the caller folds it into realized mortality.
     handling_mort_by_tank: dict = field(default_factory=dict)
@@ -254,8 +269,12 @@ class Transfer:
         warns: list[str] = []
         src = state.tanks_by_id.get(self.source_tank_id)
         if src is None:
+            self.refusal_reason = "unknown_source_tank"
             return [f"Transfer {self.batch_id}: unknown source tank #{self.source_tank_id}"]
         if src.is_empty or src.batch_id != self.batch_id:
+            self.refusal_reason = ("source_empty" if src.is_empty
+                                   else "source_holds_other_batch")
+            self.refusal_detail = "-" if src.is_empty else str(src.batch_id)
             warns.append(
                 f"Transfer {self.batch_id}: source {src.location_id} holds "
                 f"batch {src.batch_id} (count={src.count:.0f}); expected {self.batch_id}"
@@ -268,6 +287,8 @@ class Transfer:
         # count_transferred stays 0 so callers see "did not apply"). 6N
         # production-mode grow-out (stage SW) moves freely.
         if not sixn_exit_allowed(src.system_id, src.stage):
+            self.refusal_reason = "r7_sixn_one_way"
+            self.refusal_detail = src.system_id
             warns.append(
                 f"R7: refused transfer of batch {self.batch_id} out of 6N "
                 f"depuration tank {src.location_id} — fish moved into 6N "

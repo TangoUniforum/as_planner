@@ -44,6 +44,7 @@ from .excel_io import (
     write_tank_continuity_audit,
     write_system_limits_audit,
     write_transfer_plan_output,
+    write_realization_report,
     write_transfer_template,
     write_batch_plan,
     annotate_batch_plan_handling,
@@ -980,6 +981,9 @@ def main(
         wb, placement.transfer_events, placement.tranog_events,
         grade_events=placement.grade_events,
     )
+    # Intent check: TransferPlan is what HAPPENED, this is what was DECIDED and
+    # whether it happened. A refused move is invisible to every other sheet.
+    write_realization_report(wb, placement.transfer_events)
     write_transfer_template(
         wb, placement.batch_locations, placement.harvest_events,
         placement.tranog_events, control, facility,

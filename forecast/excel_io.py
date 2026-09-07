@@ -508,6 +508,121 @@ def write_transfer_plan_output(
         ws.column_dimensions[get_column_letter(c)].width = w
 
 
+def write_realization_report(wb, transfer_events,
+                             sheet_name: str = "RealizationReport") -> None:
+    """Did what the planner DECIDED actually happen?
+
+    Every other check in this project verifies either conservation (nothing is
+    lost) or an outcome (floors, empty weeks, caps, handling budget). A move the
+    planner emitted and the engine refused passes all of them: it is perfectly
+    conservative, it trips no gate, it does not consume the handling budget
+    (which counts APPLIED pairs), and the TransferPlan sheet deliberately drops
+    it as "not the actionable plan". Nothing anywhere asked whether the plan was
+    carried out. This sheet is that third question.
+
+    It is DIAGNOSTIC. It reads events after the fact and changes no decision.
+
+    The STUCK RELATIONSHIPS table is the point. A refusal repeating on the same
+    (batch, source tank, reason) is not noise, it is one fact restated: the
+    planner's record and the realized facility disagree about where a batch
+    lives, and nothing re-syncs them, so the same move is re-emitted and
+    re-refused every week for the rest of the batch's life. Measured on the
+    2026-08-31 PR: 528 refusals, 73 distinct facts, 86% repeats, worst 25.
+    Collapsing them is what makes a divergence visible in the week it starts
+    instead of the fortieth.
+
+    NOTE the counter-intuitive measured result recorded here so nobody "fixes"
+    this from the sheet alone: those refusals are LOAD-BEARING. Sourcing the
+    diff from realized occupancy instead of the planned assignment removes all
+    528 and makes the plan worse on both PRs tested -- transfer legs 626->1166,
+    weeks over the 15-move budget 0->13, worst grow-out density 163->281 kg/m3,
+    and no tonnage gained. The refusal is throttling an emitter that plans about
+    twice the movement the facility can execute. Read this sheet as a measure of
+    that appetite, not as a defect list.
+    """
+    if sheet_name in wb.sheetnames:
+        del wb[sheet_name]
+    ws = wb.create_sheet(sheet_name)
+    ws.append(["REALIZATION REPORT"])
+    ws.append(["Planned moves vs applied moves. Diagnostic only - reads events "
+               "after the fact and changes no decision. A refused move loses no "
+               "fish and trips no gate, so it is invisible everywhere else."])
+    ws.append([])
+
+    per_week: dict = {}
+    stuck: dict = {}
+    tot = applied = partial = refused = 0
+    f_plan = f_moved = 0.0
+    for ev in transfer_events:
+        if not hasattr(ev, "destinations"):
+            continue                      # GradedHarvest rides here; not a move
+        wk = iso_week_label(ev.event_date)
+        planned = sum((d.count or 0) for d in ev.destinations)
+        moved = float(getattr(ev, "count_transferred", 0.0) or 0.0)
+        reason = getattr(ev, "refusal_reason", None)
+        row = per_week.setdefault(wk, [0, 0, 0, 0, 0.0, 0.0])
+        row[0] += 1
+        tot += 1
+        f_plan += planned
+        f_moved += moved
+        row[4] += planned
+        row[5] += moved
+        if reason:
+            refused += 1
+            row[3] += 1
+            key = (ev.batch_id, ev.source_tank_id, reason,
+                   getattr(ev, "refusal_detail", None) or "")
+            st = stuck.setdefault(key, [0, wk, wk, 0.0])
+            st[0] += 1
+            st[1] = min(st[1], wk)
+            st[2] = max(st[2], wk)
+            st[3] += planned
+        elif moved + 0.5 < planned:
+            partial += 1
+            row[2] += 1
+        else:
+            applied += 1
+            row[1] += 1
+
+    ws.append(["SUMMARY"])
+    for label, val in (
+        ("Weeks with transfer activity", len(per_week)),
+        ("Transfer events emitted", tot),
+        ("  ... applied in full", applied),
+        ("  ... applied in part", partial),
+        ("  ... refused whole", refused),
+        ("Fish the planner moved", round(f_moved)),
+        ("Fish the planner planned to move", round(f_plan)),
+        ("Fish that stayed put", round(f_plan - f_moved)),
+        ("Share of planned movement realized",
+         (f"{100.0 * f_moved / f_plan:.1f}%" if f_plan else "n/a")),
+        ("Distinct stuck relationships", len(stuck)),
+    ):
+        ws.append([label, val])
+    ws.append([])
+
+    ws.append(["PER WEEK"])
+    ws.append(["Week", "Events", "Applied", "Partial", "Refused",
+               "Fish_planned", "Fish_moved", "Fish_stuck"])
+    for wk in sorted(per_week):
+        n, a, p_, r, fp, fm = per_week[wk]
+        ws.append([wk, n, a, p_, r, round(fp), round(fm), round(fp - fm)])
+    ws.append([])
+
+    ws.append(["STUCK RELATIONSHIPS - one row per (batch, source tank, reason). "
+               "Occurrences > 1 means the same decision was re-emitted and "
+               "re-refused; the planner is not learning from the refusal."])
+    ws.append(["Batch", "Source_Tank", "Reason", "Found", "Occurrences",
+               "First_Week", "Last_Week", "Fish_planned_total"])
+    for (b, tk, reason, detail), (n, first, last, fp) in sorted(
+            stuck.items(), key=lambda kv: (-kv[1][0], kv[0][0], kv[0][1])):
+        ws.append([b, tk, reason, detail, n, first, last, round(fp)])
+
+    widths = {1: 13, 2: 13, 3: 24, 4: 10, 5: 13, 6: 13, 7: 13, 8: 19}
+    for c, w in widths.items():
+        ws.column_dimensions[get_column_letter(c)].width = w
+
+
 def write_transfer_template(
     wb,
     batch_locations,

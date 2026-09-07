@@ -814,8 +814,28 @@ so you can always see the two side by side.
 | **InputConservationAudit** | per batch: placed/dropped, harvested, standing, **FW reconciliation** (planned vs realized seawater entry) + **closed FW mass-balance** (`first_FW_count` vs `realized_TranOG + FW_mort + FW_cull`; §6 #6) | conservation + FW calibration gaps |
 | **TankContinuityAudit** | per-(tank, week) balance + **facility conservation summary** | 0-drift proof |
 | **ReconciliationReport / SystemLimitsAudit** | per-batch open/close balance (count reconciles **exactly** via recorded realized biology; biomass within tolerance) / per-system realized biomass + feed vs cap, flagged `BIOMASS_OVER` / `FEED_OVER` | deeper audits — *TankContinuityAudit is the authoritative 0-drift biomass check* |
+| **RealizationReport** | the **intent** check: moves the planner DECIDED vs moves that happened. Summary (events emitted / applied in full / in part / refused whole, fish planned vs moved, **share of planned movement realized**), a per-week table, and **STUCK RELATIONSHIPS** — one row per (batch, source tank, reason) so a refusal repeated many times reads as one fact with a first/last week, not as many log lines | "did the plan actually happen?" — see the note below |
 | **Diagnostics** | FW-calibration: per batch, the target vs projected pre-cull avg weight at TranOG, the residual, and a back-solved `Suggested_FW_Correction` | tuning `fw_correction` (§7 step 2) |
 | **RunConfig** | the exact config + scenario embedded in the output | reproducibility |
+
+> **Reading RealizationReport.** Every other check in the workbook verifies
+> either *conservation* (nothing is lost) or an *outcome* (floors, empty weeks,
+> caps, handling budget). A move the planner emitted and the engine refused
+> passes all of them: it is perfectly conservative, trips no gate, does not
+> consume the handling budget (which counts APPLIED pairs), and TransferPlan
+> deliberately omits it as "not the actionable plan". This sheet is the only
+> place that question is asked.
+>
+> **A high refusal count is not automatically a defect.** Measured on two PR
+> closings, only ~36–37% of planned movement is realized, and essentially every
+> refusal is `source_holds_other_batch` — the planner's record and the realized
+> facility disagree about where a batch lives. Sourcing the plan-diff from
+> realized occupancy instead removes *all* of them and makes the plan **worse**:
+> transfer legs 626 → 1,166, weeks over the 15-move handling budget 0 → 13,
+> worst grow-out density 163 → 281 kg/m³, with no tonnage gained. The refusal is
+> throttling an emitter that plans roughly twice the movement the facility can
+> execute. Read the sheet as a measure of that appetite, and treat a *rising*
+> refusal count or a *new* stuck relationship as the signal — not the level.
 
 > The `ProductionReport` sheet stays the **historical** input month only — the
 > *forecast* is in the sheets above (same as the reference workbook). Skipped vs the
