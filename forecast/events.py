@@ -442,6 +442,11 @@ class Grade:
     source_tank_ids: list[int]
     destinations: list[TankAllocation]
 
+    # Why apply() refused the whole event. DIAGNOSTIC ONLY; None when it
+    # applied. Same optional-metadata pattern as Transfer/Harvest above.
+    refusal_reason: Optional[str] = None
+    refusal_detail: Optional[str] = None
+
     def apply(self, state: FacilityState) -> list[str]:
         warns: list[str] = []
         # Validate sources.
@@ -479,6 +484,7 @@ class Grade:
         _r7_srcs = [s for s in srcs
                     if not sixn_exit_allowed(s.system_id, s.stage)]
         if _r7_srcs:
+            self.refusal_reason = "r7_grade_source_in_6n"
             warns.append(
                 f"Grade {self.batch_id}: R7 — refused; sources "
                 f"{[s.location_id for s in _r7_srcs]} are 6N depuration tanks "
@@ -501,6 +507,7 @@ class Grade:
             if t.system_id in OG12_SYSTEMS and t.tank_id not in src_ids
         ]
         if og12_srcs_locked and og12_external_dests:
+            self.refusal_reason = "inv4_grade_between_og12"
             warns.append(
                 f"Grade {self.batch_id}: INV-4 violation — sources "
                 f"{[s.location_id for s in og12_srcs_locked]} >= 1 kg "
@@ -513,6 +520,7 @@ class Grade:
         src_count = sum(s.count for s in srcs)
         dest_count = sum(d.count for (_t, d) in dests_resolved)
         if abs(src_count - dest_count) > 0.5:
+            self.refusal_reason = "count_not_conserved"
             warns.append(
                 f"Grade {self.batch_id}: count not conserved — sources "
                 f"hold {src_count:.0f} fish, destinations sum {dest_count:.0f} "
@@ -665,18 +673,26 @@ class GradedHarvest:
     # biomass on the (frozen) pickup tank instead of over-debiting the source.
     pickup_source_avg_wt_g: Optional[float] = None
 
+    # Why apply() refused the whole event. DIAGNOSTIC ONLY; None when it
+    # applied. Same optional-metadata pattern as Transfer/Harvest above.
+    refusal_reason: Optional[str] = None
+    refusal_detail: Optional[str] = None
+
     def apply(self, state: FacilityState) -> list[str]:
         warns: list[str] = []
         src = state.tanks_by_id.get(self.source_tank_id)
         pickup = state.tanks_by_id.get(self.pickup_tank_id)
         retention = state.tanks_by_id.get(self.retention_tank_id)
         if src is None or pickup is None or retention is None:
+            self.refusal_reason = "unknown_tank"
             return [
                 f"GradedHarvest {self.batch_id}: tank lookup failed "
                 f"(src={self.source_tank_id}, pickup={self.pickup_tank_id}, "
                 f"retention={self.retention_tank_id})"
             ]
         if src.batch_id != self.batch_id:
+            self.refusal_reason = "source_holds_other_batch"
+            self.refusal_detail = str(src.batch_id)
             warns.append(
                 f"GradedHarvest {self.batch_id}: source {src.location_id} holds "
                 f"batch {src.batch_id}"
@@ -686,6 +702,8 @@ class GradedHarvest:
         # GradedHarvest is precisely that (pickup routes to harvest or 6N
         # depuration). Non-destructive refusal, state unchanged.
         if not harvest_allowed(src.system_id):
+            self.refusal_reason = "r5_entry_tier_harvest"
+            self.refusal_detail = src.system_id
             warns.append(
                 f"R5: refused graded harvest of batch {self.batch_id} from "
                 f"{src.location_id} ({src.system_id}) — fish can't be harvested "
@@ -695,6 +713,8 @@ class GradedHarvest:
             return warns
         # Pickup may already hold this batch (cross-tank accumulation) or be empty.
         if not pickup.is_empty and pickup.batch_id != self.batch_id:
+            self.refusal_reason = "pickup_holds_other_batch"
+            self.refusal_detail = str(pickup.batch_id)
             warns.append(
                 f"GradedHarvest {self.batch_id}: pickup {pickup.location_id} holds "
                 f"different batch {pickup.batch_id}"
@@ -702,6 +722,8 @@ class GradedHarvest:
             return warns
         # Retention may already hold this batch (accumulated smalls) or be empty.
         if not retention.is_empty and retention.batch_id != self.batch_id:
+            self.refusal_reason = "retention_holds_other_batch"
+            self.refusal_detail = str(retention.batch_id)
             warns.append(
                 f"GradedHarvest {self.batch_id}: retention {retention.location_id} "
                 f"holds different batch {retention.batch_id}"

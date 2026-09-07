@@ -814,7 +814,7 @@ so you can always see the two side by side.
 | **InputConservationAudit** | per batch: placed/dropped, harvested, standing, **FW reconciliation** (planned vs realized seawater entry) + **closed FW mass-balance** (`first_FW_count` vs `realized_TranOG + FW_mort + FW_cull`; §6 #6) | conservation + FW calibration gaps |
 | **TankContinuityAudit** | per-(tank, week) balance + **facility conservation summary** | 0-drift proof |
 | **ReconciliationReport / SystemLimitsAudit** | per-batch open/close balance (count reconciles **exactly** via recorded realized biology; biomass within tolerance) / per-system realized biomass + feed vs cap, flagged `BIOMASS_OVER` / `FEED_OVER` | deeper audits — *TankContinuityAudit is the authoritative 0-drift biomass check* |
-| **RealizationReport** | the **intent** check, for all three event families. **Transfers**: events emitted / applied in full / in part / refused whole, fish planned vs moved, **share of planned movement realized**, a per-week table, and **STUCK RELATIONSHIPS** (one row per batch+source tank+reason, so a refusal repeated many times reads as one fact with a first/last week). **Harvest**: decided vs taken, split into taken-as-decided / INV-5 force-emptied (took *more*) / short / refused. **TranOG**: fish planned to enter vs entered, and **fish that never entered the facility at all** | "did the plan actually happen?" — see the note below |
+| **RealizationReport** | the **intent** check, for all three event families. **Transfers**: events emitted / applied in full / in part / refused whole, fish planned vs moved, **share of planned movement realized**, a per-week table, and **STUCK RELATIONSHIPS** (one row per batch+source tank+reason, so a refusal repeated many times reads as one fact with a first/last week). **Harvest**: decided vs taken, split into taken-as-decided / INV-5 force-emptied (took *more*) / short / refused. **TranOG**: fish planned to enter vs entered, and **fish that never entered the facility at all**. **Grading**: Grade (size split) and GradedHarvest (the peel), applied vs refused whole | "did the plan actually happen?" — see the note below |
 | **Diagnostics** | FW-calibration: per batch, the target vs projected pre-cull avg weight at TranOG, the residual, and a back-solved `Suggested_FW_Correction` | tuning `fw_correction` (§7 step 2) |
 | **RunConfig** | the exact config + scenario embedded in the output | reproducibility |
 
@@ -842,7 +842,21 @@ so you can always see the two side by side.
 > decided (110/110 and 101/101, no force-empties, no shortfalls, no refusals)
 > and 100.0% of planned TranOG entry was realized. Every refusal path in both
 > is covered by a test that forces it, so a zero here means "did not happen",
-> not "cannot be reported". The realization gap is confined to transfers.
+> not "cannot be reported". **Grading reads clean too** (79/79 and 88/88 Grade
+> events applied; 7/7 and 35/35 peels), likewise with every refusal path
+> test-forced. The realization gap is confined to transfers.
+>
+> Every summary label is self-identifying (`transfers refused whole`,
+> `harvests refused whole`, `grades refused whole`, `peels refused whole`) —
+> read as key/value, a shared label would silently return the wrong section's
+> number.
+>
+> ⚠ **One known gap this sheet exists to cover.** `write_transfer_plan_output`
+> filters refused *transfers* out of TransferPlan, but emits a GradedHarvest's
+> pickup and retention rows **without checking whether it applied** — so a
+> refused peel would print on TransferPlan as a real move. It is 0 on both PRs
+> tested, so nothing is currently misreported; if `peels refused whole` is ever
+> non-zero, treat those TransferPlan rows as suspect.
 
 > The `ProductionReport` sheet stays the **historical** input month only — the
 > *forecast* is in the sheets above (same as the reference workbook). Skipped vs the

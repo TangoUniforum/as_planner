@@ -987,6 +987,7 @@ def main(
         wb, placement.transfer_events,
         harvest_events=placement.harvest_events,
         tranog_events=placement.tranog_events,
+        grade_events=placement.grade_events,
     )
     write_transfer_template(
         wb, placement.batch_locations, placement.harvest_events,

@@ -509,7 +509,7 @@ def write_transfer_plan_output(
 
 
 def write_realization_report(wb, transfer_events, harvest_events=None,
-                             tranog_events=None,
+                             tranog_events=None, grade_events=None,
                              sheet_name: str = "RealizationReport") -> None:
     """Did what the planner DECIDED actually happen?
 
@@ -554,9 +554,15 @@ def write_realization_report(wb, transfer_events, harvest_events=None,
     stuck: dict = {}
     tot = applied = partial = refused = 0
     f_plan = f_moved = 0.0
+    graded_harvests = []
     for ev in transfer_events:
         if not hasattr(ev, "destinations"):
-            continue                      # GradedHarvest rides here; not a move
+            # GradedHarvest rides in transfer_events. It is not a tank-to-tank
+            # move, so it does not belong in the transfer tallies -- but it is
+            # still a decision that can be refused, so it is graded below
+            # rather than dropped.
+            graded_harvests.append(ev)
+            continue
         wk = iso_week_label(ev.event_date)
         planned = sum((d.count or 0) for d in ev.destinations)
         moved = float(getattr(ev, "count_transferred", 0.0) or 0.0)
@@ -591,7 +597,7 @@ def write_realization_report(wb, transfer_events, harvest_events=None,
         ("Transfer events emitted", tot),
         ("  ... applied in full", applied),
         ("  ... applied in part", partial),
-        ("  ... refused whole", refused),
+        ("  ... transfers refused whole", refused),
         ("Fish the planner moved", round(f_moved)),
         ("Fish the planner planned to move", round(f_plan)),
         ("Fish that stayed put", round(f_plan - f_moved)),
@@ -705,7 +711,56 @@ def write_realization_report(wb, transfer_events, harvest_events=None,
     else:
         ws.append(["No TranOG destination was refused.", ""])
 
-    widths = {1: 13, 2: 13, 3: 30, 4: 12, 5: 13, 6: 13, 7: 13, 8: 19}
+    # ---- GRADING (Grade + GradedHarvest) --------------------------------
+    # Both are whole-event refusals, so a refused one changed nothing at all.
+    # Worth watching because write_transfer_plan_output emits a GradedHarvest's
+    # pickup and retention rows WITHOUT checking whether it applied -- a refused
+    # peel still reads as a real move on TransferPlan. This section is where
+    # that shows up.
+    g_ref: dict = {}
+    g_n = g_ok = 0
+    gh_n = gh_ok = 0
+    for ev in (grade_events or []):
+        g_n += 1
+        reason = getattr(ev, "refusal_reason", None)
+        if reason:
+            key = ("Grade", ev.batch_id, reason,
+                   getattr(ev, "refusal_detail", None) or "")
+            g_ref[key] = g_ref.get(key, 0) + 1
+        else:
+            g_ok += 1
+    for ev in graded_harvests:
+        gh_n += 1
+        reason = getattr(ev, "refusal_reason", None)
+        if reason:
+            key = ("GradedHarvest", ev.batch_id, reason,
+                   getattr(ev, "refusal_detail", None) or "")
+            g_ref[key] = g_ref.get(key, 0) + 1
+        else:
+            gh_ok += 1
+    ws.append([])
+    ws.append(["GRADING - Grade (size split) and GradedHarvest (the peel). "
+               "Both refuse whole, so a refused one changed nothing -- but a "
+               "refused GradedHarvest still prints pickup/retention rows on "
+               "TransferPlan, so check here before trusting those."])
+    for label, val in (
+        ("Grade events emitted", g_n),
+        ("  ... grades applied", g_ok),
+        ("  ... grades refused whole", g_n - g_ok),
+        ("GradedHarvest events emitted", gh_n),
+        ("  ... peels applied", gh_ok),
+        ("  ... peels refused whole", gh_n - gh_ok),
+    ):
+        ws.append([label, val])
+    if g_ref:
+        ws.append(["Event", "Batch", "Reason", "Found", "Occurrences"])
+        for (kind, b, reason, detail), n in sorted(g_ref.items(),
+                                                   key=lambda kv: -kv[1]):
+            ws.append([kind, b, reason, detail, n])
+    else:
+        ws.append(["No grading event was refused.", ""])
+
+    widths = {1: 16, 2: 13, 3: 30, 4: 12, 5: 13, 6: 13, 7: 13, 8: 19}
     for c, w in widths.items():
         ws.column_dimensions[get_column_letter(c)].width = w
 

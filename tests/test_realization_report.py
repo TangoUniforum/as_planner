@@ -73,7 +73,7 @@ def test_classifies_applied_partial_and_refused():
     assert s["Transfer events emitted"] == 3
     assert s["... applied in full"] == 1
     assert s["... applied in part"] == 1
-    assert s["... refused whole"] == 1
+    assert s["... transfers refused whole"] == 1
 
 
 def test_reports_the_share_of_intent_that_happened():
@@ -253,3 +253,96 @@ def test_tranog_all_stocked_reads_100_percent():
     s, _ = _tsummary([ev])
     assert s["Share of planned entry realized"] == "100.0%"
     assert s["Fish that never entered"] == 0
+
+
+# ---------------------------------------------------------------------------
+# GRADING: Grade (size split) and GradedHarvest (the peel).
+#
+# Also clean on both PRs (79/79 Grade, 7/7 GradedHarvest applied). Same rule as
+# above: the zero only means something once each path is shown to be reachable.
+#
+# GradedHarvest matters more than its count suggests -- write_transfer_plan_output
+# emits its pickup and retention rows WITHOUT checking whether it applied, so a
+# refused peel prints on TransferPlan as a real move. This section is the only
+# place that would show up.
+# ---------------------------------------------------------------------------
+
+from forecast.events import Grade, GradedHarvest   # noqa: E402
+
+
+def _gsummary(grades=(), transfers=()):
+    wb = Workbook()
+    write_realization_report(wb, list(transfers), grade_events=list(grades))
+    rows = [[c.value for c in r] for r in wb["RealizationReport"].iter_rows()]
+    return _summary(rows), rows
+
+
+def _gh(src, pickup, retention, batch="B45"):
+    return GradedHarvest(
+        batch_id=batch, event_date=D1, source_tank_id=src,
+        pickup_tank_id=pickup, pickup_count=1000.0, pickup_avg_wt_g=3400.0,
+        retention_tank_id=retention, retention_count=1000.0,
+        retention_avg_wt_g=2600.0, cv_pct=16.0,
+    )
+
+
+def test_grade_count_not_conserved_is_reachable():
+    st = _state(); _stock(st, 41, "B45", 5000.0)
+    ev = Grade(batch_id="B45", event_date=D1, source_tank_ids=[41],
+               destinations=[TankAllocation(tank_id=51, count=99.0,
+                                            avg_wt_g=3100.0, cv_pct=16.0)])
+    ev.apply(st)
+    assert ev.refusal_reason == "count_not_conserved"
+    s, rows = _gsummary(grades=[ev])
+    assert s["Grade events emitted"] == 1
+    assert s["... grades refused whole"] == 1
+    assert any(r and r[2] == "count_not_conserved" for r in rows)
+
+
+def test_grade_applied_is_not_counted_as_refused():
+    st = _state(); _stock(st, 41, "B45", 5000.0)
+    ev = Grade(batch_id="B45", event_date=D1, source_tank_ids=[41],
+               destinations=[TankAllocation(tank_id=51, count=5000.0,
+                                            avg_wt_g=3100.0, cv_pct=16.0)])
+    ev.apply(st)
+    assert ev.refusal_reason is None
+    s, _ = _gsummary(grades=[ev])
+    assert s["... grades refused whole"] == 0
+
+
+def test_graded_harvest_source_mismatch_is_reachable():
+    st = _state(); _stock(st, 41, "B47", 5000.0)
+    ev = _gh(41, 51, 11)
+    ev.apply(st)
+    assert ev.refusal_reason == "source_holds_other_batch"
+    assert ev.refusal_detail == "B47"
+    s, rows = _gsummary(transfers=[ev])
+    assert s["... peels refused whole"] == 1
+    assert any(r and r[0] == "GradedHarvest" for r in rows)
+
+
+def test_graded_harvest_r5_entry_tier_is_reachable():
+    st = _state(); _stock(st, 11, "B45", 5000.0)      # OG1N source
+    ev = _gh(11, 51, 41)
+    ev.apply(st)
+    assert ev.refusal_reason == "r5_entry_tier_harvest"
+    assert _gsummary(transfers=[ev])[0]["... peels refused whole"] == 1
+
+
+def test_graded_harvest_pickup_holding_another_batch_is_reachable():
+    st = _state(); _stock(st, 41, "B45", 5000.0); _stock(st, 51, "B47", 10.0)
+    ev = _gh(41, 51, 11)
+    ev.apply(st)
+    assert ev.refusal_reason == "pickup_holds_other_batch"
+    assert ev.refusal_detail == "B47"
+
+
+def test_graded_harvest_is_not_counted_as_a_transfer():
+    """It rides in transfer_events but is not a tank-to-tank move; counting it
+    there would inflate the transfer realization rate with the wrong unit."""
+    st = _state(); _stock(st, 41, "B45", 5000.0)
+    ev = _gh(41, 51, 11)
+    ev.apply(st)
+    s, _ = _gsummary(transfers=[ev])
+    assert s["Transfer events emitted"] == 0
+    assert s["GradedHarvest events emitted"] == 1
