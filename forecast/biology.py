@@ -253,10 +253,25 @@ def _apply_bottom_cull(
     avg_wt rises because the smallest fish are removed; culled biomass
     uses the conditional mean of the removed (bottom) fraction.
     """
-    if cull_pct <= 0 or count <= 0 or avg_wt <= 0:
+    if cull_pct <= 0 or count <= 0:
         return count, avg_wt, 0.0, 0.0
     if cull_pct >= 1:
         return 0.0, avg_wt, count, count * avg_wt / 1000.0
+    if avg_wt <= 0:
+        # NO USABLE SIZE DISTRIBUTION. A bottom cull ranks fish by weight, and
+        # with avg_wt <= 0 there is nothing to rank -- but the COUNT reduction
+        # is still perfectly well defined, and landing on a count is what the
+        # caller asked for (the TranOG reconcile to tran_og_count). Returning
+        # "culled 0.0" here reported SUCCESS while removing nobody: measured on
+        # the 2026-08-31 PR, B56's FW growth projected an avg weight of 0.00 g
+        # (its fw_correction did not converge), so the reconcile asked to cull
+        # 79,788 fish, culled none, and 409,671 entered seawater against a
+        # tran_og_count of 330,000 -- +24%, reported only as an FW-divergence
+        # note. Cull PROPORTIONALLY instead: the count is right, the weight is
+        # already meaningless, and the zero weight itself stays loud through
+        # the FW-calibration warning that fires for the same batch.
+        new_count = count * (1 - cull_pct)
+        return new_count, avg_wt, count - new_count, 0.0
     sigma = avg_wt * (cv_pct / 100.0)
     z = NormalDist().inv_cdf(cull_pct)
     # Conditional mean of N(0,1) below z, scaled to N(mu, sigma):
