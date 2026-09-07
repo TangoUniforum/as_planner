@@ -5450,6 +5450,29 @@ def phase_d_emit_events(
                            and (t.density_kg_m3 > t.max_density_kg_m3
                                 or t.tank_id in _chronic)]
             if _over_entry and _moves_left_quality() > 0:
+                # WIDENING THIS TO GROW-OUT WAS BUILT, MEASURED AND DROPPED
+                # (2026-09-07). The scope below is entry-tier only, and grow-out
+                # carries 54-66% of all non-exempt over-cap tank-weeks across 3
+                # PR closings -- so the obvious move is to watch every OG tank.
+                # Measured on 8/31, 8/19, 8/13: over-cap improved on two
+                # (91->82, 88->73) and got WORSE on one (78->83), while floor
+                # misses TRIPLED on 8/31 (2->6) and HOG fell on all three.
+                # Entry-tier breaches rose on two of the three (34->37, 36->42):
+                # the widened pass does not ADD anticipation, it REALLOCATES the
+                # same weekly moves away from harvest staging.
+                #
+                # And the limit below is not what bounds it: chronic_max_frees
+                # _per_week=2 gave BYTE-IDENTICAL output to 1 on all three PRs.
+                # The binding constraint is _moves_left_quality() -- the weekly
+                # handling budget. Raising max_transfers_per_week to 20 did not
+                # help either (8/31 over-cap 91->95, floors still 6): more moves
+                # get spent, not better ones.
+                #
+                # So relieving density and staging harvest compete for ONE
+                # scarce resource and this allocation is already near the
+                # efficient point. Do not re-scope this without first changing
+                # the resource.
+                #
                 # BOUND THE ANTICIPATORY WORK. Consolidation and the 6N harvest
                 # move-in draw on the SAME weekly handling budget
                 # (max_transfers_per_week), so an unbounded chronic sweep
