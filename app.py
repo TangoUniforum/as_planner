@@ -7245,6 +7245,11 @@ def _feed_weekly(out_path):
             g = (lambda n: row[hdr.index(n)]
                  if n in hdr and hdr.index(n) < len(row) else None)
             w, f = g("Week"), g("Feed (kg)")
+            # SKIP THE PER-WEEK TOTAL ROW. WeeklyReport carries a TOTAL row per
+            # week (2026-09-07), which repeats that week's feed in the same
+            # column -- summing it doubles every week's feed against the cap.
+            if str(g("Batch") or "").strip().upper() == "TOTAL":
+                continue
             if w and isinstance(f, (int, float)):
                 per_week[str(w)] = per_week.get(str(w), 0.0) + float(f)
         # Per-week caps + the default, from the run's own stamp.
