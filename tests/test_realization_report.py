@@ -52,8 +52,15 @@ def _summary(rows):
 
 
 def _stuck(rows):
-    i = next(k for k, r in enumerate(rows) if r and r[0] == "Batch")
-    return [r for r in rows[i + 1:] if r and r[0] is not None]
+    """The TRANSFER stuck table only — stop at the HARVEST section, which has
+    its own Batch/Source_Tank header and would otherwise be swept in."""
+    end = next((k for k, r in enumerate(rows)
+                if r and r[0] and str(r[0]).startswith("HARVEST")), len(rows))
+    head = next((k for k, r in enumerate(rows[:end]) if r and r[0] == "Batch"),
+                None)
+    if head is None:
+        return []
+    return [r for r in rows[head + 1:end] if r and r[0] is not None]
 
 
 def test_classifies_applied_partial_and_refused():
@@ -129,3 +136,120 @@ def test_apply_records_why_it_refused():
     assert ev.refusal_reason == "source_holds_other_batch"
     assert ev.refusal_detail == "B47"
     assert ev.count_transferred == 0.0
+
+
+# ---------------------------------------------------------------------------
+# HARVEST + TranOG.
+#
+# Both read CLEAN on the two PR closings tested (110/110 and 101/101 harvests
+# taken exactly as decided; 100.0% of planned TranOG entry realized). A clean
+# number is worth nothing until the counter is shown to be reachable -- this
+# project has already shipped a metric that could not report a non-zero by
+# construction, and believed it. Every test below forces one of the paths.
+# ---------------------------------------------------------------------------
+
+from forecast.events import Harvest, TranOGEntry   # noqa: E402
+
+
+def _state():
+    st = FacilityState(D1, [
+        TankState("OG1N-11", 11, "OG1N", 1000.0, 95.0, 1000.0, "OG"),
+        TankState("OG4N-41", 41, "OG4N", 1000.0, 95.0, 1000.0, "OG"),
+        TankState("OG5N-51", 51, "OG5N", 1000.0, 95.0, 1000.0, "OG"),
+    ])
+    return st
+
+
+def _stock(st, tid, batch, n, wt=3100.0):
+    st.tanks_by_id[tid].assign(batch_id=batch, count=n, avg_wt_g=wt,
+                               cv_pct=16.0, stage="SW")
+
+
+def _hsummary(harvests):
+    wb = Workbook()
+    write_realization_report(wb, [], harvest_events=harvests)
+    rows = [[c.value for c in r] for r in wb["RealizationReport"].iter_rows()]
+    return _summary(rows), rows
+
+
+def test_harvest_keeps_what_was_asked_for_after_apply_overwrites_it():
+    st = _state(); _stock(st, 41, "B45", 5000.0)
+    ev = Harvest(batch_id="B45", event_date=D1, source_tank_id=41,
+                 count=9999.0, avg_wt_g=3100.0)
+    ev.apply(st)
+    assert ev.count == 5000.0            # apply rewrote it to reality
+    assert ev.requested_count == 9999.0  # ... and intent survived
+
+
+def test_harvest_short_is_counted():
+    st = _state(); _stock(st, 41, "B45", 5000.0)
+    ev = Harvest(batch_id="B45", event_date=D1, source_tank_id=41,
+                 count=9999.0, avg_wt_g=3100.0)
+    ev.apply(st)
+    s, _ = _hsummary([ev])
+    assert s["... short (tank held fewer than asked)"] == 1
+    assert s["Fish decided"] == 9999 and s["Fish taken"] == 5000
+
+
+def test_harvest_source_mismatch_is_reported_as_refused():
+    st = _state(); _stock(st, 41, "B47", 5000.0)
+    ev = Harvest(batch_id="B45", event_date=D1, source_tank_id=41,
+                 count=1000.0, avg_wt_g=3100.0)
+    ev.apply(st)
+    assert ev.refusal_reason == "source_holds_other_batch"
+    assert ev.refusal_detail == "B47"
+    s, rows = _hsummary([ev])
+    assert s["... harvests refused whole"] == 1
+    assert s["Fish taken"] == 0          # never credited as harvested
+    assert any(r and r[2] == "source_holds_other_batch" for r in rows)
+
+
+def test_harvest_r5_entry_tier_refusal_is_reachable():
+    st = _state(); _stock(st, 11, "B45", 5000.0)      # OG1N = entry tier
+    ev = Harvest(batch_id="B45", event_date=D1, source_tank_id=11,
+                 count=1000.0, avg_wt_g=3100.0)
+    ev.apply(st)
+    assert ev.refusal_reason == "r5_entry_tier_harvest"
+    assert _hsummary([ev])[0]["... harvests refused whole"] == 1
+
+
+def test_inv5_force_empty_counts_as_over_realization_not_refusal():
+    st = _state(); _stock(st, 41, "B45", 5000.0)
+    ev = Harvest(batch_id="B45", event_date=D1, source_tank_id=41,
+                 count=4000.0, avg_wt_g=3100.0, min_tank_control=2000.0)
+    ev.apply(st)
+    assert ev.forced_empty is True and ev.count == 5000.0
+    s, _ = _hsummary([ev])
+    assert s["... force-emptied (INV-5, took more)"] == 1
+    assert s["... harvests refused whole"] == 0
+
+
+def _tsummary(trans):
+    wb = Workbook()
+    write_realization_report(wb, [], tranog_events=trans)
+    rows = [[c.value for c in r] for r in wb["RealizationReport"].iter_rows()]
+    return _summary(rows), rows
+
+
+def test_tranog_refused_destination_is_reachable_and_reported():
+    st = _state(); _stock(st, 11, "B47", 100.0)       # occupied by another batch
+    ev = TranOGEntry(batch_id="B45", event_date=D1, destinations=[
+        TankAllocation(tank_id=11, count=600000.0, avg_wt_g=370.0, cv_pct=16.0),
+    ])
+    ev.apply(st)
+    assert ("inv1_dest_holds_other_batch" in [r for _, r in ev.refusals])
+    s, rows = _tsummary([ev])
+    assert s["Fish that never entered"] == 600000
+    assert s["Share of planned entry realized"] == "0.0%"
+    assert any(r and r[2] == "inv1_dest_holds_other_batch" for r in rows)
+
+
+def test_tranog_all_stocked_reads_100_percent():
+    st = _state()
+    ev = TranOGEntry(batch_id="B45", event_date=D1, destinations=[
+        TankAllocation(tank_id=41, count=1000.0, avg_wt_g=370.0, cv_pct=16.0),
+    ])
+    ev.apply(st)
+    s, _ = _tsummary([ev])
+    assert s["Share of planned entry realized"] == "100.0%"
+    assert s["Fish that never entered"] == 0

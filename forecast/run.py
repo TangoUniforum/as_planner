@@ -983,7 +983,11 @@ def main(
     )
     # Intent check: TransferPlan is what HAPPENED, this is what was DECIDED and
     # whether it happened. A refused move is invisible to every other sheet.
-    write_realization_report(wb, placement.transfer_events)
+    write_realization_report(
+        wb, placement.transfer_events,
+        harvest_events=placement.harvest_events,
+        tranog_events=placement.tranog_events,
+    )
     write_transfer_template(
         wb, placement.batch_locations, placement.harvest_events,
         placement.tranog_events, control, facility,

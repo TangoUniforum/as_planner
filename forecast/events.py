@@ -74,6 +74,11 @@ class TranOGEntry:
     # 600,000 actually stocked, 1,200,000 reported).
     count_placed: float = 0.0          # populated by apply()
     count_refused: float = 0.0         # populated by apply()
+    # (tank_id, reason) per destination this event could not stock. Populated
+    # by apply(); DIAGNOSTIC ONLY. count_refused says how many fish did not
+    # enter, this says WHICH door was shut and why, which is what the
+    # realization report needs to collapse repeats into one fact.
+    refusals: list = field(default_factory=list)
 
     def apply(self, state: FacilityState) -> list[str]:
         warns: list[str] = []
@@ -82,6 +87,7 @@ class TranOGEntry:
             tank = state.tanks_by_id.get(dest.tank_id)
             if tank is None:
                 warns.append(f"TranOG {self.batch_id}: unknown tank #{dest.tank_id}")
+                self.refusals.append((dest.tank_id, "unknown_dest_tank"))
                 continue
             # SAME-COHORT TOP-UP (operator rule, 2026-09-02). A cohort may
             # land in a tank that already holds ITSELF; only a DIFFERENT batch
@@ -98,12 +104,14 @@ class TranOGEntry:
                     f"DIFFERENT batch {tank.batch_id} (INV-1) — a cohort may "
                     f"share a tank only with itself"
                 )
+                self.refusals.append((dest.tank_id, "inv1_dest_holds_other_batch"))
                 continue
             if tank.type != "OG":
                 warns.append(
                     f"TranOG {self.batch_id}: tank {tank.location_id} is not OG "
                     f"(type={tank.type})"
                 )
+                self.refusals.append((dest.tank_id, "dest_not_og"))
                 continue
             if not tank.is_empty:
                 # These two guards bind ONLY on the top-up branch, so an EMPTY
@@ -120,12 +128,14 @@ class TranOGEntry:
                         f"{tank.location_id} ({tank.system_id}) is not entry "
                         f"tier; FW arrivals may enter ONLY OG1/2 (rule R1)"
                     )
+                    self.refusals.append((dest.tank_id, "r1_topup_not_entry_tier"))
                     continue
                 if tank.stage != STAGE_SW:
                     warns.append(
                         f"TranOG {self.batch_id}: top-up refused — "
                         f"{tank.location_id} is stage {tank.stage}, not on feed"
                     )
+                    self.refusals.append((dest.tank_id, "topup_not_on_feed"))
                     continue
             if tank.is_empty:
                 tank.assign(
@@ -547,13 +557,30 @@ class Harvest:
     count: float
     avg_wt_g: float
     min_tank_control: float = 0.0
+    # WHAT WAS ASKED FOR. apply() overwrites `count` with what was actually
+    # taken ("Record what was ACTUALLY harvested, not what was requested",
+    # below) -- which the audits depend on, but it means the intent is gone the
+    # moment the event applies and nothing can afterwards ask whether the
+    # harvest the planner decided on happened. Captured at entry to apply().
+    requested_count: Optional[float] = None
+    # Why apply() refused, and against what. DIAGNOSTIC ONLY; None when the
+    # harvest applied. `forced_empty` marks the opposite case -- INV-5 taking
+    # MORE than requested -- which is an over-realization, not a refusal.
+    refusal_reason: Optional[str] = None
+    refusal_detail: Optional[str] = None
+    forced_empty: bool = False
 
     def apply(self, state: FacilityState) -> list[str]:
         warns: list[str] = []
+        self.requested_count = self.count
         src = state.tanks_by_id.get(self.source_tank_id)
         if src is None:
+            self.refusal_reason = "unknown_source_tank"
             return [f"Harvest {self.batch_id}: unknown source tank #{self.source_tank_id}"]
         if src.is_empty or src.batch_id != self.batch_id:
+            self.refusal_reason = ("source_empty" if src.is_empty
+                                   else "source_holds_other_batch")
+            self.refusal_detail = "-" if src.is_empty else str(src.batch_id)
             warns.append(
                 f"Harvest {self.batch_id}: source {src.location_id} holds "
                 f"batch {src.batch_id}; expected {self.batch_id}"
@@ -564,6 +591,8 @@ class Harvest:
         # first. Non-destructive refusal (state unchanged, count zeroed so
         # callers see "did not apply").
         if not harvest_allowed(src.system_id):
+            self.refusal_reason = "r5_entry_tier_harvest"
+            self.refusal_detail = src.system_id
             warns.append(
                 f"R5: refused harvest of batch {self.batch_id} from "
                 f"{src.location_id} ({src.system_id}) — fish can't be harvested "
@@ -579,6 +608,7 @@ class Harvest:
         if 0 < remaining < self.min_tank_control:
             take = src.count
             remaining = 0.0
+            self.forced_empty = True
             warns.append(
                 f"INV-5 force-empty: harvest from {src.location_id} would leave "
                 f"{src.count - self.count:.0f} fish < min_tank_control "

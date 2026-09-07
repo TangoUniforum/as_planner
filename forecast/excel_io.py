@@ -508,7 +508,8 @@ def write_transfer_plan_output(
         ws.column_dimensions[get_column_letter(c)].width = w
 
 
-def write_realization_report(wb, transfer_events,
+def write_realization_report(wb, transfer_events, harvest_events=None,
+                             tranog_events=None,
                              sheet_name: str = "RealizationReport") -> None:
     """Did what the planner DECIDED actually happen?
 
@@ -618,7 +619,93 @@ def write_realization_report(wb, transfer_events,
             stuck.items(), key=lambda kv: (-kv[1][0], kv[0][0], kv[0][1])):
         ws.append([b, tk, reason, detail, n, first, last, round(fp)])
 
-    widths = {1: 13, 2: 13, 3: 24, 4: 10, 5: 13, 6: 13, 7: 13, 8: 19}
+    # ---- HARVEST -------------------------------------------------------
+    # Harvest.apply overwrites `count` with what was actually taken, so intent
+    # survives only in requested_count (captured at entry to apply).
+    h_ref: dict = {}
+    h_n = h_ok = h_short = h_forced = 0
+    h_req = h_got = 0.0
+    for ev in (harvest_events or []):
+        h_n += 1
+        req = getattr(ev, "requested_count", None)
+        req = float(ev.count if req is None else req)
+        got = float(ev.count or 0.0)
+        reason = getattr(ev, "refusal_reason", None)
+        if reason:
+            got = 0.0
+            key = (ev.batch_id, ev.source_tank_id, reason,
+                   getattr(ev, "refusal_detail", None) or "")
+            st = h_ref.setdefault(key, [0, 0.0])
+            st[0] += 1
+            st[1] += req
+        elif getattr(ev, "forced_empty", False):
+            h_forced += 1
+        elif got + 0.5 < req:
+            h_short += 1
+        else:
+            h_ok += 1
+        h_req += req
+        h_got += got
+    ws.append([])
+    ws.append(["HARVEST - decided vs taken. INV-5 force-empty takes MORE than "
+               "asked (an over-realization, not a refusal) and is counted "
+               "separately."])
+    for label, val in (
+        ("Harvest events emitted", h_n),
+        ("  ... taken as decided", h_ok),
+        ("  ... force-emptied (INV-5, took more)", h_forced),
+        ("  ... short (tank held fewer than asked)", h_short),
+        ("  ... harvests refused whole", sum(v[0] for v in h_ref.values())),
+        ("Fish decided", round(h_req)),
+        ("Fish taken", round(h_got)),
+    ):
+        ws.append([label, val])
+    if h_ref:
+        ws.append(["Batch", "Source_Tank", "Reason", "Found", "Occurrences",
+                   "Fish_decided_total"])
+        for (b, tk, reason, detail), (n, fq) in sorted(
+                h_ref.items(), key=lambda kv: -kv[1][0]):
+            ws.append([b, tk, reason, detail, n, round(fq)])
+    else:
+        ws.append(["No harvest was refused.", ""])
+
+    # ---- TranOG --------------------------------------------------------
+    t_ref: dict = {}
+    t_n = t_ok = 0
+    t_plan = t_placed = 0.0
+    for ev in (tranog_events or []):
+        t_n += 1
+        planned = sum((d.count or 0) for d in ev.destinations)
+        placed = float(getattr(ev, "count_placed", 0.0) or 0.0)
+        t_plan += planned
+        t_placed += placed
+        refs = getattr(ev, "refusals", None) or []
+        if not refs:
+            t_ok += 1
+        for tank_id, reason in refs:
+            t_ref[(ev.batch_id, tank_id, reason)] = (
+                t_ref.get((ev.batch_id, tank_id, reason), 0) + 1)
+    ws.append([])
+    ws.append(["TranOG (FW -> seawater) - a refused destination means fish that "
+               "never entered the facility at all."])
+    for label, val in (
+        ("TranOG events emitted", t_n),
+        ("  ... every destination stocked", t_ok),
+        ("Fish planned to enter", round(t_plan)),
+        ("Fish that entered", round(t_placed)),
+        ("Fish that never entered", round(t_plan - t_placed)),
+        ("Share of planned entry realized",
+         (f"{100.0 * t_placed / t_plan:.1f}%" if t_plan else "n/a")),
+    ):
+        ws.append([label, val])
+    if t_ref:
+        ws.append(["Batch", "Dest_Tank", "Reason", "Occurrences"])
+        for (b, tk, reason), n in sorted(t_ref.items(), key=lambda kv: -kv[1]):
+            ws.append([b, tk, reason, n])
+    else:
+        ws.append(["No TranOG destination was refused.", ""])
+
+    widths = {1: 13, 2: 13, 3: 30, 4: 12, 5: 13, 6: 13, 7: 13, 8: 19}
     for c, w in widths.items():
         ws.column_dimensions[get_column_letter(c)].width = w
 
