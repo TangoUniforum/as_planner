@@ -78,6 +78,45 @@ def _method_obj(key):
         return _AS_CONFIGURED
     return _METHODS.get(key) or _METHODS[_DEFAULT_METHOD]
 
+
+def _effective_method():
+    """What ▶ Run forecast will ACTUALLY run, and why. (key, overrides, source)
+
+    Precedence, most specific first:
+      1. an explicit pick THIS SESSION — ✅ Adopt, or "Use this plan" on the
+         Compare engines board.
+      2. the PROMOTED default in config/analysis_defaults.yaml. Durable: it
+         survives a restart, which a session pick does not.
+      3. _DEFAULT_METHOD.
+
+    Before 2026-09-08 only (1) and (3) existed, so "⭐ Promote as Quick-run
+    default" set what the ⚡ Quick run card replayed and NOTHING else. The
+    operator promoted the plain controller, ran a forecast, and got the hybrid
+    — twice, spending two runs on a plan they had not chosen, each time with no
+    signal beyond a caption they had no reason to re-read. Promoting a default
+    now decides the default. (Session pick still wins: it is the more recent
+    and more specific statement of intent.)
+
+    `overrides` is the promoted candidate's OWN knob set, and honouring it is
+    not optional. A promoted plan is method + knobs; running the method against
+    today's config reproduces a DIFFERENT plan — the precise hazard the Adopt
+    and Promote comments below already warn about twice. The live
+    config/control.yaml is never written: the overrides are layered into a
+    throwaway config dir for the run, exactly as ⚡ Quick run does it.
+    """
+    key = st.session_state.get("_chosen_method")
+    if key:
+        return key, {}, "picked this session"
+    try:
+        from forecast import analysis as _ana_pm
+        promoted = _ana_pm.load_promoted_default(CONFIG_DIR)
+    except Exception:                                        # noqa: BLE001
+        promoted = None
+    if promoted and promoted.get("method"):
+        return (promoted["method"], dict(promoted.get("overrides") or {}),
+                f"promoted {promoted.get('promoted_ts', '?')}")
+    return _DEFAULT_METHOD, {}, "app default"
+
 # App-managed config (Phase 1) + scenario (Phase 2) live here. In PR-only
 # mode the app reads these instead of pulling everything from the upload;
 # the uploaded workbook then supplies only the ProductionReport.
@@ -6203,9 +6242,14 @@ with st.sidebar:
     # The planning method is chosen ONCE, on the Compare & Choose board, where
     # you can see every method graded side by side. Run forecast just re-runs
     # whichever plan you picked — no second, blind choice on the main screen.
-    _chosen = st.session_state.get("_chosen_method", _DEFAULT_METHOD)
+    _chosen, _chosen_ov, _chosen_src = _effective_method()
     _chosen_m = _method_obj(_chosen)
-    st.caption(f"Method: **{_chosen_m.label}**")
+    st.caption(f"Method: **{_chosen_m.label}**  ·  _{_chosen_src}_")
+    if _chosen_ov:
+        st.caption("Promoted knobs applied for this run: "
+                   + ", ".join(f"`{k}={v}`" for k, v in _chosen_ov.items())
+                   + " — layered over config/control.yaml, which is not "
+                     "modified.")
     if _chosen == _DEFAULT_METHOD:
         # The hybrid is the default because its L1 guide harvests LESS in fat
         # weeks so fish still exist for lean ones — the fix for empty harvest
@@ -7397,7 +7441,7 @@ def _optimizer():
     # If the plan picked on the Compare board is a GLOBAL engine, knobs found
     # here were never measured on it — say so instead of letting a save look
     # like it was validated for the chosen plan.
-    _ch = st.session_state.get("_chosen_method", _DEFAULT_METHOD)
+    _ch = _effective_method()[0]
     _chm = _METHODS.get(_ch)
     if _chm is not None and _chm.engine == "global":
         st.warning(
@@ -9703,10 +9747,20 @@ if uploaded is not None:
 # ============================================================
 
 if (run_clicked or st.session_state.pop("_pending_run", False)) and uploaded is not None:
-    _method = st.session_state.get("_chosen_method", _DEFAULT_METHOD)
+    _method, _method_ov, _method_src = _effective_method()
     _mobj = _method_obj(_method)
+    # Promoted knobs are layered into a throwaway config dir, never written
+    # into config/control.yaml — the operator's file stays theirs.
+    _run_cfg = str(CONFIG_DIR)
+    if _method_ov:
+        _run_cfg = optimize.config_dir_with_overrides(str(CONFIG_DIR),
+                                                      _method_ov)
     _spin = (f"Running {_mobj.label} — typically {_TYPICAL.get(_method, '?')}...")
     with st.status(_spin, expanded=True) as status:
+        st.write(f"Method: {_mobj.label} ({_method_src})"
+                 + (f" · promoted knobs: "
+                    + ", ".join(f"{k}={v}" for k, v in _method_ov.items())
+                    if _method_ov else ""))
         st.write("Config + scenario from the app; ProductionReport from upload...")
 
         def _narrate(line, _s=status):
@@ -9717,7 +9771,7 @@ if (run_clicked or st.session_state.pop("_pending_run", False)) and uploaded is 
 
         result = _run_with_workbook_bytes(
             uploaded.getvalue(), uploaded.name,
-            config_dir=str(CONFIG_DIR), scenario_dir=str(SCENARIO_DIR),
+            config_dir=_run_cfg, scenario_dir=str(SCENARIO_DIR),
             method=_method, cpsat_time=300.0,
             cpsat_det_time=_cpsat_det_time(),
             cpsat_workers=_cpu_workers(),
