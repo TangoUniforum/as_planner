@@ -1948,7 +1948,9 @@ def _ledger_value_cells(d: dict) -> list:
 # across 21 months), and a ledger reconciled by eye must tie. The error is
 # under 2 fish in ~5,000,000.
 #
-# Flows SUM. Peak_Density takes the MAX -- two tanks at 90 kg/m3 is not 180.
+# Flows SUM. Avg_Density is RECOMPUTED as the period's total biomass over its
+# total water -- never summed (two tanks at 90 kg/m3 is not 180) and never a
+# max of the rows above (that would report a peak in a column that says avg).
 # Weights and every rate (SGR, SFR, both FCRs, Harv_AvgWt_HOG) are RECOMPUTED
 # from the period's totals: an average of ratios is not the ratio of the
 # aggregate.
