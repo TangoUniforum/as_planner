@@ -281,6 +281,35 @@ def _format_table(ws, header_row: int, autofilter: bool = True) -> None:
             if isinstance(cell.value, (int, float)) and not isinstance(cell.value, bool):
                 cell.number_format = fmt
 
+    # DATES IN THE BODY. The pass above deliberately touches only int/float, so
+    # a date cell kept whatever openpyxl defaulted to when it was written -- and
+    # that depends on the TYPE: a `date` gets yyyy-mm-dd, a `datetime` gets
+    # yyyy-mm-dd h:mm:ss. Ledger rows carry both (PR-derived week starts arrive
+    # from Excel as datetimes, computed ones are dates), so WeeklyReport showed
+    # 619 of 1,266 Week_Start cells with a meaningless 00:00:00 beside the rest.
+    # Nothing in this project carries a time of day, so the body renders dates
+    # one way.
+    for c in range(1, ncol + 1):
+        for r in range(first, last + 1):
+            cell = ws.cell(r, c)
+            if isinstance(cell.value, (datetime, date)):
+                cell.number_format = "yyyy-mm-dd"
+
+    # ROW-LABELLED DECIMALS. This sheet family (HarvestPlan Report) is laid out
+    # by ROW -- each batch has Units / Av Weight / Biomass lines across month
+    # COLUMNS -- so a per-column format cannot tell a count from a weight, and
+    # every month cell took the integer "#,##0". An average weight of 2.63 kg
+    # then displayed as "3", while the TOTAL column kept its decimals because it
+    # is General. Operator, 2026-09-07: "we need to add 2 sig figs to the
+    # harvest plan avg weight report for the months".
+    for r in range(first, last + 1):
+        label = " ".join(str(ws.cell(r, c).value or "") for c in (1, 2)).lower()
+        if "av weight" in label or "avg weight" in label or "avgwt" in label:
+            for c in range(1, ncol + 1):
+                cell = ws.cell(r, c)
+                if isinstance(cell.value, (int, float)) and not isinstance(cell.value, bool):
+                    cell.number_format = "#,##0.00"
+
     # Conditional rules. Every one of these tests a value the ENGINE computed
     # (a flag it raised, a delta it measured) — none invents a threshold of
     # its own. Per-tank density caps vary 30..95 kg/m3 by tier, so density is
