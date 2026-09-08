@@ -871,6 +871,24 @@ _CONTROL_HELP = {
         "changes only a line in the run summary. Kept so older configs still "
         "load. Nothing to tune: no Analyze/Optimize search touches it, and no "
         "setting of it changes a plan.",
+    "harvest_prep_density_limit":
+        "HARVEST-PREP DENSITY LIMIT (kg/m3). Operator rule, 2026-09-08: a tank "
+        "being prepared for harvest is not exempt from density — it has a "
+        "RAISED cap of 150. Fish off feed before shipping are meant to be "
+        "dense, but not unboundedly so. **0 = detect only** (the shipped "
+        "default): harvest-prep consolidation still merges a batch into its "
+        "fullest tank at any density, and every merge over 150 is reported in "
+        "the ValidationLog as HARVEST-PREP OVER LIMIT. On the 2026-08-31 plan "
+        "that is 29 merges, worst 254 kg/m3 — invisible before this, because a "
+        "consolidated tank is normally harvested inside the same week and the "
+        "end-of-week snapshot never sees the peak. Set 150 to ENFORCE it: the "
+        "pass then bin-packs the group into as few of its own tanks as fit. "
+        "That works (29 over-limit merges → 0) but MEASURED COST on the same "
+        "plan is 2 weeks over the hard 15-move handling budget and 3 over the "
+        "55,000 harvest ceiling, one of them 2027-W05 at 64,136 (+16.6%). "
+        "Enforcing is therefore an operator decision, not a default — turn it "
+        "on when you would rather see the plan refuse an impossible merge than "
+        "quietly propose it.",
     "sixn_level_drains":
         "Levels the flow through depuration: caps how full one 6N pair may "
         "get (at the weekly harvest limit) so weekly fills don't pile into a "
@@ -1131,6 +1149,7 @@ _CONTROL_LABEL = {
     "sixn_growth": "Run 6N as grow-out",
     "sixn_production_start": "6N production start date",
     "sixn_transition_weeks": "6N transition fallow (weeks)",
+    "harvest_prep_density_limit": "Harvest-prep density limit (kg/m3, 0 = detect only)",
     "sixn_level_drains": "Level 6N purge drains (on/off)",
     "tran_og_default_tanks": "TranOG default tanks",
     "global_buffer_pct": "System-cap buffer (R29)",
@@ -1346,6 +1365,7 @@ _CONTROL_GROUPS = [
      ["rebalance_balance_budget", "rebalance_level", "rebalance_headroom_days",
       "rebalance_split_budget", "rebalance_varqty_budget", "cap_repair_budget",
       "density_relief_pct", "consolidation_fill_pct",
+      "harvest_prep_density_limit",
       "chronic_pressure_frac", "chronic_pressure_weeks", "chronic_relief_pct",
       "chronic_max_frees_per_week"]),
     ("🧊 6N depuration",

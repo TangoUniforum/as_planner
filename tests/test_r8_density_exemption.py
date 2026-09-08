@@ -31,6 +31,7 @@ from pathlib import Path
 import pytest
 
 from forecast.sixn import purge_mode_on
+from forecast import tiers
 from forecast.tiers import density_exempt, effective_density_cap
 
 CAP = 95.0
@@ -167,3 +168,56 @@ class TestNoSecondRule:
             assert hits, (
                 f"allowlisted site {name!r} / {snip!r} no longer exists - "
                 f"remove the entry (reason on file: {why})")
+
+
+# ---- The harvest-prep ceiling (operator, 2026-09-08) ----
+# R8 said "exempt", and the code modelled that as +infinity. The operator's
+# actual rule is a RAISED cap: "when we are starving to harvest we can increase
+# the density limit to 150kg/m3 when a tank is being prepared for harvest".
+# Unbounded was never right -- it let a plan merge a batch into one tank at
+# 254 kg/m3 and report it as fine, 29 times on the live plan.
+#
+# Judging is OPT-IN because sizing must NOT change: placement._sixn_fill_capacity
+# _fish turns this same cap into a fish-capacity, and making it finite there was
+# measured and rejected on 2026-09-04 (HOG -54 t, floor misses 2 -> 7).
+
+class TestHarvestPrepCeiling:
+
+    def test_default_is_still_unbounded_for_sizing_callers(self):
+        """No harvest_prep_cap argument -> the historical +inf, unchanged."""
+        assert tiers.effective_density_cap(85.0, "OG3N", "STARVE") == float("inf")
+        assert tiers.effective_density_cap(85.0, "OG6N", "SW", True) == float("inf")
+
+    def test_opt_in_judges_harvest_prep_at_150(self):
+        cap = tiers.effective_density_cap(
+            85.0, "OG3N", "STARVE",
+            harvest_prep_cap=tiers.HARVEST_PREP_DENSITY_CAP)
+        assert cap == 150.0
+
+    def test_the_ceiling_applies_in_any_system_and_either_era(self):
+        """Stage first: the 150 is not a 6N rule, it is a harvest-prep rule."""
+        for system in ("OG3N", "OG4S", "OG6N", "OG6S"):
+            for purge in (True, False):
+                assert tiers.effective_density_cap(
+                    85.0, system, "STARVE", purge,
+                    harvest_prep_cap=tiers.HARVEST_PREP_DENSITY_CAP) == 150.0
+
+    def test_a_growing_tank_is_untouched_by_the_opt_in(self):
+        """The raised cap must never loosen an ordinary tank's own cap."""
+        assert tiers.effective_density_cap(
+            85.0, "OG3N", "SW", False,
+            harvest_prep_cap=tiers.HARVEST_PREP_DENSITY_CAP) == 85.0
+
+    def test_149_is_legal_and_151_is_not(self):
+        """The negative control: the ceiling has to be able to say no."""
+        cap = tiers.effective_density_cap(
+            85.0, "OG3N", "STARVE",
+            harvest_prep_cap=tiers.HARVEST_PREP_DENSITY_CAP)
+        assert 149.0 <= cap        # under the limit: legal
+        assert 151.0 > cap         # over it: a violation the audit can report
+
+    def test_a_zero_or_absent_ceiling_falls_back_to_unbounded(self):
+        """A caller passing 0 must not accidentally judge everything at 0."""
+        for bad in (0, 0.0, None):
+            assert tiers.effective_density_cap(
+                85.0, "OG3N", "STARVE", harvest_prep_cap=bad) == float("inf")

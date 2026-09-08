@@ -12,7 +12,7 @@ from .harvest_scheduler import schedule_harvests, summarize_demands
 from .placement import run_placement, summarize_placement
 from .precalc import build_precalc_canvas, print_canvas_summary
 from .sixn import is_purge_mode
-from .tiers import effective_density_cap
+from .tiers import HARVEST_PREP_DENSITY_CAP, effective_density_cap
 from .caps import (
     apply_facility_buffer,
     resolve_facility_cap,
@@ -997,11 +997,16 @@ def main(
         if cap <= 0:
             continue
         # R8 (tiers.effective_density_cap) — ONE definition, shared with
-        # placement.py and the Global arms' tank picker. Returns +inf for a
-        # tank preparing for harvest, so the comparison below needs no branch.
+        # placement.py and the Global arms' tank picker. A tank preparing for
+        # harvest is judged at HARVEST_PREP_DENSITY_CAP (the operator's 150),
+        # NOT at +inf: harvest prep is a raised cap, not an exemption, and
+        # before 2026-09-08 this audit could not report a STARVE tank at any
+        # density at all. Judging only — the planner's sizing paths keep the
+        # historical +inf, see the note in tiers.effective_density_cap.
         cap = _eff_cap(cap, tank_sys_by_id.get(r.tank_id, ""),
                        getattr(r, "stage", ""),
-                       _is_purge_mode(control, r.week_start))
+                       _is_purge_mode(control, r.week_start),
+                       harvest_prep_cap=HARVEST_PREP_DENSITY_CAP)
         if r.density_kg_m3 > cap:
             density_violations.append(
                 (r.week_label, r.location_id, r.batch_id, r.density_kg_m3, cap)

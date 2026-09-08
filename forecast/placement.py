@@ -83,6 +83,7 @@ from .sixn import (
 )
 from .state import FacilityState, TankState, STAGE_STARVE
 from .tiers import effective_density_cap as _eff_density_cap
+from .tiers import HARVEST_PREP_DENSITY_CAP
 from .time_grid import (
     forecast_week_labels,
     iso_week_label,
@@ -2536,6 +2537,7 @@ def _consolidate_harvest_prep(
     transfer_events: list,
     warnings: list[str],
     max_moves: int,
+    density_limit: float = 0.0,
 ) -> int:
     """Merge a batch's IN-PLACE harvest-prep tanks into its fullest one.
 
@@ -2587,14 +2589,35 @@ def _consolidate_harvest_prep(
         dst, srcs = tanks[0], tanks[1:]
         _clock = max(getattr(t, "starvation_days_remaining", 0) or 0
                      for t in tanks)
+        # ENFORCEMENT (opt-in, control.harvest_prep_density_limit). Off, this
+        # pass merges the whole group into `dst` at ANY density -- which is how
+        # a merge reaches 254 kg/m3. On, the group is BIN-PACKED into as few of
+        # its own tanks as actually fit: a source moves only into a bin with
+        # room for all of it, and otherwise stays put and becomes a bin itself.
+        # First-fit over biomass-descending tanks, so the fullest tank is
+        # filled first and the fewest tanks are left occupied.
+        _bins = [dst] if density_limit > 0 else []
         for src in srcs:
             if moves <= 0:
                 break
+            _dest = dst
+            if density_limit > 0:
+                _dest = next(
+                    (b for b in _bins
+                     if b.volume_m3 > 0
+                     and (b.biomass_kg + src.biomass_kg)
+                     <= density_limit * b.volume_m3),
+                    None)
+                if _dest is None:
+                    # Nothing it fits in: the source keeps its own tank and
+                    # becomes a destination for anything smaller that follows.
+                    _bins.append(src)
+                    continue
             ev = Transfer(
                 batch_id=bid, event_date=event_date,
                 source_tank_id=src.tank_id,
                 destinations=[TankAllocation(
-                    tank_id=dst.tank_id, count=src.count,
+                    tank_id=_dest.tank_id, count=src.count,
                     avg_wt_g=src.avg_wt_g, cv_pct=src.cv_pct)],
                 leaves_source_empty=True,
                 channel="_consolidate_harvest_prep",
@@ -2608,11 +2631,30 @@ def _consolidate_harvest_prep(
         dst.stage = STAGE_STARVE
         dst.starvation_days_remaining = _clock
         if freed:
-            warnings.append(
-                f"HARVEST-PREP CONSOLIDATION: batch {bid} merged into "
-                f"{dst.location_id} ({dst.count:,.0f} fish, "
-                f"{dst.density_kg_m3:.0f} kg/m3 -- no density cap on fish "
-                f"preparing for harvest); freed {freed} growout tank(s)")
+            # The at-merge density is the ONLY place this peak is visible. A
+            # consolidated tank is usually harvested inside the same week, so
+            # the end-of-week BatchLocations snapshot never sees it: measured
+            # 2026-09-08, 28 of 48 merges on the live plan exceed 150 kg/m3
+            # (worst 254) while only TWO survive into a weekly row. Reporting
+            # it here is the difference between a known cost and an invisible
+            # one.
+            _hp_cap = HARVEST_PREP_DENSITY_CAP
+            if dst.density_kg_m3 > _hp_cap:
+                warnings.append(
+                    f"HARVEST-PREP OVER LIMIT: batch {bid} merged into "
+                    f"{dst.location_id} at {dst.density_kg_m3:,.0f} kg/m3, "
+                    f"over the {_hp_cap:,.0f} kg/m3 limit for a tank being "
+                    f"prepared for harvest ({dst.count:,.0f} fish, freed "
+                    f"{freed} growout tank(s)). Harvest prep is a RAISED cap, "
+                    f"not an exemption -- this merge is not executable as "
+                    f"planned.")
+            else:
+                warnings.append(
+                    f"HARVEST-PREP CONSOLIDATION: batch {bid} merged into "
+                    f"{dst.location_id} ({dst.count:,.0f} fish, "
+                    f"{dst.density_kg_m3:.0f} kg/m3, within the "
+                    f"{_hp_cap:,.0f} kg/m3 harvest-prep limit); freed "
+                    f"{freed} growout tank(s)")
     return freed
 
 
@@ -5504,6 +5546,8 @@ def phase_d_emit_events(
                 _consolidate_harvest_prep(
                     state, transfer_date, transfer_events, warnings,
                     max_moves=_moves_left_quality(),
+                    density_limit=float(getattr(
+                        control, "harvest_prep_density_limit", 0.0) or 0.0),
                 )
 
             for b in sorted(set(prev_by_batch) | set(this_by_batch)):

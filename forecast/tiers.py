@@ -129,16 +129,43 @@ def density_exempt(system_id: str, stage: str, purge_mode: bool = True) -> bool:
     return bool(purge_mode) and system_id == SIXN_SYSTEM
 
 
-def effective_density_cap(cap_kg_m3: float, system_id: str, stage: str,
-                          purge_mode: bool = True) -> float:
-    """`cap_kg_m3`, or +inf when the tank is exempt (see `density_exempt`).
+# Operator, 2026-09-08: "when we are starving to harvest we can increase the
+# density limit to 150kg/m3 when a tank is being prepared for harvest and when
+# 6N is production." So harvest prep is NOT unlimited -- it is a RAISED cap.
+# The exemption above predates that answer and models it as +inf, which is why
+# a plan can propose merging a batch into one tank at 254 kg/m3 and report it
+# as fine. Judge harvest prep against THIS number, never against +inf.
+HARVEST_PREP_DENSITY_CAP = 150.0
 
-    Returning infinity rather than a flag lets a caller keep one comparison
+
+def effective_density_cap(cap_kg_m3: float, system_id: str, stage: str,
+                          purge_mode: bool = True,
+                          harvest_prep_cap: float | None = None) -> float:
+    """`cap_kg_m3`, or the harvest-prep ceiling when the tank is exempt.
+
+    Returning a number rather than a flag lets a caller keep one comparison
     (`density > cap`) and one sizing expression (`cap * volume`) instead of
     branching around the exemption at every site.
+
+    `harvest_prep_cap` is OPT-IN, and deliberately so. Pass
+    `HARVEST_PREP_DENSITY_CAP` to JUDGE a harvest-prep tank against the
+    operator's real 150 limit -- that is what the R8 audit and the report layer
+    want. Omit it (default) to keep the historical +inf, which is what every
+    SIZING caller must keep:
+
+      * `placement._sixn_fill_capacity_fish` (placement.py:179) turns this cap
+        into a fish-capacity for a 6N fill. Making it finite there was built,
+        measured and REJECTED on 2026-09-04 -- HOG 11,401 -> 11,347 t and floor
+        misses 2 -> 7 on the live config -- and the note at placement.py:2049
+        says DO NOT RETRY as a capacity bound. A blanket 150 here would silently
+        re-enter that regression.
+
+    So: judging is opt-in, sizing is unchanged. One definition, two callers,
+    and the difference is stated rather than implied.
     """
     if cap_kg_m3 is None or cap_kg_m3 <= 0:
         return float("inf")
-    return (float("inf")
-            if density_exempt(system_id, stage, purge_mode)
-            else float(cap_kg_m3))
+    if density_exempt(system_id, stage, purge_mode):
+        return (float(harvest_prep_cap) if harvest_prep_cap and harvest_prep_cap > 0
+                else float("inf"))
+    return float(cap_kg_m3)
