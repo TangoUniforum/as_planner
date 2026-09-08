@@ -195,7 +195,7 @@ def main(
         if b > 0 or o > 0:
             print(f"    {system:>5}: {b:>10,.0f} kg  in {o}/{total} tanks")
     fw_rolled = summarize_fw_records(fw_records)
-    # PR FW WEIGHT MISSING. A freshwater batch the PR gives a COUNT but no
+    # PR FW WEIGHT DERIVED. A freshwater batch the PR gives a COUNT but no
     # BIOMASS seeds the projection at 0 g, and FW growth is MULTIPLICATIVE --
     # so it stays 0 g for its entire freshwater phase. Nothing downstream can
     # recover it, and every symptom appears far from the cause: the FW
@@ -206,8 +206,19 @@ def main(
     # Measured on the 2026-08-31 PR: B56, 563,234 fish across 46 hatchery units,
     # every one 0.00 kg (B54 0.56 g, B55 0.21 g, B56 0.00 g -- the youngest
     # batch, whose weight simply is not recorded yet).
-    # Detect, do not coerce: the operator is told exactly what is missing and
-    # where. Inventing a weight from the growth table would hide a data gap.
+    # 842ade4 changed the RESPONSE, not the detection. The batch is no longer
+    # left at 0 g: biology.py seeds it from its OWN lifecycle (hatch weight at
+    # its tran_sf_date, else input_date + HATCHERY_DAYS, then the FW curve under
+    # its own fw_correction) exactly as a batch not yet in the PR is projected.
+    # That is not "inventing a weight from the growth table" -- it is the same
+    # model the planner already trusts for every un-arrived batch, applied to a
+    # batch whose lifecycle dates the PR does give us. Leaving it at 0 g was the
+    # worse lie: multiplicative growth froze it at 0 g forever, so it never
+    # reached min_harvest_weight_g, was never harvested, and held its tanks for
+    # the whole horizon (B56 sat in tanks 14 and 21 from 2027-W32 to 2029-W05).
+    # Detect, do not coerce still holds -- the warning below is LOUD, names the
+    # batch and unit count, and says in the operator's own terms that these
+    # weights are MODELLED, not measured. The data gap is reported, not hidden.
     _fw_zero: dict[str, list] = {}
     for (batch, _system), info in fw_rolled.items():
         if info["count"] > 0 and info["biomass_kg"] <= 0:
@@ -513,7 +524,13 @@ def main(
     batch_by_id = {b.batch_id: b for b in batches}
     in_flight_states: list = []
     # OG-in-flight projection (anchored to PR OG tank state).
-    for batch_id, tank_list in [(bid, state.tanks_for_batch(bid)) for bid in og_in_flight_ids]:
+    # sorted(): og_in_flight_ids is a SET OF batch_id STRINGS, so iterating it
+    # raw put the OG in-flight batches into states_by_batch in hash-seed order
+    # (its FW twin 16 lines below has always been sorted). That order reached
+    # batch_week_facts and, through it, a tied pick in precalc._relieve_tank_supply
+    # -- which is how the whole forecast became irreproducible (2026-09-08).
+    for batch_id, tank_list in [(bid, state.tanks_for_batch(bid))
+                                for bid in sorted(og_in_flight_ids)]:
         b_meta = batch_by_id.get(batch_id)
         if b_meta is None:
             continue

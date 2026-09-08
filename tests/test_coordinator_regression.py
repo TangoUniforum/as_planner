@@ -269,12 +269,23 @@ def test_no_harvest_craters(run_outputs):
         f"{craters} — the steady-harvest contract rule is breached")
 
 
-# ---- Determinism guard (2026-06-05) ----
+# ---- Determinism guard (2026-06-05, strengthened 2026-09-08) ----
 # The forecast must be identical regardless of PYTHONHASHSEED. A
 # set-of-strings iteration in phase_d without a deterministic tiebreak
 # made it vary run-to-run (245/216.5 vs 228/168.3 on the same workbook).
-# Runs the pipeline in two subprocesses with different hash seeds and
-# asserts the BatchLocations density signature matches.
+#
+# It happened AGAIN on 2026-09-08, in a different place: run.py iterated
+# `og_in_flight_ids` (a set of batch_id strings) unsorted, which reached a
+# tied max() in precalc._relieve_tank_supply and moved one free tank between
+# two batches at 2026-W24 -- 105 over-cap rows/170.0 kg/m3 vs 90/162.9.
+# The guard caught it, but two weaknesses nearly let it through, both now
+# closed:
+#   1. THREE seeds, not two. A binary tie shows up in two, but a 3-way tie
+#      can agree by chance in any given pair.
+#   2. HASH THE PLAN SHEETS, not just a 3-number density summary. Two plans
+#      can differ in which tank a batch holds while landing on the same
+#      over-cap count, max and sum -- the summary is lossy by construction.
+#      HarvestPlan and TransferPlan are the sheets the operator acts on.
 
 def test_engine_deterministic_across_hash_seeds():
     import os
@@ -296,6 +307,7 @@ def test_engine_deterministic_across_hash_seeds():
         shutil.copy(os.environ["WB"], t)
         with contextlib.redirect_stdout(io.StringIO()):
             r.main(t, o, config_dir=os.environ["CFG"], scenario_dir=os.environ["SCN"])
+        import hashlib
         wb = openpyxl.load_workbook(o, data_only=True)
         ws = wb["BatchLocations"]
         v = []
@@ -305,7 +317,18 @@ def test_engine_deterministic_across_hash_seeds():
             d = row[8]
             if isinstance(d, (int, float)) and d > 95:
                 v.append(round(d, 2))
-        print("%d|%.2f|%.2f" % (len(v), max(v, default=0.0), round(sum(v), 2)))
+        sig = ["%d|%.2f|%.2f" % (len(v), max(v, default=0.0), round(sum(v), 2))]
+        # Full-sheet hashes: the density summary above is lossy, and two
+        # different plans can share it. These are the sheets that ARE the plan.
+        for name in ("BatchLocations", "HarvestPlan", "TransferPlan"):
+            if name not in wb.sheetnames:
+                sig.append("%s=MISSING" % name)
+                continue
+            h = hashlib.sha256()
+            for row in wb[name].iter_rows(values_only=True):
+                h.update(repr(row).encode("utf-8", "replace"))
+            sig.append("%s=%s" % (name, h.hexdigest()[:16]))
+        print(" ".join(sig))
         """
     )
 
@@ -317,7 +340,8 @@ def test_engine_deterministic_across_hash_seeds():
         assert out.returncode == 0, f"seed {seed} failed: {out.stderr[-500:]}"
         return out.stdout.strip().splitlines()[-1]
 
-    sig0 = _run(0)
-    sig1 = _run(1)
-    assert sig0 == sig1, (
-        f"non-deterministic across hash seeds: seed0={sig0} seed1={sig1}")
+    sigs = {seed: _run(seed) for seed in (0, 1, 2)}
+    distinct = set(sigs.values())
+    detail = [f"  seed {s}: {sig}" for s, sig in sorted(sigs.items())]
+    assert len(distinct) == 1, (
+        "non-deterministic across hash seeds -- " + "  ||  ".join(detail))

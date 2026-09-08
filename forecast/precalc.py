@@ -672,11 +672,29 @@ def _relieve_tank_supply(batch_week_facts: dict, bottlenecks: list) -> int:
                      if f.tanks_needed_at_density_cap > f.tanks_needed_base]
             if not slack:
                 break        # nothing left that is a reservation, not a need
-            # Deepest reservation first; tie-break on the larger claim so the
-            # order is deterministic (never on dict iteration order).
-            f = max(slack, key=lambda x: (x.tanks_needed_at_density_cap
-                                          - x.tanks_needed_base,
-                                          x.tanks_needed_at_density_cap))
+            # Deepest reservation first, then the larger claim -- and then a
+            # THIRD, UNIQUE term, without which this pick is not deterministic.
+            # The old key stopped at the two integers above and claimed in its
+            # own comment to be "deterministic (never on dict iteration order)".
+            # It was not: both terms tie constantly, and max() returns whichever
+            # tied fact `pool` happens to hold first -- an order inherited from
+            # batch_week_facts, which was hash-seed dependent. That was the
+            # engine's reproducibility bug (2026-09-08): ONE tied pick at
+            # 2026-W24, B42 vs B43 at key (1, 7), moved free tank 66 between
+            # them and every downstream week diverged -- 105 over-cap rows /
+            # 170.0 kg/m3 under one hash seed vs 90 / 162.9 under another.
+            # Among equal claims the LOWEST batch_id surrenders. That tiebreak
+            # is ARBITRARY BUT TOTAL: batch_id is a stable name, not a priority,
+            # and no policy should be read into it. It is chosen to agree with
+            # the sorted upstream order (run.py) rather than to override it, so
+            # this guard changes no plan today -- it makes the function correct
+            # whatever order it is fed, which is the property the old comment
+            # only asserted. batch_id is unique within `pool` (one week).
+            f = min(slack, key=lambda x: (
+                -(x.tanks_needed_at_density_cap - x.tanks_needed_base),
+                -x.tanks_needed_at_density_cap,
+                x.batch_id,
+            ))
             f.tanks_needed_at_density_cap -= 1
             need -= 1
             released += 1
