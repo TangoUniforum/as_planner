@@ -345,3 +345,99 @@ def test_engine_deterministic_across_hash_seeds():
     detail = [f"  seed {s}: {sig}" for s, sig in sorted(sigs.items())]
     assert len(distinct) == 1, (
         "non-deterministic across hash seeds -- " + "  ||  ".join(detail))
+
+
+# ---- Arrivals must be credited by BIOMASS, not just by count (2026-09-08) ----
+# The operator read the shipped Sep'26 workbook and said an FCR of 0.29 on B50
+# and 1.04 for October could not be right. They were not.
+#
+# On the FW->OG boundary the ledger deliberately zeroes the OG opening balance
+# (the FW projection is a separate track whose close does not flow by count into
+# OG) and credits the arrival as an INPUT instead. But the input's biomass was
+# `input_count * owt` where `owt` is the opening weight the same branch had just
+# set to zero -- so the fish were credited at 0 g and their entire existing
+# biomass fell out of the balance as one week of GROWTH. B50 opened 2026-W43 at
+# zero against a W42 close of 253,392 fish / 98,817 kg and booked 108,256 kg of
+# growth in a week, reporting Bio_FCR 0.09 for the week and 0.29 for the month.
+# October's TOTAL read 1.04 where the truth is 1.18: the phantom growth inflated
+# the denominator of the total too, so feed conversion looked ~12% better than
+# it was in every month carrying a TranOG arrival.
+#
+# Note the shape: `Bio_Check` is 0 by construction on these rows (the same
+# input_bio appears on both sides of the balance identity), so the conservation
+# audits were satisfied throughout. Conservation cannot see a quantity that is
+# consistently mis-valued on both sides -- only a physical sanity test can.
+
+def test_no_ledger_row_reports_an_impossible_fcr(run_outputs):
+    """A fish cannot gain a kilo on 300 g of feed."""
+    wb = _load(run_outputs)
+    ws = wb["WeeklyReport"]
+    rows = list(ws.iter_rows(values_only=True))
+    hdr = None
+    for i, r in enumerate(rows[:12]):
+        if r and any(str(c).strip() == "Batch" for c in r if c):
+            hdr = {str(c).strip(): j for j, c in enumerate(r) if c is not None}
+            start = i + 1
+            break
+    assert hdr, "WeeklyReport header not found"
+    need = ("Batch", "Week", "Gross_Growth (kg)", "Feed (kg)",
+            "Bio_FCR (ratio)", "Open_Count (fish)", "Input_Count (fish)")
+    for k in need:
+        assert k in hdr, f"missing ledger column {k}"
+
+    impossible = []
+    for r in rows[start:]:
+        if not r or r[hdr["Batch"]] is None:
+            continue
+        try:
+            feed = float(r[hdr["Feed (kg)"]] or 0.0)
+            growth = float(r[hdr["Gross_Growth (kg)"]] or 0.0)
+            fcr = float(r[hdr["Bio_FCR (ratio)"]] or 0.0)
+        except (TypeError, ValueError):
+            continue
+        # Only rows doing real work: a week with meaningful feed AND growth.
+        # A batch off feed for harvest prep legitimately shows near-zero both
+        # ways, and the ratio of two near-zero numbers is noise, not a defect.
+        if feed < 1000.0 or growth < 1000.0 or fcr <= 0:
+            continue
+        if fcr < 0.6:
+            impossible.append((r[hdr["Batch"]], r[hdr["Week"]], growth, feed, fcr))
+    assert not impossible, (
+        "ledger rows converting feed to flesh better than any salmon can — "
+        "check that arrivals are credited by biomass, not only by count: "
+        + "; ".join(f"{b} {w}: {g:,.0f} kg growth on {f:,.0f} kg feed = {x}"
+                    for b, w, g, f, x in impossible[:5]))
+
+
+def test_an_arrival_week_does_not_book_the_arrival_as_growth(run_outputs):
+    """The specific defect: zero opening + a big input + growth ~= close_bio."""
+    wb = _load(run_outputs)
+    ws = wb["WeeklyReport"]
+    rows = list(ws.iter_rows(values_only=True))
+    hdr = None
+    for i, r in enumerate(rows[:12]):
+        if r and any(str(c).strip() == "Batch" for c in r if c):
+            hdr = {str(c).strip(): j for j, c in enumerate(r) if c is not None}
+            start = i + 1
+            break
+    offenders = []
+    for r in rows[start:]:
+        if not r or r[hdr["Batch"]] is None:
+            continue
+        try:
+            oc = float(r[hdr["Open_Count (fish)"]] or 0.0)
+            ic = float(r[hdr["Input_Count (fish)"]] or 0.0)
+            growth = float(r[hdr["Gross_Growth (kg)"]] or 0.0)
+            cbio = float(r[hdr["Close_Bio (kg)"]] or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if ic <= 0 or oc > 0 or cbio <= 0:
+            continue
+        # Growth on an arrival week is ONE WEEK of growth. If it is most of the
+        # closing biomass, the arrivals themselves were booked as growth.
+        if growth > 0.5 * cbio:
+            offenders.append((r[hdr["Batch"]], r[hdr["Week"]], growth, cbio))
+    assert not offenders, (
+        "arrival weeks booking the arriving biomass as growth: "
+        + "; ".join(f"{b} {w}: growth {g:,.0f} of close {c:,.0f}"
+                    for b, w, g, c in offenders[:5]))

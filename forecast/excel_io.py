@@ -1837,6 +1837,13 @@ def _build_batch_week_ledger(
         weeks = sorted(by_batch[b])
         for i, wk in enumerate(weeks):
             cc, cwt, cbio, ws_date = close_vals((b, wk))
+            # Weight to value an ARRIVAL at. 0 = "use the batch's own opening
+            # weight", which is right everywhere except the branches below that
+            # deliberately zero the opening balance: there the arrivals must
+            # still be credited at a real weight or their biomass books as
+            # growth. MUST be reset every week -- a value leaking from a
+            # previous iteration would mis-value an unrelated input.
+            _input_wt_g = 0.0
             if i == 0:
                 s0 = bio_state.get((b, wk))
                 if s0 and getattr(s0, "week_from_input", -1) == 0:
@@ -1861,7 +1868,14 @@ def _build_batch_week_ledger(
                 elif (b, wk) in tranog_in:
                     # In-flight OG batch's first ledger week entered via TranOG with
                     # no opening balance -> reset open to 0 (inflow credited below).
+                    # Value the arrivals at the week's CLOSING weight: there is no
+                    # prior ledger week to read a true arrival weight from, and the
+                    # close understates it only by the week's own growth -- which
+                    # errs toward a HIGHER reported FCR, the safe direction. The
+                    # alternative, `owt` = 0, credits them at 0 g and books the
+                    # whole arriving biomass as growth (see the FW->OG branch).
                     oc, owt, obio = 0.0, 0.0, 0.0
+                    _input_wt_g = cwt
                 else:
                     oc, owt, obio = cc, cwt, cbio
             else:
@@ -1876,6 +1890,22 @@ def _build_batch_week_ledger(
                     # separate track whose close does not flow by COUNT into OG).
                     # Reset open + credit the inflow (below); chaining the FW close
                     # here would leave the two-engine handoff gap as a residual.
+                    #
+                    # The inflow must be credited by BIOMASS as well as by count,
+                    # and it was not. `input_bio` below is `input_count * owt`, and
+                    # `owt` is the opening weight this branch has just zeroed -- so
+                    # the arriving fish were credited at 0 g and their whole
+                    # existing biomass fell out as one week of GROWTH. Measured on
+                    # the shipped Sep'26 workbook: B50 opened 2026-W43 at zero
+                    # against a 2026-W42 close of 253,392 fish / 98,817 kg, booked
+                    # 108,256 kg of "growth" in one week, and reported Bio_FCR 0.09
+                    # for the week and 0.29 for October -- physically impossible,
+                    # and the operator spotted it. 24 batch-weeks carried an input
+                    # with a zeroed opening. Value the arrivals at the weight they
+                    # actually arrive with: the FW track's own closing weight for
+                    # the previous week, which is these same fish.
+                    _fw_c, _fw_wt, _fw_bio, _ = close_vals((b, prev_wk))
+                    _input_wt_g = _fw_wt
                     oc, owt, obio = 0.0, 0.0, 0.0
                 else:
                     oc, owt, obio, _ = close_vals((b, prev_wk))
@@ -1916,7 +1946,10 @@ def _build_batch_week_ledger(
                     mort_count = _rmort[(b, wk)]
             mort_bio = mort_count * owt / 1000.0
             input_count = inputc.get((b, wk), 0.0) + tranog_in.get((b, wk), 0.0)
-            input_bio = input_count * owt / 1000.0
+            # Value arrivals at the weight they ARRIVE with. `owt` is the
+            # batch's own opening weight and is 0 on the FW->OG boundary week
+            # (see above), which credited a whole batch's biomass at 0 g.
+            input_bio = input_count * (_input_wt_g or owt) / 1000.0
             xf = xfer.get((b, wk), 0.0)
             harv_gross = h["gross"]
             # Per-week HOG yield override (matches HarvestReport/HarvestPlan);
