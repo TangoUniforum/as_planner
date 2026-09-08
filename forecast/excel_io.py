@@ -372,6 +372,33 @@ def write_harvest_plan_output(
     ])
 
     events_sorted = sorted(harvest_events, key=lambda e: (e.event_date, e.source_tank_id))
+    # Round the WEEK, not each row. Rounding every event independently lets the
+    # rounded rows out-sum the number the planner actually decided: measured
+    # 2026-09-08, 2028-W09 wrote 26,593 + 26,593 + 1,815 = 55,001 against a
+    # decision of exactly 55,000, and three such weeks made a clean plan report
+    # THREE breaches of the 55,000 processing ceiling. Every gate that sums
+    # this sheet saw them -- the ceiling count, the board, the checklist -- and
+    # Advisory (which records the decision, not the split) disagreed with all
+    # of them. Largest-remainder keeps the rows tying to the week: floor
+    # everything, then hand the shortfall to the largest fractions.
+    _by_week: dict[str, list] = {}
+    for ev in events_sorted:
+        _by_week.setdefault(iso_week_label(ev.event_date), []).append(ev)
+    _shown: dict[int, float] = {}
+    for _evs in _by_week.values():
+        _target = round(sum(e.count for e in _evs), 0)
+        _floors = [float(int(e.count)) for e in _evs]
+        _short = int(round(_target - sum(_floors)))
+        # Biggest fractional part first; event id breaks a tie deterministically
+        # (a set-order tiebreak here is the bug class that made the whole engine
+        # irreproducible earlier today -- see commit 87ee040).
+        _order = sorted(range(len(_evs)),
+                        key=lambda i: (-(_evs[i].count - _floors[i]),
+                                       _evs[i].source_tank_id))
+        for _i in _order[:max(0, _short)]:
+            _floors[_i] += 1.0
+        for _e, _c in zip(_evs, _floors):
+            _shown[id(_e)] = _c
     for ev in events_sorted:
         wk = iso_week_label(ev.event_date)
         gross_avg_kg = ev.avg_wt_g / 1000.0
@@ -379,7 +406,7 @@ def write_harvest_plan_output(
         hog_yield = facility_limits_hog.get(wk, default_hog_yield)
         ws.append([
             wk, ev.batch_id, ev.source_tank_id,
-            round(ev.count, 0),
+            _shown.get(id(ev), round(ev.count, 0)),
             round(gross_avg_kg, 2),
             round(gross_biomass, 0),
             round(hog_yield, 2),
