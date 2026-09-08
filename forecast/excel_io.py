@@ -1993,16 +1993,55 @@ def _build_batch_week_ledger(
     return rows
 
 
+# A derived RATE is only meaningful when the thing it divides is real.
+#
+# SGR is log(close_wt / open_wt): a PER-FISH growth rate, valid only while you
+# are following the SAME fish. Harvest, culls and arrivals change WHICH fish are
+# in the average, so on those periods it measures population turnover and prints
+# it as growth. Operator, 2026-09-08, on B43 reading 0.2973 %/day in a week when
+# nothing grew: "if you take out the top half into one tank but still have the
+# small group in another tank then the batch average should remain the same" --
+# exactly right, and the corollary is that REMOVING fish does move it. That week
+# the harvest took 53,539 fish from the lighter tank (4.203 kg) and left 7,129
+# in the heavier one (4.304 kg); tank 61 read 4.304 in both weeks, flat.
+# 42 batch-weeks reported an SGR while more than a quarter of the batch was
+# harvested.
+#
+# The FCRs are different: their denominator is the MASS BALANCE, which already
+# handles harvest correctly, so a big harvest does not invalidate them. They go
+# empty only when there is no feeding to measure -- B43's October is 304 kg of
+# feed against a 255-tonne batch, 0.008 %/day, a batch off feed for harvest
+# prep. Feed residue over growth residue printed 0.81, which reads as a claim
+# about feed conversion that the row cannot support.
+#
+# Blank, never 0: this file already uses an empty cell for "not applicable"
+# (see the Avg_Density legend) and a 0 would assert a result.
+_SGR_POP_CHANGE_TOL = 0.01     # >1% of the opening count leaves the mean unsafe
+_FCR_MIN_SFR_PCT_DAY = 0.05    # below this the batch is not meaningfully feeding
+
+
+def _rate_is_meaningful(d: dict) -> tuple[bool, bool]:
+    """(sgr_ok, fcr_ok) for one ledger row or period aggregate."""
+    oc = d.get("open_count") or 0.0
+    moved = ((d.get("harv_count") or 0.0) + (d.get("cull_count") or 0.0)
+             + (d.get("input_count") or 0.0))
+    sgr_ok = oc > 0 and (moved / oc) <= _SGR_POP_CHANGE_TOL
+    fcr_ok = (d.get("sfr") or 0.0) >= _FCR_MIN_SFR_PCT_DAY
+    return sgr_ok, fcr_ok
+
+
 def _ledger_value_cells(d: dict) -> list:
     """Format the 27 shared open/close ledger value columns from a row dict."""
     _pk = d.get("peak_density")
+    _sgr_ok, _fcr_ok = _rate_is_meaningful(d)
     return [
         round(d["open_count"], 0), round(d["open_wt"], 1), round(d["open_bio"], 0),
         round(d["close_count"], 0), round(d["close_wt"], 1), round(d["close_bio"], 0),
         (round(_pk, 1) if _pk is not None else None),
-        round(d["sgr"], 4), round(d["gross_growth"], 0),
+        (round(d["sgr"], 4) if _sgr_ok else None), round(d["gross_growth"], 0),
         round(d["net_prod"], 0), round(d["feed"], 0), round(d["sfr"], 4),
-        round(d["bio_fcr"], 2), round(d["econ_fcr"], 2),
+        (round(d["bio_fcr"], 2) if _fcr_ok else None),
+        (round(d["econ_fcr"], 2) if _fcr_ok else None),
         round(d["mort_count"], 0), round(d["mort_bio"], 1),
         round(d["harv_count"], 0), round(d["harv_gross"], 1),
         round(d["harv_hog"], 1), round(d["harv_avg_hog"], 1),
@@ -2056,10 +2095,20 @@ def _ledger_total_cells(t: dict) -> list:
     c[4] = round(cw, 1)
     c[_LEDGER_DENSITY_IDX] = (round(t["dens_bio"] / t["dens_vol"], 1)
                               if t.get("dens_vol") else None)
-    c[7] = round((log(cw / ow) / days * 100.0) if ow > 0 and cw > 0 else 0.0, 4)
-    c[11] = round((ff / avg_bio / days * 100.0) if avg_bio > 0 else 0.0, 4)
-    c[12] = round((ff / gg) if gg > 0 else 0.0, 2)
-    c[13] = round((ff / npd) if npd > 0 else 0.0, 2)
+    # Same rule as the rows above (_rate_is_meaningful), applied to the PERIOD
+    # aggregate: a total's SGR compares the period's opening and closing mean
+    # weight, so a period that harvested most of its fish reports turnover as
+    # growth exactly as a week does -- and more misleadingly, because a month
+    # nearly always harvests something.
+    _sfr = round((ff / avg_bio / days * 100.0) if avg_bio > 0 else 0.0, 4)
+    _moved = (hc or 0.0) + (c[20] or 0.0) + (c[22] or 0.0)
+    _sgr_ok = (oc or 0.0) > 0 and (_moved / oc) <= _SGR_POP_CHANGE_TOL
+    _fcr_ok = _sfr >= _FCR_MIN_SFR_PCT_DAY
+    c[7] = (round((log(cw / ow) / days * 100.0) if ow > 0 and cw > 0 else 0.0, 4)
+            if _sgr_ok else None)
+    c[11] = _sfr
+    c[12] = (round((ff / gg) if gg > 0 else 0.0, 2)) if _fcr_ok else None
+    c[13] = (round((ff / npd) if npd > 0 else 0.0, 2)) if _fcr_ok else None
     c[19] = round((c[18] * 1000.0 / hc) if hc > 0 else 0.0, 1)
     return c
 
