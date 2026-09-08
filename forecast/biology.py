@@ -941,6 +941,47 @@ def project_in_flight_batch(
     return out
 
 
+# Days from input_date to start-feed, for a batch with no tran_sf_date of its
+# own. FALLBACK ONLY -- tran_sf_date is the recorded date and wins wherever it
+# exists (see _derived_hatch_date).
+#
+# The operator's rule of thumb was 90 ("we can assume 90 days in the
+# hatchery"), but their own scenario runs tighter: across 45 batches the gap is
+# min 71, MEDIAN 81, max 88 -- B54/B55/B56 at 78, B57 onward at 81, B50 at 88.
+# 90 would start every fallback batch feeding ~9 days late, so the constant
+# tracks the data rather than the round number.
+HATCHERY_DAYS = 81
+
+
+def _derived_hatch_date(batch, tran_sf_date, tran_og_date):
+    """When did / will this batch hatch, for a PR row that carries no weight?
+
+    ONE PLACE, deliberately. Deciding whether a zero-weight batch is still eggs
+    or already swimming is the whole difference between "weighs nothing yet,
+    correctly" and "weighs nothing forever, wrongly", so the rule lives here
+    rather than inline.
+
+    `tran_sf_date` IS the hatchery -> freshwater transfer (operator confirmed,
+    2026-09-08), so it is the batch's own recorded hatch and is used whenever
+    present. That also keeps this path in step with project_batch, which drives
+    the same EGG -> FW transition off the same date: a PR-anchored batch and an
+    incoming one must not hatch by two different rules.
+
+    HATCHERY_DAYS is the FALLBACK, for a batch with no tran_sf_date at all --
+    then hatch is input_date + 90, and the freshwater phase is whatever remains
+    to tran_og_date ("transfer OG date minus input date minus 90").
+
+    Used ONLY for a batch whose PR row carries no weight. A batch the report
+    weighed is never routed here.
+    """
+    if tran_sf_date is not None:
+        return tran_sf_date
+    input_date = _as_date(batch.input_date) if batch.input_date else None
+    if input_date is not None:
+        return input_date + timedelta(days=HATCHERY_DAYS)
+    return None
+
+
 def project_in_flight_fw_batch(
     batch: BatchInput,
     tables: BiologyTables,
@@ -997,10 +1038,39 @@ def project_in_flight_fw_batch(
     # Starting state from PR.
     cur_count = float(initial_count)
     cur_weight = float(initial_avg_wt_g)
+    tran_sf_date = _as_date(batch.tran_sf_date) if batch.tran_sf_date else None
+
+    # PR GAVE A COUNT BUT NO WEIGHT. Growth is multiplicative, so seeding at
+    # 0 g keeps the batch at 0 g for life: it never reaches
+    # min_harvest_weight_g, so it is never harvested, and it occupies its tanks
+    # until the horizon ends. Measured on the 2026-08-31 PR: B56 sat in tanks
+    # 14 and 21 from 2027-W32 to 2029-W05 with avg weight 0 and 0 harvested.
+    #
+    # The batch's OWN lifecycle already says what it should weigh -- it is what
+    # every batch NOT yet in the PR is given (project_batch: FW_START_WEIGHT_G
+    # at tran_sf_date, then the FW curve under its fw_correction). Nothing is
+    # invented; the same model runs, seeded from the same constant.
+    #
+    # B56's case is the common one: at PR closing it has not hatched yet
+    # (tran_sf 2026-11-06 vs a 2026-08-31 close), which is exactly WHY the
+    # report carries a count and no weight -- it is still eggs. Those run as
+    # EGG until tran_sf_date and take hatch weight there, matching project_batch
+    # day for day. A batch already past tran_sf_date with no recorded weight
+    # cannot have its history reconstructed, so it seeds at hatch weight: a
+    # lower bound, and still a growing fish rather than a frozen one.
+    derived_start_weight = cur_weight <= 0
+    hatch_date = _derived_hatch_date(batch, tran_sf_date, tran_og_date)
+    pre_hatch = bool(derived_start_weight and hatch_date
+                     and hatch_date > forecast_start)
+    if derived_start_weight and not pre_hatch:
+        cur_weight = FW_START_WEIGHT_G
+
     # Batch is in FW at PR closing (caller filtered for FW PR records).
     # crossed_tran_og = True only if PR closing is already past TranOG
     # (operator's PR may straddle the date in edge cases).
     stage = "SW" if (tran_og_date and pr_close >= tran_og_date) else "FW"
+    if pre_hatch:
+        stage = "EGG"
     crossed_tran_og = (stage == "SW")
     og_transferred = (stage == "SW")
 
@@ -1013,6 +1083,21 @@ def project_in_flight_fw_batch(
         cull_count_today = 0.0
         cull_biomass_today = 0.0
         cull_pct_today = 0.0
+
+        # EGG -> FW. Only reachable for a batch seeded pre-hatch above; a
+        # batch the PR weighed is already FW and never enters this branch.
+        # Mirrors project_batch: handling mortality on transfer, then hatch
+        # weight. Without it an egg batch has no way to acquire a weight and
+        # the multiplicative growth below has nothing to work on.
+        if stage == "EGG" and hatch_date and cur_date >= hatch_date:
+            _pre_h = cur_count
+            cur_count *= (1.0 - handling_frac)
+            _hm_h = _pre_h - cur_count
+            if _hm_h > 0:
+                cull_count_today += _hm_h
+                cull_biomass_today += _hm_h * cur_weight / 1000.0
+            cur_weight = FW_START_WEIGHT_G
+            stage = "FW"
 
         # TranOG reconciliation cull — week CONTAINING TranOG_Date (VBA
         # `wE >= TranOGDate`). Fish stay in the FW pool; OG transfer is

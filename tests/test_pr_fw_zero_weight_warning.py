@@ -45,11 +45,11 @@ def test_it_warns_through_hydration_warns():
 
 def test_the_message_names_the_batch_the_fish_and_the_consequence():
     blk = _hydration_block()
-    assert "PR FW WEIGHT MISSING" in blk
+    assert "PR FW WEIGHT DERIVED" in blk
     for token in ("{_b}", "{_cnt:,.0f}", "{_units}"):
         assert token in blk, f"the warning must name {token}"
-    assert "multiplicative" in blk        # WHY zero is fatal, not just that it is
-    assert "tran_og_count" in blk         # the downstream effect it explains
+    assert "derived" in blk               # WHAT the planner did about it
+    assert "MODELLED, not measured" in blk  # and what the operator still owes
 
 
 def test_it_aggregates_per_batch_not_per_unit():

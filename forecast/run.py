@@ -217,12 +217,14 @@ def main(
     for _b in sorted(_fw_zero):
         _cnt, _units = _fw_zero[_b]
         hydration_warns.append(
-            f"PR FW WEIGHT MISSING — {_b}: {_cnt:,.0f} fish across {_units} "
-            f"freshwater unit(s) carry 0 kg in the ProductionReport. Growth is "
-            f"multiplicative, so this batch projects 0 g for its whole FW phase "
-            f"— its TranOG weight, FW biomass and size-class split are not "
-            f"meaningful, and the reconcile to tran_og_count has no size "
-            f"distribution to cull against. Record a weight for those units."
+            f"PR FW WEIGHT DERIVED — {_b}: {_cnt:,.0f} fish across {_units} "
+            f"freshwater unit(s) carry 0 kg in the ProductionReport, so the "
+            f"batch's starting weight was derived from its OWN lifecycle "
+            f"instead — hatch weight at its tran_sf_date, then the FW curve "
+            f"under its fw_correction, exactly as a batch not yet in the PR is "
+            f"projected. The plan is sound, but this batch's FW weights are "
+            f"MODELLED, not measured: record a weight for those units if you "
+            f"want them anchored to reality."
         )
     if fw_rolled:
         print(f"  FW in-flight rollup (not in TankState; representation TBD):")
