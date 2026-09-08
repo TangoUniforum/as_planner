@@ -207,19 +207,25 @@ class ControlParams:
     # slack first, NEVER below a batch's own current need -- until the week fits
     # the facility it actually has.
     plan_tank_feasibility: bool = False
-    # Operator, 2026-09-08: harvest prep is a RAISED density cap (150 kg/m3),
-    # not an exemption. 0.0 = judge but do not ENFORCE, which is the shipped
-    # behaviour: _consolidate_harvest_prep still merges a batch into its
-    # fullest tank at any density, and the audit reports it. Set to 150.0 to
-    # make the planner respect the limit -- it then bin-packs the group into as
-    # few of its OWN tanks as fit, instead of one tank at any density.
-    # MEASURED COST of enforcing on the 2026-08-31 PR: 2 weeks over the HARD
-    # 15-move handling budget (16 and 17, both essential passes) and 3 weeks
-    # over the 55,000 harvest ceiling incl. 2027-W05 at 64,136 (+16.6%). That
-    # is why the default is detect-only: the rule is real, and the planner
-    # cannot yet honour it without breaking two rules the operator ruled
-    # inviolable. Do not flip this default without re-measuring both.
-    harvest_prep_density_limit: float = 0.0
+    # Operator, 2026-09-08, asked and answered twice. First: harvest prep is a
+    # RAISED density cap (150 kg/m3), not an exemption. Then, shown the 29
+    # merges this plan makes above it (worst 254) and the measured cost of
+    # enforcing: "we cannot go over 150kg/m3 even in harvest prep."
+    # So this is a HARD FACILITY CONSTRAINT and the default ENFORCES it. The
+    # pass bin-packs a batch's harvest-prep group into as few of its own tanks
+    # as fit, instead of merging all of them into one at any density.
+    # 0.0 = detect only (the pre-2026-09-08 behaviour): still merge into one
+    # tank at any density, and report every crossing as HARVEST-PREP OVER
+    # LIMIT. Keep 0.0 only to reproduce an old plan.
+    # ⚠ MEASURED COST on the 2026-08-31 PR, and it is not free: 2 weeks over
+    # the 15-move handling budget (16 and 17, both essential passes) and 3
+    # weeks over the 55,000 harvest ceiling, incl. 2027-W05 at 64,136 (+16.6%),
+    # with realization 40.4% -> 33.0% and HOG -44 t. Two independent
+    # implementations produce a bit-identical plan, so that cost is structural.
+    # The operator has ruled the density limit hard, so the plan now shows
+    # those breaches instead of hiding an impossible merge -- they are REAL and
+    # still need solving, they are simply no longer concealed.
+    harvest_prep_density_limit: float = 150.0
     sixn_level_drains: bool = True
     # R31: per-tank density target as a fraction of the cap. Drives
     # precalc `tanks_needed_at_density_cap` sizing, the Phase D Grade-

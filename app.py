@@ -886,9 +886,10 @@ _CONTROL_HELP = {
         "That works (29 over-limit merges → 0) but MEASURED COST on the same "
         "plan is 2 weeks over the hard 15-move handling budget and 3 over the "
         "55,000 harvest ceiling, one of them 2027-W05 at 64,136 (+16.6%). "
-        "Enforcing is therefore an operator decision, not a default — turn it "
-        "on when you would rather see the plan refuse an impossible merge than "
-        "quietly propose it.",
+        "The operator ruled on 2026-09-08 that 150 cannot be exceeded even in "
+        "harvest prep, so 150 is now the DEFAULT. Those breach weeks are real "
+        "and still need solving — they are simply no longer hidden behind an "
+        "impossible merge. Set 0 only to reproduce a plan made before this.",
     "sixn_level_drains":
         "Levels the flow through depuration: caps how full one 6N pair may "
         "get (at the weekly harvest limit) so weekly fills don't pile into a "

@@ -47,6 +47,30 @@ def write_biology_projection(wb, states: Iterable[BatchWeekState], sheet_name: s
         ws.column_dimensions[get_column_letter(c)].width = w
 
 
+# One whole fish (or one kg). Below this there is no drift to characterise.
+DRIFT_FLOOR = 1.0
+
+
+def drift_ratio(signed: float, abs_sum: float,
+                floor: float = DRIFT_FLOOR) -> float:
+    """Scale-free leak gauge: |signed|/|abs|, near 0 = cancelling (conserved),
+    near 1 = systematic one-way loss.
+
+    Scale-free is its virtue and its trap: the ratio is UNDEFINED when there is
+    no drift to characterise. Guarding only `if abs_sum` (exactly 0.0) left
+    float dust dividing float dust -- a single -1e-9 fish over a 130-week
+    horizon returned -1.000, the gauge's maximum alarm, on a plan whose
+    per-tank continuity was EXACT: 0 TANK_DRIFT rows, signed and abs both
+    rounding to 0 fish. Measured 2026-09-08, when a planner change happened to
+    make the residual dust one-signed and the regression suite reported a
+    "distributed fish leak" of zero fish.
+
+    A distributed leak worth naming moves MANY fish, so the floor costs no
+    detection: below one whole fish there is nothing to divide.
+    """
+    return (signed / abs_sum) if abs_sum >= floor else 0.0
+
+
 def write_batch_locations(wb, batch_locations, sheet_name: str = "BatchLocations") -> None:
     """Per-(week, batch, tank) occupancy from the placement plan."""
     if sheet_name in wb.sheetnames:
@@ -3231,8 +3255,8 @@ def write_tank_continuity_audit(
     # scale-free leak gauge — near 0 = random/cancelling (conserved), near 1 =
     # systematic one-way loss. Biomass carries a known + bias (weekly-vs-daily
     # growth approximation), surfaced here as a caveat, not a defect.
-    _dc_ratio = (_fac_dc_signed / _fac_dc_abs) if _fac_dc_abs else 0.0
-    _db_ratio = (_fac_db_signed / _fac_db_abs) if _fac_db_abs else 0.0
+    _dc_ratio = drift_ratio(_fac_dc_signed, _fac_dc_abs)
+    _db_ratio = drift_ratio(_fac_db_signed, _fac_db_abs)
     ws.append([])
     ws.append(["FACILITY CONSERVATION SUMMARY (sum over all tank-weeks)"])
     ws.append(["Metric", "Signed_Sum", "Abs_Sum", "Signed/Abs_ratio", "Note"])
