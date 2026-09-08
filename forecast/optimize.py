@@ -666,7 +666,30 @@ def _tank_density_caps(wb):
 
     Only SW rows are read: FacilityConfig repeats TankID '1' across the FW
     systems, while OG tank ids are unique and BatchLocations is seawater-only.
+
+    2026-09-08: that 2026-08-26 fix had never once engaged. THIS ENGINE DOES NOT
+    WRITE A `FacilityConfig` SHEET -- a controller output has 27 sheets and none
+    of them is that one -- so this returned {} on every real workbook and every
+    caller fell straight back to the hardcoded 95.0 the fix was written to
+    remove. The bug its own docstring describes was live the whole time: OG
+    tank-weeks between 85 and 95 scored as compliant, and 6N production rows
+    judged 25 kg/m3 too strictly. It is invisible precisely because the fallback
+    is a plausible number.
+
+    So fall back to the workbook's own `RunConfig` SNAPSHOT before falling back
+    to a constant. Every run stamps `config/facility.yaml` there verbatim, and
+    `config_snapshot.read_config_snapshot` is the reader the app already uses to
+    re-import it -- the caps are the ones this forecast actually planned against,
+    not today's config/. 95.0 survives only for a workbook carrying neither.
     """
+    caps = _facility_sheet_caps(wb)
+    if caps:
+        return caps
+    return _snapshot_caps(wb)
+
+
+def _facility_sheet_caps(wb):
+    """Per-tank caps from a `FacilityConfig` SHEET, when a workbook has one."""
     caps = {}
     if "FacilityConfig" not in wb.sheetnames:
         return caps
@@ -687,6 +710,41 @@ def _tank_density_caps(wb):
                 continue
             caps[str(row[hdr["TankID"]]).strip()] = float(
                 row[hdr["MaxDensity_kg/m3"]])
+        except (KeyError, TypeError, ValueError):
+            continue
+    return caps
+
+
+def _snapshot_caps(wb):
+    """Per-tank caps from the RunConfig snapshot's own `config/facility.yaml`.
+
+    Keyed by tank_id as a string, to match the BatchLocations Tank column the
+    caller looks up. FW tanks are skipped for the same reason the sheet reader
+    skips them: facility.yaml repeats `tank_id: 1` across every FW system, while
+    OG ids are unique and BatchLocations is seawater-only.
+    """
+    caps = {}
+    try:
+        import yaml
+        from .config_snapshot import read_config_snapshot
+        blocks = read_config_snapshot(wb)
+    except Exception:
+        return caps
+    text = blocks.get("config/facility.yaml") or blocks.get("facility.yaml")
+    if not text:
+        return caps
+    try:
+        doc = yaml.safe_load(text) or {}
+    except Exception:
+        return caps
+    for t in (doc.get("tanks") or []):
+        try:
+            if str(t.get("type", "")).strip().upper() == "FW":
+                continue
+            cap = t.get("max_density_kg_m3")
+            if cap is None:
+                continue
+            caps[str(t["tank_id"]).strip()] = float(cap)
         except (KeyError, TypeError, ValueError):
             continue
     return caps
@@ -721,8 +779,10 @@ def _density_overshoot(wb):
             # if an OG tank were ever given a different cap -- which happened
             # when the OG caps became 85 (production) / 120 (6N). At 95 the
             # scorer passed every tank-week between 85 and 95 as compliant and
-            # judged 6N production rows 25 kg/m3 too strictly. 95 remains the
-            # fallback for a workbook with no FacilityConfig sheet.
+            # judged 6N production rows 25 kg/m3 too strictly. Caps come from
+            # a FacilityConfig sheet if present, else the RunConfig snapshot's
+            # facility.yaml (which every run stamps); 95 is the last resort for
+            # a workbook carrying neither.
             cap = caps.get(str(row[tki]).strip() if len(row) > tki else "", 95.0)
             if dens > cap:
                 over += 1
