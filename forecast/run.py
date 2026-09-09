@@ -1160,6 +1160,7 @@ def main(
         default_hog_yield=control.default_hog_yield,
         facility_limits_hog=facility_hog_overrides,
         forecast_start=fs_date,
+        report_start=report_start,
     )
     write_yearly_summary(
         wb, placement.batch_locations, placement.harvest_events,

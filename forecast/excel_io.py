@@ -1246,8 +1246,15 @@ def write_daily_harvest_schedule(
         del wb[sheet_name]
     ws = wb.create_sheet(sheet_name)
     ws.append(["DAILY HARVEST SCHEDULE"])
+    # The date the REPORT opens, not the date the planner opens. A manual
+    # override window shifts control.forecast_start forward by the window
+    # length, so `forecast_start` here reads 2026-09-15 on the 2026-08-31
+    # closing while this sheet's first row is 2026-09-01. Printing the planning
+    # start over rows that predate it is how the header came to contradict the
+    # table under it. `report_start` is the PR closing + 1 day.
+    _hdr_start = report_start if report_start is not None else forecast_start
     ws.append([f"Each week's harvest (all tanks combined) split Mon-Fri. "
-               f"Forecast start {forecast_start}"])
+               f"Forecast start {_hdr_start}"])
     ws.append([])
     ws.append([
         "Year", "Week", "Date", "Tank", "Batch", "Count (fish)",
@@ -1326,6 +1333,7 @@ def write_harvest_report(
     facility_limits_hog: dict,
     forecast_start=None,
     sheet_name: str = "HarvestReport",
+    report_start=None,
 ) -> None:
     """Per-event harvest forecast (one row per tank harvest), matches reference.
 
@@ -1336,7 +1344,11 @@ def write_harvest_report(
         del wb[sheet_name]
     ws = wb.create_sheet(sheet_name)
     ws.append(["HARVEST FORECAST"])
-    fs = forecast_start.date() if hasattr(forecast_start, "date") else forecast_start
+    # See write_daily_harvest_schedule: the header must name the date the
+    # REPORT opens (PR closing + 1), not the planning start a manual override
+    # window shifts forward -- this sheet also contains the window weeks.
+    _hs = report_start if report_start is not None else forecast_start
+    fs = _hs.date() if hasattr(_hs, "date") else _hs
     ws.append([f"Generated from forecast starting {fs}" if fs else "Generated from forecast"])
     ws.append([])
     ws.append([
