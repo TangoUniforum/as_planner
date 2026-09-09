@@ -312,6 +312,25 @@ def main(
     # from), so the audit must keep the ORIGINAL PR-hydrated anchor — else the
     # prefix weeks (which open from the PR) reconcile against the wrong opening.
     audit_initial_state = state
+    # LIMITS AND THE PER-WEEK OG GROWTH FACTOR ARE BOUND *BEFORE* THE WINDOW.
+    # The manual override window walks 7 days of real biology per week through
+    # biology.advance_tank_one_day, which reads tables.og_sgr_by_week. That
+    # binding used to happen ~90 lines BELOW this point, so the window ran with
+    # an EMPTY factor dict and og_sgr_factor returned 1.0 for every one of its
+    # days. The operator's own per-week settings for exactly those weeks --
+    # scenario/limits.yaml, sgr_correction_og 0.90 at 2026-W36 and 0.92 at
+    # 2026-W37 -- were therefore completely inert: measured 2026-09-08, forcing
+    # both to 0.10 produced a byte-identical workbook across all 2,832
+    # BatchLocations rows. Every day the run ever simulates with an ISO label of
+    # W36 or W37 lies inside the window, so those two knobs could never fire.
+    # The window grew ~8.5% too fast and handed the planner a facility 29,541 kg
+    # (0.78%) too heavy. Safe to hoist: load_limits reads only sixn_growth and
+    # sixn_production_start from control, neither of which the window changes,
+    # and facility_limits comes straight from the file.
+    from .scenario_io import load_limits
+    facility_limits, system_limits = load_limits(scenario_dir, control)
+    from .caps import og_sgr_factors as _og_sgr_factors
+    tables.og_sgr_by_week = _og_sgr_factors(facility_limits)
     if window_n > 0:
         # Reject a window that is as long as (or longer than) the whole forecast:
         # the planner needs at least one week after the window to plan, else the
@@ -383,18 +402,15 @@ def main(
 
     # ----- Caps -----
     fs_date = control.forecast_start.date() if hasattr(control.forecast_start, "date") else control.forecast_start
-    from .scenario_io import load_limits
-    # `control` is required: system defaults may be mode-specific (6N), and
-    # the mode of a week is derived from Control's sixn fields.
-    facility_limits, system_limits = load_limits(scenario_dir, control)
-    # PER-WEEK OG GROWTH FACTOR. Bound onto `tables` here, once, because tables
-    # is the object already threaded to every growth and feed call site; the
-    # alternative is a second argument on ~24 signatures where a single miss
-    # would desync the projection from the realized walk. Applied SW-only in
+    # `facility_limits`, `system_limits` and `tables.og_sgr_by_week` are all
+    # bound ABOVE, before the manual override window, so the window's own
+    # biology sees the operator's per-week growth factors. See the note there.
+    # PER-WEEK OG GROWTH FACTOR: on `tables` because tables is the object
+    # already threaded to every growth and feed call site; the alternative is a
+    # second argument on ~24 signatures where a single miss would desync the
+    # projection from the realized walk. Applied SW-only in
     # biology.sgr_pct_per_day, so growth AND the feed derived from it move
     # together. An empty dict (nothing configured) is exactly the old behaviour.
-    from .caps import og_sgr_factors as _og_sgr_factors
-    tables.og_sgr_by_week = _og_sgr_factors(facility_limits)
     if tables.og_sgr_by_week:
         _ogs = tables.og_sgr_by_week
         _odd = {w: f for w, f in _ogs.items() if f > 1.5 or f == 0.0}
