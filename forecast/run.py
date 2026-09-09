@@ -285,6 +285,18 @@ def main(
     # scheduler/placement key off the shifted (post-window) week labels.
     _fw_proj_fs = control.forecast_start
     _fw_proj_horizon = control.horizon_weeks
+    # THE DATE THE REPORT OPENS, which is NOT the date the planner opens.
+    # A manual override window shifts control.forecast_start forward by the
+    # window length (below), so from here on `fs_date` is the PLANNING start --
+    # 2026-09-15 on the 8/31 closing with a two-week window. The report still
+    # covers the window weeks, and it opens the day after the PR closes.
+    # Operator, 2026-09-08: "the report open is the start of the day after the
+    # production report ... so there should be no entries in this document for
+    # Aug as it starts on 9/1." Reporting surfaces clip on THIS date; clipping
+    # on the shifted one would delete the manual-window weeks outright, which
+    # is what retired the earlier clip on working_day_month_split.
+    report_start = (_fw_proj_fs.date() if hasattr(_fw_proj_fs, "date")
+                    else _fw_proj_fs)
     prefix_realized: dict = {}
     prefix_batch_locations: list = []
     prefix_transfers: list = []
@@ -1028,6 +1040,7 @@ def main(
         default_hog_yield=control.default_hog_yield,
         facility_limits_hog=facility_hog_overrides,
         forecast_start=fs_date,
+        report_start=report_start,
         pr_period=_pr_period,
     )
     write_transfer_plan_output(
@@ -1140,6 +1153,7 @@ def main(
         wb, placement.harvest_events, fs_date,
         default_hog_yield=control.default_hog_yield,
         facility_limits_hog=facility_hog_overrides,
+        report_start=report_start,
     )
     write_harvest_report(
         wb, placement.harvest_events,
@@ -1159,7 +1173,8 @@ def main(
         sixn_move_in_feed=getattr(placement, "sixn_move_in_feed", None))
     write_feed_forecast_monthly(
         wb, placement.batch_locations, rl_states_by_batch, fs_date, tables, batch_by_id,
-        sixn_move_in_feed=getattr(placement, "sixn_move_in_feed", None))
+        sixn_move_in_feed=getattr(placement, "sixn_move_in_feed", None),
+        report_start=report_start)
     all_states = _to_realized_lifespan(states + in_flight_states)
     write_weekly_report(
         wb, placement.batch_locations, placement.harvest_events, all_states,
@@ -1182,6 +1197,7 @@ def main(
         transfer_events=placement.transfer_events, batches=batch_by_id, tables=tables,
         scenario_name=control.scenario_name, hog_yield=control.default_hog_yield,
         hog_overrides=facility_hog_overrides, forecast_start=control.forecast_start,
+        report_start=report_start,
         realized_biology=getattr(placement, "realized_biology", None),
         # OPENINGS, ARRIVALS AND CULLS ARE ONE DECISION -- all three or none.
         #

@@ -29,11 +29,13 @@ from __future__ import annotations
 
 from datetime import date, datetime
 
-from openpyxl.formatting.rule import CellIsRule, ColorScaleRule, DataBarRule, FormulaRule
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
-# ---------- palette (shared with write_run_comparison) ----------
+# ---------- palette (shared with excel_io.write_run_comparison) ----------
+# C_BAD/C_WARN/C_GOOD and their fonts no longer style the ledgers -- the
+# operator removed conditional formatting on 2026-09-08 -- but they remain
+# the workbook's shared status palette and are kept for that.
 C_TITLE = PatternFill("solid", fgColor="1F4E78")
 C_HDR = PatternFill("solid", fgColor="D9E1F2")
 C_BAD = PatternFill("solid", fgColor="FFC7CE")
@@ -47,6 +49,12 @@ F_BAD = Font(bold=True, color="9C0006")
 F_WARN = Font(bold=True, color="9C6500")
 F_GOOD = Font(bold=True, color="006100")
 F_MONO = Font(name="Consolas", size=9)
+# TOTAL rows. Operator, 2026-09-08: "make all the total rows for all the
+# different tabs Bold and with a different background colour." A period total
+# is the number most often read off these sheets, and it used to look exactly
+# like the batch rows above it.
+C_TOTAL = PatternFill("solid", fgColor="E2EFDA")
+F_TOTAL = Font(bold=True, color="1F4E78")
 
 _thin = Side(style="thin", color="BFBFBF")
 _med = Side(style="medium", color="1F4E78")
@@ -87,12 +95,6 @@ TAB_COLOURS = {
 
 # Text tokens that mean "this row is a breach" / "this row is fine". Matched
 # case-sensitively against whole cell values in flag-ish columns.
-BAD_TOKENS = (
-    "BIOMASS_OVER", "FEED_OVER", "BIO_DRIFT", "COUNT_DRIFT", "DROPPED",
-    "REDUCE BIOMASS", "REDUCE FEED", "FAIL", "OVER", "UNMET", "BREACH",
-)
-WARN_TOKENS = ("FW UNDER plan", "PARTIAL", "NOTE", "WARNING", "pre-start", "SHORT")
-GOOD_TOKENS = ("OK", "PASS", "PLACED", "CLEAN")
 
 
 # ---------- number-format inference ----------
@@ -141,18 +143,6 @@ def _number_format(header: str) -> str | None:
     return None
 
 
-def _is_flagish(header: str) -> bool:
-    h = (header or "").strip().lower()
-    return h in ("flag", "bio_flag", "feed_flag", "fw_flag", "status",
-                 "advisory", "verdict", "gate", "result", "category", "severity")
-
-
-def _is_deltaish(header: str) -> bool:
-    """Columns where any non-zero value is worth the eye, and a positive one
-    is worse (an excess over a cap) than a merely non-zero one (a residual)."""
-    h = (header or "").strip().lower()
-    return ("delta" in h or "excess" in h or "residual" in h
-            or "_check" in h or "at_risk" in h or "over_cap" in h)
 
 
 # ---------- sheet shape detection ----------
@@ -310,46 +300,31 @@ def _format_table(ws, header_row: int, autofilter: bool = True) -> None:
                 if isinstance(cell.value, (int, float)) and not isinstance(cell.value, bool):
                     cell.number_format = "#,##0.00"
 
-    # Conditional rules. Every one of these tests a value the ENGINE computed
-    # (a flag it raised, a delta it measured) — none invents a threshold of
-    # its own. Per-tank density caps vary 30..95 kg/m3 by tier, so density is
-    # shaded relatively rather than cut at a line that would be wrong for the
-    # smolt tanks.
-    for c, head in enumerate(headers, start=1):
-        col = get_column_letter(c)
-        rng = f"{col}{first}:{col}{last}"
-
-        if _is_flagish(head):
-            for tok in BAD_TOKENS:
-                ws.conditional_formatting.add(rng, FormulaRule(
-                    formula=[f'ISNUMBER(SEARCH("{tok}",{col}{first}))'],
-                    fill=C_BAD, font=F_BAD, stopIfTrue=False))
-            for tok in WARN_TOKENS:
-                ws.conditional_formatting.add(rng, FormulaRule(
-                    formula=[f'ISNUMBER(SEARCH("{tok}",{col}{first}))'],
-                    fill=C_WARN, font=F_WARN, stopIfTrue=False))
-            for tok in GOOD_TOKENS:
-                ws.conditional_formatting.add(rng, FormulaRule(
-                    formula=[f'EXACT({col}{first},"{tok}")'],
-                    fill=C_GOOD, font=F_GOOD, stopIfTrue=False))
-
-        elif _is_deltaish(head):
-            ws.conditional_formatting.add(rng, CellIsRule(
-                operator="greaterThan", formula=["0"], fill=C_BAD, font=F_BAD))
-            ws.conditional_formatting.add(rng, CellIsRule(
-                operator="lessThan", formula=["0"], fill=C_WARN, font=F_WARN))
-
-        elif "density" in head.lower():
-            ws.conditional_formatting.add(rng, ColorScaleRule(
-                start_type="min", start_color="FFFFFF",
-                mid_type="percentile", mid_value=70, mid_color="FFEB9C",
-                end_type="max", end_color="FFC7CE"))
-
-        elif head.strip().lower() in ("count (fish)", "harvest_count",
-                                      "harv_count (fish)"):
-            ws.conditional_formatting.add(rng, DataBarRule(
-                start_type="num", start_value=0, end_type="max",
-                color="8EA9DB", showValue=True))
+    # NO CONDITIONAL FORMATTING. Operator, 2026-09-08: "get rid of all of the
+    # conditional formatting for all of the different tabs, the formatting that
+    # shows cell color of bar chart in the cell, that not necessary."
+    #
+    # What was here: red/amber/green fills keyed on FAIL/WARN/OK tokens in flag
+    # columns, a red/amber split on delta columns, a white->amber->red colour
+    # scale on every density column, and an in-cell DataBar on the count
+    # columns. All of it was decoration over numbers the operator reads
+    # directly, and the density scale in particular shaded RELATIVELY -- the
+    # darkest cell on a sheet was just that sheet's maximum, which reads as a
+    # severity it never claimed. The engine's own findings live in the
+    # ValidationLog and the audits, which say what happened in words.
+    #
+    # TOTAL rows instead: bold, on their own background, because a period total
+    # is what gets read off these sheets and it looked identical to the batch
+    # rows above it. Detected by the literal cell value, not by position -- the
+    # label sits in a different column on every sheet (Batch on the ledgers,
+    # Date on the Daily Harvest Schedule, Week on the feed matrices).
+    for r in range(first, last + 1):
+        if any(str(ws.cell(r, c).value or "").strip().lower() == "total"
+               for c in range(1, min(ncol, 6) + 1)):
+            for c in range(1, ncol + 1):
+                cell = ws.cell(r, c)
+                cell.font = F_TOTAL
+                cell.fill = C_TOTAL
 
     # Widths: respect what the writers already chose, only rescue the ones
     # that would clip their own header.

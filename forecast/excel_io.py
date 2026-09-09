@@ -965,6 +965,7 @@ def write_harvest_plan_report(
     forecast_start=None,
     pr_period=None,
     sheet_name: str = "HarvestPlan Report",
+    report_start=None,
 ) -> None:
     """Annual per-batch harvest summary (matches reference format).
 
@@ -997,11 +998,14 @@ def write_harvest_plan_report(
         hog_yield = facility_limits_hog.get(iso_week_label(ev.event_date), default_hog_yield)
         hog_kg = ev.count * ev.avg_wt_g / 1000.0 * hog_yield
         # The week's harvest goes WHOLE to its ISO Monday's month — the sales
-        # contract convention. There is no boundary split to clip, so the
-        # forecast_start hazard that the working-day version had to avoid
-        # (manual override-window harvests dated before the shifted start)
-        # cannot arise here.
-        for (yr, mo), frac in iso_week_month_split(ev.event_date).items():
+        # contract convention, undivided. But an ISO week starts on a MONDAY,
+        # so the first week of a forecast opening the day after a month-end PR
+        # has its Monday in the PREVIOUS month: on the 2026-08-31 closing this
+        # matrix grew an August column carrying B41's 5,322 fish and 14 t, in a
+        # September forecast. `report_start` moves that week to the first month
+        # the report covers; the convention itself is unchanged.
+        for (yr, mo), frac in iso_week_month_split(
+                ev.event_date, clip_start=report_start).items():
             e = agg[(yr, ev.batch_id, mo)]
             e["count"] += ev.count * frac
             e["hog_kg"] += hog_kg * frac
@@ -1224,6 +1228,7 @@ def write_daily_harvest_schedule(
     default_hog_yield: float,
     facility_limits_hog: dict,
     sheet_name: str = "Daily Harvest Schedule",
+    report_start=None,
 ) -> None:
     """Mon-Fri split of each week's COMBINED harvest with HOG conversions.
 
@@ -1269,6 +1274,20 @@ def write_daily_harvest_schedule(
         ev_date = rec["ev_date"]
         monday = ev_date - timedelta(days=ev_date.weekday())
         mon_fri = [monday + timedelta(days=i) for i in range(5)]
+        # Never schedule a day the forecast does not cover. An ISO week starts
+        # on a Monday, so a forecast opening the day after a month-end PR opens
+        # mid-week: on the 2026-08-31 closing this sheet listed a harvest on
+        # Mon 2026-08-31, which belongs to August and to the PR, not to the
+        # September forecast. The week's TOTAL is unchanged -- it is spread over
+        # the operating days that remain (4 instead of 5), so no fish move
+        # months. If every day would be clipped (a manual-window week dated
+        # wholly before a shifted start) the week keeps all five days rather
+        # than vanishing.
+        _fs = getattr(report_start, "date", lambda: report_start)()
+        if _fs is not None:
+            _kept = [d for d in mon_fri if d >= _fs]
+            if _kept:
+                mon_fri = _kept
         n_days = len(mon_fri)
         cnt, live_kg = rec["count"], rec["live_kg"]
         hog_yield = facility_limits_hog.get(wk_label, default_hog_yield)
@@ -1480,6 +1499,7 @@ def write_feed_forecast_monthly(
     batches=None,
     sheet_name: str = "FeedForecastMonthly",
     sixn_move_in_feed=None,
+    report_start=None,
 ) -> None:
     """Per-month feed forecast as a Feed Type x Month matrix (kg/month).
 
@@ -1505,7 +1525,7 @@ def write_feed_forecast_monthly(
     months: set[str] = set()
     for (name, wk), v in ftw.items():
         ws_ = wk_start.get(wk)
-        for (yr, mon), frac in calendar_day_month_split(ws_).items():
+        for (yr, mon), frac in calendar_day_month_split(ws_, clip_start=report_start).items():
             mo = f"{yr}-{mon:02d}"
             months.add(mo)
             ftm[(name, mo)] += v * frac
@@ -1540,7 +1560,7 @@ def write_feed_forecast_monthly(
     fbtm: dict[tuple[str, str, str], float] = defaultdict(float)  # (batch, type, month)
     for (bid, name, wk), v in fbtw.items():
         ws_ = wk_start.get(wk)
-        for (yr, mon), frac in calendar_day_month_split(ws_).items():
+        for (yr, mon), frac in calendar_day_month_split(ws_, clip_start=report_start).items():
             fbtm[(bid, name, f"{yr}-{mon:02d}")] += v * frac
     # Max-size order for feed types (same ordering basis as the by-type block).
     size_of = {name: (ms if ms is not None else 0.0) for ms, name in ftypes}
@@ -2249,6 +2269,7 @@ def write_monthly_report(
     realized_biology=None,
     window_openings=None,
     window_culls=None,
+    report_start=None,
 ) -> None:
     """Per-(month, batch) open/close production ledger (matches reference format).
 
@@ -2327,9 +2348,10 @@ def write_monthly_report(
                       f"week {w.get('week')!r} (batch {b}) — its flows are "
                       f"missing from the monthly totals")
                 continue
-            split_c = calendar_day_month_split(wkd)   # daily flows
-            split_w = iso_week_month_split(wkd)        # harvest (no fs clip —
-            #        pre-start manual weeks must split by working day like the rest)
+            split_c = calendar_day_month_split(wkd, clip_start=report_start)
+            # harvest: whole to its ISO Monday's month, but never to a month
+            # before the report opens (see iso_week_month_split's clip note).
+            split_w = iso_week_month_split(wkd, clip_start=report_start)
             oc, ob = w["open_count"], w["open_bio"]
             hc, hg = w["harv_count"], w["harv_gross"]
             dc, db = w["close_count"] - oc, w["close_bio"] - ob

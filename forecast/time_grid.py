@@ -191,7 +191,7 @@ def working_day_month_split(event_date, forecast_start=None) -> dict[tuple[int, 
     return out
 
 
-def iso_week_month_split(event_date) -> dict[tuple[int, int], float]:
+def iso_week_month_split(event_date, clip_start=None) -> dict[tuple[int, int], float]:
     """(year, month) -> 1.0 for the month of the ISO week's MONDAY.
 
     THE HARVEST MONTH CONVENTION (operator decision, 2026-09-02). A week's
@@ -212,10 +212,23 @@ def iso_week_month_split(event_date) -> dict[tuple[int, int], float]:
     """
     d = _as_date(event_date)
     monday = d - timedelta(days=d.weekday())
+    # `clip_start` keeps the convention from reporting a harvest in a month the
+    # report does not cover. An ISO week starts on a MONDAY, so the first week
+    # of a forecast that opens the day after a month-end PR has its Monday in
+    # the PREVIOUS month: the 2026-08-31 closing put week 2026-W36's whole
+    # harvest into August, a month whose fish belong to the ProductionReport.
+    # The week still belongs whole and undivided to ONE month (the operator's
+    # 2026-09-02 sales convention is untouched) -- it is just the first month
+    # the report actually covers rather than a month before it began.
+    if clip_start is not None:
+        cs = _as_date(clip_start)
+        if monday < cs:
+            return {(cs.year, cs.month): 1.0}
     return {(monday.year, monday.month): 1.0}
 
 
-def calendar_day_month_split(week_start, days: int = 7) -> dict[tuple[int, int], float]:
+def calendar_day_month_split(week_start, days: int = 7,
+                             clip_start=None) -> dict[tuple[int, int], float]:
     """(year, month) -> fraction of a weekly DAILY flow in that calendar month.
 
     For flows consumed every day — feed, growth, mortality, culls — a weekly
@@ -227,10 +240,28 @@ def calendar_day_month_split(week_start, days: int = 7) -> dict[tuple[int, int],
     """
     ws = _as_date(week_start)
     n = max(1, days)
+    dates = [ws + timedelta(days=i) for i in range(n)]
+    # `clip_start` drops days the forecast does not cover. An ISO week starts on
+    # a MONDAY, so a forecast beginning the day after a month-end PR starts
+    # mid-week: on the 2026-08-31 closing the forecast starts Tue 2026-09-01
+    # while week 2026-W36 starts Mon 2026-08-31, and 1/7 of that week's flows
+    # were credited to a month the forecast contains no days of. The operator:
+    # "the report opens the start of the day after the production report ...
+    # so there should be no entries in this document for Aug as it starts on
+    # 9/1." The remaining days are RENORMALISED, so this moves which month a
+    # flow is reported in and never the total -- no fish and no kg are dropped.
+    # If every day would be clipped (a manual-window week dated wholly before a
+    # shifted start) the week is left alone: that collapse is what retired the
+    # equivalent clip on working_day_month_split, and it is not repeated here.
+    if clip_start is not None:
+        cs = _as_date(clip_start)
+        kept = [d for d in dates if d >= cs]
+        if kept:
+            dates = kept
     out: dict[tuple[int, int], float] = {}
-    for i in range(n):
-        d = ws + timedelta(days=i)
-        out[(d.year, d.month)] = out.get((d.year, d.month), 0.0) + 1.0 / n
+    frac = 1.0 / len(dates)
+    for d in dates:
+        out[(d.year, d.month)] = out.get((d.year, d.month), 0.0) + frac
     return out
 
 
