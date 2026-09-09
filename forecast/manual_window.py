@@ -144,7 +144,24 @@ def _build_fw_lookup(events, fw_records, control, pr_closing, tables, batch_by_i
         cv = b_meta.tran_og_cv or 16.0
         for s in states:
             if s.stage == "FW":
-                lookup[(bid, s.week_label)] = (s.close_count, s.close_avg_weight_g, cv)
+                # OPEN, not close. A manual fw_to_og in week W deposits the
+                # cohort into OG at the START of W, and the window then grows it
+                # through W -- so drawing the CLOSE state grew that same
+                # freshwater week twice. Measured on B49 at the 2026-08-31
+                # stitch: ~10.5 t, +10.5% of the batch's biomass, created out of
+                # nothing and invisible to every audit (TankContinuityAudit and
+                # ReconciliationReport book the arrival as exogenous, the
+                # InputConservationAudit's FW balance for a manual transfer is
+                # 0 by construction, and the ledgers' Bio_Check is 0 by
+                # construction too).
+                # This also aligns the manual path with the AUTOMATIC one:
+                # biology.py:1141 makes the FW->SW split at the first
+                # forecast-week boundary on/after tran_og_date, using the state
+                # as of that day -- the week's opening, not its close.
+                _oc = s.open_count if (s.open_count or 0) > 0 else s.close_count
+                _ow = (s.open_avg_weight_g if (s.open_avg_weight_g or 0) > 0
+                       else s.close_avg_weight_g)
+                lookup[(bid, s.week_label)] = (_oc, _ow, cv)
     return lookup
 
 
