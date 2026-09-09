@@ -2046,7 +2046,18 @@ def _rate_is_meaningful(d: dict) -> tuple[bool, bool]:
     moved = ((d.get("harv_count") or 0.0) + (d.get("cull_count") or 0.0)
              + (d.get("input_count") or 0.0))
     sgr_ok = oc > 0 and (moved / oc) <= _SGR_POP_CHANGE_TOL
-    fcr_ok = (d.get("sfr") or 0.0) >= _FCR_MIN_SFR_PCT_DAY
+    # FCR also needs something to have grown FROM. A batch that opens the
+    # period with ZERO biomass is first-feeding fry: the mass that appears is
+    # the hatch weight carried out of the egg, not flesh converted from feed,
+    # so booking it as growth reads as a fish that grew on almost no feed.
+    # Measured on the live plan: four such months, ~529,000 fry opening at
+    # 0 kg and closing at 74 kg (0.14 g each, the FW start weight), reporting
+    # Bio_FCR 0.46-0.51 -- physically impossible and the last of the sub-1.0
+    # values the operator was seeing. Same shape as an arrival booked as
+    # growth; the ledger still shows the biomass, it just does not claim a
+    # conversion ratio for it.
+    fcr_ok = ((d.get("sfr") or 0.0) >= _FCR_MIN_SFR_PCT_DAY
+              and (d.get("open_bio") or 0.0) > 0.0)
     return sgr_ok, fcr_ok
 
 

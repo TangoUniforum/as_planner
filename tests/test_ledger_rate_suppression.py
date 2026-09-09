@@ -41,7 +41,7 @@ from forecast.excel_io import (_FCR_MIN_SFR_PCT_DAY, _SGR_POP_CHANGE_TOL,
 
 def _row(**kw):
     d = {"open_count": 100000.0, "harv_count": 0.0, "cull_count": 0.0,
-         "input_count": 0.0, "sfr": 1.0}
+         "input_count": 0.0, "sfr": 1.0, "open_bio": 250000.0}
     d.update(kw)
     return d
 
@@ -109,3 +109,36 @@ def test_a_missing_field_does_not_crash_the_ledger():
     """Aggregates are built from several sources; absent keys must default."""
     assert _rate_is_meaningful({"open_count": 100.0}) == (True, False)
     assert _rate_is_meaningful({}) == (False, False)
+
+
+# ---- First-feeding fry have nothing to convert FROM (2026-09-08) ----
+# Four monthly rows survived the SFR rule and still read 0.46-0.51: ~529,000
+# fry opening at ZERO biomass and closing at 74 kg -- 0.14 g each, exactly
+# FW_START_WEIGHT_G. The mass appearing at EGG->FW is the hatch weight carried
+# out of the yolk, not flesh converted from feed, so booking it as growth reads
+# as a fish that grew on almost no feed. Same shape as an arrival booked as
+# growth. The ledger still shows the biomass; it just stops claiming a
+# conversion ratio for it.
+
+def test_first_feeding_fry_have_no_fcr():
+    """Opens at zero biomass -> nothing to convert from."""
+    _, fcr_ok = _rate_is_meaningful(_row(open_bio=0.0, sfr=2.97))
+    assert not fcr_ok
+
+
+def test_a_batch_that_opens_with_biomass_keeps_its_fcr():
+    """NEGATIVE CONTROL — the rule must not blank ordinary feeding periods."""
+    _, fcr_ok = _rate_is_meaningful(_row(open_bio=250000.0, sfr=0.9))
+    assert fcr_ok
+
+
+def test_both_conditions_are_required():
+    """Off feed OR no opening biomass is enough to make the ratio empty."""
+    assert _rate_is_meaningful(_row(open_bio=0.0, sfr=0.9))[1] is False
+    assert _rate_is_meaningful(_row(open_bio=250000.0, sfr=0.001))[1] is False
+    assert _rate_is_meaningful(_row(open_bio=250000.0, sfr=0.9))[1] is True
+
+
+def test_a_missing_open_bio_is_treated_as_zero():
+    """Aggregates are built from several sources; an absent key must not pass."""
+    assert _rate_is_meaningful({"open_count": 100.0, "sfr": 1.0})[1] is False
