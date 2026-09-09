@@ -342,6 +342,33 @@ def annotate_batch_plan_handling(wb, batch_sheet="Batch Plan",
     ws.column_dimensions[get_column_letter(ncol + 2)].width = 26
 
 
+def whole_parts(values) -> list[float]:
+    """Whole numbers that SUM to round(sum(values)) — largest remainder.
+
+    Rounding each part on its own lets the parts out-sum the whole: three
+    harvest events of 26,592.5 + 26,592.5 + 1,815 became 26,593 + 26,593 +
+    1,815 = 55,001 against a decision of exactly 55,000, and every gate that
+    re-summed the sheet called it a breach of the 55,000 ceiling.
+
+    ONE definition, used by every writer that splits a whole into displayed
+    parts. It first shipped inline in write_harvest_plan_output (eae18ae) and
+    the other two writers kept rounding per row, so the same phantom 55,001
+    survived one sheet over in HarvestReport and the Daily Harvest Schedule's
+    day rows missed their own Total by 1-2 fish in 58 of 85 weeks. Deterministic:
+    ties break on position, and the callers pass a sorted sequence.
+    """
+    vals = [float(v or 0.0) for v in values]
+    if not vals:
+        return []
+    target = round(sum(vals), 0)
+    floors = [float(int(v)) for v in vals]
+    short = int(round(target - sum(floors)))
+    order = sorted(range(len(vals)), key=lambda i: (-(vals[i] - floors[i]), i))
+    for i in order[:max(0, short)]:
+        floors[i] += 1.0
+    return floors
+
+
 def write_harvest_plan_output(
     wb,
     harvest_events,
@@ -386,18 +413,7 @@ def write_harvest_plan_output(
         _by_week.setdefault(iso_week_label(ev.event_date), []).append(ev)
     _shown: dict[int, float] = {}
     for _evs in _by_week.values():
-        _target = round(sum(e.count for e in _evs), 0)
-        _floors = [float(int(e.count)) for e in _evs]
-        _short = int(round(_target - sum(_floors)))
-        # Biggest fractional part first; event id breaks a tie deterministically
-        # (a set-order tiebreak here is the bug class that made the whole engine
-        # irreproducible earlier today -- see commit 87ee040).
-        _order = sorted(range(len(_evs)),
-                        key=lambda i: (-(_evs[i].count - _floors[i]),
-                                       _evs[i].source_tank_id))
-        for _i in _order[:max(0, _short)]:
-            _floors[_i] += 1.0
-        for _e, _c in zip(_evs, _floors):
+        for _e, _c in zip(_evs, whole_parts([e.count for e in _evs])):
             _shown[id(_e)] = _c
     for ev in events_sorted:
         wk = iso_week_label(ev.event_date)
@@ -1236,8 +1252,11 @@ def write_daily_harvest_schedule(
     biomass are summed and distributed evenly across that week's five Mon-Fri
     operating days, with blended average weights (total biomass / total fish),
     a per-week Total row, and a blank separator. The Tank/Batch columns list
-    every tank/batch that contributed. No forecast_start clip (manual override
-    weeks are dated before the shifted start and must show their full 5 days).
+    every tank/batch that contributed. Days before `report_start` are clipped
+    and the week's total re-spread over the days that remain, so nothing is
+    scheduled before the forecast opens; a week wholly before it keeps all
+    five days rather than vanishing, which is the case that retired the
+    earlier clip on the shifted forecast_start.
     """
     from collections import defaultdict
     from datetime import timedelta
@@ -1304,13 +1323,18 @@ def write_daily_harvest_schedule(
         tanks = ", ".join(str(t) for t in sorted(rec["tanks"]))
         batches = ", ".join(sorted(rec["batches"]))
         iso_y, iso_w, _ = ev_date.isocalendar()
-        for d in mon_fri:
+        # Split the WEEK across its days, so the day rows tie to the Total row
+        # under them (they missed it by 1-2 fish in 58 of 85 weeks before).
+        _d_cnt = whole_parts([cnt / n_days] * n_days)
+        _d_hog = whole_parts([hog_kg / n_days] * n_days)
+        _d_live = whole_parts([live_kg / n_days] * n_days)
+        for _i, d in enumerate(mon_fri):
             ws.append([
                 iso_y, iso_w, d, tanks, batches,
-                round(cnt / n_days, 0),
-                round(hog_kg / n_days, 0),
+                _d_cnt[_i],
+                _d_hog[_i],
                 round(hog_avg_kg, 3),
-                round(live_kg / n_days, 0),
+                _d_live[_i],
                 round(live_avg_kg, 3),
             ])
         ws.append([
@@ -1360,6 +1384,16 @@ def write_harvest_report(
         return ev_date.date() if hasattr(ev_date, "date") else ev_date
 
     evs = sorted(harvest_events, key=lambda e: (_d(e.event_date), e.source_tank_id))
+    # Whole fish that tie to the week, same rule as HarvestPlan — this sheet
+    # used to round each row on its own and so reported 55,001 against a
+    # 55,000 decision on the very weeks HarvestPlan had already been fixed.
+    _hr_by_week: dict[str, list] = {}
+    for _e in evs:
+        _hr_by_week.setdefault(iso_week_label(_e.event_date), []).append(_e)
+    _hr_shown: dict[int, float] = {}
+    for _ws_evs in _hr_by_week.values():
+        for _e, _c in zip(_ws_evs, whole_parts([e.count for e in _ws_evs])):
+            _hr_shown[id(_e)] = _c
     for ev in evs:
         d = _d(ev.event_date)
         wk = iso_week_label(ev.event_date)
@@ -1372,7 +1406,7 @@ def write_harvest_report(
             d,
             ev.source_tank_id,
             ev.batch_id,
-            round(ev.count, 0),
+            _hr_shown.get(id(ev), round(ev.count, 0)),
             round(gross, 0),
             round(gross * hog_yield, 0),
             round(ev.avg_wt_g / 1000.0, 2),
@@ -2146,7 +2180,11 @@ def _ledger_total_cells(t: dict) -> list:
     _sfr = round((ff / avg_bio / days * 100.0) if avg_bio > 0 else 0.0, 4)
     _moved = (hc or 0.0) + (c[20] or 0.0) + (c[22] or 0.0)
     _sgr_ok = (oc or 0.0) > 0 and (_moved / oc) <= _SGR_POP_CHANGE_TOL
-    _fcr_ok = _sfr >= _FCR_MIN_SFR_PCT_DAY
+    # Same two conditions as _rate_is_meaningful, including the opening
+    # biomass one: a TOTAL row for a period that opened at zero biomass has
+    # no conversion to report either. Latent on today's plan (0 of 210 such
+    # rows) but the rule must not live in two places with two meanings.
+    _fcr_ok = _sfr >= _FCR_MIN_SFR_PCT_DAY and (ob or 0) > 0
     c[7] = (round((log(cw / ow) / days * 100.0) if ow > 0 and cw > 0 else 0.0, 4)
             if _sgr_ok else None)
     c[11] = _sfr

@@ -32,7 +32,8 @@ from datetime import date
 
 import openpyxl
 
-from forecast.excel_io import write_harvest_plan_output
+from forecast.excel_io import (whole_parts, write_daily_harvest_schedule,
+                               write_harvest_plan_output, write_harvest_report)
 
 
 @dataclass
@@ -106,3 +107,71 @@ def test_no_fish_are_invented_or_lost_overall():
     evs = [_Ev(D, t, "B1", 1000.0 + t * 0.37) for t in range(11, 21)]
     exact = round(sum(e.count for e in evs), 0)
     assert sum(r[2] for r in _rows(evs)) == exact
+
+
+# ---- The other two writers had the SAME bug (2026-09-09) ----
+# eae18ae fixed write_harvest_plan_output and left write_harvest_report and
+# write_daily_harvest_schedule rounding each row on its own. The audit found
+# the phantom still sitting one sheet over: HarvestReport read 55,001 against
+# a 55,000 decision at 2028-W09, 8 weeks disagreed with HarvestPlan by a fish,
+# and the Daily Harvest Schedule's day rows missed their own Total row in 58
+# of 85 weeks. The rounding rule now lives in ONE function, `whole_parts`,
+# which all three call.
+
+def test_whole_parts_ties_to_the_whole():
+    assert sum(whole_parts([26592.5, 26592.5, 1815.0])) == 55000
+    assert sum(whole_parts([10.5, 10.5])) == 21
+    assert whole_parts([]) == []
+    assert sum(whole_parts([1000.0 + t * 0.37 for t in range(10)])) == round(
+        sum(1000.0 + t * 0.37 for t in range(10)), 0)
+
+
+def test_whole_parts_returns_whole_numbers_only():
+    for v in whole_parts([26592.5, 26592.5, 1815.0]):
+        assert float(v).is_integer()
+
+
+def test_whole_parts_is_order_deterministic():
+    """Ties break on position, so a sorted input gives a stable answer."""
+    a = whole_parts([10.5, 10.5, 10.5, 10.5])
+    assert a == whole_parts([10.5, 10.5, 10.5, 10.5])
+    assert sum(a) == 42
+
+
+def test_harvest_report_ties_to_the_week():
+    """The incident: this sheet read 55,001 where HarvestPlan read 55,000."""
+    evs = [_Ev(D, 41, "B55", 26592.5), _Ev(D, 46, "B55", 26592.5),
+           _Ev(D, 52, "B55", 1815.0)]
+    wb = openpyxl.Workbook()
+    write_harvest_report(wb, evs, 0.86, {})
+    total = sum(r[6] for r in wb["HarvestReport"].iter_rows(values_only=True)
+                if r and isinstance(r[6], (int, float)))
+    assert total == 55000
+
+
+def test_the_two_harvest_sheets_agree():
+    """They are the same events; they must not disagree by a fish."""
+    evs = [_Ev(D, 41, "B55", 26592.5), _Ev(D, 46, "B55", 26592.5),
+           _Ev(D, 52, "B55", 1815.0)]
+    wb1 = openpyxl.Workbook(); write_harvest_plan_output(wb1, evs, 0.86, {})
+    wb2 = openpyxl.Workbook(); write_harvest_report(wb2, evs, 0.86, {})
+    plan = sum(r[3] for r in wb1["HarvestPlan"].iter_rows(values_only=True)
+               if r and isinstance(r[3], (int, float)))
+    rep = sum(r[6] for r in wb2["HarvestReport"].iter_rows(values_only=True)
+              if r and isinstance(r[6], (int, float)))
+    assert plan == rep == 55000
+
+
+def test_daily_schedule_day_rows_tie_to_their_total():
+    """58 of 85 weeks missed their own Total row by 1-2 fish."""
+    wb = openpyxl.Workbook()
+    write_daily_harvest_schedule(wb, [_Ev(D, 41, "B1", 23387.0)], None, 0.86, {})
+    days, total = [], None
+    for r in wb["Daily Harvest Schedule"].iter_rows(values_only=True):
+        if not r or r[0] is None:
+            continue
+        if str(r[2]).strip() == "Total":
+            total = r[5]
+        elif isinstance(r[5], (int, float)):
+            days.append(r[5])
+    assert total is not None and sum(days) == total

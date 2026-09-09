@@ -53,6 +53,10 @@ F_MONO = Font(name="Consolas", size=9)
 # different tabs Bold and with a different background colour." A period total
 # is the number most often read off these sheets, and it used to look exactly
 # like the batch rows above it.
+import re as _re
+# Matches "Total", "TOTAL", "Grand Total" and "Total (kg)" — the label
+# differs per sheet. Anchored, so a batch id containing "total" is safe.
+_TOTAL_RE = _re.compile("(grand +)?total([^a-z]|$)")
 C_TOTAL = PatternFill("solid", fgColor="E2EFDA")
 F_TOTAL = Font(bold=True, color="1F4E78")
 
@@ -319,7 +323,10 @@ def _format_table(ws, header_row: int, autofilter: bool = True) -> None:
     # label sits in a different column on every sheet (Batch on the ledgers,
     # Date on the Daily Harvest Schedule, Week on the feed matrices).
     for r in range(first, last + 1):
-        if any(str(ws.cell(r, c).value or "").strip().lower() == "total"
+        # Match the WORD, not the exact string: the feed matrices label their
+        # total row "Total (kg)" and "Grand Total", and an == "total" test
+        # silently skipped both while the ledgers styled correctly.
+        if any(_TOTAL_RE.match(str(ws.cell(r, c).value or "").strip().lower())
                for c in range(1, min(ncol, 6) + 1)):
             for c in range(1, ncol + 1):
                 cell = ws.cell(r, c)
