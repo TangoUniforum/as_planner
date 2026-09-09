@@ -8893,9 +8893,20 @@ def _analyze(skip_lever_check=False):
         with st.container(border=True):
             _pk = ", ".join(f"{k}={v}" for k, v in
                             (promoted.get("overrides") or {}).items()) or "no knob overrides"
-            st.markdown(f"**⚡ Promoted default** — `{promoted['method']}` · {_pk} · "
-                        f"promoted {promoted.get('promoted_ts', '?')}"
+            # Name the METHOD, not its registry key. The key and one of the
+            # knobs both contain the word "hybrid" -- a card reading
+            # "`controller` · hybrid_follow=off" was read by the operator as
+            # the hybrid arm when it is the exact opposite: `controller` IS
+            # "Controller — reactive greedy", and hybrid_follow=off is the knob
+            # that DISABLES the hybrid guide. Show the label they picked from,
+            # and keep the key only as a small trailing tag so the card still
+            # ties to analysis_defaults.yaml and the adoption log.
+            _pm = _method_obj(promoted["method"])
+            st.markdown(f"**⚡ Promoted default** — **{_pm.label}** "
+                        f"`({promoted['method']})` · promoted "
+                        f"{promoted.get('promoted_ts', '?')}"
                         + (f" · _{promoted['note']}_" if promoted.get("note") else ""))
+            st.caption(f"Knobs applied when you ⚡ Quick run this: {_pk}")
             # A default promoted OVER a known breach must say so every time it
             # is offered — the acknowledgement happened once, in a session that
             # is long gone; whoever presses ⚡ next may not be the same reader.
