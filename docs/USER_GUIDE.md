@@ -1709,8 +1709,7 @@ Everything the app does can be run from the terminal — useful for understandin
 pipeline (a direct run **narrates every stage to the console**) and for scripting.
 
 ```powershell
-# The app (Configure / Run / Analyze / Compare & Choose / Optimize /
-#          Accuracy / How it works)
+# The app (Configure / Run / Decide / Ideal / Accuracy / How it works)
 streamlit run app.py
 
 # A single forecast, directly — prints the full stage-by-stage narration
@@ -2310,3 +2309,69 @@ it back as a drift table. A batch flagged **persistent** — the applied
 correction has sat away from the configured value across at least three runs —
 is a **standing model error to fix in the biology config**, not to re-discover
 every month.
+
+---
+
+## 14. Ideal (what should we stock?) — the steady rhythm (2026-09-10)
+
+Every other mode plans the fish you already have. **Ideal** asks the question
+underneath: *what stocking rhythm — how many smolt, how often — could this
+facility carry forever?*
+
+### Using it
+
+1. **Mode → Ideal (what should we stock?)**.
+2. Set the **Biomass cap** slider. It starts at the cap in your Control config,
+   but the cap is a variable, not a permit — try values.
+3. Optionally open **Grid** to choose which cadences (days between stockings)
+   and batch sizes (fish to OG) to try. The default is 3 cadences × 6 sizes =
+   18 runs of 2–5 s each, spread over the sidebar's **Computer power** workers.
+4. Press **Find the ideal rhythm**.
+
+It shows the best **balanced** rhythm at that cap, today's rhythm (read from
+the last six batches in your scenario) measured at the same cap, and a table
+of every rhythm tried. Move the slider afterwards and the page says the result
+is stale until you press the button again.
+
+### How it is measured
+
+Each rhythm is a synthetic stream — one batch every *cadence* days, all the
+same size, copied from your latest batch — run through the L1 harvest envelope
+from a **clean start** for three years. Only year 3 is read, once the start-up
+has washed out. Harvest is priced on the `config/economics.yaml` bands across
+the model's size spread. There is no search and no solver: every number is one
+plain run.
+
+**Balanced** means both: it lands at least **95 %** of what it stocks, and its
+peak standing biomass is no more than **2 %** over the cap. The 2 % allowance is
+structural — the envelope harvests one week late, so a perfectly good plan
+reads 1–1.5 % over. Judge a rhythm by its peak, never by counting "illegal"
+weeks.
+
+### What the numbers said when it was built (3,800 t vs 4,200 t)
+
+| Cap | Ideal rhythm | Smolt/yr | Revenue/yr | Fish ≥ 8 lb |
+|---|---|---|---|---|
+| 3,800 t | 49 d × 280k | 2.09 M | $163.6M | 55 % |
+| 4,200 t | 49 d × 250k | 1.86 M | $167.3M | 78 % |
+
+Today's scenario stocks 49 d × 340k (2.53 M smolt/yr), which at 3,800 t is not
+balanced: stocked fish outrun what can be landed and pile up. Above roughly
+**5,000 t** there is no balanced rhythm at all — harvest is limited to about
+one smallest tank per week (`og_tank_ceiling_kg`, ≈7,700 t HOG/yr), so a bigger
+cap only builds a backlog. These figures will move whenever biology or prices
+are recalibrated; re-run the mode rather than quote the table.
+
+### What it CANNOT tell you
+
+- **It is a carrying-capacity answer, not an operating plan.** No tanks, no
+  density limits, no 15-move handling budget. The tank layout for the ideal
+  rhythm, and the transition from today's fish to it, are the next pieces.
+- **The growth model runs hot** (§13): a few percent optimistic on weight, so
+  tonnage and revenue here are optimistic too.
+- **An unbalanced rhythm's revenue is not real.** It prices fish that are
+  stocked but never landed — inventory, not production.
+- **Prices are flat above 8 lb**, so the ranking favours tonnage over size. If
+  the market pays more for large fish than the bands say, a slower, bigger-fish
+  rhythm may be the better call. That is your judgement, not the model's.
+- **Hatchery cost is not included** — fewer smolt is cheaper than shown.

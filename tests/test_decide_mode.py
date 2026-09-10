@@ -21,11 +21,15 @@ import pytest
 SRC = io.open("app.py", encoding="utf-8").read()
 
 
-def test_the_mode_list_is_five_and_offers_decide():
+def test_the_mode_list_is_six_and_offers_decide():
+    # Five after the 2026-08-31 merge; six from 2026-09-10, when Ideal ("what
+    # should we stock?") was added — a different question from Decide's
+    # "which plan?", not a split of it.
     m = re.search(r'app_mode = st\.radio\(\s*"Mode",\s*\[(.*?)\]', SRC, re.S)
     assert m, "could not find the mode radio"
     opts = re.findall(r'"([^"]+)"', m.group(1))
-    assert len(opts) == 5, f"expected 5 modes, found {len(opts)}: {opts}"
+    assert len(opts) == 6, f"expected 6 modes, found {len(opts)}: {opts}"
+    assert any(o.startswith("Ideal") for o in opts)
     assert any(o.startswith("Decide") for o in opts)
     for gone in ("Analyze (", "Compare & Choose", "Optimize ("):
         assert not any(o.startswith(gone.rstrip(" (")) for o in opts), gone

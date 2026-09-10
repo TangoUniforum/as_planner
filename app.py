@@ -5015,6 +5015,171 @@ def _config_editor():
 
 
 # ============================================================
+# Ideal — the steady rhythm the facility can sustain (2026-09-10)
+# ============================================================
+
+def _ideal():
+    """What SHOULD we stock? The steady rhythm at a chosen biomass cap.
+
+    Runs forecast.ideal — L1 clean-slate on a synthetic stocking stream per
+    (cadence, size) cell, priced on the economics bands. Nothing runs until
+    the button is pressed: test_app_renders sweeps every mode, so the page
+    itself must build cheaply."""
+    import pandas as _pd
+    from concurrent.futures.process import BrokenProcessPool
+    from pickle import PicklingError
+    from forecast import ideal as _im
+    from forecast import scenario_io as _sio
+
+    st.header("🎯 Ideal — what should we stock?")
+    st.caption(
+        "The stocking rhythm this facility could run forever at a given biomass "
+        "cap — how many smolt, how often. Measured from a clean start (none of "
+        "today's fish), read over a steady third year. **A carrying-capacity "
+        "answer, not an operating plan:** it has no tanks, density or handling "
+        "limits, and the growth model runs a few percent hot (see Accuracy), so "
+        "tonnage here is optimistic.")
+
+    try:
+        ctx = _im.load_context(_ROOT)
+        today = _im.current_rhythm(
+            _sio.load_batches(os.path.join(str(_ROOT), "scenario")))
+    except Exception as e:  # noqa: BLE001 — named, not hidden
+        st.error(f"**The Ideal could not load the config** — "
+                 f"{type(e).__name__}: {e}")
+        return
+
+    cap_now_t = float(ctx["control"].max_biomass_kg) / 1000.0
+    c1, c2 = st.columns([3, 2])
+    with c1:
+        cap_t = st.slider(
+            "Biomass cap (t)", min_value=3000, max_value=6500,
+            value=int(min(6500, max(3000, round(cap_now_t / 100.0) * 100))),
+            step=100, key="ideal_cap_t",
+            help="The most standing fish the facility may carry. A variable, "
+                 "not a permit — try values. Above roughly 5,000 t there is no "
+                 "balanced rhythm: harvest is limited to about one tank per "
+                 "week, so a bigger cap only lets fish pile up.")
+    with c2:
+        st.metric("Cap in your config", f"{cap_now_t:,.0f} t")
+    with st.expander("Grid — which rhythms to try"):
+        cads = st.multiselect(
+            "Cadence (days between stockings)", [35, 42, 49, 56, 63, 70],
+            default=list(_im.CADENCES), key="ideal_cads")
+        sizes_k = st.multiselect(
+            "Batch size (thousand fish to OG)",
+            [220, 250, 280, 310, 340, 370, 400, 440],
+            default=[s // 1000 for s in _im.SIZES], key="ideal_sizes")
+        st.caption(
+            f"{len(cads) * len(sizes_k)} runs of ~2–5 s each, spread over "
+            f"{_cpu_workers()} worker(s) (sidebar **Computer power**). "
+            f"Template batch: {ctx['template'].batch_id}. Today's rhythm "
+            f"({today[0]}d × {today[1] // 1000}k) is always measured too.")
+
+    key = (int(cap_t), tuple(sorted(cads)), tuple(sorted(sizes_k)),
+           ctx["template"].batch_id, today)
+    if st.button("🎯 Find the ideal rhythm", type="primary",
+                 disabled=not (cads and sizes_k)):
+        cap_kg = float(cap_t) * 1000.0
+        grid = dict(cadences=sorted(cads), sizes=[k * 1000 for k in sorted(sizes_k)])
+        with st.spinner(f"Measuring {len(cads) * len(sizes_k)} rhythms at "
+                        f"{cap_t:,} t…"):
+            try:
+                rows = _im.frontier(cap_kg, ctx, workers=_cpu_workers(), **grid)
+            except (BrokenProcessPool, PicklingError, OSError) as e:
+                st.warning(f"Parallel run unavailable ({type(e).__name__}: {e})"
+                           f" — ran one at a time instead.")
+                rows = _im.frontier(cap_kg, ctx, workers=1, **grid)
+            cur = next((r for r in rows
+                        if (r.cadence_days, r.batch_size) == today), None)
+            if cur is None:
+                cur = _im.evaluate(today[0], today[1], cap_kg, **ctx)
+        st.session_state["_ideal_result"] = dict(key=key, rows=rows, today=cur)
+
+    res = st.session_state.get("_ideal_result")
+    if not res:
+        st.info("Pick a cap and press **Find the ideal rhythm**.")
+        return
+    if res["key"] != key:
+        # State outlives its inputs — say so rather than show a stale answer
+        # under a slider that now reads something else.
+        st.warning(f"Showing the result for **{res['key'][0]:,} t** — the "
+                   f"settings above have changed since. Press the button to "
+                   f"recompute.")
+
+    rows, cur = res["rows"], res["today"]
+    cap_kg = rows[0].cap_kg
+    b = _im.best(rows)
+    if b is None:
+        st.error(
+            f"**No balanced rhythm at {cap_kg / 1000:,.0f} t.** Every rhythm "
+            f"tried either lands under {_im.MIN_BALANCE:.0%} of what it stocks "
+            f"(a growing backlog, not production) or peaks above the cap. At "
+            f"high caps this is structural: harvest is limited to about one "
+            f"tank per week ({rows[0].ceiling_hog_t_per_yr:,.0f} t HOG/yr), so "
+            f"a bigger cap only lets fish pile up.")
+    else:
+        st.subheader(f"Ideal at {cap_kg / 1000:,.0f} t: {b.label}")
+        vs = cur.balanced and cur is not b
+        m = st.columns(5)
+        m[0].metric("Smolt to OG / yr", f"{b.smolt_per_yr / 1e6:.2f} M",
+                    delta=(f"{(b.smolt_per_yr - cur.smolt_per_yr) / 1e6:+.2f} M "
+                           f"vs today" if vs else None), delta_color="off")
+        m[1].metric("HOG / yr", f"{b.hog_t_per_yr:,.0f} t",
+                    delta=(f"{b.hog_t_per_yr - cur.hog_t_per_yr:+,.0f} t vs today"
+                           if vs else None))
+        m[2].metric("Revenue / yr", f"${b.revenue_per_yr / 1e6:,.1f}M",
+                    delta=(f"{(b.revenue_per_yr - cur.revenue_per_yr) / 1e6:+,.1f}M"
+                           f" vs today" if vs else None))
+        m[3].metric("Fish ≥ 8 lb", f"{b.share_over_8lb:.0%}")
+        m[4].metric("Peak vs cap", f"{b.peak_pct_of_cap:.0%}")
+
+    if cur.balanced:
+        st.markdown(f"**Today's scenario stocks {cur.label}** "
+                    f"({cur.smolt_per_yr / 1e6:.2f} M smolt/yr) — balanced at "
+                    f"this cap.")
+    else:
+        st.markdown(
+            f"**Today's scenario stocks {cur.label}** "
+            f"({cur.smolt_per_yr / 1e6:.2f} M smolt/yr) — **not sustainable at "
+            f"this cap**: it lands {cur.balance:.0%} of what it stocks and peaks "
+            f"at {cur.peak_pct_of_cap:.0%} of the cap. Its revenue figure is "
+            f"inventory being priced, not produced, so no 'vs today' is shown.")
+
+    tbl = sorted(rows + ([cur] if cur not in rows else []),
+                 key=lambda r: (-r.revenue_per_yr, r.cadence_days, r.batch_size))
+    st.dataframe(_pd.DataFrame([{
+        "Rhythm": r.label + ("  (today)" if r == cur else ""),
+        "Balanced": "✓" if r.balanced else "✗",
+        "Revenue $M/yr": round(r.revenue_per_yr / 1e6, 1),
+        "HOG t/yr": round(r.hog_t_per_yr),
+        "Smolt M/yr": round(r.smolt_per_yr / 1e6, 2),
+        "Landed %": round(100 * r.balance),
+        "Avg kg (gross)": round(r.avg_gross_kg, 2),
+        "≥ 8 lb %": round(100 * r.share_over_8lb),
+        "Peak t": round(r.peak_kg / 1000),
+        "Peak % of cap": round(100 * r.peak_pct_of_cap),
+    } for r in tbl]), hide_index=True, width="stretch")
+
+    with st.expander("How to read this — and what it leaves out"):
+        st.markdown(f"""
+- **Balanced** = lands at least {_im.MIN_BALANCE:.0%} of what it stocks AND
+  peaks no more than {_im.PEAK_TOLERANCE:.0%} over the cap. The small
+  allowance is structural: the envelope harvests one week late, so a good plan
+  still reads 1–1.5% over. Judge by the peak, not by counting "illegal" weeks.
+- **An unbalanced rhythm's revenue is not real.** Fish that are stocked but
+  never landed pile up as standing biomass; pricing them counts inventory as
+  production.
+- **Prices are flat above 8 lb** in `config/economics.yaml`, so the ranking
+  favours tonnage over size. If the market pays more for large fish than the
+  bands say, a slower, bigger-fish rhythm may be the better call — that is
+  your judgement, not the model's.
+- **Hatchery cost is not included** — fewer smolt is cheaper than shown.
+- **Not yet here:** the ideal tank layout for this rhythm, and the transition
+  from today's fish to it. Both are next.""")
+
+
+# ============================================================
 # How it works — the plain-language rulebook (operator request)
 # ============================================================
 
@@ -6124,7 +6289,7 @@ with st.sidebar:
     app_mode = st.radio(
         "Mode",
         ["Configure (models & control)", "Run forecast",
-         "Decide (which plan should I run?)",
+         "Decide (which plan should I run?)", "Ideal (what should we stock?)",
          "Accuracy (forecast vs actuals)", "How it works (the rules)"],
         captions=[
             "Set up once — biology curves, tanks, batches, per-week limits, "
@@ -6133,6 +6298,8 @@ with st.sidebar:
             "ProductionReport and download the workbook.",
             "“Which plan should I run?” — the monthly lever check, the "
             "engine board, and knob tuning, in one place.",
+            "“What should we stock?” — the steady rhythm (smolt × cadence) "
+            "the facility can sustain at a biomass cap you choose.",
             "“How much should I trust this?” — grades a past forecast against "
             "the PR that followed it.",
             "The rulebook — what each layer decides, what it may never do, "
@@ -6174,6 +6341,12 @@ with st.sidebar:
             "by side on eight lenses and lets you set a NON-winning engine as "
             "your default; *Tune knobs* sweeps one engine against weights you "
             "choose. Finished runs are shared — nothing runs twice.\n"
+            "- **Ideal (what should we stock?)** — the strategic question "
+            "under every plan: how many smolt, how often, can this facility "
+            "carry forever? Pick a biomass cap; it measures a grid of "
+            "rhythms from a clean start and shows the best balanced one "
+            "beside today's. A carrying-capacity answer — no tanks, density "
+            "or handling limits yet.\n"
             "- **Accuracy (forecast vs actuals)** — the only mode that grades "
             "the *biology* rather than the plan. Upload a forecast workbook "
             "you produced earlier plus the ProductionReport that came after "
@@ -9634,6 +9807,10 @@ if app_mode.startswith("Configure"):
 
 if app_mode.startswith("How it works"):
     _how_it_works()
+    st.stop()
+
+if app_mode.startswith("Ideal"):
+    _ideal()
     st.stop()
 
 
