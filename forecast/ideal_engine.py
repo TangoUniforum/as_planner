@@ -161,6 +161,14 @@ class YearRead:
     floor_min: Optional[float] = None
     floor_max: Optional[float] = None
     capped_weeks: Optional[int] = None
+    # Per-system limits, as the engine's own SystemLimitsAudit judges them:
+    # (system, week) rows whose biomass / feed is above the system's limit
+    # times (1 + global_buffer_pct); 6N is exempt while it purges. A plan
+    # "within the system constraints" (operator, 2026-09-10) needs these too,
+    # not only the facility cap and tank density.
+    sys_bio_over_weeks: int = 0
+    sys_feed_over_weeks: int = 0
+    sys_worst: Optional[dict] = None
 
 
 @dataclass(frozen=True)
@@ -614,9 +622,35 @@ def read_workbook(path, control, facility, bands, cv_pct: float,
         _r, rr = _table(wb, "ReconciliationReport", "Week")
         _c, tc = _table(wb, "TankContinuityAudit", "Week")
         _v, vl = _table(wb, "ValidationLog", "#")
+        sh, sl = _table(wb, "SystemLimitsAudit", "Week")
         ic_lines, ic_status = _input_conservation(wb)
     finally:
         wb.close()
+    # The engine's own per-system verdicts (excel_io's SystemLimitsAudit):
+    # a flag = above the system limit x (1 + global_buffer_pct).
+    s_cols = {c: _col(sh, c, "SystemLimitsAudit")
+              for c in ("System", "Biomass_kg", "Biomass_cap", "Bio_flag",
+                        "Feed_kg_day", "Feed_cap", "Feed_flag")}
+    sys_over = {"biomass": Counter(), "feed": Counter()}
+    sys_worst: dict = {}
+    for r in sl:
+        w = str(r["Week"])
+        y = _label_year(w)
+        for kind, flag, val_c, cap_c, unit in (
+                ("biomass", "Bio_flag", "Biomass_kg", "Biomass_cap", "kg"),
+                ("feed", "Feed_flag", "Feed_kg_day", "Feed_cap", "kg/day")):
+            if not r.get(s_cols[flag]):
+                continue
+            sys_over[kind][y] += 1
+            val = float(r.get(s_cols[val_c]) or 0.0)
+            cap = float(r.get(s_cols[cap_c]) or 0.0)
+            ratio = val / cap if cap > 0 else math.inf
+            cur = sys_worst.get(y)
+            if cur is None or (ratio, w, str(r[s_cols["System"]])) > (
+                    cur["ratio"], cur["week"], cur["system"]):
+                sys_worst[y] = dict(system=str(r[s_cols["System"]]), week=w,
+                                    kind=kind, value=val, cap=cap, unit=unit,
+                                    ratio=ratio)
     c_cnt = _col(bh, "Count", "BatchLocations")
     c_bio = _col(bh, "Biomass", "BatchLocations")
     c_den = _col(bh, "Density", "BatchLocations")
@@ -737,6 +771,9 @@ def read_workbook(path, control, facility, bands, cv_pct: float,
             floor_min=min(floored) if floored else None,
             floor_max=max(floored) if floored else None,
             capped_weeks=len(capped),
+            sys_bio_over_weeks=sys_over["biomass"].get(y, 0),
+            sys_feed_over_weeks=sys_over["feed"].get(y, 0),
+            sys_worst=sys_worst.get(y),
         )
 
     # The layout: one mid-year week of the last read year, and every tank's
@@ -979,6 +1016,8 @@ def gates(run: EngineRun, year: int, control) -> list[Gate]:
     else:
         floor_s = (f"the resolved floor runs {y.floor_min:,.0f}-"
                    f"{y.floor_max:,.0f} fish/week")
+    sw = y.sys_worst
+    sys_buf = float(getattr(control, "global_buffer_pct", 0.0) or 0.0)
     no_cap = y.capped_weeks == 0
     cap_ok = (f"no biomass cap applies in any of the {y.weeks} weeks (peak "
               f"standing {y.standing_peak_kg / 1000:,.0f} t)" if no_cap else
@@ -1005,6 +1044,15 @@ def gates(run: EngineRun, year: int, control) -> list[Gate]:
                f"{w['tank']} ({w['system']}) {w['week']}: {w['density']:.1f} vs "
                f"{w['cap']:.0f} kg/m3 ({w['stage']})") if w else "",
               "no tank over its density cap"),
+        _gate("System limits",
+              y.sys_bio_over_weeks + y.sys_feed_over_weeks > 0, "WARN",
+              (f"{y.sys_bio_over_weeks} system-weeks over their biomass limit "
+               f"and {y.sys_feed_over_weeks} over their feed limit (flagged "
+               f"above the limit +{sys_buf:.0%}); worst {sw['system']} "
+               f"{sw['week']}: {sw['kind']} {sw['value']:,.0f} vs "
+               f"{sw['cap']:,.0f} {sw['unit']}") if sw else "",
+              f"every system within its biomass and feed limits (flagged "
+              f"above the limit +{sys_buf:.0%})"),
         _gate("Handling budget", y.weeks_over_move_budget > 0, "WARN",
               f"{y.weeks_over_move_budget} weeks over "
               f"{control.max_transfers_per_week} moves (max {y.moves_max})",

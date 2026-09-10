@@ -318,10 +318,16 @@ def test_gates_keep_their_order_and_only_fail_rows_decide(engine, control):
     warn_only = with_year(under_floor_weeks=2, weeks_over_move_budget=1,
                           r8_over_tank_weeks=3,
                           r8_worst=dict(week="x", tank=1, batch="b", density=99.0,
-                                        cap=85.0, system="OG1N", stage="SW"))
+                                        cap=85.0, system="OG1N", stage="SW"),
+                          sys_feed_over_weeks=2,
+                          sys_worst=dict(system="OG2S", week="x", kind="feed",
+                                         value=3400.0, cap=3000.0,
+                                         unit="kg/day", ratio=3400 / 3000))
     g = ie.gates(warn_only, STEADY, control)
     assert [x.name for x in g] == names
     assert ie.plausible(g) and any(x.status == "WARN" for x in g)
+    sysg = next(x for x in g if x.name == "System limits")
+    assert sysg.status == "WARN" and "OG2S" in sysg.detail   # a WARN, never a FAIL
 
     for bad in (with_year(zero_weeks=1),
                 with_year(peak_pct_of_cap=1.0 + ideal.PEAK_TOLERANCE + 0.01),
@@ -386,6 +392,7 @@ def test_the_reader_agrees_with_the_workbooks_own_independent_sheets(kept):
     tp = _sheet(path, "TransferPlan", "Week")
     bl = _sheet(path, "BatchLocations", "Week")
     bp = _sheet(path, "BiologyProjection", "Batch")
+    sla = _sheet(path, "SystemLimitsAudit", "Week")
 
     years = sorted({int(str(r["Week"])[:4]) for r in adv})
     got = ie.read_workbook(*kept["args"], years, facility_limits=kept["flimits"])
@@ -462,6 +469,14 @@ def test_the_reader_agrees_with_the_workbooks_own_independent_sheets(kept):
         for w in aw:
             assert weekly[w]["moves"] == len(pairs.get(w, ())), w
         assert Y.moves_max == max(len(pairs.get(w, ())) for w in aw)
+
+        # Per-system limits: the engine's own SystemLimitsAudit flags,
+        # counted here independently, system-week by system-week.
+        yr = [r for r in sla if str(r["Week"]).startswith(f"{y}-")]
+        assert Y.sys_bio_over_weeks == sum(1 for r in yr if r["Bio_flag"])
+        assert Y.sys_feed_over_weeks == sum(1 for r in yr if r["Feed_flag"])
+        assert (Y.sys_worst is None) == (
+            Y.sys_bio_over_weeks + Y.sys_feed_over_weeks == 0)
 
     # An empty facility has nothing big enough to harvest in its first weeks,
     # so the zero-week check above had real zeros to find.

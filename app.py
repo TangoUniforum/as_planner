@@ -5856,6 +5856,11 @@ def _ideal_transition(ctx, today):
             # Density overshoot is a WARN, never a FAIL — so it must be shown
             # in its own column or a ✓ hides the very trade being weighed.
             row[f"{tag}: tank-weeks over density"] = yy.r8_over_tank_weeks
+            # Per-system limits, biomass and feed SEPARATELY: a sum let fewer
+            # feed breaches hide more biomass ones (and a system-week over
+            # both limits counted twice).
+            row[f"{tag}: system-weeks over biomass limit"] = yy.sys_bio_over_weeks
+            row[f"{tag}: system-weeks over feed limit"] = yy.sys_feed_over_weeks
             row[f"{tag}: plausible"] = "✓" if not fails else "✗ " + ", ".join(fails)
         rows.append(row)
     st.dataframe(_pd.DataFrame(rows), hide_index=True, width="stretch")
@@ -5865,9 +5870,12 @@ def _ideal_transition(ctx, today):
         "First and last years are partial (the run starts at the PR and lasts "
         f"{_TR_HORIZON_WEEKS} weeks). A ✗ year is not a real result: its "
         "tonnage prices fish the facility could not actually carry or land. "
-        "✓ means no hard failure — tanks over their density cap are a "
-        "warning, counted in their own column: compare it between the two "
-        "plans, it is what extra tonnage costs.")
+        "✓ means no hard failure — tanks over their density cap, and systems "
+        "over their biomass or feed limit (flagged above the limit + your "
+        f"{float(getattr(ctx['control'], 'global_buffer_pct', 0.0) or 0.0):.0%}"
+        " buffer, exactly as the SystemLimitsAudit sheet flags them), are "
+        "warnings, counted in their own columns: compare them between the two "
+        "plans — that is what extra tonnage costs.")
 
 
 # ============================================================

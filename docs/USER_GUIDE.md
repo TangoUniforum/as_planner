@@ -2400,7 +2400,9 @@ warning on one early batch is expected for the same reason.
 clean conservation audits does not make a plan feasible — an overstocked run
 once "finished" at 1,685 % of the cap. So each run is graded: every week
 harvests, peak biomass within 2 % of the cap and the audits clean are FAILs if
-broken; the harvest floor, tank density and 15-move budget are WARNs. A plan
+broken; the harvest floor, tank density, the per-system biomass and feed
+limits (flagged above the limit + your `global_buffer_pct`, exactly as the
+SystemLimitsAudit sheet flags them) and the 15-move budget are WARNs. A plan
 with a FAIL is not a result: its revenue prices fish the facility could not
 carry or land.
 
@@ -2436,23 +2438,33 @@ for which weeks (on the current config the biomass cap's rows cover late 2026,
 so a new cap takes effect from 2027). If your Control values change, the boxes
 reset to the new values rather than keep an old one.
 
-What your engine said at a **4,200 t** cap on the 8/31 PR (2026-09-10; the
-cap applies from 2027, the 2026 rows stay at 3,650 t):
+**Can the cap go up within the system constraints?** (2026-09-10; your engine,
+the 8/31 PR, 208 weeks; a new cap applies from 2027; breaches summed over
+2027–29.) Your rule: the cap may rise if the plan stays within the system
+constraints. Today's plan already breaches some limits, so the test is "no
+worse than today's plan at today's cap":
 
-| | 2027 | 2028 revenue / avg fish | 2029 revenue / avg fish (≥ 8 lb) | 2027–29 |
+| Cap · future batches | Revenue 2027–29 | Tank-weeks over density | System-weeks over biomass / feed | No worse than today? |
 |---|---|---|---|---|
-| Today's 340k at 3,800 t (now) | $141.1M | $151.9M / 3.66 kg | $142.8M / 3.55 kg (8 %) | $435.8M |
-| Today's 340k at 4,200 t | $145.4M | $159.5M / 3.79 kg | $151.7M / 3.69 kg (14 %) | $456.6M |
-| 280k at 4,200 t | $142.8M | $160.4M / 4.26 kg | $146.0M / 4.25 kg (38 %) | $449.2M |
-| 250k at 4,200 t | $141.5M | $153.7M / 4.48 kg | $146.1M / 4.65 kg (58 %) | $441.3M |
+| **3,800 t · today's 340k** | $435.8M | 195 | 3 / 137 | the baseline |
+| 3,800 t · 320k | $433.1M | 181 | 2 / 125 | ✅ |
+| 3,800 t · 300k | $433.3M | 238 | 7 / 126 | ❌ |
+| **3,800 t · 280k** | $424.1M | 136 | 2 / 59 | ✅ clearly |
+| 4,000 t · today's 340k | $459.1M | 485 | 10 / 235 | ❌ |
+| 4,000 t · 320k / 300k / 280k | $448.0M / $439.3M / $436.8M | 287 / 304 / 283 | 4 / 169 · 3 / 120 · 7 / 113 | ❌ |
+| 4,200 t · today's 340k | $456.6M | 408 | 9 / 202 | ❌ |
+| 4,200 t · 320k / 300k / 280k | $451.9M / $459.0M / $449.2M | 369 / 585 / 456 | 5 / 158 · 33 / 252 · 20 / 154 | ❌ |
 
-**The cap is the big lever** — about $21M over three years with no other
-change, and no year over the cap after 2026. Batch size is the fish-size lever:
-at today's flat prices above 8 lb, today's schedule plus the higher cap earns
-the most; if big fish earn a premium, 280k at 4,200 t is the contender. More
-fish in the tanks also means more tank-weeks over their density cap (2029:
-159 today at 4,200 t, 125 at 280k, 228 at 250k). Whether 4,200 t is allowed,
-and whether size earns a premium, are your calls.
+**Not with today's tanks and engine.** Every 4,000 t and 4,200 t path earns
+more ($1–23M over three years), but takes tank-density breaches from 195 to
+283–585 tank-weeks, and most also add system biomass or feed breaches — the
+extra fish do not fit the tanks at their density caps. **The binding limit is
+tank density, not the biomass cap.** Within today's constraints the choices
+stay at 3,800 t: today's schedule, 320k (−$2.7M, slightly fewer breaches), or
+**280k** — the clean option: 30 % fewer density breaches and 57 % fewer system
+feed breaches for −$11.7M (−3 %). Using a higher cap would need more room per
+tank (higher density limits or more volume) or a planning engine that keeps
+density in bounds at higher biomass; none of the stocking sizes tested does.
 
 What your engine said on the 8/31 PR (2026-09-10; the promoted plain
 controller, 208 weeks, your manual events, every future batch re-sized from
