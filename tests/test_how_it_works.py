@@ -227,15 +227,18 @@ def test_rulebook_does_not_contain_known_stale_phrasing(monkeypatch, phrase):
     assert phrase.lower() not in _render_rulebook(monkeypatch, flat=True).lower()
 
 
-def test_rulebook_states_the_global_limitations(monkeypatch):
-    """The operator must be able to tell a benchmark from a runnable plan.
-    These are the three things that decide it, all verified against the code:
-    Global ignores the handling budget, does not enforce the full tier
-    rulebook, and only its CP-SAT arm constrains per-tank density."""
+# test_rulebook_states_the_global_limitations lived here until 2026-09-10. It
+# required the page to spell out Global's limits (never read the handling
+# budget, TOPOLOGY VIOLATION rows, R1/R5/R7 unchecked) so the operator could
+# tell a benchmark from a runnable plan. The Global family was removed that
+# day, so describing it as a selectable engine would now be false. What must
+# hold instead: the page says it is gone, and does not offer it.
+def test_rulebook_records_the_global_removal_and_offers_no_global_engine(monkeypatch):
     out = _render_rulebook(monkeypatch, flat=True).lower()
-    assert "handling budget" in out and "never read" in out
-    assert "topology violation" in out
-    assert "r1, r5 and r7 are not checked" in out
+    assert "global family was removed" in out
+    for gone in ("global — cp-sat optimal", "global — lexicographic lp",
+                 "the global engines are benchmarks", "two families"):
+        assert gone not in out, f"the rulebook still offers Global: {gone!r}"
 
 
 def test_rulebook_names_all_five_manual_event_types(monkeypatch):

@@ -156,8 +156,10 @@ def _read_or_explain(loader, what: str, hint: str = _READ_FIX_HINT):
 
 def _cpu_workers() -> int:
     """Parallel-work budget from the sidebar's "Computer power" percent: that
-    share of this machine's logical CPUs, at least 1. One number feeds both
-    kinds of heavy work — CP-SAT search threads and Optimize sweep processes."""
+    share of this machine's logical CPUs, at least 1. One number feeds the
+    parallel heavy work — Optimize sweep processes and the Ideal rhythm grid.
+    (It also set CP-SAT search threads until the Global method was removed on
+    2026-09-10.)"""
     pct = int(st.session_state.get("cpu_pct", 40))
     return max(1, round((os.cpu_count() or 2) * pct / 100.0))
 
@@ -247,7 +249,7 @@ def _active_config_summary(cd: dict) -> list[tuple]:
          "the plant's weekly capacity — a cap, never a target"),
         ("Handling budget", f"{g('max_transfers_per_week', 0):,.0f} moves/wk",
          "deferrable quality moves stop here; essential moves are never "
-         "blocked (Controller engines only — Global ignores this)"),
+         "blocked"),
     ]
     # Surface the opt-in knobs only when they're engaged (off by default).
     if (g("min_transfer_count") or 0) > 0:
@@ -771,9 +773,8 @@ _CONTROL_HELP = {
         "balancing, variable-quantity trims, remnant clean-up) wait for a "
         "calmer week — the split pass is NOT budget-gated. Essential moves "
         "are never blocked; a week they alone exceed the budget shows "
-        "amber/red on the checklist instead. 0 switches the budget off. NOTE: "
-        "only the Controller engines read this — the Global engines ignore it "
-        "entirely. Unit: moves/week.",
+        "amber/red on the checklist instead. 0 switches the budget off. Every "
+        "planning method reads it. Unit: moves/week.",
     "default_hog_yield":
         "Converts live (gross) weight to sold weight — HOG means head-off, "
         "gutted. Sold kg = live kg × this. Used wherever harvest tonnage or "
@@ -5504,7 +5505,7 @@ earlier**. A plan that pins to relief every week isn't using a buffer, it's
 hiding a restructuring problem.
 
 When the **harvest guide** is on (Configure → Control, `hybrid_follow` — on by
-default), a whole-horizon harvest envelope (the Global engine's long view) is
+default), a whole-horizon harvest envelope (L1, the tankless long view) is
 computed first and fed to the weekly controller as a **target band**
 (±{k['guide_band'] * 100:.0f}%): it tells the controller to harvest *less* in
 fat weeks so those fish still exist for lean ones — the one thing a week-by-week
@@ -5578,14 +5579,13 @@ tank audit. Density does **not** bind here: rule **R8**
 harvest — both 6N depuration and, after the production switch, in-place
 starvation in an ordinary grow-out tank.""")
 
-    with st.expander("8 · The engines — two families, and how far you can "
-                     "trust each"):
+    with st.expander("8 · The engines — one family, and how far you can "
+                     "trust it"):
         st.markdown(f"""
 **What it decides.** Which planning *method* produced your plan. Every method
-reads the same inputs and every method's output goes through the same audits —
-but they do **not** all enforce the same rules while planning. That difference
-is the single most important thing on this page, so it is spelled out below
-rather than smoothed over.
+reads the same inputs, enforces the same tier rules while planning, and goes
+through the same audits — they differ only in *how* they choose each week's
+harvests and tank moves.
 
 **The Controller family — runnable operating plans.**
 
@@ -5598,51 +5598,22 @@ rather than smoothed over.
 * **Controller — greedy + LNS** — adds an audited relocation pass. It only
   changes anything when there are free tanks to relocate into, so on a
   capacity-bound facility it usually matches the plain controller exactly.
+* **Controller — plan-feasible tanks** — plans each week within the tanks
+  that actually exist, handing back forward tank reservations until the week
+  fits. Measured on 3 PRs it does not win (tonnage slips, refusals rise); it
+  is kept because it isolates a real planning question on your PR.
 
-All three enforce the tier rules R1-R8 *while planning* (an illegal move is
+All four enforce the tier rules R1-R8 *while planning* (an illegal move is
 refused, not logged), respect the **{k['moves']}-move handling budget** by
 deferring their optional quality passes, and route all harvest through 6N.
 
-**The Global family — whole-horizon benchmarks, not drop-in operating plans.**
-
-* **Global — lexicographic LP** — plans the whole horizon up front: harvest
-  envelope → per-batch share per system → tank placement.
-* **Global — CP-SAT optimal** — the same front end, but the grow-out tank
-  layout is re-solved week by week with a constraint solver. Slowest by far;
-  tightest, most evenly balanced layouts. Its advantage is **not foresight** —
-  it plans one week at a time, seeded by last week's occupancy, exactly as
-  myopic as the controller — but an explicit min-max *balance* term the
-  controller has no equivalent of. Same-week tank swaps are only *softly*
-  penalised in that objective, so it buys them freely: expect a
-  transfer-heavy plan.
-
-Both Global methods conserve fish exactly and pass the tank-continuity audit —
-that part is real. **What they do not do:**
-
-* They **never read the handling budget.** No Global code looks at
-  `max_transfers_per_week`; they minimise moves in their objective but nothing
-  caps a week. Expect weeks well above {k['moves']} moves.
-* They enforce only **part** of the tier rulebook. R2/R3/R4 are checked when a
-  transfer is paired up, and R6 is respected by the CP-SAT layout. **R1, R5 and
-  R7 are not checked at all** while planning. When no legal source exists for a
-  needed move, the Global pick **emits the move anyway** and writes a
-  `TOPOLOGY VIOLATION` row to the ValidationLog — the controller would have
-  refused it. Read that sheet before treating a Global plan as executable.
-* Their planning pass **decomposes the horizon into independent weekly
-  problems**, which is why week-to-week topology can break in the first place.
-* Only **CP-SAT** enforces a real per-tank density cap (each tank's own
-  kg/m³ × volume, from your facility config). The **LP** arm sizes tanks off a
-  single facility-wide number — the *smallest* OG tank's legal mass — and where
-  a batch cannot get enough tanks it packs it denser and flags the row.
-  Nothing rejects an over-cap tank on the LP path.
-* If CP-SAT cannot solve a week, that week falls through to an
-  **unconstrained** placement (no density test) and the run writes
-  `PLACEMENT DEGRADED` to the ValidationLog naming how many weeks it hit.
-  On the current facility + PR this is 0 weeks, but it is a real path, not a
-  removed one — so check for that row rather than assuming.
-
-Use Global to ask *"how good could a plan be if nothing constrained handling
-or topology?"* Use a Controller method for a plan the crew can actually run.
+**The Global family was removed on 2026-09-10.** It planned the whole horizon
+up front (an LP, or a CP-SAT solver week by week). It conserved fish, but it
+never read the handling budget, did not check R1, R5 or R7 while planning, and
+its tuned arms hard-failed the 6N one-way rule — a benchmark, never a plan the
+crew could run. The one part of it that helps, the whole-horizon harvest
+envelope (L1), lives on inside the hybrid. The pre-removal tool is preserved
+as V1 (git tag `v1-baseline-pre-v2`).
 
 **What they may never do.** Diverge on the starting state: the manual window,
 the PR hydration and the biology are shared — after a scripted window, *no*
@@ -5656,9 +5627,8 @@ hard-rule badges (conserves · fully placed · no empty week · under cap), and
 Analyze's checklist adds the density and handling-budget gates, which are
 **flagged, never disqualifying**, plus the **6N one-way rule (R7), which is
 hard** — any outbound depuration transfer FAILs it and drops the plan to the
-bottom of the ranking. That is why the Global family left the default roster: it
-consumed most of an 8h35m tournament to produce arms that hard-fail R7. A plan
-can still top a lens and be unrunnable for a SOFT reason; the badges and the
+bottom of the ranking. A plan can still top a lens and be unrunnable for a
+SOFT reason; the badges and the
 ValidationLog are how you tell.""")
 
     with st.expander("9 · The checks that bind everything (the audit net)"):
@@ -5727,11 +5697,11 @@ that counts fish which grew into the window afterwards.
 
 The yardstick is the excess itself, never an engine's own target. Asking "did it
 get what it asked for?" would judge the controller on a number it records while
-Global, which records none, kept being judged on plant capacity — the same
-asymmetry that let Global's OG-only biomass flatter it for months. On the
-8.23.26 PR this separates a controller plan with **1 avoidable** red week from a
-Global plan with **14**, where the raw counts (15 and 30) largely measure the
-same maturity trough twice.
+an engine that records none is judged on plant capacity — the asymmetry that
+once let the (since removed, 2026-09-10) Global method's OG-only biomass
+flatter it for months. On the 8.23.26 PR this separated a controller plan with
+**1 avoidable** red week from a Global plan with **14**, where the raw counts
+(15 and 30) largely measured the same maturity trough twice.
 
 **Gate 3 is the contract, gate 2 is only its degenerate case.** "Never an
 empty week" catches a week that harvests *literally nothing*; the rule you
@@ -5798,15 +5768,7 @@ lift a plan above one that beats it on an earlier tier.""")
   — measured on real PRs; forcing it forward breaks feed caps.
 * **A week can exceed the {k['moves']}-move handling budget.** Essential
   moves (rotation fills, arrival make-room) are never blocked; such a week
-  is flagged on the handling gate rather than silently truncated. Note the
-  budget is a *Controller* mechanism — the Global engines never read it at
-  all (layer 8).
-* **The Global engines are benchmarks, not runnable plans.** They do not
-  enforce R1, R5 or R7 while planning, they ignore the handling budget, and
-  the LP variant has no per-tank density constraint. They conserve fish and
-  balance the facility beautifully; that is a different question from "can
-  the crew execute this". Layer 8 has the full list — read it before
-  adopting a Global plan.
+  is flagged on the handling gate rather than silently truncated.
 * **Three gates can actually sink a plan.** Conservation,
   never-an-empty-week and the 6N one-way commitment (R7) are the hard
   ones. THREE more can never even reach FAIL by design — the weekly
@@ -6242,13 +6204,12 @@ st.caption(
 with st.sidebar:
     # "Computer power" — how much of this machine the heavy runs may use. Stored
     # as a PERCENT of logical CPUs (operator-friendly); _cpu_workers() translates
-    # it into CP-SAT search threads / sweep worker processes at the call sites.
+    # it into sweep worker processes at the call sites.
     st.slider(
         "Computer power", min_value=10, max_value=100, value=40, step=10,
         format="%d%%", key="cpu_pct",
-        help="How much of this computer the heavy runs may use — the Global "
-             "optimal (CP-SAT) solver (also inside Decide -> Compare engines) and the "
-             "Optimize sweeps. Higher = faster runs, but other applications "
+        help="How much of this computer the heavy runs may use — the Optimize "
+             "sweeps and the Ideal rhythm grid. Higher = faster runs, but other applications "
              "may feel slower (and Optimize sweeps use more memory) while a "
              "run is going. A plain controller Run forecast is "
              "sequential and unaffected.",
@@ -7574,19 +7535,9 @@ def _optimizer():
     _render_active_config(
         _base_cd, "ℹ️ Base configuration — the search tunes knobs ON TOP of this")
 
-    # Optimize tunes the controller-family pipeline (the live config's engine).
-    # If the plan picked on the Compare board is a GLOBAL engine, knobs found
-    # here were never measured on it — say so instead of letting a save look
-    # like it was validated for the chosen plan.
-    _ch = _effective_method()[0]
-    _chm = _METHODS.get(_ch)
-    if _chm is not None and _chm.engine == "global":
-        st.warning(
-            f"Your picked plan is **{_chm.label}** (a Global engine). Optimize "
-            f"sweeps and validates the **controller-family** engine, so a "
-            f"recommendation saved here was not measured on your picked plan — "
-            f"re-run **Decide -> Compare engines** after saving to see its effect "
-            f"there.")
+    # (A warning for a Global-engine pick lived here. Every registered method is
+    # controller-family since the Global method was removed on 2026-09-10, so
+    # knobs tuned here are always measured on the engine the picked plan uses.)
 
     _hist = optimize.read_run_log(n=15)
     if _hist:
@@ -8219,7 +8170,7 @@ def _res_from_disk(res: dict) -> dict:
 def _board_store() -> dict:
     """The per-method finished-run store, hydrated from the DISK cache once
     per session — so a page reload, a frozen tab, or a browser restart never
-    loses a finished leg (a CP-SAT leg is 30 minutes of compute). Staleness
+    loses a finished leg (each is a minute or more of compute). Staleness
     is unchanged: every entry carries its sig and is checked at use."""
     store = st.session_state.setdefault("_board_store", {})
     if not st.session_state.get("_board_cache_hydrated"):
@@ -8293,8 +8244,8 @@ def _compare_and_choose():
         "crater. They are a floor, not the whole rulebook: they say nothing "
         "about the handling budget, the tier rules or the depuration hold, and "
         "the empty-week badge catches craters rather than the weekly contract "
-        "floor itself. Read the legend below before picking a **Global** "
-        "method, and Analyze's checklist for the rest.")
+        "floor itself. Read the legend below, and Analyze's checklist for the "
+        "rest.")
 
     _cfg_ok = _config_ready() and _scenario_ready()
     _pr_ok = pr is not None and pr["ok"]
@@ -8369,9 +8320,9 @@ def _compare_and_choose():
                     state="complete" if res.get("ok") else "error")
             res["_label"] = mlabel
             # Which FAMILY produced this plan. The handling-budget gate needs
-            # it: Global reads neither max_transfers_per_week nor
-            # handling_mortality_pct, so grading it on move counts compares a
-            # budgeted planner with an unbudgeted one. Stamped from the
+            # it so an unbudgeted planner is never graded on move counts (the
+            # Global family read neither max_transfers_per_week nor
+            # handling_mortality_pct; removed 2026-09-10). Stamped from the
             # registry, never sniffed from the label string.
             _mm = _METHODS.get(mkey)
             res["_engine_family"] = getattr(_mm, "engine", "") if _mm else ""
@@ -8501,18 +8452,12 @@ def _compare_and_choose():
             "from then on).\n\n"
             "⚠️ **These four badges are not the whole rulebook.** They do not "
             "check the handling budget, the tier rules R1-R8, or the "
-            "depuration hold. That matters most for the two **Global** "
-            "methods: they plan the horizon as independent weekly problems, "
-            "never read the handling budget, and do not enforce R1, R5 or R7 "
-            "while planning — where no legal move exists they emit the move "
-            "anyway and log a `TOPOLOGY VIOLATION` row. A Global plan can "
-            "therefore win several lenses and still not be executable. Before "
-            "adopting one, open its workbook's **ValidationLog** and look for "
-            "`TOPOLOGY VIOLATION`, `DEPURATION HOLD` and `PLACEMENT DEGRADED` "
-            "rows, and check the handling-budget gate over in **Analyze**. "
-            "The Controller methods enforce all of it while planning, so they "
-            "are the ones to reach for when you want a plan the crew runs "
-            "rather than a benchmark to measure against.")
+            "depuration hold. Every method on this board enforces the tier "
+            "rules and the hold while planning, but a week can still go over "
+            "the handling budget (essential moves are never blocked) — so "
+            "before adopting a plan, check the handling-budget gate over in "
+            "**Analyze** and look for `DEPURATION HOLD` rows in its "
+            "workbook's **ValidationLog**.")
     pool = _board_lens_pool(scored)
     cols = st.columns(2)
     for i, (label, getter, blurb) in enumerate(_BOARD_LENSES):
@@ -8739,7 +8684,7 @@ def _adoption_gate(cand, sig: str, slot: str, box=None) -> bool:
     SHAPE, decided deliberately: the button never disappears. Hiding it would
     take a judgement call away from the operator on the one surface that is
     theirs — they can see the plan, its checklist and its provenance, and a
-    hard-gate FAIL on a Global leg may be a known modelling gap they mean to
+    hard-gate FAIL on a leg may be a known modelling gap they mean to
     accept. Leaving it unguarded, though, is how a relief-ceiling breach walks
     into control.yaml unremarked. So: adopt anything you can justify, never
     anything you did not notice.
@@ -8915,9 +8860,7 @@ def _decide():
     with st.expander("🎛️ Tune knobs on one engine with your own weights"):
         st.caption(
             "Sweeps the controller family against an objective you choose, with "
-            "a Pareto view of the trade. Note it tunes the CONTROLLER — if your "
-            "chosen plan is a Global engine, knobs found here were not measured "
-            "on it.")
+            "a Pareto view of the trade.")
         _optimizer()
 
 
@@ -9104,8 +9047,7 @@ def _analyze(skip_lever_check=False):
                        "PR+config already measured (keyed on file CONTENT, not "
                        "timestamps), so re-running the tournament is cheap. "
                        "Methods showing 0 grid and 0 descent have no tunable "
-                       "knobs and compete at stock — that is the two Global "
-                       "methods.")
+                       "knobs and compete at stock.")
     go = st.button(
         f"▶ Run {'TUNED tournament' if tuned_mode else 'full analysis'} "
         f"({_n_eng} engines + knob search + checklist)",
@@ -9144,9 +9086,9 @@ def _analyze(skip_lever_check=False):
                 _ms.update(state="complete" if res.get("ok") else "error")
             res["_label"] = mlabel
             # Which FAMILY produced this plan. The handling-budget gate needs
-            # it: Global reads neither max_transfers_per_week nor
-            # handling_mortality_pct, so grading it on move counts compares a
-            # budgeted planner with an unbudgeted one. Stamped from the
+            # it so an unbudgeted planner is never graded on move counts (the
+            # Global family read neither max_transfers_per_week nor
+            # handling_mortality_pct; removed 2026-09-10). Stamped from the
             # registry, never sniffed from the label string.
             _mm = _METHODS.get(mkey)
             res["_engine_family"] = getattr(_mm, "engine", "") if _mm else ""
@@ -10720,7 +10662,7 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
                                    for p in bplans])
             st.dataframe(hdr_df, hide_index=True, use_container_width=True)
             # A previous run's pick may not exist in this run's plans (different
-            # PR, or a Global-LP plan without per-tank rows) — Streamlit passes
+            # PR, or a plan without per-tank rows) — Streamlit passes
             # the stale value through verbatim, so guard it or next() raises.
             _bp_opts = [p["Batch"] for p in bplans]
             if st.session_state.get("batchplan_pick") not in _bp_opts:
@@ -10756,7 +10698,7 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
     # ---- Transfer plan — the week-by-week move list. Parsed LAZILY from
     # the output workbook (every engine writes a TransferPlan sheet), so it
     # also works for results picked/restored before this view existed, and
-    # shows even when per-batch plans are unavailable (Global LP).
+    # shows even when per-batch plans are unavailable.
     with tab_plan:
         st.divider()
         st.subheader("🚚 Transfer plan — every planned move, week by week")

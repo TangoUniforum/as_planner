@@ -183,7 +183,9 @@ def main() -> int:
     from forecast.methods import REGISTRY, run_method
 
     t0 = time.time()
-    rc = run_method(REGISTRY["controller-hybrid"], args.workbook, str(xlsx),
+    # run_method returns (rc, elapsed_seconds). Treating the tuple as rc made
+    # `if rc:` always true, so this printed FAILED on every run (2026-09-10).
+    rc, _elapsed = run_method(REGISTRY["controller-hybrid"], args.workbook, str(xlsx),
                     str(cfg), args.scenario_dir, quiet=False)
     dt = time.time() - t0
     if rc:
