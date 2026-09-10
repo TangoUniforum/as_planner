@@ -57,7 +57,7 @@ def run_outputs(tmp_path_factory):
     tmp = tmp_path_factory.mktemp("wb") / "Forecast.xlsm"
     shutil.copy(WORKBOOK, tmp)
     rc = run_mod.main(str(tmp), config_dir=str(CONFIG_DIR),
-                      scenario_dir=str(SCENARIO_DIR))
+                      scenario_dir=str(SCENARIO_DIR), calib_log_path="")
     assert rc == 0, f"pipeline exited non-zero ({rc})"
     return tmp
 
@@ -306,7 +306,8 @@ def test_engine_deterministic_across_hash_seeds():
         o = os.path.join(td, "deto%d.xlsm" % os.getpid())
         shutil.copy(os.environ["WB"], t)
         with contextlib.redirect_stdout(io.StringIO()):
-            r.main(t, o, config_dir=os.environ["CFG"], scenario_dir=os.environ["SCN"])
+            r.main(t, o, config_dir=os.environ["CFG"], scenario_dir=os.environ["SCN"],
+                   calib_log_path="")
         import hashlib
         wb = openpyxl.load_workbook(o, data_only=True)
         ws = wb["BatchLocations"]

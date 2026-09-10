@@ -80,7 +80,8 @@ def windowed_run(tmp_path_factory):
     shutil.copy(WORKBOOK, inp)
     with contextlib.redirect_stdout(io.StringIO()):
         rc = run_mod.main(str(inp), str(out), config_dir=str(cdir),
-                          scenario_dir=str(sdir), advance_weeks=WINDOW_WEEKS)
+                          scenario_dir=str(sdir), advance_weeks=WINDOW_WEEKS,
+                          calib_log_path="")
     assert rc == 0, f"pipeline exited non-zero ({rc})"
     return out
 

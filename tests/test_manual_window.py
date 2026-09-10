@@ -419,7 +419,8 @@ class TestGradedHarvest:
         shutil.copy(WORKBOOK, wb)
         out = tmp_path / "out.xlsm"
         run_mod.main(str(wb), output_path=str(out),
-                     config_dir=str(CONFIG_DIR), scenario_dir=str(sdir))
+                     config_dir=str(CONFIG_DIR), scenario_dir=str(sdir),
+                     calib_log_path="")
         owb = _lw(str(out), data_only=True)
         tc = [[c.value for c in r]
               for r in owb["TankContinuityAudit"].iter_rows()]
@@ -526,7 +527,8 @@ class TestPurge6NFreeze:
         shutil.copy(WORKBOOK, wb)
         out = tmp_path / "out.xlsm"
         run_mod.main(str(wb), output_path=str(out),
-                     config_dir=str(CONFIG_DIR), scenario_dir=str(sdir))
+                     config_dir=str(CONFIG_DIR), scenario_dir=str(sdir),
+                     calib_log_path="")
         owb = _lw(str(out), data_only=True)
         tc = [[c.value for c in r]
               for r in owb["TankContinuityAudit"].iter_rows()]
@@ -590,7 +592,8 @@ class TestAutoCalibrateFw:
         shutil.copy(WORKBOOK, wb)
         out = tmp_path / "out.xlsm"
         run_mod.main(str(wb), output_path=str(out),
-                     config_dir=str(cdir), scenario_dir=str(sdir))
+                     config_dir=str(cdir), scenario_dir=str(sdir),
+                     calib_log_path="")
         owb = _lw(str(out), data_only=True)
         dg = [r for r in owb["Diagnostics"].iter_rows(values_only=True)]
         hdr = next(r for r in dg if r and str(r[0]) == "Batch")
@@ -633,4 +636,5 @@ class TestWindowHorizonGuard:
         out = tmp_path / "out.xlsm"
         with pytest.raises(ValueError, match="horizon"):
             run_mod.main(str(wb), output_path=str(out),
-                         config_dir=str(CONFIG_DIR), scenario_dir=str(sdir))
+                         config_dir=str(CONFIG_DIR), scenario_dir=str(sdir),
+                         calib_log_path="")
