@@ -5019,6 +5019,35 @@ def _config_editor():
 # Ideal — the steady rhythm the facility can sustain (2026-09-10)
 # ============================================================
 
+# Ideal-page widget state. Streamlit (1.50) DROPS a keyed widget's value when
+# the widget is not rendered (another mode is showing), and a keyed widget
+# IGNORES `value=` after its first render. So each value is remembered under a
+# shadow key and restored before the widget draws again, and `value=` is
+# passed only while the key is empty (passing both makes Streamlit warn that
+# the value was "also set via the Session State API").
+_IDEAL_KEEP = ("ideal_cap_t", "ideal_cads", "ideal_sizes", "ideal_ref_cad",
+               "ideal_ref_size", "ideal_ref_cap", "ideal_ref_hmax",
+               "ideal_ref_hmin", "ideal_ref_wmin", "ideal_ref_feed",
+               "ideal_tr_cutoff", "ideal_tr_sizes")
+
+
+def _ideal_restore():
+    for k in _IDEAL_KEEP:
+        if k not in st.session_state and ("_keep_" + k) in st.session_state:
+            st.session_state[k] = st.session_state["_keep_" + k]
+
+
+def _ideal_save():
+    for k in _IDEAL_KEEP:
+        if k in st.session_state:
+            st.session_state["_keep_" + k] = st.session_state[k]
+
+
+def _ideal_default(key, value, param="value"):
+    """`value=` (or `default=`) for a keyed widget only while its key is empty."""
+    return {} if key in st.session_state else {param: value}
+
+
 def _ideal():
     """What SHOULD we stock? The steady rhythm at a chosen biomass cap.
 
@@ -5032,14 +5061,16 @@ def _ideal():
     from forecast import ideal as _im
     from forecast import scenario_io as _sio
 
+    _ideal_restore()
     st.header("🎯 Ideal — what should we stock?")
     st.caption(
-        "The stocking rhythm this facility could run forever at a given biomass "
-        "cap — how many smolt, how often. Measured from a clean start (none of "
-        "today's fish), read over a steady third year. **A carrying-capacity "
-        "answer, not an operating plan:** it has no tanks, density or handling "
-        "limits, and the growth model runs a few percent hot (see Accuracy), so "
-        "tonnage here is optimistic.")
+        "Three steps. **1 · Quick scan** — which stocking rhythms (how many "
+        "smolt, how often) this facility could carry forever at a biomass cap "
+        "you choose, measured in seconds by the tankless model. **2 · Reference "
+        "sheet** — your batch table, run through the real forecast engine from "
+        "an empty facility: the real tonnage, tank layout and checks. "
+        "**3 · Transition** — how to get there from today's fish by re-sizing "
+        "only future stockings. Nothing here changes your config or scenario.")
 
     try:
         ctx = _im.load_context(_ROOT)
@@ -5050,12 +5081,14 @@ def _ideal():
                  f"{type(e).__name__}: {e}")
         return
 
+    st.subheader("1 · Quick scan — which rhythms fit (tankless model)")
     cap_now_t = float(ctx["control"].max_biomass_kg) / 1000.0
     c1, c2 = st.columns([3, 2])
     with c1:
         cap_t = st.slider(
             "Biomass cap (t)", min_value=3000, max_value=6500,
-            value=int(min(6500, max(3000, round(cap_now_t / 100.0) * 100))),
+            **_ideal_default("ideal_cap_t", int(min(
+                6500, max(3000, round(cap_now_t / 100.0) * 100)))),
             step=100, key="ideal_cap_t",
             help="The most standing fish the facility may carry. A variable, "
                  "not a permit — try values. Above roughly 5,000 t there is no "
@@ -5066,11 +5099,14 @@ def _ideal():
     with st.expander("Grid — which rhythms to try"):
         cads = st.multiselect(
             "Cadence (days between stockings)", [35, 42, 49, 56, 63, 70],
-            default=list(_im.CADENCES), key="ideal_cads")
+            **_ideal_default("ideal_cads", list(_im.CADENCES), "default"),
+            key="ideal_cads")
         sizes_k = st.multiselect(
             "Batch size (thousand fish to OG)",
             [220, 250, 280, 310, 340, 370, 400, 440],
-            default=[s // 1000 for s in _im.SIZES], key="ideal_sizes")
+            **_ideal_default("ideal_sizes", [s // 1000 for s in _im.SIZES],
+                             "default"),
+            key="ideal_sizes")
         st.caption(
             f"{len(cads) * len(sizes_k)} runs of ~2–5 s each, spread over "
             f"{_cpu_workers()} worker(s) (sidebar **Computer power**). "
@@ -5096,11 +5132,32 @@ def _ideal():
             if cur is None:
                 cur = _im.evaluate(today[0], today[1], cap_kg, **ctx)
         st.session_state["_ideal_result"] = dict(key=key, rows=rows, today=cur)
+        # Steps 2 and 3 follow the scan: their inputs render later in THIS
+        # run, so writing their state here is allowed, and the reference
+        # table is refilled from the new best rhythm.
+        b_new = _im.best(rows)
+        if b_new is not None:
+            st.session_state["ideal_ref_cad"] = int(b_new.cadence_days)
+            st.session_state["ideal_ref_size"] = int(b_new.batch_size)
+            st.session_state["ideal_tr_sizes"] = str(int(b_new.batch_size))
+            st.session_state["_ideal_ref_regen"] = True
+        st.session_state["ideal_ref_cap"] = int(cap_t)
 
     res = st.session_state.get("_ideal_result")
     if not res:
         st.info("Pick a cap and press **Find the ideal rhythm**.")
-        return
+    else:
+        _ideal_quick_results(_im, res, key)
+    st.divider()
+    _ideal_reference(ctx, today, cap_t)
+    st.divider()
+    _ideal_transition(ctx, today)
+    _ideal_save()
+
+
+def _ideal_quick_results(_im, res, key):
+    """Step 1's answer: the best balanced rhythm, today's, and the grid."""
+    import pandas as _pd
     if res["key"] != key:
         # State outlives its inputs — say so rather than show a stale answer
         # under a slider that now reads something else.
@@ -5176,8 +5233,473 @@ def _ideal():
   bands say, a slower, bigger-fish rhythm may be the better call — that is
   your judgement, not the model's.
 - **Hatchery cost is not included** — fewer smolt is cheaper than shown.
-- **Not yet here:** the ideal tank layout for this rhythm, and the transition
-  from today's fish to it. Both are next.""")
+- **This quick model has no tanks.** It runs well above the real engine on
+  the same rhythm — measured 2026-09-10 with your promoted controller, about
+  16% high on tonnage and 19% on revenue (the engine grows smaller fish under
+  real density and handling limits). A different engine can also rank close
+  options differently: comparing the best rhythm at 3,800 t with the best at
+  4,200 t, your controller agreed with this grid (4,200 t) but the hybrid
+  preferred 3,800 t. Use this grid to rule rhythms out; settle close calls in
+  **2 · Reference sheet** below, which runs your engine.""")
+
+
+# The reference sheet runs 3 years from an empty facility and reads the last,
+# steady one (year 2 is still filling: it lands only ~90% of what it stocks).
+# The transition runs 4 years on the real PR so a re-size's 2028-29 effect shows.
+_REF_HORIZON_WEEKS = 156
+_TR_HORIZON_WEEKS = 208
+
+
+def _ideal_gate_rows(gate_list):
+    return [{"Check": g.name, "Result": g.status, "Detail": g.detail}
+            for g in gate_list]
+
+
+def _ideal_reference(ctx, today, cap_t):
+    """Step 2 — the operator's reference sheet, run in the REAL engine.
+
+    Their spec (2026-09-10): input batch count, input date, facility limits,
+    growth model and FCR model per batch, and run it "just as a reference
+    sheet". The table is generated from a rhythm, then editable per batch
+    with the same columns and serialisation as Configure → Batches. It runs
+    through the unchanged controller-hybrid engine from an EMPTY facility
+    (forecast.ideal_engine) — the page headline is the engine's numbers
+    (operator ruling); the quick scan above only ranks rhythms. Nothing is
+    written to config/ or scenario/: the run lives in a temp copy."""
+    import copy as _copy
+    import datetime as _dt
+    import hashlib as _hl
+    import json as _json
+    import shutil as _sh
+    import tempfile as _tf
+    import pandas as _pd
+    from forecast import ideal as _im
+    from forecast import ideal_engine as _ie
+    from forecast.scenario_io import batches_from_list, batches_to_list
+
+    st.subheader("2 · Reference sheet — the real engine, from an empty facility")
+    st.caption(
+        "Your batch table and facility limits, run by the same forecast engine "
+        "and settings ▶ Run forecast uses, starting from an empty facility. It "
+        "reads the steady third year. The facility runs as it will after 2028: "
+        "6N in **production** mode (an empty 6N cannot start its purge "
+        "rotation). About 30 s.")
+
+    ctrl = ctx["control"]
+    # One tool: the SAME method and promoted knobs ▶ Run forecast would run.
+    m_key, m_ov, m_src = _effective_method()
+    m_ov = dict(m_ov or {})
+    st.caption(f"Engine: **{_method_obj(m_key).label}** — {m_src}"
+               + (" · promoted knobs: " + ", ".join(
+                   f"{k}={v}" for k, v in m_ov.items()) if m_ov else ""))
+    res1 = st.session_state.get("_ideal_result")
+    best1 = _im.best(res1["rows"]) if res1 else None
+    d_cad, d_size = ((best1.cadence_days, best1.batch_size) if best1 else today)
+    g1, g2, g3 = st.columns([2, 2, 2])
+    cad = g1.number_input("Cadence (days between stockings)", min_value=7,
+                          max_value=140, step=7, key="ideal_ref_cad",
+                          **_ideal_default("ideal_ref_cad", int(d_cad)))
+    size = g2.number_input("Fish to OG per batch", min_value=50_000,
+                           max_value=600_000, step=10_000, key="ideal_ref_size",
+                           **_ideal_default("ideal_ref_size", int(d_size)))
+    g3.write("")
+    regen = g3.button("↻ Fill the table from this rhythm", key="ideal_ref_gen")
+    if (regen or st.session_state.pop("_ideal_ref_regen", False)
+            or "ideal_ref_base" not in st.session_state):
+        stream = [b for b in _im.synthetic_stream(
+                      ctx["template"], int(cad), int(size), _REF_HORIZON_WEEKS)
+                  if b.tran_og_date > _im.STEADY_START]
+        df = _pd.DataFrame(batches_to_list(stream))
+        st.session_state["ideal_ref_base"] = df
+        st.session_state["ideal_ref_generated"] = df
+        st.session_state["ideal_ref_from"] = (int(cad), int(size))
+        # A NEW editor, not a popped key: the browser keeps a data_editor's
+        # edits per element, so the same key + same data kept them.
+        st.session_state["ideal_ref_nonce"] = (
+            st.session_state.get("ideal_ref_nonce", 0) + 1)
+    nonce = st.session_state.get("ideal_ref_nonce", 0)
+    ed_key = f"ideal_ref_df_w_{nonce}"
+    kept = st.session_state.get("_keep_ideal_ref_edited")
+    if ed_key not in st.session_state and kept is not None and kept[0] == nonce:
+        # Back from another mode: Streamlit dropped the editor's state, so
+        # start from the table exactly as the operator left it.
+        st.session_state["ideal_ref_base"] = kept[1]
+    base = st.session_state["ideal_ref_base"]
+    st.caption(
+        f"One row per batch — edit counts, dates, growth and FCR model, or add "
+        f"and delete rows. Filled from {st.session_state['ideal_ref_from'][0]} d "
+        f"× {st.session_state['ideal_ref_from'][1]:,} on template "
+        f"{ctx['template'].batch_id}. Batches that would already be in seawater "
+        f"on day one are left out (an empty facility cannot hold them).")
+    cols = {c: st.column_config.Column(help=h) for c, h in _BATCH_HELP.items()}
+    cols["fcr_model"] = st.column_config.SelectboxColumn(
+        options=sorted(ctx["tables"].fcr_by_model), help=_BATCH_HELP["fcr_model"])
+    edited = st.data_editor(base, num_rows="dynamic", hide_index=True,
+                            width="stretch", key=ed_key, column_config=cols)
+    st.session_state["_keep_ideal_ref_edited"] = (nonce, edited)
+
+    st.markdown("**Facility limits for this run** — your Control values, "
+                "changed here for this run only.")
+    l1, l2, l3, l4, l5 = st.columns(5)
+    cap_in = l1.number_input("Biomass cap (t)", min_value=500, max_value=10_000,
+                             step=100, key="ideal_ref_cap",
+                             **_ideal_default("ideal_ref_cap", int(cap_t)))
+    hmax = l2.number_input("Max harvest / wk (fish)", min_value=0, step=1_000,
+                           key="ideal_ref_hmax", **_ideal_default(
+                               "ideal_ref_hmax", int(ctrl.max_harvest_per_week)))
+    hmin = l3.number_input("Min harvest / wk (fish)", min_value=0, step=1_000,
+                           key="ideal_ref_hmin", **_ideal_default(
+                               "ideal_ref_hmin", int(ctrl.min_harvest_per_week)))
+    wmin = l4.number_input("Min harvest weight (g)", min_value=0, step=50,
+                           key="ideal_ref_wmin", **_ideal_default(
+                               "ideal_ref_wmin", int(ctrl.min_harvest_weight_g)))
+    feed = l5.number_input("Max feed / day (kg)", min_value=0, step=500,
+                           key="ideal_ref_feed", **_ideal_default(
+                               "ideal_ref_feed", int(ctrl.max_feed_per_day_kg)))
+    ov = dict(max_biomass_kg=float(cap_in) * 1000.0,
+              max_harvest_per_week=float(hmax),
+              min_harvest_per_week=float(hmin),
+              min_harvest_weight_g=float(wmin),
+              max_feed_per_day_kg=float(feed),
+              sixn_production_start=_dt.date(
+                  _im.STEADY_START.year - 1, 1, 1).isoformat(),
+              scenario_name="Ideal reference sheet")
+    rows_now = _records(edited)
+    # The run also reads config/ and scenario/ (biology, tanks, limits): a
+    # change there must mark the shown answer stale too.
+    sig = _hl.md5(_json.dumps([rows_now, ov, _config_fingerprint(), m_key, m_ov],
+                              sort_keys=True, default=str).encode()).hexdigest()
+    year = _im.STEADY_START.year + _REF_HORIZON_WEEKS // 52 - 1
+
+    if st.button("▶ Run the reference sheet in the real engine (~30 s)",
+                 type="primary", key="ideal_ref_run"):
+        try:
+            batches = batches_from_list(_clean_rows(rows_now, "batch_id", "batch"))
+        except Exception as e:  # noqa: BLE001 — named, not hidden
+            st.error(f"The batch table has a problem — {type(e).__name__}: {e}")
+            return
+        keep = _tf.mkdtemp(prefix="ideal_ref_keep_")
+        try:
+            with st.spinner("Running the real engine on your batch table…"):
+                run = _ie.run_schedule(
+                    batches, _ROOT, start=_im.STEADY_START,
+                    horizon_weeks=_REF_HORIZON_WEEKS, overrides=ov,
+                    years=[year], keep_dir=keep,
+                    method=m_key, method_overrides=m_ov)
+            wb_bytes = open(run.out_path, "rb").read()
+            wb_name = os.path.basename(run.out_path)
+        except (ValueError, RuntimeError) as e:
+            st.error(f"The engine could not run this table — "
+                     f"{type(e).__name__}: {e}")
+            return
+        finally:
+            _sh.rmtree(keep, ignore_errors=True)
+        gctrl = _copy.deepcopy(ctrl)
+        for k, v in m_ov.items():          # judged on the knobs it ran with
+            if hasattr(gctrl, k):
+                setattr(gctrl, k, v)
+        for k in ("max_biomass_kg", "max_harvest_per_week",
+                  "min_harvest_per_week", "min_harvest_weight_g",
+                  "max_feed_per_day_kg"):
+            setattr(gctrl, k, ov[k])
+        st.session_state["_ideal_ref"] = dict(
+            sig=sig, run=run, year=year, gates=_ie.gates(run, year, gctrl),
+            wb=wb_bytes, wb_name=wb_name, cap_kg=ov["max_biomass_kg"],
+            unedited=edited.equals(st.session_state.get("ideal_ref_generated")),
+            # The quick scan prices with the Control limits; a comparison is
+            # only fair when step 2 ran with them too.
+            limits_match=all(
+                float(ov[k]) == float(getattr(ctrl, k))
+                for k in ("max_harvest_per_week", "min_harvest_per_week",
+                          "min_harvest_weight_g", "max_feed_per_day_kg")),
+            rhythm=st.session_state["ideal_ref_from"])
+
+    r = st.session_state.get("_ideal_ref")
+    if not r:
+        st.info("Check the table and limits, then press **Run the reference "
+                "sheet**.")
+        return
+    if r["sig"] != sig:
+        st.warning("Showing the last run — the table or limits have changed "
+                   "since. Press **Run the reference sheet** to recompute.")
+    run, y = r["run"], r["run"].years[r["year"]]
+    ok = _ie.plausible(r["gates"])
+    st.markdown(f"#### Engine answer, steady year {r['year']}: "
+                + ("plausible ✅" if ok else "**not plausible** ❌ — see the checks"))
+    m = st.columns(6)
+    m[0].metric("HOG / yr", f"{y.hog_t:,.0f} t")
+    m[1].metric("Revenue / yr", f"${y.revenue / 1e6:,.1f}M")
+    m[2].metric("Avg harvest (gross)", f"{y.avg_gross_kg:.2f} kg")
+    m[3].metric("Fish ≥ 8 lb", f"{y.share_over_8lb:.0%}")
+    m[4].metric("Peak vs cap", f"{y.peak_pct_of_cap:.0%}")
+    m[5].metric("OG tanks used", f"{y.og_tanks_mean:.0f} / {y.og_tanks_total}",
+                help=f"Mean over the year; the busiest week used {y.og_tanks_max}.")
+    if not ok:
+        st.caption("A plan that fails a check is not a real answer: its revenue "
+                   "prices fish the facility could not actually carry or land.")
+    if res1 and r["unedited"] and r.get("limits_match"):
+        q = next((x for x in list(res1["rows"]) + [res1["today"]]
+                  if (x.cadence_days, x.batch_size) == tuple(r["rhythm"])
+                  and abs(x.cap_kg - r["cap_kg"]) < 1.0), None)
+        if q is not None and q.hog_t_per_yr > 0:
+            st.caption(
+                f"The quick model priced this same rhythm and cap at "
+                f"{q.hog_t_per_yr:,.0f} t / ${q.revenue_per_yr / 1e6:,.1f}M; the "
+                f"engine lands {1 - y.hog_t / q.hog_t_per_yr:.0%} less tonnage — "
+                f"tanks, density and handling are real here.")
+    st.dataframe(_pd.DataFrame(_ideal_gate_rows(r["gates"])), hide_index=True,
+                 width="stretch")
+
+    st.markdown(f"**Tank layout** — tanks in use per system over {r['year']}, "
+                f"and a snapshot of week {run.layout_week}.")
+    st.dataframe(_pd.DataFrame([{
+        "System": s, "Tanks": d["n_tanks"],
+        "In use (mean)": round(d["mean_tanks"], 1), "In use (max)": d["max_tanks"],
+        "Peak density kg/m³": round(d["peak_density"], 1)}
+        for s, d in y.per_system.items()]), hide_index=True, width="stretch")
+    snap = [dict(System=s, Tank=d["tank"], Batch=d["batch"],
+                 Fish=round(d["count"]), **{"Biomass t": round(d["biomass_kg"] / 1000, 1),
+                 "Density kg/m³": round(d["density"], 1)}, Stage=d["stage"])
+            for s, rows in run.layout.items() for d in rows]
+    with st.expander(f"Every occupied tank in week {run.layout_week} "
+                     f"({len(snap)} rows)"):
+        st.dataframe(_pd.DataFrame(snap), hide_index=True, width="stretch")
+    with st.expander(f"Each tank's batches through {r['year']}"):
+        st.dataframe(_pd.DataFrame([{"Tank": k, "Batches in order": " → ".join(v)}
+                                    for k, v in run.tank_sequence.items()]),
+                     hide_index=True, width="stretch")
+    notes = []
+    if run.dropped_batches:
+        notes.append(f"left out (already in seawater on day one): "
+                     f"{', '.join(run.dropped_batches)}")
+    if run.validation_top.get(r["year"]):
+        notes.append("most frequent engine warnings that year: " + "; ".join(
+            f"{c} ×{n}" for c, n in run.validation_top[r["year"]][:5]))
+    if notes:
+        _txt = " · ".join(notes)       # upper-case the first letter ONLY:
+        st.caption(_txt[:1].upper() + _txt[1:]   # .capitalize() lowercased ids
+                   + ". A small FW mass-balance warning on one early batch is "
+                     "expected on an empty start (its freshwater phase began "
+                     "before day one).")
+    st.download_button("⬇ Download the reference workbook", data=r["wb"],
+                       file_name=f"Ideal_reference_{r['year']}.xlsm",
+                       mime="application/vnd.ms-excel.sheet.macroEnabled.12",
+                       key="ideal_ref_dl")
+
+
+def _ideal_parse_sizes(txt):
+    """'240000, 240000, 280k' -> [240000, 240000, 280000]."""
+    out = []
+    for part in str(txt).split(","):
+        p = part.strip().replace("_", "").replace(" ", "").lower()
+        if not p:
+            continue
+        out.append(int(round(float(p[:-1]) * 1000)) if p.endswith("k")
+                   else int(p))
+    # Commas separate sizes, so "280,500" reads as 280 then 500 fish — a
+    # thousands separator silently becoming a tiny-batch ramp. No real batch
+    # is under 1,000 fish: refuse, and say how to write it.
+    tiny = [s for s in out if 0 < s < 1000]
+    if tiny:
+        raise ValueError(
+            f"{', '.join(map(str, tiny))} fish is not a batch size — write "
+            f"sizes without thousands separators (280000, or 280k); commas "
+            f"separate the steps of a ramp")
+    return out
+
+
+def _ideal_transition_runs(live, proposed, pr_bytes, pr_name, method,
+                           method_overrides):
+    """Both schedules through the real engine on today's PR, in parallel
+    when the machine allows, one at a time (and said so) when it does not."""
+    import shutil as _sh
+    import tempfile as _tf
+    from concurrent.futures import ProcessPoolExecutor
+    from concurrent.futures.process import BrokenProcessPool
+    from pickle import PicklingError
+    from forecast import ideal_engine as _ie
+    tmp = _tf.mkdtemp(prefix="ideal_tr_pr_")
+    try:
+        prp = os.path.join(tmp, "pr" + (os.path.splitext(pr_name)[1] or ".xlsm"))
+        with open(prp, "wb") as f:
+            f.write(pr_bytes)
+        kw = dict(pr_path=prp, horizon_weeks=_TR_HORIZON_WEEKS,
+                  include_manual_events=True, method=method,
+                  method_overrides=method_overrides)
+        note = None
+        if _cpu_workers() >= 2:
+            # Only a pool that cannot START, or that DIES, falls back. An
+            # error the engine raises inside a worker re-raises here with its
+            # own class and must surface as that error — not be re-run and
+            # relabelled "parallel run unavailable".
+            try:
+                ex = ProcessPoolExecutor(max_workers=2)
+            except OSError as e:
+                note = (f"Parallel run unavailable ({type(e).__name__}: {e}) — "
+                        f"ran one at a time instead.")
+            else:
+                with ex:
+                    fa = ex.submit(_ie.run_schedule, live, str(_ROOT), **kw)
+                    fb = ex.submit(_ie.run_schedule, proposed, str(_ROOT), **kw)
+                    try:
+                        return fa.result(), fb.result(), None
+                    except (BrokenProcessPool, PicklingError) as e:
+                        note = (f"Parallel run unavailable ({type(e).__name__}"
+                                f": {e}) — ran one at a time instead.")
+        return (_ie.run_schedule(live, str(_ROOT), **kw),
+                _ie.run_schedule(proposed, str(_ROOT), **kw), note)
+    finally:
+        _sh.rmtree(tmp, ignore_errors=True)
+
+
+def _ideal_transition(ctx, today):
+    """Step 3 — from today's fish to the rhythm. Only FUTURE stockings change
+    (forecast.transition, pure); both schedules can be checked in the real
+    engine on the uploaded PR; the proposal is handed over as a download.
+    The live scenario is never written: adopting it is the operator's act."""
+    import copy as _copy
+    import pandas as _pd
+    from forecast import ideal_engine as _ie
+    from forecast import transition as _tr
+    from forecast.scenario_io import load_batches
+
+    st.subheader("3 · Transition — from today's fish to the ideal")
+    st.caption(
+        "Fish already in the water can't change, and everything entering "
+        "seawater in the next ~12 months is already stocked in freshwater — so "
+        "the lever is the size of FUTURE stockings. Pick a size, or a ramp, and "
+        "see what it does to the years ahead in the real engine. Your scenario "
+        "is not changed: you get the proposed batch schedule as a download.")
+    if uploaded is None or not (pr and pr.get("ok") and pr.get("forecast_start")):
+        st.info("Upload today's **ProductionReport** in the sidebar to plan the "
+                "transition — it is the starting point.")
+        return
+    fs = pr["forecast_start"]
+    fs_d = fs.date() if hasattr(fs, "date") else fs
+    try:
+        live = load_batches(os.path.join(str(_ROOT), "scenario"))
+    except Exception as e:  # noqa: BLE001 — named, not hidden
+        st.error(f"scenario/batches.yaml could not be read — {type(e).__name__}: {e}")
+        return
+    m_key, m_ov, m_src = _effective_method()
+    m_ov = dict(m_ov or {})
+    d_size = st.session_state.get("ideal_ref_size") or today[1]
+    c1, c2 = st.columns([1, 2])
+    # A remembered cutoff from an older PR can sit before this PR's start;
+    # Streamlit raises on a value under min_value, so bring it up to the start.
+    _kept_cut = st.session_state.get("ideal_tr_cutoff")
+    if _kept_cut is not None and _kept_cut < fs_d:
+        st.session_state["ideal_tr_cutoff"] = fs_d
+    cutoff = c1.date_input("Change stockings after", min_value=fs_d,
+                           key="ideal_tr_cutoff",
+                           **_ideal_default("ideal_tr_cutoff", fs_d))
+    sizes_txt = c2.text_input(
+        "Fish to OG per future batch — one size, or a ramp (comma-separated; "
+        "the last repeats)", key="ideal_tr_sizes",
+        **_ideal_default("ideal_tr_sizes", str(int(d_size))),
+        help="Examples: 280000 — or 240000, 240000, 240000, 280000 (three "
+             "smaller batches first, then 280k). '280k' also works.")
+    try:
+        sizes = _ideal_parse_sizes(sizes_txt)
+        proposed, changes = _tr.propose(live, fs, cutoff, sizes)
+        summ = _tr.summarize(proposed, changes)
+        no_og = _tr.future_without_og(live, fs, cutoff)
+    except ValueError as e:
+        st.error(f"Can't build that proposal — {e}")
+        return
+    m = st.columns(3)
+    m[0].metric("Future batches re-sized", f"{summ['n_changed']}")
+    m[1].metric("Change in smolt to OG", f"{-summ['smolt_removed']:+,}",
+                help="Fish to seawater across the re-sized batches, proposal "
+                     "minus today. Negative = fewer smolt.")
+    m[2].metric("First seawater date affected",
+                (summ["first_changed_tran_og_date"].strftime("%Y-%m-%d")
+                 if summ["first_changed_tran_og_date"] else "—"))
+    st.caption(summ["note"])
+    if no_og:
+        st.warning(f"{len(no_og)} future batch(es) have no seawater (TranOG) "
+                   f"count, so they were left exactly as they are: "
+                   f"{', '.join(no_og)}. Check them in Configure → Batches.")
+    if changes:
+        with st.expander(f"The {len(changes)} batch changes"):
+            st.dataframe(_pd.DataFrame(_tr.changes_rows(changes)),
+                         hide_index=True, width="stretch")
+        st.download_button(
+            "⬇ Download the proposed batches.yaml",
+            data=_tr.batches_yaml_text(proposed).encode("utf-8"),
+            file_name=f"batches_proposed_{cutoff:%Y-%m-%d}.yaml",
+            mime="text/yaml", key="ideal_tr_dl",
+            help="The whole schedule with only these batches re-sized — the "
+                 "same format Configure → Batches saves.")
+        st.caption(
+            "**To adopt it:** keep a copy of `scenario/batches.yaml`, then "
+            "replace it with this file (or edit the same rows in Configure → "
+            "Batches) — ▶ Run forecast then runs it unchanged. Its 85-week "
+            "horizon shows only the start of the effect; the check below runs "
+            f"{_TR_HORIZON_WEEKS // 52} years.")
+
+    # PR, proposal, engine AND config/scenario (batches.yaml is "today").
+    key = (st.session_state.get("_pr_key"), str(cutoff), tuple(sizes),
+           _config_fingerprint(), m_key, str(sorted(m_ov.items())))
+    st.caption(f"Both schedules run with **{_method_obj(m_key).label}** — the "
+               f"method and settings ▶ Run forecast uses ({m_src}).")
+    if st.button("▶ Check both schedules in the real engine (~1–2 min)",
+                 key="ideal_tr_run", disabled=not changes):
+        with st.spinner("Running today's schedule and the proposal on your PR…"):
+            try:
+                a, b, note = _ideal_transition_runs(live, proposed,
+                                                    uploaded.getvalue(),
+                                                    uploaded.name, m_key, m_ov)
+            except (ValueError, RuntimeError, OSError) as e:
+                st.error(f"The engine could not run the transition — "
+                         f"{type(e).__name__}: {e}")
+                return
+        st.session_state["_ideal_tr"] = dict(key=key, a=a, b=b, note=note)
+    t = st.session_state.get("_ideal_tr")
+    if not t:
+        return
+    if t["key"] != key:
+        st.warning("Showing the last check — the PR, cutoff or sizes have "
+                   "changed since. Press **Check both schedules** to recompute.")
+    if t["note"]:
+        st.warning(t["note"])
+    ev = t["a"].audits.get("manual_events_file")
+    if ev:
+        st.caption(f"Both runs include your manual events for this PR ({ev}).")
+    else:
+        st.warning("No manual-events file was found for this PR's closing date, "
+                   "so both runs start without any scripted events — if you "
+                   "scripted the first weeks in Run forecast, they are not in "
+                   "this check.")
+    ctrl = _copy.deepcopy(ctx["control"])
+    for k, v in m_ov.items():              # judged on the knobs it ran with
+        if hasattr(ctrl, k):
+            setattr(ctrl, k, v)
+    rows = []
+    for yr in sorted(set(t["a"].years) | set(t["b"].years)):
+        row = {"Year": yr}
+        for tag, run in (("Today's plan", t["a"]), ("Proposal", t["b"])):
+            yy = run.years.get(yr)
+            if yy is None:
+                continue
+            g = _ie.gates(run, yr, ctrl)
+            fails = [x.name for x in g if x.status == "FAIL"]
+            row["Weeks"] = yy.weeks
+            row[f"{tag}: peak % of cap"] = round(100 * yy.peak_pct_of_cap)
+            row[f"{tag}: HOG t"] = round(yy.hog_t)
+            # Density overshoot is a WARN, never a FAIL — so it must be shown
+            # in its own column or a ✓ hides the very trade being weighed.
+            row[f"{tag}: tank-weeks over density"] = yy.r8_over_tank_weeks
+            row[f"{tag}: plausible"] = "✓" if not fails else "✗ " + ", ".join(fails)
+        rows.append(row)
+    st.dataframe(_pd.DataFrame(rows), hide_index=True, width="stretch")
+    st.caption(
+        "First and last years are partial (the run starts at the PR and lasts "
+        f"{_TR_HORIZON_WEEKS} weeks). A ✗ year is not a real result: its "
+        "tonnage prices fish the facility could not actually carry or land. "
+        "✓ means no hard failure — tanks over their density cap are a "
+        "warning, counted in their own column: compare it between the two "
+        "plans, it is what extra tonnage costs.")
 
 
 # ============================================================
@@ -6305,9 +6827,9 @@ with st.sidebar:
             "- **Ideal (what should we stock?)** — the strategic question "
             "under every plan: how many smolt, how often, can this facility "
             "carry forever? Pick a biomass cap; it measures a grid of "
-            "rhythms from a clean start and shows the best balanced one "
-            "beside today's. A carrying-capacity answer — no tanks, density "
-            "or handling limits yet.\n"
+            "rhythms from a clean start in seconds (tankless), runs your "
+            "batch table through the real engine for tonnage, tank layout "
+            "and checks, and plans the transition from today's fish.\n"
             "- **Accuracy (forecast vs actuals)** — the only mode that grades "
             "the *biology* rather than the plan. Upload a forecast workbook "
             "you produced earlier plus the ProductionReport that came after "

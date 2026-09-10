@@ -73,6 +73,40 @@ if at.exception:
     fail("slider: " + "; ".join(str(e)[:300] for e in at.exception))
 if not any("Showing the result for" in w.value for w in at.warning):
     fail("moved the cap but the old result is not marked stale")
+
+# Step 2 must FOLLOW the scan (a keyed widget ignores value= after its first
+# render — the defaults used to stay at today's rhythm).
+if at.number_input(key="ideal_ref_size").value not in (250000, 280000):
+    fail("step 2 did not follow the scan's best rhythm: size = %%r"
+         %% (at.number_input(key="ideal_ref_size").value,))
+
+# A value typed on this page must survive a trip to another mode (Streamlit
+# drops the state of widgets that are not rendered).
+at.number_input(key="ideal_ref_hmax").set_value(30000).run()
+at.radio[0].set_value("How it works (the rules)").run()
+at.radio[0].set_value("Ideal (what should we stock?)").run()
+if at.exception:
+    fail("mode round-trip: " + "; ".join(str(e)[:300] for e in at.exception))
+if at.number_input(key="ideal_ref_hmax").value != 30000:
+    fail("a step-2 limit was lost on a mode round-trip: %%r"
+         %% (at.number_input(key="ideal_ref_hmax").value,))
+
+# Step 2: the reference sheet through the REAL engine (~30 s).
+ref = [b for b in at.button if "Run the reference sheet" in b.label]
+if not ref:
+    fail("the reference-sheet Run button is missing")
+ref[0].click().run()
+if at.exception:
+    fail("reference run: " + "; ".join(str(e)[:300] for e in at.exception))
+errs = [e.value for e in at.error]
+if errs:
+    fail("reference run showed an error: " + errs[0][:300])
+if not any("Engine answer, steady year" in m.value for m in at.markdown):
+    fail("the reference sheet ran but shows no engine answer")
+
+# Step 3 without a PR must say what it needs, not crash.
+if not any("Upload today's" in i.value for i in at.info):
+    fail("the transition step does not ask for a ProductionReport")
 print("OK ideal click path")
 '''
 

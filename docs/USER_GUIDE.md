@@ -2316,9 +2316,14 @@ every month.
 
 Every other mode plans the fish you already have. **Ideal** asks the question
 underneath: *what stocking rhythm — how many smolt, how often — could this
-facility carry forever?*
+facility carry forever?* — and then how to get there from the fish you have.
+It works in three steps on one page: **1 · Quick scan** (seconds, tankless)
+rules rhythms in or out; **2 · Reference sheet** runs your batch table through
+the real forecast engine from an empty facility; **3 · Transition** re-sizes
+future stockings from today's ProductionReport and hands you the proposed
+schedule. Nothing on the page writes your config or scenario.
 
-### Using it
+### 1 · Quick scan — using it
 
 1. **Mode → Ideal (what should we stock?)**.
 2. Set the **Biomass cap** slider. It starts at the cap in your Control config,
@@ -2350,10 +2355,19 @@ weeks.
 
 ### What the numbers said when it was built (3,800 t vs 4,200 t)
 
-| Cap | Ideal rhythm | Smolt/yr | Revenue/yr | Fish ≥ 8 lb |
+| Cap | Best rhythm (quick scan) | Smolt/yr | Quick scan HOG / revenue | Your engine HOG / revenue / avg fish (step 2) |
 |---|---|---|---|---|
-| 3,800 t | 49 d × 280k | 2.09 M | $163.6M | 55 % |
-| 4,200 t | 49 d × 250k | 1.86 M | $167.3M | 78 % |
+| 3,800 t | 49 d × 280k | 2.09 M | 7,625 t / $163.6M | 6,583 t / $136.8M / 4.05 kg |
+| 4,200 t | 49 d × 250k | 1.86 M | 7,642 t / $167.3M | 6,582 t / $141.0M / 4.56 kg |
+
+"Your engine" is the method and settings Run forecast uses — measured with the
+promoted plain controller (hybrid off, your tuned knobs). **Believe the
+engine's numbers:** the quick scan runs about 16 % high on tonnage and 19 % on
+revenue because it has no tanks — the engine grows smaller fish under real
+density and handling limits. Here the two agree on the ranking (4,200 t with
+250k batches wins: the same tonnage, much bigger fish), but a different engine
+can disagree — the hybrid preferred 3,800 t. Use the quick scan to rule rhythms
+out; settle close calls with the reference sheet, which runs your engine.
 
 Today's scenario stocks 49 d × 340k (2.53 M smolt/yr), which at 3,800 t is not
 balanced: stocked fish outrun what can be landed and pile up. Above roughly
@@ -2362,11 +2376,81 @@ one smallest tank per week (`og_tank_ceiling_kg`, ≈7,700 t HOG/yr), so a bigge
 cap only builds a backlog. These figures will move whenever biology or prices
 are recalibrated; re-run the mode rather than quote the table.
 
+### 2 · Reference sheet — the real engine
+
+Enter batch count, input date, growth and FCR model per batch, plus facility
+limits, and run it as a reference sheet. Fill the table from a rhythm (it
+defaults to the quick scan's best, or today's), then edit any row — the columns
+and format are exactly Configure → Batches'. Set the facility limits for this
+run only; your Control values are the defaults and are not changed.
+**Run the reference sheet** runs the same forecast method and settings
+▶ Run forecast uses (the page names it) on that table from an **empty facility** for
+three years and reads the steady third year: tonnage, revenue, harvest weight,
+the share over 8 lb, peak biomass against the cap, tanks in use per system, one
+week's full tank layout, each tank's batch sequence, and the checks. Download
+the workbook to keep it.
+
+Two things are fixed by the method, not chosen: an empty facility cannot hold
+fish that would already be in seawater on day one, so those batches are left
+out (and listed); and 6N runs in **production** mode, as it will after 2028,
+because an empty 6N cannot start its purge rotation. A small FW mass-balance
+warning on one early batch is expected for the same reason.
+
+**The checks decide whether the answer is real.** The engine finishing with
+clean conservation audits does not make a plan feasible — an overstocked run
+once "finished" at 1,685 % of the cap. So each run is graded: every week
+harvests, peak biomass within 2 % of the cap and the audits clean are FAILs if
+broken; the harvest floor, tank density and 15-move budget are WARNs. A plan
+with a FAIL is not a result: its revenue prices fish the facility could not
+carry or land.
+
+### 3 · Transition — from today's fish
+
+Needs today's ProductionReport (sidebar). Fish already in the water can't
+change, and everything entering seawater in the next ~12 months is already in
+freshwater, so the only lever is the size of **future** stockings. Choose the
+date after which stockings change (never earlier than the PR) and a size — or
+a ramp, e.g. `240000, 240000, 240000, 280000` (the last size repeats). Each
+re-sized batch keeps its dates; its egg count scales by its own freshwater
+survival, so it still culls to exactly the target at transfer.
+
+You get the list of changed batches and **the proposed `batches.yaml` as a
+download** — your scenario is never changed from here. **Check both schedules
+in the real engine** runs today's schedule and the proposal on your PR for four
+years and shows, per year, peak biomass against the cap, tonnage and whether
+each year passes the checks. To adopt a proposal: keep a copy of
+`scenario/batches.yaml`, then replace it (or edit the same rows in Configure →
+Batches). Run forecast then runs it unchanged — its 85-week horizon shows only
+the start of the effect.
+
+What your engine said on the 8/31 PR (2026-09-10; the promoted plain
+controller, 208 weeks, your manual events, every future batch re-sized from
+the PR onward):
+
+| Future batches | 2028 peak / HOG / avg fish | 2029 peak / HOG / avg fish (≥ 8 lb) | 2029 revenue | 2029 tank-weeks over density |
+|---|---|---|---|---|
+| 340k (today) | 97 % / 7,504 t / 3.66 kg | 91 % / 7,103 t / 3.55 kg (8 %) | $142.8M | 37 |
+| 310k | 97 % / 7,220 t / 3.78 kg | 92 % / 6,885 t / 3.76 kg (15 %) | $140.5M | 56 |
+| 300k | 96 % / 7,099 t / 3.89 kg | 100 % / 7,073 t / 4.00 kg (26 %) | $146.6M | 97 |
+| 290k | 96 % / 7,093 t / 3.94 kg | 92 % / 6,747 t / 3.95 kg (24 %) | $139.4M | 64 |
+| 280k | 96 % / 6,994 t / 3.99 kg | 91 % / 6,701 t / 4.06 kg (29 %) | $139.5M | 46 |
+
+2026 is over the cap in every row (105 % of your 3,650 t 2026 limit — those
+fish are already in the water), and 2027 barely moves, because nothing
+re-sized reaches seawater before 2027-09-23. **With your engine, today's plan
+stays under the cap** — it copes with the extra fish by harvesting them
+smaller: by 2029 the average fish is 3.55 kg and only 8 % clear 8 lb.
+Re-sizing to 280–300k keeps fish around 4 kg (a quarter or more over 8 lb) for
+about the same revenue — today's plan earns most in 2028, 300k most in 2029.
+**The choice is tonnage now against fish size later**, and it is yours. (The
+hybrid engine answers differently — it held today's plan 3–6 % over the cap —
+which is why the page always runs the method Run forecast uses.)
+
 ### What it CANNOT tell you
 
-- **It is a carrying-capacity answer, not an operating plan.** No tanks, no
-  density limits, no 15-move handling budget. The tank layout for the ideal
-  rhythm, and the transition from today's fish to it, are the next pieces.
+- **The quick scan (step 1) is a carrying-capacity answer.** No tanks, no
+  density limits, no 15-move handling budget — which is why it runs 16–25 %
+  high. The reference sheet and the transition check use the real engine.
 - **The growth model runs hot** (§13): a few percent optimistic on weight, so
   tonnage and revenue here are optimistic too.
 - **An unbalanced rhythm's revenue is not real.** It prices fish that are
