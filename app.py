@@ -5028,7 +5028,9 @@ def _config_editor():
 _IDEAL_KEEP = ("ideal_cap_t", "ideal_cads", "ideal_sizes", "ideal_ref_cad",
                "ideal_ref_size", "ideal_ref_cap", "ideal_ref_hmax",
                "ideal_ref_hmin", "ideal_ref_wmin", "ideal_ref_feed",
-               "ideal_tr_cutoff", "ideal_tr_sizes")
+               "ideal_tr_cutoff", "ideal_tr_sizes", "ideal_tr_cap",
+               "ideal_tr_hmax", "ideal_tr_hmin", "ideal_tr_wmin",
+               "ideal_tr_feed")
 
 
 def _ideal_restore():
@@ -5046,6 +5048,53 @@ def _ideal_save():
 def _ideal_default(key, value, param="value"):
     """`value=` (or `default=`) for a keyed widget only while its key is empty."""
     return {} if key in st.session_state else {param: value}
+
+
+# Step 3's what-if limits: (widget key, Control key, box unit per Control
+# unit, label, unit). The cap box is in tonnes, its range 500–10,000.
+_IDEAL_TR_LIMITS = (
+    ("ideal_tr_cap", "max_biomass_kg", 1000.0, "Biomass cap", "t"),
+    ("ideal_tr_hmax", "max_harvest_per_week", 1.0, "Max harvest / wk", "fish"),
+    ("ideal_tr_hmin", "min_harvest_per_week", 1.0, "Min harvest / wk", "fish"),
+    ("ideal_tr_wmin", "min_harvest_weight_g", 1.0, "Min harvest weight", "g"),
+    ("ideal_tr_feed", "max_feed_per_day_kg", 1.0, "Max feed / day", "kg"),
+)
+
+
+def _ideal_tr_seeds(ctrl) -> dict:
+    """What each what-if box starts at: the Control value in the box's unit,
+    whole, and inside the box's range (a Control cap of 0 = "no cap", or one
+    outside 500–10,000 t, must not crash the page)."""
+    seeds = {}
+    for key, ck, scale, _label, _unit in _IDEAL_TR_LIMITS:
+        v = int(round(float(getattr(ctrl, ck)) / scale))
+        if key == "ideal_tr_cap":
+            v = min(10_000, max(500, v))
+        seeds[key] = v
+    return seeds
+
+
+def _ideal_tr_overrides(seeds: dict, values: dict) -> dict:
+    """Only boxes the operator MOVED become overrides, in Control units. Each
+    box is compared with the value it was SEEDED with, not the raw Control
+    value — rounding a cap to whole tonnes must not read as an edit."""
+    out = {}
+    for key, ck, scale, _label, _unit in _IDEAL_TR_LIMITS:
+        v = values.get(key)
+        if v is not None and int(v) != int(seeds[key]):
+            out[ck] = float(v) * scale
+    return out
+
+
+def _ideal_limit_text(ov: dict, ctrl) -> str:
+    """'Biomass cap 4,200 t (Control 3,800 t)' — box labels and units, never
+    engine key names in kg."""
+    parts = []
+    for _key, ck, scale, label, unit in _IDEAL_TR_LIMITS:
+        if ck in ov:
+            parts.append(f"{label} {ov[ck] / scale:,.0f} {unit} (Control "
+                         f"{float(getattr(ctrl, ck)) / scale:,.0f} {unit})")
+    return "; ".join(parts)
 
 
 def _ideal():
@@ -5338,6 +5387,17 @@ def _ideal_reference(ctx, today, cap_t):
                             width="stretch", key=ed_key, column_config=cols)
     st.session_state["_keep_ideal_ref_edited"] = (nonce, edited)
 
+    # Same rule as step 3: if Control changed since these boxes were filled,
+    # re-fill them, or a remembered old value would run as if chosen.
+    seeds2 = {"ideal_ref_hmax": int(ctrl.max_harvest_per_week),
+              "ideal_ref_hmin": int(ctrl.min_harvest_per_week),
+              "ideal_ref_wmin": int(ctrl.min_harvest_weight_g),
+              "ideal_ref_feed": int(ctrl.max_feed_per_day_kg)}
+    if st.session_state.get("_ideal_ref_seeds") != seeds2:
+        for k in seeds2:
+            st.session_state.pop(k, None)
+            st.session_state.pop("_keep_" + k, None)
+        st.session_state["_ideal_ref_seeds"] = seeds2
     st.markdown("**Facility limits for this run** — your Control values, "
                 "changed here for this run only.")
     l1, l2, l3, l4, l5 = st.columns(5)
@@ -5509,9 +5569,13 @@ def _ideal_parse_sizes(txt):
 
 
 def _ideal_transition_runs(live, proposed, pr_bytes, pr_name, method,
-                           method_overrides):
+                           method_overrides, overrides=None):
     """Both schedules through the real engine on today's PR, in parallel
-    when the machine allows, one at a time (and said so) when it does not."""
+    when the machine allows, one at a time (and said so) when it does not.
+
+    Today's plan runs at the CURRENT limits (where you are); the proposal —
+    new sizes and/or the what-if `overrides` — at the new ones (where you
+    would go). So "today at 3,800 t vs the proposal at 4,200 t" is one check."""
     import shutil as _sh
     import tempfile as _tf
     from concurrent.futures import ProcessPoolExecutor
@@ -5526,6 +5590,7 @@ def _ideal_transition_runs(live, proposed, pr_bytes, pr_name, method,
         kw = dict(pr_path=prp, horizon_weeks=_TR_HORIZON_WEEKS,
                   include_manual_events=True, method=method,
                   method_overrides=method_overrides)
+        kw_b = dict(kw, overrides=dict(overrides or {}))
         note = None
         if _cpu_workers() >= 2:
             # Only a pool that cannot START, or that DIES, falls back. An
@@ -5540,14 +5605,14 @@ def _ideal_transition_runs(live, proposed, pr_bytes, pr_name, method,
             else:
                 with ex:
                     fa = ex.submit(_ie.run_schedule, live, str(_ROOT), **kw)
-                    fb = ex.submit(_ie.run_schedule, proposed, str(_ROOT), **kw)
+                    fb = ex.submit(_ie.run_schedule, proposed, str(_ROOT), **kw_b)
                     try:
                         return fa.result(), fb.result(), None
                     except (BrokenProcessPool, PicklingError) as e:
                         note = (f"Parallel run unavailable ({type(e).__name__}"
                                 f": {e}) — ran one at a time instead.")
         return (_ie.run_schedule(live, str(_ROOT), **kw),
-                _ie.run_schedule(proposed, str(_ROOT), **kw), note)
+                _ie.run_schedule(proposed, str(_ROOT), **kw_b), note)
     finally:
         _sh.rmtree(tmp, ignore_errors=True)
 
@@ -5638,29 +5703,123 @@ def _ideal_transition(ctx, today):
             "horizon shows only the start of the effect; the check below runs "
             f"{_TR_HORIZON_WEEKS // 52} years.")
 
-    # PR, proposal, engine AND config/scenario (batches.yaml is "today").
+    # Optional what-if limits for BOTH schedules (e.g. "what if the cap were
+    # 4,200 t?"). Only values that DIFFER from Control become overrides, so an
+    # untouched box leaves the run exactly Run forecast's. They land where the
+    # engine's own rule puts them (caps.resolve_facility_cap): a dated
+    # per-week row in limits.yaml still wins for its week.
+    ctrl0 = ctx["control"]
+    seeds = _ideal_tr_seeds(ctrl0)
+    if st.session_state.get("_ideal_tr_seeds") != seeds:
+        # Control changed since these boxes were filled (or this is the first
+        # visit): re-fill them from the NEW Control. A remembered old value
+        # would otherwise run as a what-if the operator never made.
+        _had = any(("_keep_" + k) in st.session_state
+                   for k, *_ in _IDEAL_TR_LIMITS)
+        for k, *_ in _IDEAL_TR_LIMITS:
+            st.session_state.pop(k, None)
+            st.session_state.pop("_keep_" + k, None)
+        if _had and "_ideal_tr_seeds" in st.session_state:
+            st.info("Your Control limits changed, so the what-if limit boxes "
+                    "below were reset to the new values.")
+        st.session_state["_ideal_tr_seeds"] = seeds
+    # Which limits have dated per-week rows (they win for their weeks), read
+    # from the limits file itself rather than stated from memory.
+    try:
+        from forecast.caps import (METRIC_BIOMASS, METRIC_FEED_DAY,
+                                   METRIC_MAX_HARVEST, METRIC_MIN_HARVEST)
+        from forecast.scenario_io import load_limits
+        _fl, _sl = load_limits(os.path.join(str(_ROOT), "scenario"), ctrl0)
+        _metric = {"max_biomass_kg": METRIC_BIOMASS,
+                   "max_feed_per_day_kg": METRIC_FEED_DAY,
+                   "max_harvest_per_week": METRIC_MAX_HARVEST,
+                   "min_harvest_per_week": METRIC_MIN_HARVEST}
+        _parts = []
+        for _k, ck, _s, label, _u in _IDEAL_TR_LIMITS:
+            wk = sorted(w for (w, m) in _fl.overrides if m == _metric.get(ck))
+            _parts.append(f"{label}: " + (f"dated rows {wk[0]}–{wk[-1]} win "
+                                          f"there" if wk else
+                                          "no dated rows, applies every week"))
+        dated_txt = "Today: " + "; ".join(_parts) + "."
+    except Exception as e:  # noqa: BLE001 — named, not hidden
+        dated_txt = (f"(Could not read the per-week limits to say which "
+                     f"weeks are pinned — {type(e).__name__}: {e})")
+    with st.expander("Facility limits for this check (optional)"):
+        st.caption(
+            "Try a different biomass cap or harvest limits for the PROPOSAL. "
+            "Today's plan always runs with your current limits, so the check "
+            "compares where you are with where you would go — with no batch "
+            "changes it shows today's plan under the new limits. Your Control "
+            "values are the defaults and are not changed. Each limit applies "
+            "wherever it has no dated per-week row in Configure → Limits, "
+            "exactly as in ▶ Run forecast. " + dated_txt)
+        t1, t2, t3, t4, t5 = st.columns(5)
+        tr_cap = t1.number_input(
+            "Biomass cap (t)", min_value=500, max_value=10_000, step=100,
+            key="ideal_tr_cap", **_ideal_default("ideal_tr_cap",
+                                                 seeds["ideal_tr_cap"]))
+        tr_hmax = t2.number_input(
+            "Max harvest / wk (fish)", min_value=0, step=1_000,
+            key="ideal_tr_hmax", **_ideal_default(
+                "ideal_tr_hmax", seeds["ideal_tr_hmax"]))
+        tr_hmin = t3.number_input(
+            "Min harvest / wk (fish)", min_value=0, step=1_000,
+            key="ideal_tr_hmin", **_ideal_default(
+                "ideal_tr_hmin", seeds["ideal_tr_hmin"]))
+        tr_wmin = t4.number_input(
+            "Min harvest weight (g)", min_value=0, step=50,
+            key="ideal_tr_wmin", **_ideal_default(
+                "ideal_tr_wmin", seeds["ideal_tr_wmin"]))
+        tr_feed = t5.number_input(
+            "Max feed / day (kg)", min_value=0, step=500,
+            key="ideal_tr_feed", **_ideal_default(
+                "ideal_tr_feed", seeds["ideal_tr_feed"]))
+        _cap_t0 = float(ctrl0.max_biomass_kg) / 1000.0
+        if not 500 <= _cap_t0 <= 10_000:
+            st.caption(
+                f"Control's biomass cap is {_cap_t0:,.0f} t"
+                + (" (0 = no cap)" if _cap_t0 <= 0 else "")
+                + " — outside this box's 500–10,000 t range, so the box "
+                  "starts at the nearest end and applies only if you move it.")
+    tr_ov = _ideal_tr_overrides(seeds, {
+        "ideal_tr_cap": tr_cap, "ideal_tr_hmax": tr_hmax,
+        "ideal_tr_hmin": tr_hmin, "ideal_tr_wmin": tr_wmin,
+        "ideal_tr_feed": tr_feed})
+
+    # PR, proposal, engine, limits AND config/scenario (batches.yaml = today).
     key = (st.session_state.get("_pr_key"), str(cutoff), tuple(sizes),
-           _config_fingerprint(), m_key, str(sorted(m_ov.items())))
+           _config_fingerprint(), m_key, str(sorted(m_ov.items())),
+           str(sorted(tr_ov.items())))
     st.caption(f"Both schedules run with **{_method_obj(m_key).label}** — the "
-               f"method and settings ▶ Run forecast uses ({m_src}).")
+               f"method and settings ▶ Run forecast uses ({m_src})."
+               + (" **The proposal runs with changed limits:** "
+                  + _ideal_limit_text(tr_ov, ctrl0) if tr_ov else ""))
     if st.button("▶ Check both schedules in the real engine (~1–2 min)",
-                 key="ideal_tr_run", disabled=not changes):
+                 key="ideal_tr_run", disabled=not (changes or tr_ov)):
         with st.spinner("Running today's schedule and the proposal on your PR…"):
             try:
                 a, b, note = _ideal_transition_runs(live, proposed,
                                                     uploaded.getvalue(),
-                                                    uploaded.name, m_key, m_ov)
+                                                    uploaded.name, m_key, m_ov,
+                                                    tr_ov)
             except (ValueError, RuntimeError, OSError) as e:
                 st.error(f"The engine could not run the transition — "
                          f"{type(e).__name__}: {e}")
                 return
-        st.session_state["_ideal_tr"] = dict(key=key, a=a, b=b, note=note)
+        st.session_state["_ideal_tr"] = dict(key=key, a=a, b=b, note=note,
+                                             ov=dict(tr_ov))
     t = st.session_state.get("_ideal_tr")
     if not t:
         return
     if t["key"] != key:
-        st.warning("Showing the last check — the PR, cutoff or sizes have "
-                   "changed since. Press **Check both schedules** to recompute.")
+        st.warning("Showing the last check — an input has changed since (the "
+                   "PR, cutoff, sizes, limits, config or engine). Press "
+                   "**Check both schedules** to recompute.")
+    # What the SHOWN result ran with — not what the boxes say now.
+    st.caption(("The proposal ran with: "
+                + _ideal_limit_text(t["ov"], ctx["control"]) + ".")
+               if t.get("ov") else
+               "Both schedules ran with your current Control limits.")
     if t["note"]:
         st.warning(t["note"])
     ev = t["a"].audits.get("manual_events_file")
@@ -5671,10 +5830,17 @@ def _ideal_transition(ctx, today):
                    "so both runs start without any scripted events — if you "
                    "scripted the first weeks in Run forecast, they are not in "
                    "this check.")
-    ctrl = _copy.deepcopy(ctx["control"])
-    for k, v in m_ov.items():              # judged on the knobs it ran with
-        if hasattr(ctrl, k):
-            setattr(ctrl, k, v)
+    # Each arm is judged on the knobs AND limits it RAN with — today's plan on
+    # the current limits, the proposal on the what-if limits stored with it
+    # (not on whatever the boxes say now; if they differ the stale warning is up).
+    def _ctrl_for(extra):
+        c = _copy.deepcopy(ctx["control"])
+        for k, v in list(m_ov.items()) + list(extra.items()):
+            if hasattr(c, k):
+                setattr(c, k, v)
+        return c
+    ctrls = {"Today's plan": _ctrl_for({}),
+             "Proposal": _ctrl_for(t.get("ov", {}))}
     rows = []
     for yr in sorted(set(t["a"].years) | set(t["b"].years)):
         row = {"Year": yr}
@@ -5682,7 +5848,7 @@ def _ideal_transition(ctx, today):
             yy = run.years.get(yr)
             if yy is None:
                 continue
-            g = _ie.gates(run, yr, ctrl)
+            g = _ie.gates(run, yr, ctrls[tag])
             fails = [x.name for x in g if x.status == "FAIL"]
             row["Weeks"] = yy.weeks
             row[f"{tag}: peak % of cap"] = round(100 * yy.peak_pct_of_cap)
@@ -5694,6 +5860,8 @@ def _ideal_transition(ctx, today):
         rows.append(row)
     st.dataframe(_pd.DataFrame(rows), hide_index=True, width="stretch")
     st.caption(
+        "Today's plan runs with your current limits; the proposal with any "
+        "limits changed above. "
         "First and last years are partial (the run starts at the PR and lasts "
         f"{_TR_HORIZON_WEEKS} weeks). A ✗ year is not a real result: its "
         "tonnage prices fish the facility could not actually carry or land. "

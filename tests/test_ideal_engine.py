@@ -585,3 +585,25 @@ def test_as_configured_is_runnable_and_unknown_methods_are_refused():
     assert m.key == AS_CONFIGURED and m.overrides == {} and m.engine == "controller"
     with pytest.raises(ValueError):
         _method("no-such-method")
+
+
+def test_real_pr_mode_carries_the_what_if_limits(tmp_path):
+    """Step 3's limits box: a cap override must reach the run's control.yaml
+    on a REAL PR too. Dated per-week rows in limits.yaml still win for their
+    weeks — the engine's own rule (caps.resolve_facility_cap) — and the run's
+    limits.yaml is copied verbatim, so those rows are untouched."""
+    import yaml
+    from pathlib import Path
+    from forecast import scenario_io as sio
+    from forecast.ideal_engine import prepare
+    root = Path(__file__).resolve().parents[1]
+    pr = root / "tests" / "fixtures" / "reference" / "production_report.xlsx"
+    assert pr.is_file(), pr
+    batches = sio.load_batches(str(root / "scenario"))
+    prep = prepare(tmp_path / "w", batches, root, horizon_weeks=60, pr_path=pr,
+                   overrides={"max_biomass_kg": 4_200_000})
+    doc = yaml.safe_load(open(Path(prep["config_dir"]) / "control.yaml",
+                              encoding="utf-8"))
+    assert doc["max_biomass_kg"] == 4_200_000
+    live = (root / "scenario" / "limits.yaml").read_bytes()
+    assert (Path(prep["scenario_dir"]) / "limits.yaml").read_bytes() == live

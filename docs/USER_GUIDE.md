@@ -2423,6 +2423,37 @@ each year passes the checks. To adopt a proposal: keep a copy of
 Batches). Run forecast then runs it unchanged — its 85-week horizon shows only
 the start of the effect.
 
+**Facility limits for this check** (optional expander): try a different biomass
+cap or harvest limits for the **proposal** — for example "what if the cap were
+4,200 t and future batches were 250k?". Today's plan always runs with your
+current limits, so the table compares where you are with where you would go;
+with no batch changes it shows today's plan under the new limits. Your Control
+values are the defaults and are not changed; only values you change are
+applied, and the page says which — and what the shown result ran with. Each
+limit applies wherever it has no dated per-week row in Configure → Limits,
+exactly as in Run forecast; the page lists which limits have dated rows and
+for which weeks (on the current config the biomass cap's rows cover late 2026,
+so a new cap takes effect from 2027). If your Control values change, the boxes
+reset to the new values rather than keep an old one.
+
+What your engine said at a **4,200 t** cap on the 8/31 PR (2026-09-10; the
+cap applies from 2027, the 2026 rows stay at 3,650 t):
+
+| | 2027 | 2028 revenue / avg fish | 2029 revenue / avg fish (≥ 8 lb) | 2027–29 |
+|---|---|---|---|---|
+| Today's 340k at 3,800 t (now) | $141.1M | $151.9M / 3.66 kg | $142.8M / 3.55 kg (8 %) | $435.8M |
+| Today's 340k at 4,200 t | $145.4M | $159.5M / 3.79 kg | $151.7M / 3.69 kg (14 %) | $456.6M |
+| 280k at 4,200 t | $142.8M | $160.4M / 4.26 kg | $146.0M / 4.25 kg (38 %) | $449.2M |
+| 250k at 4,200 t | $141.5M | $153.7M / 4.48 kg | $146.1M / 4.65 kg (58 %) | $441.3M |
+
+**The cap is the big lever** — about $21M over three years with no other
+change, and no year over the cap after 2026. Batch size is the fish-size lever:
+at today's flat prices above 8 lb, today's schedule plus the higher cap earns
+the most; if big fish earn a premium, 280k at 4,200 t is the contender. More
+fish in the tanks also means more tank-weeks over their density cap (2029:
+159 today at 4,200 t, 125 at 280k, 228 at 250k). Whether 4,200 t is allowed,
+and whether size earns a premium, are your calls.
+
 What your engine said on the 8/31 PR (2026-09-10; the promoted plain
 controller, 208 weeks, your manual events, every future batch re-sized from
 the PR onward):
