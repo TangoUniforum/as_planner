@@ -11,7 +11,7 @@ results land side-by-side in the RunComparison sheet.
 
 Usage:
     python -m tools.run_compare PATH_TO_PR.xlsm
-    python -m tools.run_compare PR.xlsm --methods controller,global-lp --out cmp.xlsx
+    python -m tools.run_compare PR.xlsm --methods controller,controller-hybrid --out cmp.xlsx
 
 Nothing here touches production files: every method runs in an isolated temp
 copy of config/scenario, and outputs go to a chosen directory (default: a
@@ -45,8 +45,9 @@ from forecast.window_weeks import manual_window_weeks  # noqa: E402
 def _per_week_floors(wb) -> dict:
     """{week_label: min_harvest_per_week} from the workbook's own RunConfig
     snapshot. Empty dict when the workbook carries no snapshot (older outputs,
-    and Global's stamp-only sheet) — the caller then falls back to the Control
-    default, which is the pre-2026-09-02 behaviour and no worse than it was.
+    and the stamp-only RunConfig sheet the removed Global exporter wrote) — the
+    caller then falls back to the Control default, which is the pre-2026-09-02
+    behaviour and no worse than it was.
     """
     try:
         import yaml
@@ -139,13 +140,17 @@ def _harvest_extras(out_path, min_harvest):
 def _conservation_verdict(out_path):
     """Authoritative per-method conservation, using each method's OWN proof.
 
-    Global emits a batch-level ReconciliationReport (seeded == harvested +
-    standing + mortality + cull). That is the mass-conservation truth. Its
-    InputConservationAudit 'never placed' flag OVER-reports on LP output — the
-    LP holds late arrivals in the biomass envelope without a per-tank row — so
-    for Global that flag means a REALIZED-PLACEMENT gap, not lost mass. The
-    Controller places tank-by-tank, so its InputConservationAudit drops ARE
-    real lost fish (use tuning._conservation).
+    The Controller places tank-by-tank, so its InputConservationAudit drops ARE
+    real lost fish (use tuning._conservation). That is the only shape a
+    registered method produces today.
+
+    The mass-gate branch below is kept for a plan whose proof is a batch-level
+    FACILITY reconciliation instead (seeded == harvested + standing + mortality
+    + cull) — the shape the removed Global method wrote, and the shape any
+    future engine that does not place tank-by-tank would have to write. On such
+    a workbook the InputConservationAudit 'never placed' flag OVER-reports
+    (late arrivals sit in the biomass envelope with no per-tank row), so it
+    means a REALIZED-PLACEMENT gap, not lost mass.
 
     Returns dict: gate ('PASS'|'PARTIAL'|'FAIL'), dropped, overprod,
     unplaced_batches, unplaced_fish, residual_pct.
@@ -166,13 +171,13 @@ def _conservation_verdict(out_path):
                 unplaced_f = int(m.group(2).replace(",", ""))
                 break
 
-    # BOTH engines emit a sheet named 'ReconciliationReport', but of different
-    # shape: Global's carries a FACILITY summary row (seeded == harvested +
-    # standing + mortality + cull) whose last column is the mass residual %; the
-    # Controller's is a per-(batch, week) balance table with NO FACILITY row.
-    # Key the gate off the FACILITY row's PRESENCE, not the sheet name — else the
-    # Controller wrongly takes the mass-gate branch, finds no residual, and FAILs
-    # a run that conserves perfectly.
+    # A sheet named 'ReconciliationReport' can be either of two shapes: a
+    # FACILITY summary row (seeded == harvested + standing + mortality + cull)
+    # whose last column is the mass residual %, or the Controller's
+    # per-(batch, week) balance table with NO FACILITY row. Key the gate off the
+    # FACILITY row's PRESENCE, not the sheet name — else the Controller wrongly
+    # takes the mass-gate branch, finds no residual, and FAILs a run that
+    # conserves perfectly.
     facility_row = None
     if "ReconciliationReport" in sheets:
         for row in wb["ReconciliationReport"].iter_rows(values_only=True):
@@ -180,7 +185,7 @@ def _conservation_verdict(out_path):
                 facility_row = row
                 break
 
-    if facility_row is not None:                    # -> Global: mass gate
+    if facility_row is not None:                    # -> facility proof: mass gate
         try:
             residual_pct = float(facility_row[-1])
         except (TypeError, ValueError):

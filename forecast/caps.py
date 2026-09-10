@@ -472,8 +472,8 @@ def require_system_cap(
     ceiling for one the operator never set plans against a number nobody
     chose and that appears nowhere in the output — so the engines that need
     a hard bound call this instead, and the error names the exact input to
-    add. Shared by the MILP and L3 placement layers so the two cannot drift
-    into different notions of "missing".
+    add. It is the ONE definition of "missing", so no placement layer can
+    quietly grow its own.
     """
     v = system_limits.resolve(week_label, system_id, metric)
     if v is None:

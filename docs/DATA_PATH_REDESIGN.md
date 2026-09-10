@@ -259,8 +259,15 @@ extended in place; the mother ship is new UI + the structured store.
 4. **Calibration loop:** `FW_Correction`/`SGR_Correction` are *outputs* of the FW
    calibration (Diagnostics residuals suggest values). In-app: run → see residuals
    → apply → re-run. Persist applied corrections on the scenario, or on the batch?
-5. **Solver stack:** operational + strategic optimizers — MILP via OR-Tools /
-   PuLP, or heuristic/metaheuristic? Affects dependencies + runtime expectations.
+5. **Solver stack:** operational + strategic optimizers — heuristic/metaheuristic,
+   or re-introduce a MILP dependency? Affects dependencies + runtime expectations.
+   One data point (2026-09): the Global planning method, the only MILP/LP attempt
+   so far, was withdrawn after measurement — CP-SAT was infeasible in ~81% of weeks
+   and fell back silently to an uncapped result labelled "optimal", the LP carried
+   no density constraint, and whole batches were dropped. OR-Tools is no longer a
+   dependency, and removing the solves cut the full suite from ~21 minutes to ~4.
+   A solver here has to be re-justified on its own evidence, and any infeasibility
+   path has to be loud.
 
 ## Phased rollout (each phase ships working software)
 

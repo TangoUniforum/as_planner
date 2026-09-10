@@ -4,41 +4,36 @@ Every method consumes the SAME inputs — the PR workbook + the app's config
 (control / biology / facility) + scenario (batches / limits / manual_events) —
 and produces a full forecast workbook at a caller-chosen output path. Because
 the methods share the config + scenario (including scenario/manual_events.yaml,
-the manual override window that BOTH engines apply identically), the runs are
+the manual override window every method applies identically), the runs are
 apples-to-apples on the INPUTS: the SAME "manual entries are law" starting
 state and the SAME control rules. That is the point — it lets the operator run
 several methods and compare the results to be confident the plan they select is
 the best available, not just the first one produced.
 
-THEY ARE NOT IDENTICAL MODELS, and since 2026-08-21 the gap is material. The
-Controller family runs forecast/placement.py, which charges handling mortality
-on every tank-to-tank deposit and carries the OG1/2 density relief,
-consolidation and chronic-pressure work. The Global family runs its own
-placement and none of that: its transfers are FREE and it has no density-relief
-policy. Both families DO share the R8 density exemption (forecast/tiers.py) and the
-core biology (forecast/biology.py) -- but NOT the imperfect grader:
-`grade_efficiency` is read only in placement.py and manual_events.py, so a
-Global arm grades perfectly at the cut line while a Controller arm does not.
-
-So: compare harvest SHAPE and contract compliance across families, but compare
-transfer counts and density-relief behaviour only WITHIN a family. A
-transfer-heavy Global plan is not being taxed the way a Controller plan is.
+EVERY REGISTERED METHOD IS THE SAME ENGINE. All of them run forecast/run.py
+over forecast/placement.py, which charges handling mortality on every
+tank-to-tank deposit and carries the OG1/2 density relief, consolidation and
+chronic-pressure work; they share the R8 density exemption (forecast/tiers.py),
+the core biology (forecast/biology.py) and the imperfect grader
+(`grade_efficiency`, read in placement.py and manual_events.py). What separates
+them is the `overrides` block — an L1 harvest guide, an LNS placement pass, a
+tank-feasibility pass — layered on the one engine. So every axis is comparable
+across the roster, transfer counts and density-relief behaviour included.
 
 This is the extension point: a newly-available method (a new placement backend,
 a new solver) becomes comparable by adding ONE `register(...)` call here — the
 compare driver (tools/run_compare.py) and the RunComparison sheet
-(excel_io.write_run_comparison) need no change.
+(excel_io.write_run_comparison) need no change. A method that brings its OWN
+engine, rather than an overrides patch on this one, also has to say what it
+does and does not read: the handling-budget gate
+(`analysis._gate_handling_budget`) grades on `max_transfers_per_week`, and a
+plan produced without reading it is not comparable on move counts.
 
 Nothing here mutates the caller's config / scenario dirs: each run executes in
 an isolated temp copy (mirrors forecast.tuning._run_in_tempdir), so a method's
 per-run control overrides (e.g. placement_method='lns') never leak between
 methods or touch the user's files. The PR workbook is copied in too, so the
 source is never written back.
-
-The rigid front-end (L1 tankless harvest + facility-share) is identical across
-the Global methods; only the PLACEMENT layer differs (LP vs CP-SAT). A true
-Global rigid-greedy (L2 water-filler, no LP) is not yet a wired mode — when it
-is, it registers here beside `global-lp` / `global-milp` and joins the roster.
 """
 from __future__ import annotations
 
@@ -73,12 +68,6 @@ from .optimize import CD_KNOB_SPACE, OPT_FULL_GRID
 #     but stays listed so no space can ever resurrect it.)
 # register() enforces this structurally — an illegal space cannot register.
 #
-# NOTE, because "the plan must respect them" is only true of one family: the
-# Global engine reads max_harvest_per_week and min_harvest_per_week but NEVER
-# reads harvest_relief_pct or max_transfers_per_week. So a Global plan carries
-# no handling budget and no relief-band semantics at all — if a Global column
-# fails one of those gates on the board, that is a MODELLING GAP in the Global
-# path, not a knob the operator can turn.
 UNTUNABLE_KNOBS = frozenset({
     # OPERATOR INPUTS, not levers (operator ruling 2026-08-22). A tuner may
     # change HOW the model plans; it may not change WHAT the facility is or
@@ -149,31 +138,6 @@ UNTUNABLE_KNOBS = frozenset({
 CONTROLLER_KNOB_GRID = tuple((lbl, dict(ov)) for lbl, ov in OPT_FULL_GRID)
 CONTROLLER_KNOB_SPACE = tuple((k, tuple(vs)) for k, vs in CD_KNOB_SPACE)
 
-# Global-family space: EMPTY — verified 2026-08-09 by grepping the whole global
-# path (global_planner_poc / _l2 / _l3 / _loop / global_tank_pick_poc /
-# global_placement_milp_poc / global_forecast / tools.run_global_forecast) for
-# control-knob reads:
-#   * The only TUNABLE knobs the global path reads are
-#     facility_biomass_deviation_pct (L1) and density_target_pct (L3) — and
-#     overriding exactly those (plus tran_og) was experimentally shown to BREAK
-#     Global's conservation proof (2026-08-07). Excluded.
-#   * The proposed safe candidates are NOT consumed by the global path:
-#     global_buffer_pct is read only by caps.system_cap_with_buffer, whose sole
-#     caller is the CONTROLLER's placement.py; hybrid_guide_smooth_weeks is read
-#     only by hybrid_guide.py, which only forecast/run.py (controller) calls.
-#     A knob a method doesn't read must not be in its space.
-#   * Everything else it reads is a fixed rule/constant (max_biomass_kg,
-#     max_harvest_per_week, min_harvest_weight_g, horizon, 6N dates).
-# So the honest Global space is empty: the Globals compete at stock config, and
-# a hard-gate failure there is 'gate-bound' (no knob can fix it), not tunable.
-GLOBAL_KNOB_GRID: tuple = ()
-GLOBAL_KNOB_SPACE: tuple = ()
-
-# Knobs a GLOBAL method's space may ever contain. Currently empty (see above);
-# if a conservation-safe, actually-consumed global knob is found later, add it
-# here WITH the grep + conservation evidence, and the registry check relaxes.
-GLOBAL_CONSERVATION_SAFE_KNOBS = frozenset()
-
 
 # --------------------------------------------------------------------------- #
 # Method definition
@@ -184,14 +148,14 @@ class Method:
 
     key      stable id used on the command line and as the RunComparison column
     label    legible name shown on the sheet
-    family   "Controller" | "Global" (groups the columns)
+    family   "Controller" — the one remaining family (groups the columns)
     blurb    one-line, human description of HOW this method plans
-    engine   which callable runs it: "controller" (forecast.run.main) or
-             "global" (tools.run_global_forecast.run_global)
+    engine   which callable runs it: "controller" (forecast.run.main), the only
+             engine there is
     overrides   control.yaml patches applied in the temp copy before the run
                 (e.g. {"placement_method": "lns"}); does NOT touch the user file
-    engine_kwargs   extra keyword args passed to the engine callable
-                    (e.g. {"optimal": True} to select CP-SAT placement)
+    engine_kwargs   extra keyword args passed to the engine callable; the
+                    controller engine takes none, so this is empty today
     knob_grid   broad-sweep rows ((label, {knob: value}), ...) the tuned
                 tournament may run for THIS method — every row is layered ON TOP
                 of `overrides` (the method's pins stay pinned)
@@ -231,10 +195,6 @@ def _run_engine(engine: str, inp, out, cdir, sdir, engine_kwargs: dict) -> int:
         # guard this; the method runner is the one path that did not.
         return _run.main(inp, out, config_dir=cdir, scenario_dir=sdir,
                          calib_log_path="")
-    if engine == "global":
-        from tools.run_global_forecast import run_global
-        return run_global(inp, out, config_dir=cdir, scenario_dir=sdir,
-                          **engine_kwargs)
     raise ValueError(f"unknown engine {engine!r}")
 
 
@@ -289,8 +249,7 @@ def _space_knobs(method: Method) -> set:
 def _validate_knob_space(method: Method) -> None:
     """Structural guarantees on a method's tunable space (fail at register time,
     not mid-tournament): business constants / operational rules are untunable by
-    ANYONE, and a Global method may only carry knobs proven conservation-safe
-    AND consumed by the global path (currently: none)."""
+    ANYONE."""
     knobs = _space_knobs(method)
     illegal = knobs & UNTUNABLE_KNOBS
     if illegal:
@@ -298,15 +257,6 @@ def _validate_knob_space(method: Method) -> None:
             f"method {method.key!r}: knob space contains untunable business/"
             f"rule knob(s) {sorted(illegal)} — these are fixed constraints "
             f"(see UNTUNABLE_KNOBS)")
-    if method.engine == "global":
-        unsafe = knobs - GLOBAL_CONSERVATION_SAFE_KNOBS
-        if unsafe:
-            raise ValueError(
-                f"method {method.key!r}: global-engine knob space contains "
-                f"{sorted(unsafe)} — not in GLOBAL_CONSERVATION_SAFE_KNOBS "
-                f"(placement-side overrides broke Global conservation, "
-                f"2026-08-07; a knob the global path doesn't read must not "
-                f"be in its space)")
 
 
 def register(method: Method) -> None:
@@ -332,7 +282,7 @@ register(Method(
           "rebalancer, and the 2026-08-21 density policy — OG1/2 relief, "
           "chronic-pressure anticipation, and consolidation that frees a tank "
           "by packing a batch into fewer of its own. Handling mortality is "
-          "charged on every deposit here; it is NOT on the Global arms. "
+          "charged on every deposit. "
           "The long-standing production engine and the greedy baseline. "
           "RE-MEASURED 2026-08-21 across all 21 PRs in pr_corpus (era "
           "registries, current code): it leaves at least one COMPLETELY EMPTY "
@@ -383,82 +333,6 @@ register(Method(
           "the better plan.",
 ))
 register(Method(
-    key="global-lp",
-    label="Global — lexicographic LP",
-    family="Global",
-    engine="global",
-    engine_kwargs={"optimal": False},
-    # Knob space EMPTY (GLOBAL_KNOB_*): no conservation-safe knob the global
-    # path actually reads exists — see the evidence block above GLOBAL_KNOB_GRID.
-    knob_grid=GLOBAL_KNOB_GRID,
-    knob_space=GLOBAL_KNOB_SPACE,
-    blurb="Precalculated cascade: tankless harvest (L1) -> per-batch facility "
-          "share -> lexicographic LP placement (L3) -> continuity tank pick. "
-          "Runs its OWN placement — NOT forecast/placement.py — so none of the "
-          "controller's 2026-08-21 density work applies here: no OG1/2 "
-          "density relief, no consolidation-to-free-tanks, no chronic-"
-          "pressure anticipation, and NO handling mortality on its "
-          "transfers (its moves are FREE, so its transfer count is not "
-          "comparable with a Controller arm's). It DOES share the R8 "
-          "density exemption and the core biology, but NOT the "
-          "imperfect grader: grade_efficiency is read only in "
-          "placement.py and manual_events.py (off control/state), so a "
-          "Global arm grades PERFECTLY at the cut line and its size "
-          "splits are cleaner than any Controller arm's. "
-          "Since 2026-08-21 it models the REAL 6N handover "
-          "(global_assume_primed_6n=false): expect a genuine startup ramp "
-          "over the first ~2 purge-hold weeks rather than a smooth week 1.",
-))
-register(Method(
-    key="global-milp",
-    label="Global — CP-SAT optimal",
-    family="Global",
-    engine="global",
-    engine_kwargs={"optimal": True},
-    # Same empty space as global-lp (same L1/L3 knob consumption).
-    knob_grid=GLOBAL_KNOB_GRID,
-    knob_space=GLOBAL_KNOB_SPACE,
-    # BLURB CORRECTED 2026-08-14. It used to read "the whole-horizon grow-out
-    # layout is placed by a CP-SAT optimal (0-swap) solver". Both halves were
-    # wrong and the error actively misled a placement investigation into
-    # treating this method as a foresight benchmark:
-    #   * NOT whole-horizon. tools.run_global_forecast.run_cpsat calls
-    #     global_placement_milp_poc.solve_cpsat_perweek, which builds and solves
-    #     ONE model per week (`info["status"] == "per-week"`), seeded only by
-    #     last week's occupancy. It is exactly as myopic as the controller; what
-    #     differs is that its objective carries an explicit min-max BALANCE term
-    #     (`100 * (zb + zf)`, the per-week hottest system biomass/feed
-    #     fractions) that the controller has no equivalent of.
-    #   * NOT 0-swap. Same-week swaps are a SOFT objective term (`+ 3 *
-    #     sum(tr_swap)`) — the cheapest penalty in the whole objective, two
-    #     orders of magnitude under the cap-slack and balance terms — so the
-    #     solver buys swaps freely whenever they relieve a hot system, and the
-    #     realised plan emits thousands of transfers. (The hard 0-swap
-    #     formulation exists in this module as the full-horizon/rolling-window
-    #     solvers, which the registered method does not use.)
-    blurb="Same L1 cascade + facility share, but the grow-out layout is placed "
-          "by a CP-SAT solve. Like the LP it plans ONE WEEK AT A TIME (seeded "
-          "by last week's occupancy) — not the whole horizon — and its "
-          "advantage is not foresight but an explicit min-max balance term in "
-          "the objective, which holds the hottest system's biomass/feed down. "
-          "Same-week tank swaps are only softly penalised, so it buys them "
-          "freely: expect a transfer-heavy plan. "
-          "Runs its OWN placement — NOT forecast/placement.py — so none of the "
-          "controller's 2026-08-21 density work applies here: no OG1/2 "
-          "density relief, no consolidation-to-free-tanks, no chronic-"
-          "pressure anticipation, and NO handling mortality on its "
-          "transfers (its moves are FREE, so its transfer count is not "
-          "comparable with a Controller arm's). It DOES share the R8 "
-          "density exemption and the core biology, but NOT the "
-          "imperfect grader: grade_efficiency is read only in "
-          "placement.py and manual_events.py (off control/state), so a "
-          "Global arm grades PERFECTLY at the cut line and its size "
-          "splits are cleaner than any Controller arm's. "
-          "Since 2026-08-21 it models the REAL 6N handover "
-          "(global_assume_primed_6n=false): expect a genuine startup ramp "
-          "over the first ~2 purge-hold weeks rather than a smooth week 1.",
-))
-register(Method(
     key="controller-hybrid",
     label="Controller — hybrid (L1-guided harvest)",
     family="Controller",
@@ -481,8 +355,8 @@ register(Method(
                "hybrid_production_lever": True, "hybrid_purge_lever": True},
     knob_grid=CONTROLLER_KNOB_GRID,
     knob_space=CONTROLLER_KNOB_SPACE,
-    blurb="The validated controller with the Global engine's L1 harvest "
-          "envelope fed in as a per-week target band. "
+    blurb="The validated controller with the tankless L1 harvest envelope "
+          "(forecast/global_planner_poc.py) fed in as a per-week target band. "
           "*** THIS ARM STEERS — the 'INERT' warning that stood here until "
           "2026-09-03 was FALSE and contradicted this Method's own overrides "
           "dict a few lines above. It pins hybrid_production_lever=True AND "
@@ -523,8 +397,8 @@ register(Method(
           "peak-density figure sat here too; it was measured BEFORE R8 removed "
           "the cap from purge and harvest-prep tanks — it counted tanks that no "
           "longer have one, so it has been withdrawn rather than restated.) "
-          "Its L1 envelope comes from the same planner as the Global arms, so "
-          "global_assume_primed_6n shapes this arm's first ~2 weeks too. "
+          "Its L1 envelope is the one place global_assume_primed_6n is still "
+          "read, so that knob shapes this arm's first ~2 weeks. "
           "Every HARVEST-side knob that shrinks that peak (wider deviation "
           "band, guide smoothing) puts empty weeks back — the spike IS the "
           "reserve; the 2026-08-21 DENSITY knobs are a different lever that "
@@ -540,29 +414,6 @@ register(Method(
 # the zero-harvest-week blind spot fixed (34ecbaf) the plain controller was shown
 # to breach the never-an-empty-week rule on 5 of 6 real PRs, while the hybrid
 # breaches it on none. The old exclusion note here predated that measurement.
-# The GLOBAL family is deliberately NOT in the default roster (2026-08-27).
-#
-# A method that hard-fails a gate can never be promoted, so running it in a
-# routine sweep spends hours to reach a foregone conclusion. Measured on the
-# 2026-08-25 tuned tournament:
-#
-#     all 3 controller arms, TUNED (58 variants)   ~19 min
-#     global-lp,   stock only                      10,948 s  (3.0 h)
-#     global-milp, stock only                      16,750 s  (4.7 h)
-#
-# Global consumed ~90% of an 8h35m tournament to produce two arms that
-# hard-fail sixn_one_way AND handling_budget. It also cannot tune -- its knob
-# space is empty by design (see GLOBAL_KNOB_* below) -- so it contributes one
-# fixed point, not a search.
-#
-# It remains fully available: pass --methods global-lp,global-milp (CLI) or
-# select it on the board. Run it deliberately as a REFERENCE when you want the
-# achievable bound -- it is the only engine that holds the facility biomass cap
-# (96.7% peak vs the controller's 105.7%, 0 weeks over vs 11).
-#
-# READMISSION CONDITION, so this is not a permanent exile: put it back in the
-# default roster when it passes every HARD gate. See
-# docs/GLOBAL_TANK_LIFECYCLE_DESIGN.md for what that needs.
 # `controller-feasible` joins the DEFAULT roster, not just the registry: a
 # method the app's board and the tuned tournament never run is not "available",
 # it is invisible. It is off-by-default at the KNOB level (plan_tank_feasibility
@@ -571,10 +422,11 @@ register(Method(
 DEFAULT_ROSTER = ["controller", "controller-hybrid", "controller-lns",
                   "controller-feasible"]
 
-# Everything registered, for callers that want the full sweep including the
-# gate-bound reference arms.
+# Everything registered. Kept as a distinct name from DEFAULT_ROSTER because
+# callers reference it by name; it is equal to DEFAULT_ROSTER now that the
+# Global family is gone.
 FULL_ROSTER = ["controller", "controller-hybrid", "controller-lns",
-               "controller-feasible", "global-lp", "global-milp"]
+               "controller-feasible"]
 
 
 def get_roster(keys: "Optional[list[str]]" = None) -> "list[Method]":

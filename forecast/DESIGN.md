@@ -469,9 +469,9 @@ Forward precalc handles the common case. Three predictable repair sites:
 - **6N round-robin under tight harvest demand** — graded harvest path
   fires; ratio computed from source distribution.
 
-LP / MILP is a future wrapper only if forward precalc proves
-insufficient. The coordinator (§7.1a) deliberately avoids it: a
-deterministic interval-layout pass keeps the plan defendable.
+The coordinator (§7.1a) deliberately avoids a solver wrapper over
+forward precalc: a deterministic interval-layout pass keeps the plan
+defendable.
 
 **Status (2026-06-01, `feature/reservation-scheduler`).** Coordinator
 locked through Q-COORD.A–L: exit-at-1 kg + per-week TARGET top-up +

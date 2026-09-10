@@ -35,17 +35,6 @@ def test_every_method_declares_its_spaces():
         assert isinstance(m.knob_space, tuple)
 
 
-def test_globals_have_empty_spaces():
-    # Experimentally validated 2026-08-07: the only tunable knobs the global
-    # path reads (dev / density) BROKE its conservation proof; the proposed
-    # safe candidates are consumed only by the controller engine. Until a
-    # knob passes both bars, the honest Global space is EMPTY.
-    for key in ("global-lp", "global-milp"):
-        m = M.REGISTRY[key]
-        assert m.knob_grid == ()
-        assert m.knob_space == ()
-
-
 def test_controller_family_gets_the_full_optimizer_space():
     for key in ("controller", "controller-lns", "controller-hybrid"):
         m = M.REGISTRY[key]
@@ -69,14 +58,6 @@ def test_register_refuses_untunable_knob():
     assert "_bad" not in M.REGISTRY
 
 
-def test_register_refuses_unvetted_global_knob():
-    bad = M.Method(key="_badg", label="x", family="Global", blurb="",
-                   engine="global",
-                   knob_grid=((("dev=0.02"), {"facility_biomass_deviation_pct":
-                                              0.02}),))
-    with pytest.raises(ValueError, match="conservation"):
-        M.register(bad)
-    assert "_badg" not in M.REGISTRY
 
 
 # --------------------------------------------------------------------------- #
@@ -215,38 +196,6 @@ def test_pick_winner_guard_stands_down_when_nothing_holds_the_floor():
     assert T.pick_winner([a, b], w, stock_min_week=30000.0).overrides == {"a": 1}
 
 
-def test_tune_method_refuses_global_engine_with_a_space():
-    m = dataclasses.replace(M.REGISTRY["global-lp"],
-                            knob_space=(("some_knob", (1, 2)),))
-    with pytest.raises(NotImplementedError, match="controller engine"):
-        T.tune_method(m, "in.xlsx", "cfg", "scen", emphasis="Balanced")
-
-
-def test_tune_method_stock_only_and_gate_bound_run_nothing():
-    g = M.REGISTRY["global-lp"]
-    out = T.tune_method(g, "in.xlsx", "cfg", "scen", emphasis="Balanced")
-    assert out["status"] == "stock-only" and out["variants"] == []
-    out = T.tune_method(g, "in.xlsx", "cfg", "scen", emphasis="Balanced",
-                        stock_hard_fails=["no_empty_week"])
-    assert out["status"] == "gate-bound" and out["variants"] == []
-
-
-def test_estimate_budget_and_cached_count():
-    m = M.REGISTRY["controller-hybrid"]
-    b = T.estimate_budget(m)
-    assert b["grid"] == len(O.OPT_FULL_GRID)
-    assert b["probe_if_gate_fails"] == len(T.probe_grid(m))
-    assert b["max_total"] >= b["grid"] + b["probe_if_gate_fails"]
-    g = M.REGISTRY["global-lp"]
-    bg = T.estimate_budget(g)
-    assert bg["grid"] == bg["probe_if_gate_fails"] == bg["verify"] == 0
-    # cache-reuse counting uses the sweep's own key
-    grid = T.search_grid(m)
-    vc = {O._overrides_key(grid[0][1]): "x", O._overrides_key(grid[3][1]): "x"}
-    assert T.cached_count(vc, grid) == 2
-    assert T.cached_count(None, grid) == 0
-
-
 # --------------------------------------------------------------------------- #
 # Tuned-candidate labeling
 # --------------------------------------------------------------------------- #
@@ -262,32 +211,6 @@ def test_tuned_label_excludes_pins_shows_chosen_knobs():
 # --------------------------------------------------------------------------- #
 # Promote -> Quick-run round-trip with a GLOBAL method + overrides
 # --------------------------------------------------------------------------- #
-def test_promote_quick_run_round_trip_global_method(tmp_path):
-    cfg = tmp_path / "config"
-    cfg.mkdir()
-    (cfg / "control.yaml").write_text(
-        "max_biomass_kg: 3800000.0\nglobal_buffer_pct: 0.05\n")
-    # Promote a tuned GLOBAL candidate: method key + its winning overrides.
-    overrides = {"global_buffer_pct": 0.07}
-    A.save_promoted_default(str(cfg), method="global-lp", overrides=overrides,
-                            promoted_ts="2026-08-09T12:00:00",
-                            note="tuned tournament winner")
-    promoted = A.load_promoted_default(str(cfg))
-    assert promoted["method"] == "global-lp"
-    assert promoted["overrides"] == overrides
-    # The method key must resolve to a real registered method (the app falls
-    # back to the default method otherwise — that would replay the WRONG plan).
-    assert promoted["method"] in M.REGISTRY
-    assert M.REGISTRY[promoted["method"]].engine == "global"
-    # Quick run's exact mechanism: merge the promoted overrides into a temp
-    # config copy, then run the promoted method against it.
-    merged_dir = O.config_dir_with_overrides(str(cfg), promoted["overrides"])
-    merged = yaml.safe_load(open(f"{merged_dir}/control.yaml"))
-    assert merged["global_buffer_pct"] == 0.07
-    assert merged["max_biomass_kg"] == 3800000.0       # untouched knobs kept
-    # ...and the user's own config was never mutated.
-    original = yaml.safe_load(open(cfg / "control.yaml"))
-    assert original["global_buffer_pct"] == 0.05
 
 
 def test_promoted_evidence_survives_round_trip(tmp_path):

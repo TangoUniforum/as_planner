@@ -65,7 +65,7 @@ reported the worst, the score averaged excess over all cells. The 8.23.26 tuned
 winner cut TOTAL over-cap feed 22% while adding 5 breaching system-weeks and
 pushing the worst system 1.318x -> 1.331x — and won the tournament on that one
 term (-0.3962 of a -0.3085 margin) while its gate read FAIL. Six candidates were
-enough to surface it; a 486-run search would have driven straight into it,
+enough to surface it; a full 648-run sweep would have driven straight into it,
 because spreading breaches thinner was free score.
 
 So the check before adding a phase is not "does the row have two entries" but
@@ -146,17 +146,13 @@ Enumerate `method x knob combination`, run each, cache metrics.
 Real sizes, measured:
 
 - controller knob space = 5 knobs -> **162 combinations**
-- 3 controller arms -> **486 runs ≈ 2 h** at ~15 s — genuinely exhaustive
-- `global-lp` **~35 min/run measured on the 8.23.26 PR** (2026-08-31), not the
-  ~4 min this line used to claim — an order of magnitude out. 162 runs would be
-  ~4 days, not 11 hours.
-- `global-milp` ~30 min/run was measured on a different PR and should be treated
-  as a floor, not an estimate, until re-measured — if it scales like LP did, a
-  full grid is a multi-day job.
+- 4 controller arms (`FULL_ROSTER` — `controller`, `controller-hybrid`,
+  `controller-lns`, `controller-feasible`) -> **648 runs ≈ 2.7 h** at ~15 s —
+  genuinely exhaustive
 
-**Measure the Global runtime on YOUR PR before planning around it.** Both
-figures above were quoted from an earlier scenario and one of them was wrong by
-10x, which is enough to turn an afternoon into a week.
+**Re-measure the per-run cost on your own PR before planning around a total.**
+A per-run figure quoted from an earlier scenario was once wrong by 10x
+(2026-08-31), which is enough to turn an afternoon into a week.
 
 **Operator inputs are never searched.** `UNTUNABLE_KNOBS` holds 16 of them
 (`min_harvest_weight_g`, `max_harvest_per_week`, `tran_og_default_tanks`, the
@@ -194,7 +190,7 @@ predate a basis fix — provenance is what removes the need for such caveats.
 
 **Guards must be HARD in an unattended run.** Today a guard that cannot be
 satisfied "stands down" and the UI flags it amber for a human to notice. Nobody
-watches a two-hour sweep: a stood-down guard must be a refusal to write the
+watches a three-hour sweep: a stood-down guard must be a refusal to write the
 preset, or a headline in the result — never a quiet amber.
 
 ---
@@ -206,11 +202,16 @@ Not different algorithms — different **coverage targets** over the same spine.
 | level | covers | ~time | typical use |
 |---|---|---|---|
 | **Quick** | cache-warm; runs only what is missing | minutes | after a small config edit |
-| **Standard** | 3 controller arms x full knob grid | ~2 h | monthly, after a new PR |
-| **Full** | + Global arms on a coarse sub-grid | overnight | quarterly, or when the roster changes |
+| **Full** | 4 controller arms x full knob grid | ~2.7 h | monthly, after a new PR |
+
+Two levels, not three: one engine family is registered, so `FULL_ROSTER` is the
+same list as `DEFAULT_ROSTER` and a Full sweep is simply every registered arm at
+full grid. A third, overnight level — a second family on a coarse sub-grid —
+becomes meaningful again only when a second family is registered and its
+per-run cost has been measured.
 
 Every level writes the same artifacts, so a Quick sweep's runs are reused by a
-later Standard one. **Report what was searched AND what was not** — silent
+later Full one. **Report what was searched AND what was not** — silent
 truncation reads as "we covered everything."
 
 ---
@@ -230,11 +231,9 @@ CV, tank footprint, fastest run) plus the raw `density_peak` lens
 10. the ~100-second engine-only path
 11. the partial-roster warning
 
-Plus two the merge plan originally missed:
+Plus one the merge plan originally missed:
 
-12. **the CP-SAT solve-depth control** — lives only in Compare, but is read by
-    five call sites *including Analyze*
-13. **naming a failed engine leg and its error** — Analyze drops `ok == False`
+12. **naming a failed engine leg and its error** — Analyze drops `ok == False`
     legs silently
 
 **House rule:** this repo retires a mode with a dated section enumerating where
@@ -251,7 +250,7 @@ Retiring two modes without that record is the documented failure mode.
 | a guard stands down unnoticed overnight | hard refusal or headline, never amber |
 | stale cache mixes old and new metric meanings | `METRICS_SCHEMA` bump invalidates |
 | preset applied to a PR it was not chosen on | provenance + Run forecast re-checks gates cheaply |
-| Global's runtime swamps the sweep | coarse sub-grid, opt-in, its cost stated up front |
+| a new arm's runtime swamps the sweep | measure one run first; state its cost up front before gridding it |
 | "no better plan found" reads as failure | first-class result: report the search and the null |
 
 **The starting state dominates the answer.** On the 8.23.26 PR the controller

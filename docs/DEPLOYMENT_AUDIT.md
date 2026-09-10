@@ -1,7 +1,7 @@
 # Deployment-Readiness Audit — Production Controller Forecast Pipeline
 
 **Date:** 2026-06-25
-**Scope:** the production controller (`forecast/run.py` and the modules it calls). The experimental CP-SAT / global method (`*_poc.py`, `global_*.py`) is **out of scope** for this rollout.
+**Scope:** the production controller (`forecast/run.py` and the modules it calls). The experimental `*_poc.py` planners are **out of scope** for this rollout.
 **Method:** 37-agent multi-agent audit — 6 subsystem reviewers (conservation, cap math, 6N depuration-hold, biology, harvest+placement, reports), each finding adversarially re-verified by a second agent, then synthesized. 30 raw findings, **29 confirmed after adversarial verification**.
 
 ---

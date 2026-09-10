@@ -51,31 +51,6 @@ def test_present_peak_density_column_still_measures(tmp_path):
     assert [d["Batch"] for d in detail] == ["B51"]   # >= DETAIL_RATIO only
 
 
-def test_scan_audit_drift_missing_facility_row_cannot_read_as_pass():
-    """DEFECT: the facility 'Count (fish)' totals initialized to 0.0, so a
-    summary row that was missing (or unparseable) DEFAULTED to the passing
-    value of the caller's `abs(fac_signed) < 1.0` cleanliness test. NaN fails
-    that comparison, so the verdict reads INVESTIGATE."""
-    from tools.run_global_forecast import _scan_audit_drift
-    wb = openpyxl.Workbook()
-    ws = wb.active   # no 'Count (fish)' row at all
-    ws.append(["Some", "other", "row"])
-    n_tank, n_bio, fac_signed, fac_abs = _scan_audit_drift(ws)
-    assert n_tank == 0 and n_bio == 0
-    assert math.isnan(fac_signed) and math.isnan(fac_abs)
-    assert not (abs(fac_signed) < 1.0)      # the caller's clean test FAILS
-
-
-def test_scan_audit_drift_parseable_row_unchanged():
-    from tools.run_global_forecast import _scan_audit_drift
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.append(["Count (fish)", 0.4, 12.0])
-    _, _, fac_signed, fac_abs = _scan_audit_drift(ws)
-    assert fac_signed == 0.4 and fac_abs == 12.0
-    assert abs(fac_signed) < 1.0            # genuinely clean still passes
-
-
 # --------------------------------------------------------------------------- #
 # global-milp: CP-SAT infeasible weeks must not be a silent degrade
 #
@@ -87,14 +62,6 @@ def test_scan_audit_drift_parseable_row_unchanged():
 # labelled "Global - CP-SAT optimal" with a PASS gate. The failure was printed
 # to stdout and recorded NOWHERE the graders or the workbook could see it.
 # --------------------------------------------------------------------------- #
-def test_cpsat_perweek_info_reports_the_horizon_denominator():
-    """n_infeasible is meaningless without its denominator: "103" reads very
-    differently from "103 of 127". The solver must self-report both."""
-    from forecast.global_placement_milp_poc import solve_cpsat_perweek
-    import inspect
-    src = inspect.getsource(solve_cpsat_perweek)
-    assert '"n_weeks": len(weeks)' in src
-    assert '"n_infeasible": n_infeasible' in src
 
 
 def test_degraded_placement_is_recorded_as_an_error_not_a_note():
@@ -133,56 +100,6 @@ def test_degrade_warning_cannot_be_mistaken_for_a_manual_window_week():
     assert window_weeks.manual_window_weeks(wb) == {"2026-W31"}
 
 
-def test_a_fully_solved_placement_raises_no_degrade_warning():
-    """The clean case must stay silent — a warning on every optimal run would
-    train the operator to ignore the one that matters."""
-    from tools.run_global_forecast import cpsat_degrade_warning
-    assert cpsat_degrade_warning({"n_weeks": 127, "n_infeasible": 0}) == ""
-    assert cpsat_degrade_warning({}) == ""
-    assert cpsat_degrade_warning(None) == ""
-
-
-def test_infeasible_weeks_produce_a_degrade_warning_with_both_numbers():
-    """The operator's actual board leg: 103 of 127 weeks unplaced."""
-    from tools.run_global_forecast import cpsat_degrade_warning
-    w = cpsat_degrade_warning({"n_weeks": 127, "n_infeasible": 103})
-    assert w.startswith("PLACEMENT DEGRADED")
-    assert "103 of 127" in w and "81%" in w
-    assert "NOT an optimal placement" in w
-    # never mistakable for an operator-scripted window row
-    assert "MANUAL EVENT" not in w and "MANUAL WINDOW" not in w
-    import re
-    assert not re.search(r"\b\d{4}-W\d{2}\b", w)
-
-
-def test_degrade_warning_survives_a_missing_denominator():
-    """An older/partial info dict must still raise the alarm rather than crash
-    or silently return "" (absence must not read as success)."""
-    from tools.run_global_forecast import cpsat_degrade_warning
-    w = cpsat_degrade_warning({"n_infeasible": 5})
-    assert w.startswith("PLACEMENT DEGRADED") and "5 of 0" in w
-
-
-def test_run_global_routes_the_degrade_warning_into_the_validation_log():
-    """End-to-end wiring, without paying for a real 40-minute CP-SAT solve:
-    the warning the helper produces must reach write_validation_log and land
-    as an ERROR row."""
-    import inspect
-    from tools import run_global_forecast as rgf
-    src = inspect.getsource(rgf.run_global)
-    assert "cpsat_degrade_warning(_cpsat_info)" in src
-    assert "manual_warnings=list(_mw_warns) + _engine_warns" in src
-    assert "return q, info" in inspect.getsource(rgf._solve_cpsat_q)
-
-    from forecast.excel_io import write_validation_log
-    wb = openpyxl.Workbook()
-    write_validation_log(wb, invariant_warnings=[
-        rgf.cpsat_degrade_warning({"n_weeks": 127, "n_infeasible": 103})])
-    cats = [r[1] for r in wb["ValidationLog"].iter_rows(values_only=True)
-            if r and isinstance(r[0], int)]
-    assert cats == ["ERROR - Placement degraded (fallback)"]
-
-
 # =========================================================================== #
 # 2026-08 documentation audit — three more categories that could never fire,
 # or fired under the wrong name. Same class as everything above: the tool made
@@ -200,91 +117,6 @@ def _caps_for(*system_ids):
     return SystemLimits(defaults={
         (s, m): v for s in system_ids
         for m, v in (("biomass", 400_000.0), ("feed_per_day", 3_000.0))})
-
-
-class TestPassBFallbackIsActuallyProduced:
-    """`WARNING - Pass B fallback (no stickiness)` was a ValidationLog category
-    with NO producer anywhere in the repo — and the fallback it names is real
-    and live: `_solve_passB_per_week` collected `_passB_fallbacks` and then
-    threw the list away. A horizon could lose transfer minimisation on most of
-    its weeks and the workbook would say nothing."""
-
-    def _run_with_a_solver_that_never_proves(self):
-        import numpy as np
-        from forecast import global_planner_l3_poc as l3
-        from forecast.caps import SystemLimits
-
-        class _Failed:
-            status, x, message = 1, None, "iteration limit"
-
-        def _never_proves(*a, **kw):
-            return _Failed()
-
-        demand = {
-            ("B1", w): l3.TankDemandRow(
-                week=w, week_label=f"2026-W{31 + w}", batch_id="B1", tier="grow",
-                tanks=1, biomass_kg=50_000.0, feed_kg_day=500.0,
-                avg_wt_g=4000.0, per_tank_biomass_kg=50_000.0,
-                per_tank_feed_kg_day=500.0)
-            for w in (0, 1)
-        }
-        y_meta = [("B1", "OG3", 0), ("B1", "OG3", 1)]
-        xA = np.zeros(len(y_meta) + 3 * 2 + len(y_meta))
-        l3.SOLVER_WARNINGS.clear()
-        l3._solve_passB_per_week(
-            [0, 1], ["OG3"], {("OG3", 0): 0, ("OG3", 1): 1},
-            {("OG3", 0): [0], ("OG3", 1): [1]}, y_meta, demand,
-            {0: {"OG3": 4}, 1: {"OG3": 4}},
-            {0: "2026-W31", 1: "2026-W32"}, _caps_for("OG3"),
-            {0: (0.0, 0.0), 1: (0.0, 0.0)}, xA, 1.0, np, _never_proves,
-            0.02, False)
-        return list(l3.SOLVER_WARNINGS)
-
-    def test_every_fallen_back_week_is_reported(self):
-        """NEGATIVE CONTROL: on the parent commit this list is empty."""
-        warns = self._run_with_a_solver_that_never_proves()
-        hits = [w for w in warns if w.startswith("PASS B FALLBACK")]
-        assert len(hits) == 1, f"Pass B fell back on every week and said: {warns}"
-        # The denominator matters as much as the count (the 2026-08 lesson):
-        # "2" reads very differently from "2 of 2".
-        assert "2 of 2 week(s)" in hits[0]
-        # And it must name the CONSEQUENCE, not just the event.
-        assert "transfer" in hits[0].lower()
-
-    def test_a_clean_pass_b_stays_silent(self):
-        """A warning on every run trains the operator to ignore the one that
-        matters — the proved path must add nothing."""
-        import numpy as np
-        from forecast import global_planner_l3_poc as l3
-        from forecast.caps import SystemLimits
-        l3.SOLVER_WARNINGS.clear()
-
-        class _Ok:
-            status, message = 0, ""
-            x = np.zeros(1 + 3 * 1)
-
-        l3._solve_passB_per_week(
-            [0], ["OG3"], {("OG3", 0): 0}, {("OG3", 0): [0]},
-            [("B1", "OG3", 0)],
-            {("B1", 0): l3.TankDemandRow(
-                week=0, week_label="2026-W31", batch_id="B1", tier="grow",
-                tanks=1, biomass_kg=50_000.0, feed_kg_day=500.0,
-                avg_wt_g=4000.0, per_tank_biomass_kg=50_000.0,
-                per_tank_feed_kg_day=500.0)},
-            {0: {"OG3": 4}}, {0: "2026-W31"}, _caps_for("OG3"), {0: (0.0, 0.0)},
-            np.zeros(1 + 3 * 1 + 1), 1.0, np, lambda *a, **kw: _Ok(),
-            0.02, False)
-        assert not [w for w in l3.SOLVER_WARNINGS
-                    if w.startswith("PASS B FALLBACK")]
-
-    def test_the_warning_still_files_under_its_category(self):
-        from forecast.excel_io import write_validation_log
-        warns = self._run_with_a_solver_that_never_proves()
-        wb = openpyxl.Workbook()
-        write_validation_log(wb, invariant_warnings=warns)
-        cats = [r[1] for r in wb["ValidationLog"].iter_rows(values_only=True)
-                if r and isinstance(r[0], int)]
-        assert any(str(c).startswith("WARNING - Pass B fallback") for c in cats)
 
 
 class TestFwCalibrationIsNotFiledAsHydration:

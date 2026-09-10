@@ -5,13 +5,13 @@ roster method it runs the stock leg, checks the HARD gates (conservation,
 never-an-empty-week), then follows forecast.tournament's per-method plan —
 full search (the method's own knob space) for gate-passers, the cheap one-knob
 probe for gate-failers ('gate-bound' when no knob fixes it), 'stock-only' for
-methods with no tunable knobs (the Global family — see forecast/methods.py for
-the evidence). Each tuned winner gets a verification run on its OWN engine and
-joins the final ranking as "METHOD (tuned: knobs)".
+methods with no tunable knobs. Every roster method carries a knob space today,
+so 'stock-only' is a path nothing takes. Each tuned winner gets a verification
+run on its OWN engine and joins the final ranking as "METHOD (tuned: knobs)".
 
 Usage:
     python -m tools.run_tuned_tournament --workbook "7.29.26 PR.xlsx" \
-        --methods controller,controller-hybrid,controller-lns,global-lp \
+        --methods controller,controller-hybrid,controller-lns,controller-feasible \
         --out-dir out_tournament [--emphasis "Walk the line"] [--max-workers 8]
 
 Writes per-run workbooks + tournament_summary.json into --out-dir and prints
@@ -222,9 +222,10 @@ def main(argv=None) -> int:
             summary["methods"][m.key] = {"status": "run-failed", "rc": rc}
             continue
         # The engine family, so _gate_handling_budget can apply its DECLARED
-        # asymmetry. Omitted since the helper gained the parameter, which
-        # left every headless grade running as "" -- a Global candidate was
-        # graded on a handling budget that is a Controller-only concept.
+        # asymmetry. It was once omitted here, leaving every headless grade
+        # running as "" -- which graded a non-controller candidate on a
+        # handling budget it never read. Every registered method stamps
+        # "controller" today; pass it anyway so the next one cannot repeat it.
         g = _grade(actual, cfg, targets, m.engine)
         fails = _tour.hard_gate_fails(g["gates"])
         print(f"   gates [{_gate_str(g['gates'])}] hard-fails: {fails or 'none'}"

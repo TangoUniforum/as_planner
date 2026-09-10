@@ -1025,8 +1025,8 @@ def main(
         if cap <= 0:
             continue
         # R8 (tiers.effective_density_cap) — ONE definition, shared with
-        # placement.py and the Global arms' tank picker. A tank preparing for
-        # harvest is judged at HARVEST_PREP_DENSITY_CAP (the operator's 150),
+        # placement.py and lns_placement.py. A tank preparing for harvest is
+        # judged at HARVEST_PREP_DENSITY_CAP (the operator's 150),
         # NOT at +inf: harvest prep is a raised cap, not an exemption, and
         # before 2026-09-08 this audit could not report a STARVE tank at any
         # density at all. Judging only — the planner's sizing paths keep the

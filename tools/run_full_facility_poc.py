@@ -1,6 +1,6 @@
 """Runner: WHOLE-FACILITY tankless L1 (model_full_facility) — FW + OG + purge.
 
-METHOD: GLOBAL (tankless L1 POC) — TRUE whole-facility biomass/feed correction
+TANKLESS L1 (forecast/global_planner_poc.py) — TRUE whole-facility biomass/feed
 ================================================================================
 
 The production controller (and the original L1 POC) enforces the facility
@@ -51,68 +51,10 @@ from forecast.scenario_io import load_batches
 from forecast import global_planner_poc as gpp
 
 
-def _hydrate_pr(workbook_path: Path, batches):
-    """Read PR -> (inflight_og, fw_inflight, derived_start).
-
-    inflight_og: batch_id -> (count, avg_wt_g, cv_pct)  [OG seeds for L1]
-    fw_inflight: batch_id -> (count, avg_wt_g, pr_closing_date)  [FW-phase
-                 override so FW-in-flight batches project from PR state]
-    """
-    try:
-        from forecast.excel_io import load_workbook
-        from forecast.production_report import read_production_report
-    except Exception as e:  # noqa: BLE001
-        print(f"  (could not import PR reader: {e}); running incoming-only")
-        return {}, {}, None
-    if not workbook_path.exists():
-        print(f"  (workbook {workbook_path} not found; running incoming-only)")
-        return {}, {}, None
-    wb = load_workbook(workbook_path)
-    pr_closing, og_records, fw_records = read_production_report(wb)
-    wb.close()
-    derived_start = None
-    pr_close_date = None
-    if pr_closing is not None:
-        derived_start = datetime(pr_closing.year, pr_closing.month,
-                                 pr_closing.day) + timedelta(days=1)
-        pr_close_date = datetime(pr_closing.year, pr_closing.month, pr_closing.day)
-
-    # Split OG closing fish into grow-out vs 6N-RESIDENT (already mid-purge at
-    # hand-over). The 6N fish must NOT seed grow-out — they belong in the purge
-    # pipeline, releasing within the next ~2 weeks. Mixing them into grow-out is
-    # what made L1 spin a fresh purge backlog from empty (the startup overshoot).
-    from forecast.sixn import SIXN_ALL_TANKS
-    og_agg: dict[str, dict] = {}
-    purge_agg: dict[str, dict] = {}
-    for r in og_records:
-        target = purge_agg if r.tank_id in SIXN_ALL_TANKS else og_agg
-        e = target.setdefault(r.batch_id, {"count": 0.0, "biomass_kg": 0.0})
-        e["count"] += r.closing_count
-        e["biomass_kg"] += r.closing_biomass_kg
-    batch_cv = {b.batch_id: b.tran_og_cv for b in batches}
-    inflight_og = {}
-    for bid, e in og_agg.items():
-        if e["count"] > 0:
-            avg_wt = e["biomass_kg"] * 1000.0 / e["count"]
-            inflight_og[bid] = (e["count"], avg_wt, batch_cv.get(bid, 16.0))
-    # purge_inflight: handed-over 6N fish, batch_id -> (count, avg_wt_g).
-    purge_inflight = {}
-    for bid, e in purge_agg.items():
-        if e["count"] > 0:
-            purge_inflight[bid] = (e["count"], e["biomass_kg"] * 1000.0 / e["count"])
-
-    # FW-in-flight: measured in FW units at PR, NOT yet in OG. Mirrors run.py.
-    fw_agg: dict[str, dict] = {}
-    for r in fw_records:
-        e = fw_agg.setdefault(r.batch_id, {"count": 0.0, "biomass_kg": 0.0})
-        e["count"] += r.closing_count
-        e["biomass_kg"] += r.closing_biomass_kg
-    fw_inflight = {}
-    for bid, e in fw_agg.items():
-        if e["count"] > 0 and bid not in inflight_og:
-            avg_wt = e["biomass_kg"] * 1000.0 / e["count"]
-            fw_inflight[bid] = (e["count"], avg_wt, pr_close_date)
-    return inflight_og, fw_inflight, derived_start, purge_inflight
+# _hydrate_pr moved to forecast/pr_state.py so that dropping the Global
+# method cannot take PR hydration with it. Re-exported under the old name
+# because tools/ and the analysis harnesses import it from here.
+from forecast.pr_state import hydrate_pr as _hydrate_pr
 
 
 def _score_true_total(res, fw_bio_by_label):
@@ -148,7 +90,7 @@ def main() -> int:
     args = ap.parse_args()
 
     print("=" * 78)
-    print("  METHOD: GLOBAL (tankless L1 POC) — TRUE WHOLE-FACILITY biomass/feed")
+    print("  TANKLESS L1 — TRUE WHOLE-FACILITY biomass/feed")
     print("=" * 78)
 
     control, tables, facility = load_config(args.config_dir)
@@ -257,7 +199,7 @@ def main() -> int:
     print(f"  {'-'*34} {'-'*16} {'-'*10} {'-'*13}")
     print(f"  {'OG-only (controller philosophy)':<34} {peak_co:>16,.0f} "
           f"{pct_co:>9.1f}% {nover_co:>13}")
-    print(f"  {'full-facility (global L1)':<34} {peak_full:>16,.0f} "
+    print(f"  {'full-facility (L1)':<34} {peak_full:>16,.0f} "
           f"{pct_full:>9.1f}% {nover_full:>13}")
     print(f"\n  HOG trade-off: full-facility harvests {hog_full-hog_og_only:+,.0f} kg "
           f"({100*(hog_full-hog_og_only)/hog_og_only:+.1f}%) "

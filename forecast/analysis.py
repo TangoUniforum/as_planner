@@ -471,8 +471,9 @@ def density_review(out_path) -> Optional[dict]:
     KEY READING RULE (hard-won): severe batches clustering in time and peaking
     mid-grow-out = a STOCKING/CAPACITY problem — no knob fixes it; the stocking
     lever does. Scattered mild overshoot near 1.0-1.1x = normal near-cap
-    operation. Returns None when the sheet is absent (e.g. Global outputs
-    without Section B) — the gate reports N/A, never a false verdict."""
+    operation. Returns None when the sheet is absent (an imported or archived
+    workbook may have no Section B) — the gate reports N/A, never a false
+    verdict."""
     from . import tuning
     try:
         peaks, detail = tuning._peaks_and_detail(out_path)
@@ -558,10 +559,11 @@ def convergence_review(out_path) -> Optional[dict]:
     operator-scripted window weeks are excluded from both.
 
     The yardstick is deliberately the EXCESS, not the engine's own target. An
-    intent-based test ("did it get what it asked for?") would judge the
-    controller on a number it records and Global on plant capacity, which is the
-    same asymmetry that let Global's OG-only biomass flatter it for months. This
-    form reads only workbook data and applies identically to both.
+    intent-based test ("did it get what it asked for?") judges each engine on
+    whatever number it happens to record, and an engine that records none is
+    then judged on something else entirely — the asymmetry that let the removed
+    Global family's OG-only biomass flatter it for months. This form reads only
+    workbook data, so it stays comparable across whatever produced the plan.
 
     BASIS, stated plainly: maturity is measured on the TANK AVERAGE weight, so
     the graded tail of a sub-threshold batch (the engine can pull the top of a
@@ -609,10 +611,12 @@ def convergence_review(out_path) -> Optional[dict]:
         inputs_from = "workbook"
         if "RunConfig" in wb.sheetnames:
             # Two stamp DIALECTS: the controller writes a YAML snapshot
-            # ("key: value" in one cell), Global writes a two-column method
-            # stamp (key in A, value in B). Read both — a parser that knows only
-            # one silently leaves the other engine unjudged, which is how a
-            # comparison stops being apples-to-apples.
+            # ("key: value" in one cell); the removed Global exporter wrote a
+            # two-column method stamp (key in A, value in B). Nothing writes
+            # the second kind any more, but stamped workbooks are still on disk
+            # (see forecast/config_snapshot.py), so keep reading both — a
+            # parser that knows only one silently leaves such a workbook
+            # unjudged, which is how a comparison stops being apples-to-apples.
             for r in wb["RunConfig"].iter_rows(values_only=True):
                 cells = list(r or ())
                 for key, setter in (("min_harvest_weight_g", "wt"),
@@ -642,10 +646,11 @@ def convergence_review(out_path) -> Optional[dict]:
                     else:
                         max_hv = v
 
-        # Not every engine stamps its inputs (Global's RunConfig omits the
-        # harvest block). Without them nothing can be excused and that engine
-        # would be charged for every red week while another is excused — the
-        # apples-to-apples failure this whole lens exists to prevent. Fall back
+        # Not every workbook stamps its inputs (the old Global method stamp
+        # omits the harvest block). Without them nothing can be excused and
+        # that plan would be charged for every red week while another is
+        # excused — the apples-to-apples failure this lens exists to prevent.
+        # Fall back
         # to the SHIPPED control defaults and say so in `inputs_from`, so a
         # reader can see the numbers did not come from the run itself.
         if min_wt_g is None or min_hv is None or max_hv is None:
@@ -801,8 +806,9 @@ def convergence_review(out_path) -> Optional[dict]:
             # actually see. If their sum cannot cover the excess, no plan could
             # have erased it and the week is FORCED. Uses only workbook data, so
             # it applies IDENTICALLY to every engine — an intent-based yardstick
-            # would judge the controller on what it asked for while Global, which
-            # records no such number, kept being judged on capacity.
+            # judges each on what it asked for, and an engine that records no
+            # such number ends up judged on capacity instead (the asymmetry the
+            # 2026-09 Global removal is the record of).
             #
             # MATURITY IS READ ONE WEEK BACK. BatchLocations is a week-END
             # snapshot, so week j's row counts fish that crossed the harvest
@@ -963,8 +969,9 @@ def revenue_for(rows: list[dict], economics: dict) -> dict:
 # --------------------------------------------------------------------------- #
 # Result cache — finished runs survive reloads, frozen tabs, and new sessions
 # --------------------------------------------------------------------------- #
-# Streamlit session_state dies with the browser session; a finished CP-SAT leg
-# is 30 minutes of compute. Entries are pickled OUTSIDE OneDrive (multi-MB
+# Streamlit session_state dies with the browser session; a finished tuned
+# tournament is tens of minutes of compute (all three controller arms, 58
+# variants: ~19 min, 2026-08-25). Entries are pickled OUTSIDE OneDrive (multi-MB
 # binaries would churn sync) and keyed by name; staleness is the CALLER's
 # problem — every stored entry carries its input signature and is checked at
 # use, so an old entry is simply re-run, never wrongly trusted.
@@ -1695,31 +1702,23 @@ def _gate_handling_budget(ctx):
 
     A Controller engine defers its quality passes to hold the budget, so an
     overrun there means ESSENTIAL moves alone (arrival make-room, rotation
-    fills, the plan-diff) exceeded it that week. The Global engines never read
-    the budget at all, so an overrun there is simply unbudgeted planning."""
+    fills, the plan-diff) exceeded it that week."""
     over = ctx.get("weeks_moves_over_cap")
     warn = ctx.get("weeks_moves_warn")
     if over is None and warn is None:
         return "N/A", "weekly transfer counts unavailable"
-    # NOT APPLICABLE TO THE GLOBAL FAMILY (2026-09-01, after the parity audit).
-    # Verified by AST + textual search: max_transfers_per_week appears 4 times
-    # in placement.py and ZERO times in any global_* module or
-    # tools/run_global_forecast.py; handling_mortality_pct likewise (2 vs 0), so
-    # a Global move is both unbudgeted AND free.
+    # N/A FOR ANY ENGINE FAMILY THAT DOES NOT READ THE BUDGET (2026-09-01,
+    # after the parity audit). Only the controller reads
+    # max_transfers_per_week and handling_mortality_pct, so only its moves are
+    # budgeted and charged; a plan produced by anything else has transfer
+    # counts that are not comparable, and grading them PASS/WARN/FAIL made the
+    # controller look profligate for obeying a rule the other family ignored.
     #
-    # Grading it PASS/WARN/FAIL implied Global was playing the same game and
-    # merely playing it worse. It is not playing it: the controller defers
-    # quality passes to hold 15 moves/week and pays 0.01% on every deposit,
-    # while Global's pick emits transfers with no budget consulted anywhere.
-    # Judging both on one number made the controller look profligate for
-    # obeying a rule its rival ignored.
-    #
-    # It is NOT fixable by making this gate hard, and not by enforcing the
-    # budget in the pick. L1 decides quantities and is TANK-BLIND; the pick
-    # sees tanks and, by the rule the design doc draws from six failed attempts
-    # ("may REORDER, may not RE-QUANTIFY"), has no authority to refuse a move
-    # or shrink a deposit -- one such attempt destroyed 696 fish. So this is a
-    # DECLARED asymmetry, not a defect to be papered over.
+    # This branch is UNREACHABLE today: `engine_family` is stamped from
+    # `forecast.methods.Method.engine` (app.py, tools/run_tuned_tournament.py),
+    # and since the Global family was removed every registered method stamps
+    # "controller". It is kept as the guard for the next non-controller engine
+    # -- report N/A rather than grade a plan on a budget it never read.
     if str(ctx.get("engine_family") or "").lower() == "global":
         return "N/A", (
             "this engine does not read max_transfers_per_week or "
@@ -1737,9 +1736,7 @@ def _gate_handling_budget(ctx):
     mx_s = f" (worst week {int(mx)} moves)" if mx else ""
     if over > 0:
         return "FAIL", (f"{over} week(s) over the {cap_s}handling budget"
-                        f"{mx_s} — on a Controller plan that means essential "
-                        f"moves alone exceeded it; the Global engines do not "
-                        f"read the budget at all")
+                        f"{mx_s} — essential moves alone exceeded it")
     if warn > 0:
         return "WARN", (f"{warn} week(s) above ~80% of the {cap_s}handling "
                         f"budget{warn_s}{mx_s}")

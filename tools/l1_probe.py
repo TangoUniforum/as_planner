@@ -1,17 +1,22 @@
-"""L1 ONLY, in ~2 seconds. The fast loop for Global planning questions.
+"""L1 ONLY, in ~2 seconds. The fast loop for harvest-envelope questions.
 
     python tools/l1_probe.py --workbook <PR.xlsm>
     python tools/l1_probe.py --workbook <PR.xlsm> --sweep sixn_min_cohort_frac 0,0.05,0.15,0.25
 
 WHY THIS EXISTS
 ---------------
-A full global run takes 30-40 MINUTES: L1 plans, L3 solves, the tank pick
-assigns physical tanks, and a workbook is written. But most planning questions
-are decided entirely inside L1 -- how much is staged into 6N, how many distinct
-cohorts a week creates, what the harvest envelope looks like. `plan()` alone
-runs in about 2 SECONDS.
+A full forecast run places every batch tank by tank and writes a workbook. But
+most planning questions are decided entirely inside L1
+(forecast/global_planner_poc.py) -- how much is staged into 6N, how many
+distinct cohorts a week creates, what the harvest envelope looks like. `plan()`
+alone runs in about 2 SECONDS against the ~90s a full-horizon controller run
+costs on the live config.
 
-That 1000x gap is not a convenience, it is the difference between measuring and
+(The gap used to be 1000x, against the 30-40 minute Global run this tool was
+written beside. Global was removed on 2026-09-09; the ratio is smaller now, the
+doctrine is not.)
+
+That gap is not a convenience, it is the difference between measuring and
 guessing. On 2026-08-23 six consecutive fixes to the 6N depuration pipeline
 failed, and the post-mortem was the same every time: the hypothesis was
 reasoned rather than measured, because measuring cost 40 minutes. One of them
@@ -56,7 +61,7 @@ if str(_ROOT) not in sys.path:
 import forecast.global_planner_poc as gpp                        # noqa: E402
 import forecast.scenario_io as sio                               # noqa: E402
 from forecast.config_io import load_config                       # noqa: E402
-from tools.run_full_facility_poc import _hydrate_pr              # noqa: E402
+from forecast.pr_state import hydrate_pr as _hydrate_pr          # noqa: E402
 
 
 def run_l1(workbook, config_dir, scenario_dir, **over):
@@ -75,7 +80,7 @@ def run_l1(workbook, config_dir, scenario_dir, **over):
 
 def summarize(l1, control, facility):
     """cohorts/week + harvest + the per-cohort 6N footprint."""
-    from forecast.global_planner_l3_poc import smallest_og_tank_kg
+    from forecast.global_planner_poc import smallest_og_tank_kg
     og_ceiling = (smallest_og_tank_kg(facility)
                   * getattr(control, "harvest_tank_density_pct", 1.25))
     per_week = collections.Counter()

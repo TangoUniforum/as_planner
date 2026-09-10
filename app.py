@@ -43,21 +43,9 @@ _METHODS = _methods.REGISTRY
 # the controller turned out to leave an empty week on 5 of 6 real PRs, which
 # breaks the hard steady-harvest contract rule. See forecast/methods.py.
 _DEFAULT_METHOD = "controller-hybrid"
-# Operator-facing runtime hints + which methods the board runs unprompted.
-# global-lp was quoted at "~4 min" from an earlier scenario and MEASURED at ~35
-# min on the 8.23.26 PR (2026-08-31) -- 10x out. An understated hint is worse
-# than a vague one: the operator concludes the app has hung and kills a run that
-# was working. Both Global figures are ranges now, and both scale with horizon.
+# Operator-facing runtime hints. Measured 2026-09-09 on the 8.31.26 PR.
 _TYPICAL = {"controller": "~30 s", "controller-hybrid": "~40 s",
-            "controller-lns": "~30 s", "global-lp": "~4-35 min (PR-dependent)",
-            "global-milp": "~30-90+ min (scales with horizon)"}
-# Behind the opt-in checkbox (slow, and benchmarks only -- see the label).
-# MUST stay a subset of _BOARD_ORDER: when the roster dropped to the three
-# controller arms on 2026-08-27 (84d3e90) this set stopped intersecting it,
-# so the comprehensions below returned the same three arms whether the box
-# was ticked or not -- a control that silently did nothing, while five
-# places of UI text promised it worked.
-_BOARD_OPTIONAL = {"global-lp", "global-milp"}
+            "controller-lns": "~30 s", "controller-feasible": "~30 s"}
 # Pseudo-method: run the controller pipeline on the given config EXACTLY as-is,
 # with NO registry pins layered on top. Optimize's sweep measures variants that
 # way (variant knobs onto the live config, nothing else), so its verification
@@ -2953,7 +2941,7 @@ def _mw_fw_intake(state, ctx, rows, labels, date_for):
     # Seed both pickers from durable copies: adding/deleting a grid event calls
     # st.rerun() BEFORE this section renders, so Streamlit drops the widget-
     # backed keys on that interrupted pass and the selection silently snapped
-    # back to the first cohort (same cleanup mechanism as the cpsat_depth fix).
+    # back to the first cohort (the same widget-key cleanup mechanism).
     _opts = sorted(avail)
     _saved_bid = st.session_state.get("_mw_fw_batch_saved")
     bid = st.selectbox("Freshwater cohort", options=_opts, key="mw_fw_batch",
@@ -6411,16 +6399,9 @@ def _run_with_workbook_bytes(
     config_dir: str | None = None,
     scenario_dir: str | None = None,
     method: str = "controller",
-    cpsat_time: float = 300.0,
-    cpsat_workers: int | None = None,
-    cpsat_det_time: float | None = None,
     on_line=None,
 ) -> dict:
     """Run the pipeline against `input_bytes` in a temp directory.
-
-    `cpsat_workers` = CP-SAT search threads for the global-optimal method
-    (None -> the engine default of 8); callers pass _cpu_workers() so the
-    sidebar's "Computer power" percent governs it.
 
     `on_line` receives each stage line the pipeline prints, as it prints it, so
     the caller can narrate progress. The captured stdout is unaffected.
@@ -6434,22 +6415,13 @@ def _run_with_workbook_bytes(
     in_path = work_dir / input_name
     _m = (_AS_CONFIGURED if method == "as-configured"
           else _METHODS.get(method) or _METHODS["controller"])
-    _is_global_engine = (_m.engine == "global")
-    _is_optimal = bool(_m.engine_kwargs.get("optimal"))
-    # The global method emits a fresh .xlsx (no VBA to carry); the controller
-    # keeps the uploaded macro workbook's suffix.
-    if _is_global_engine and _is_optimal:
-        out_name = Path(input_name).stem + "_planned_OPTIMAL.xlsx"
-    elif _is_global_engine:
-        out_name = Path(input_name).stem + "_planned_GLOBAL.xlsx"
-    else:
-        # Match the output extension to the workbook's MACRO STATE, not the input
-        # name's suffix: the controller keeps VBA on load, so a macro-enabled input
-        # yields a macro-enabled output that MUST be .xlsm — Excel refuses a macro
-        # workbook wearing a .xlsx extension. (run.py also backstops this on save.)
-        from forecast.excel_io import is_macro_enabled_workbook
-        _suf = ".xlsm" if is_macro_enabled_workbook(input_bytes) else ".xlsx"
-        out_name = Path(input_name).stem + "_planned" + _suf
+    # Match the output extension to the workbook's MACRO STATE, not the input
+    # name's suffix: the controller keeps VBA on load, so a macro-enabled input
+    # yields a macro-enabled output that MUST be .xlsm — Excel refuses a macro
+    # workbook wearing a .xlsx extension. (run.py also backstops this on save.)
+    from forecast.excel_io import is_macro_enabled_workbook
+    _suf = ".xlsm" if is_macro_enabled_workbook(input_bytes) else ".xlsx"
+    out_name = Path(input_name).stem + "_planned" + _suf
     out_path = work_dir / out_name
     in_path.write_bytes(input_bytes)
 
@@ -6473,16 +6445,8 @@ def _run_with_workbook_bytes(
     captured = _TeeIO(on_line)
     try:
         with redirect_stdout(captured):
-            if _is_global_engine:
-                from tools.run_global_forecast import run_global
-                rc = run_global(in_path, out_path, run_config_dir, scenario_dir,
-                                optimal=_is_optimal,
-                                cpsat_time=cpsat_time,
-                                cpsat_workers=(cpsat_workers or 8),
-                                cpsat_det_time=(cpsat_det_time or 30.0))
-            else:
-                rc = run_pipeline(input_path=in_path, output_path=out_path,
-                                  config_dir=run_config_dir, scenario_dir=scenario_dir)
+            rc = run_pipeline(input_path=in_path, output_path=out_path,
+                              config_dir=run_config_dir, scenario_dir=scenario_dir)
     except Exception as e:
         return {
             "ok": False,
@@ -8004,10 +7968,8 @@ def _board_lens_pool(scored: dict) -> dict:
     return eligible or scored
 
 
-# FULL_ROSTER, not DEFAULT_ROSTER: the Global arms must be PRESENT here for
-# the opt-in filter to have anything to add. They are excluded by default
-# via _BOARD_OPTIONAL, so an unticked board is still the three controller
-# arms -- identical to before, but now the checkbox actually reaches them.
+# FULL_ROSTER now equals DEFAULT_ROSTER (the Global family was removed
+# 2026-09-09). Kept as the explicit name so the board follows the registry.
 _BOARD_ORDER = tuple(_methods.FULL_ROSTER)
 
 
@@ -8016,9 +7978,6 @@ def _board_method_sig(mkey: str, pr_md5: str) -> str:
     reused instead of re-run. "board3" is a format tag — bump it when the
     stored result shape or the key composition changes (board2→board3 = the
     content-based _config_fingerprint; every mtime-keyed leg ages out once).
-    The CP-SAT knobs enter only the method they affect, so moving the Computer
-    power slider doesn't needlessly invalidate the fast methods.
-
     Deliberately EXCLUDES METRICS_SCHEMA: this sig identifies what the ENGINE
     produced (PR + config/scenario + method), while grading is stamped with
     its own schema inside _score and self-invalidates (_ensure_board_score).
@@ -8026,23 +7985,7 @@ def _board_method_sig(mkey: str, pr_md5: str) -> str:
     workbook, it must not force 30-minute engine re-runs."""
     import hashlib
     parts = ["board4", pr_md5, _config_fingerprint(), _engine_fingerprint(), mkey]
-    if (_METHODS.get(mkey) or _METHODS["controller"]).engine_kwargs.get("optimal"):
-        parts += [f"cpsat{_cpsat_det_time()}", str(_cpu_workers())]
     return hashlib.md5("|".join(parts).encode()).hexdigest()
-
-
-def _cpsat_det_time() -> float:
-    """CP-SAT's per-week DETERMINISTIC work budget — the criterion that actually
-    stops each solve. (The wall-clock limit is only a safety cap for a
-    pathological week, so tuning it changes nothing.) Higher = tighter layout,
-    longer solve.
-
-    Reads the durable copy when the Compare-board slider isn't rendered —
-    Streamlit deletes widget-backed keys on any rerun that doesn't draw the
-    widget, so without the fallback every other mode (including ▶ Run forecast
-    re-running a picked CP-SAT plan) silently reverted to 30.0."""
-    return float(st.session_state.get(
-        "cpsat_depth", st.session_state.get("_cpsat_depth_saved", 30.0)))
 
 
 def _restore_output_path(res: dict, tag: str) -> None:
@@ -8189,41 +8132,14 @@ def _compare_and_choose():
         st.info("Upload a valid **ProductionReport** in the sidebar first.")
         return
 
-    include_milp = st.checkbox(
-        "Include the Global engines (global-lp ~4 min, CP-SAT ~30 min+) — "
-        "BENCHMARKS, not runnable plans: both plan the horizon as independent "
-        "weekly problems, never read the handling budget, and currently "
-        "hard-fail the 6N one-way rule (R7), which disqualifies them",
-        value=False, key="board_milp")
-    _always = [k for k in _BOARD_ORDER if k not in _BOARD_OPTIONAL]
     st.caption(
-        ", ".join(f"{_METHODS[k].label} ({_TYPICAL.get(k, '?')})" for k in _always)
-        + " always run. The CP-SAT leg gives EVERY week of your horizon its own "
-        "solver budget, so its total runtime scales with the horizon and can run "
-        "well past the estimate — uncheck it for a fast compare and add it later, "
-        "since finished methods are reused. On a capacity-bound config (facility "
-        "full at peak) **Controller + LNS usually matches plain Controller** — "
-        "LNS only diverges when there's tank slack to relocate into.")
-    if include_milp:
-        # value= seeds from the durable copy so leaving Compare mode (which
-        # drops the widget key) doesn't snap the depth back to Balanced — that
-        # both re-ran picked plans at the wrong budget and falsely marked
-        # finished CP-SAT legs stale (the board sig embeds _cpsat_det_time()).
-        st.select_slider(
-            "CP-SAT solve depth", options=[8.0, 30.0, 60.0],
-            value=st.session_state.get("_cpsat_depth_saved", 30.0),
-            format_func=lambda v: {8.0: "Quick", 30.0: "Balanced",
-                                   60.0: "Thorough"}[v],
-            key="cpsat_depth",
-            help="Deterministic work budget per week — the criterion that "
-                 "actually stops each solve (the wall-clock limit is only a "
-                 "safety cap). Quick trades layout tightness for a much shorter "
-                 "run; Balanced is the validated default.")
-        st.session_state["_cpsat_depth_saved"] = float(
-            st.session_state["cpsat_depth"])
+        ", ".join(f"{_METHODS[k].label} ({_TYPICAL.get(k, '?')})"
+                  for k in _BOARD_ORDER)
+        + " all run. On a capacity-bound config (facility full at peak) "
+        "**Controller + LNS usually matches plain Controller** — LNS only "
+        "diverges when there's tank slack to relocate into.")
 
-    roster = [(k, _METHODS[k].label) for k in _BOARD_ORDER
-              if k not in _BOARD_OPTIONAL or include_milp]
+    roster = [(k, _METHODS[k].label) for k in _BOARD_ORDER]
 
     _b1, _b2 = st.columns([3, 2])
     run_all = _b1.button("▶ Run all methods & compare", type="primary",
@@ -8271,9 +8187,7 @@ def _compare_and_choose():
                 res = _run_with_workbook_bytes(
                     uploaded.getvalue(), uploaded.name,
                     config_dir=str(CONFIG_DIR), scenario_dir=str(SCENARIO_DIR),
-                    method=mkey, cpsat_time=300.0,
-                    cpsat_det_time=_cpsat_det_time(),
-                    cpsat_workers=_cpu_workers(),
+                    method=mkey,
                     on_line=lambda ln, _s=_ms, _l=mlabel: _s.update(
                         label=f"{_l} — {ln[:100]}"))
                 _ms.update(
@@ -8930,8 +8844,6 @@ def _analyze(skip_lever_check=False):
                     qres = _run_with_workbook_bytes(
                         uploaded.getvalue(), uploaded.name, config_dir=_qcfg,
                         scenario_dir=str(SCENARIO_DIR), method=_qm,
-                        cpsat_time=300.0, cpsat_det_time=_cpsat_det_time(),
-                        cpsat_workers=_cpu_workers(),
                         on_line=lambda ln, _s=_qs: _s.update(label=ln[:100]))
                     _qs.update(state="complete" if qres.get("ok") else "error")
                 if qres.get("ok"):
@@ -8969,10 +8881,6 @@ def _analyze(skip_lever_check=False):
         list(optimize.EMPHASIS_PRESETS.keys()), key="ana_emph",
         help="Hard rules always come first regardless of emphasis; this weights "
              "the soft objectives (flat biomass, feed, handling, density).")
-    include_milp = st.checkbox(
-        "Include the Global engines (adds ~4 min + ~30 min; finished legs are "
-        "reused) — benchmarks only: they hard-fail R7, so they rank last",
-        value=False, key="ana_milp")
     depth = st.radio(
         "Analysis depth",
         ["Quick tournament — engines at stock + knob search on the live config",
@@ -8988,23 +8896,14 @@ def _analyze(skip_lever_check=False):
              "then compares the methods at their best. A method that already "
              "fails a hard rule at stock gets a cheap one-knob probe first; if "
              "no probed knob clears the failure it is marked GATE-BOUND and the "
-             "full search is skipped (honestly — nothing there to find).\n\n"
-             "Note on the two Global methods: they have NO tunable knobs at "
-             "all, so they compete at stock under either depth. That is "
-             "deliberate — the only knobs their code path reads were measured "
-             "to break Global's own conservation proof when overridden, so the "
-             "registry refuses to put them in a search space. It also means a "
-             "Global method that fails a hard rule reads GATE-BOUND with no "
-             "probe: there is simply no knob to try.")
+             "full search is skipped (honestly — nothing there to find).")
     tuned_mode = depth.startswith("Tuned")
-    _n_eng = len([k for k in _BOARD_ORDER if k not in _BOARD_OPTIONAL or include_milp])
+    _n_eng = len(_BOARD_ORDER)
     if tuned_mode:
         # ---- Honest budget: what pressing go can cost, and what's already paid ----
         from forecast import tournament as _tour
         _brows = []
         for _bk in _BOARD_ORDER:
-            if _bk in _BOARD_OPTIONAL and not include_milp:
-                continue
             _bm = _METHODS[_bk]
             _bb = _tour.estimate_budget(_bm)
             _bvc = _variant_cache(_bk)
@@ -9041,8 +8940,7 @@ def _analyze(skip_lever_check=False):
 
     if go:
         pr_md5 = hashlib.md5(uploaded.getvalue()).hexdigest()
-        roster = [(k, _METHODS[k].label) for k in _BOARD_ORDER
-                  if k not in _BOARD_OPTIONAL or include_milp]
+        roster = [(k, _METHODS[k].label) for k in _BOARD_ORDER]
         store = _board_store()
         n_phases = (2 * len(roster) + 1) if tuned_mode else (len(roster) + 2)
         bar = st.progress(0.0, text="Phase 1/3 — engine round…")
@@ -9067,9 +8965,7 @@ def _analyze(skip_lever_check=False):
                 res = _run_with_workbook_bytes(
                     uploaded.getvalue(), uploaded.name,
                     config_dir=str(CONFIG_DIR), scenario_dir=str(SCENARIO_DIR),
-                    method=mkey, cpsat_time=300.0,
-                    cpsat_det_time=_cpsat_det_time(),
-                    cpsat_workers=_cpu_workers(),
+                    method=mkey,
                     on_line=lambda ln, _s=_ms, _l=mlabel: _s.update(
                         label=f"{_l} — {ln[:100]}"))
                 _ms.update(state="complete" if res.get("ok") else "error")
@@ -9168,9 +9064,7 @@ def _analyze(skip_lever_check=False):
                             uploaded.getvalue(), uploaded.name,
                             config_dir=_tcfg,
                             scenario_dir=str(SCENARIO_DIR), method=mkey,
-                            cpsat_time=300.0,
-                            cpsat_det_time=_cpsat_det_time(),
-                            cpsat_workers=_cpu_workers())
+                            )
                         if vres.get("ok"):
                             vres["_label"] = _tour.tuned_label(
                                 mlabel, winner, m.overrides)
@@ -9283,7 +9177,7 @@ def _analyze(skip_lever_check=False):
             st.session_state["_ana"] = ana
     if not ana:
         st.caption("No analysis yet — click ▶ above. Roughly "
-                   f"{'1½–2 h' if include_milp else '45–75 min'} hands-off; "
+                   "45–75 min hands-off; "
                    "finished engine legs are reused across re-runs and shared "
                    "with Decide -> Compare engines.")
         return
@@ -9783,9 +9677,7 @@ if (run_clicked or st.session_state.pop("_pending_run", False)) and uploaded is 
         result = _run_with_workbook_bytes(
             uploaded.getvalue(), uploaded.name,
             config_dir=_run_cfg, scenario_dir=str(SCENARIO_DIR),
-            method=_method, cpsat_time=300.0,
-            cpsat_det_time=_cpsat_det_time(),
-            cpsat_workers=_cpu_workers(),
+            method=_method,
             on_line=_narrate,
         )
         if result["ok"]:

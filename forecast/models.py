@@ -34,7 +34,9 @@ class ControlParams:
     # at the threshold; lower leaves the two populations OVERLAPPING near the
     # cut line, which is what actually happens. VBA default 0.85
     # (ForecastEngine_V2.bas:1662). Values outside (0,1) mean "perfect".
-    # GLOBAL ENGINE ONLY. False (default, operator 2026-08-21) = model the REAL
+    # READ ONLY BY THE L1 HARVEST ENVELOPE (forecast/global_planner_poc.py), so
+    # it reaches the plan through the controller-hybrid arm's guide and nowhere
+    # else. False (default, operator 2026-08-21) = model the REAL
     # 6N handover: L1 primes its purge pipeline ONLY from the fish actually in
     # 6N at forecast start. True = the older idealisation, which topped the
     # first purge slots up to steady-state fill by drawing harvest-ready fish
@@ -42,7 +44,7 @@ class ControlParams:
     #
     # The idealisation buys a smooth harvest from week 1 with no startup ramp,
     # and it conserves INSIDE L1 (it only moves fish already in the seeds). But
-    # the tank picker cannot realise it: there are six 6N tanks and the
+    # no placement layer can realise it: there are six 6N tanks and the
     # ProductionReport has already filled them with other batches, so the fish
     # L1 "staged" get harvested straight out of production tanks. That is the
     # entire 6N-only-rule violation -- 39,094 fish, 99.96% of them in week 1 --

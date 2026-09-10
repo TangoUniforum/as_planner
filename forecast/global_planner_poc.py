@@ -84,8 +84,11 @@ This is L1 only: the *envelope*, not the assignment. It does not place fish in
 specific tanks or respect per-system caps, and uses the OG-tank kg ceiling as
 the spatial proxy (one pair/week in purge mode). The 6N flow is modeled at the
 tankless / system-config grain (a pooled purge buffer + whole-tank 6N footprint),
-NOT placement's per-tank state machine. L2 (assign envelope -> systems) and L3
-(assign -> tanks, density) are out of scope. See the runner's notes.
+NOT placement's per-tank state machine. Assignment (envelope -> systems ->
+tanks, with density) is out of scope and always was: the layers that once did
+it here were removed with the Global method on 2026-09-09. Today the one
+consumer is `forecast.hybrid_guide`, which takes the harvest QUANTITY only and
+lets the controller's own audited placement execute it.
 """
 from __future__ import annotations
 
@@ -123,8 +126,9 @@ from .time_grid import iso_week_label, week_range
 #   * Production mode (week >= sixn_production_start): no 6N staging — harvest is
 #     in-place off-feed for `starvation_period_days`, then removed; the 3 6N main
 #     tanks join the production placement pool.
-# The default `model_purge_hold=False` keeps every existing caller byte-identical
-# (instant removal, no buffer); the L1<->L3 loop turns it ON.
+# `model_purge_hold=False` recovers the original byte-identical behaviour
+# (instant removal, no buffer). The `plan()` default is True — the correct
+# facility behaviour — and no caller passes False today.
 _PURGE_HOLD_WEEKS = 2
 
 
@@ -580,18 +584,22 @@ class StandingTraceRow:
 
 @dataclass
 class BatchStandingRow:
-    """Per-(batch, week) POST-harvest standing state — exposed for L2.
+    """Per-(batch, week) POST-harvest standing state — exposed for a consumer
+    that wants to assign the population to systems/tanks.
 
     This is purely additive: it records, for each active batch each week, the
     standing biomass/count/mean-weight AFTER that week's harvest draw. It does
-    not influence L1's harvest math; L2 (system assignment) consumes it.
+    not influence L1's harvest math. Emitted only under `record_standing=True`,
+    which today means the diagnostics (`tools/l1_probe.py`,
+    `tools/run_full_facility_poc.py`); the hybrid guide reads the harvest
+    envelope and leaves this off.
 
     `in_purge` (default False) flags rows that are 6N PURGE-HOLD population —
     fish that have left grow-out into a 6N depuration pair, held off-feed for the
     rolling 2-week purge (see `model_purge_hold`). These rows carry biomass but
-    ZERO feed (`feed_kg_day == 0`) and must be placed into the 6N staging pool,
-    NOT the 33-tank grow-out placement pool. When `model_purge_hold` is off every
-    row is grow-out (`in_purge=False`), so existing L2/L3 callers are unchanged.
+    ZERO feed (`feed_kg_day == 0`) and belong in the 6N staging pool, NOT the
+    33-tank grow-out placement pool. When `model_purge_hold` is off every row is
+    grow-out (`in_purge=False`).
     """
     week: int
     week_label: str
@@ -729,17 +737,18 @@ def plan(
     ceiling override. When None (default) every week uses the flat
     `control.max_biomass_kg`, so existing callers are byte-identical. When given,
     week `w` harvests to hold `biomass_ceiling.get(label, control.max_biomass_kg)`
-    instead of the flat facility cap — the L1<->L3 feasibility loop lowers a
-    week's ceiling to what the tanks can physically realize and re-plans. The
-    ceiling drives the biomass/arrival need + the legality verdict; the feed cap
-    is untouched (the loop only constrains biomass).
+    instead of the flat facility cap. `forecast.hybrid_guide` builds it from the
+    operator's per-week FacilityLimits (`_per_week_bio_ceiling`), so a week the
+    operator capped lower is planned against that lower number. The ceiling
+    drives the biomass/arrival need + the legality verdict; the feed cap is
+    untouched (it only constrains biomass).
 
     `model_purge_hold` (DEFAULT True — the CORRECT facility behavior) models the
     production pipeline's 6N flow-to-harvest instead of removing the harvest
     envelope instantly. It is data-dependency-free (no PR inputs needed beyond
     what L1 already consumes), so it is safe as the default. Pass False to
-    recover the old byte-identical instant-removal POC (the `run_*_poc`
-    diagnostics + `run_purge_compare_poc` do so explicitly):
+    recover the old byte-identical instant-removal POC (no caller does today;
+    the POC diagnostics that passed it explicitly went with the Global method):
 
       * PURGE mode (`forecast.sixn.is_purge_mode`): the kg drawn in a week are not
         removed at once. They are MOVED OUT of grow-out into a 6N PURGE HOLD
@@ -753,25 +762,27 @@ def plan(
         per week — at most one pair's worth of biomass releases per week.
       * PRODUCTION mode (`week >= sixn_production_start`): harvest-bound fish go
         off-feed IN PLACE for `control.starvation_period_days` then are removed;
-        no separate 6N staging (the 3 6N main tanks join the placement pool — an
-        L3 tank-count concern, surfaced via `available_tanks_for_week`). Modeled
+        no separate 6N staging (the 3 6N main tanks join the placement pool — a
+        tank-count concern for whatever places the fish, not for L1). Modeled
         here as a short in-place off-feed hold (`starvation_period_days/7` weeks,
         rounded up) before removal.
       * TRANSITION window (`forecast.sixn.in_transition_window`): 6N is fallow;
         no new move-ins, the buffer is allowed to drain.
 
     The purge-hold population is recorded as `in_purge=True` BatchStandingRows
-    (zero feed) so L3 places it into the 6N staging pool, not the 33-tank
-    grow-out pool. Per-week 6N accounting lands in `PlannerResult.purge_trace`.
+    (zero feed), which is how a consumer tells the 6N staging pool from the
+    33-tank grow-out pool. Per-week 6N accounting lands in
+    `PlannerResult.purge_trace`.
 
     `model_full_facility` (default False here at the `plan()` entry, but the
-    CORRECT facility behavior — the loop / tool entry point MUST pass it True
+    CORRECT facility behavior — every data-aware caller MUST pass it True
     together with `fw_inflight`). It is left False as the `plan()` default ONLY
     because it is correct exclusively when `fw_inflight` (the PR-measured
     in-flight FW units) is ALSO passed; without `fw_inflight` it under-counts the
     FW phase. So `plan()`'s default stays the safe OG-only model, and the
-    data-aware callers (`run_loop` below — DEFAULT True; the
-    `tools/run_global_forecast.py` entry point) hydrate `fw_inflight` and pass
+    data-aware callers — `forecast.hybrid_guide` (the shipped controller-hybrid
+    arm), `tools/l1_probe.py`, `tools/run_full_facility_poc.py` — hydrate
+    `fw_inflight` via `forecast.pr_state.hydrate_pr` and pass
     `model_full_facility=True`. When True it makes L1 a TRUE whole-facility
     biomass/feed model. The production controller checks the facility cap against
     OG (grow-out) biomass ONLY, but the real limit covers the ENTIRE farm:
@@ -992,7 +1003,7 @@ def plan(
     # earliest unscripted release is week _PURGE_HOLD_WEEKS.
     # OFF BY DEFAULT (operator 2026-08-21): model the REAL handover instead.
     # The prime below conserves inside L1 -- it only MOVES fish already in the
-    # seeds -- but the tank picker cannot realise it: six 6N tanks, already
+    # seeds -- but no placement layer can realise it: six 6N tanks, already
     # filled by the ProductionReport with other batches. The "staged" fish then
     # get harvested straight out of production tanks, which IS the 6N-only-rule
     # violation (39,094 fish, 99.96% in week 1). Enforcing the rule at the draw
@@ -1394,8 +1405,9 @@ def plan(
         ))
 
         # 8) (additive, opt-in) record per-(batch, week) POST-harvest standing
-        # so L2 can assign the standing population to systems. This reads the
-        # already-evolved working histograms; it does not alter the harvest math.
+        # so a consumer can assign the standing population to systems. This
+        # reads the already-evolved working histograms; it does not alter the
+        # harvest math.
         if record_standing:
             for s in seeds:
                 if not entered[s.batch_id]:
@@ -1410,8 +1422,9 @@ def plan(
                     feed_kg_day=h.feed_kg_day(s.batch, tables),
                 ))
             # 8b) The off-feed HOLD population is ALSO standing. PURGE-mode holds
-            # (sixn=True) occupy 6N pairs -> flagged in_purge so L3 routes them to
-            # the 6N staging pool (not the 33-tank grow-out pool). PRODUCTION-mode
+            # (sixn=True) occupy 6N pairs -> flagged in_purge so a consumer
+            # routes them to the 6N staging pool (not the 33-tank grow-out
+            # pool). PRODUCTION-mode
             # in-place starvation (sixn=False) stays on a GROW-OUT tank -> recorded
             # as ordinary (non-purge) standing so it competes for the 36-tank
             # production pool. Both are OFF-FEED (feed_kg_day=0).

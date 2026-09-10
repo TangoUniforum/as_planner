@@ -236,31 +236,6 @@ class TestMissingCapStillRaisesWithItsAddress:
         assert "system_defaults" in msg          # tells you where to put it
         assert "will not invent one" in msg
 
-    def test_the_milp_placement_pass_raises(self):
-        from forecast.global_placement_milp_poc import _scap, _DEFAULT_BIO_CAP
-        assert _DEFAULT_BIO_CAP is None
-        with pytest.raises(ValueError, match="OG4S"):
-            _scap(METRIC_BIOMASS, "2027-W10", "OG4S", SystemLimits(),
-                  _DEFAULT_BIO_CAP)
-
-    def test_the_l3_planner_raises_too(self):
-        from forecast.global_planner_l3_poc import (
-            _system_cap, _DEFAULT_BIO_CAP, _DEFAULT_FEED_CAP)
-        assert (_DEFAULT_BIO_CAP, _DEFAULT_FEED_CAP) == (None, None)
-        with pytest.raises(ValueError, match="OG4S"):
-            _system_cap(METRIC_BIOMASS, "2027-W10", "OG4S", SystemLimits(),
-                        _DEFAULT_BIO_CAP)
-
-    def test_no_capacity_literal_is_left_in_the_planners(self):
-        """NEGATIVE CONTROL: passes only because L3's literals are gone."""
-        for mod in ("global_planner_l3_poc.py", "global_placement_milp_poc.py"):
-            src = (ROOT / "forecast" / mod).read_text(encoding="utf-8")
-            for line in src.splitlines():
-                if line.lstrip().startswith("#"):
-                    continue                     # prose may quote the history
-                assert "_DEFAULT_BIO_CAP = 400000" not in line.replace("_", "")
-                assert "400000.0" not in line.replace("_", ""), (mod, line)
-
 
 class TestSerializerRoundTrip:
     def _sl(self):

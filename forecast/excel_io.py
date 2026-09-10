@@ -206,12 +206,15 @@ def write_facility_config(wb, facility, sheet_name="FacilityConfig"):
     """Emit the facility's per-tank geometry and caps, in the same shape the
     operator's input workbook uses.
 
-    Added 2026-08-26 so a GLOBAL output workbook is self-describing. The
-    controller writes into a copy of the input .xlsm and inherits its
-    FacilityConfig; the Global runner builds a fresh .xlsx and had none. The
-    scorer's per-tank density lookup therefore found caps for the controller
-    (85 / 120) and none for Global, silently falling back to 95 -- so the two
-    engines were judged against DIFFERENT density caps and were not comparable.
+    NO CALLER TODAY. Added 2026-08-26 for the Global runner, which built a
+    fresh .xlsx and so shipped no FacilityConfig: the scorer's per-tank density
+    lookup found the controller's real caps (85 / 120) and none for Global,
+    silently fell back to 95, and judged the two engines against DIFFERENT
+    caps. The controller writes into a copy of the input .xlsm and inherits its
+    FacilityConfig, so it never needed this; the Global runner went on
+    2026-09-09 and took the only call site with it. Kept because any future
+    engine that writes a fresh workbook hits the same trap -- read
+    forecast/optimize.py's `_tank_density_caps` before deleting it.
 
     Stage is written FW/SW to match the input sheet; the internal tank type
     is 'OG' for seawater, which no reader of this sheet expects.
@@ -263,8 +266,9 @@ def annotate_batch_plan_handling(wb, batch_sheet="Batch Plan",
     may be compared with each other.
 
     Runs as a post-pass so it does not depend on the order an engine writes its
-    sheets (forecast.run writes TransferPlan before the Batch Plan; the Global
-    runner writes it after).
+    sheets — forecast.run writes TransferPlan before the Batch Plan, and the
+    removed Global runner wrote it after, which is how the dependency was
+    found.
     """
     import collections
     if batch_sheet not in wb.sheetnames or transfer_sheet not in wb.sheetnames:
@@ -1784,9 +1788,10 @@ def _build_batch_week_ledger(
     # TranOG fresh-stocking inflow per (batch, week): fish ENTERING OG from FW /
     # appearing in-flight, with NO chained OG predecessor (opening OG balance 0).
     # Credited as input at a genuine FW->OG boundary week only (open reset to 0
-    # there) — a two-engine handoff where the FW projection's count does not flow
-    # by count into the pick's realized OG entry. (Global reports only; the
-    # controller passes no tranog_events -> this map stays empty.)
+    # there) — a two-model handoff where the FW projection's count does not flow
+    # by count into the realized OG entry. Empty when the caller passes no
+    # tranog_events; forecast.run passes placement.tranog_events, so on a
+    # controller plan this map is populated.
     tranog_in: dict[tuple, float] = defaultdict(float)
     for ev in (tranog_events or ()):
         wk = iso_week_label(ev.event_date)
@@ -3861,8 +3866,8 @@ def write_validation_log(
             cat = "ERROR - Depuration hold breach"
         elif w.startswith("TOPOLOGY VIOLATION"):
             # A move the conveyor rules (R1-R7) forbid. The controller
-            # family emits none; a Global plan that does is not
-            # comparable to it.
+            # emits none, so any row here is a real defect, not a
+            # difference in engine.
             cat = "ERROR - Topology violation (R1-R7)"
         elif w.startswith("PLACEMENT GAP"):
             # L1 standing that never reached a tank. Not rounding: the only
@@ -4268,8 +4273,9 @@ def write_run_comparison(wb, records, *, pr_name="", generated=None,
     def _gate(rec):
         """PASS / PARTIAL / FAIL, using the driver's per-method verdict when
         present (it reads each method's OWN authoritative conservation proof —
-        the batch-level ReconciliationReport for Global, the tank-by-tank audit
-        for the Controller). Falls back to dropped/overprod for synthetic rows.
+        for the Controller, the tank-by-tank audit; for a plan that carries a
+        batch-level FACILITY ReconciliationReport instead, the mass residual).
+        Falls back to dropped/overprod for synthetic rows.
         PARTIAL = mass conserved but some stocked fish left unplaced in tanks."""
         g = rec.get("gate")
         if g:
@@ -4533,8 +4539,7 @@ def write_run_comparison(wb, records, *, pr_name="", generated=None,
         "• CONSERVATION GATE — PASS = every stocked fish is both conserved (mass) AND placed in a "
         "tank. PARTIAL = mass conserved but some fish left unplaced in the realized layout (see the "
         "'not placed in tanks' rows). FAIL = fish lost/created, or the run errored. Each method is "
-        "judged on its OWN authoritative proof (Global: batch-level ReconciliationReport; "
-        "Controller: tank-by-tank audit).",
+        "judged on its OWN authoritative proof — for the Controller, the tank-by-tank audit.",
         "• GREEN = best on that row among PASS methods only. PARTIAL/FAIL numbers are greyed — "
         "they are computed on an incomplete or non-conserving plan, so they are not a valid 'best'.",
         "• There is no single 'best' column: hold-the-cap (peak vs cap, utilization), flatness "

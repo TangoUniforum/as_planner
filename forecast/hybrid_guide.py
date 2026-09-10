@@ -2,13 +2,15 @@
 
 The controller decides harvest reactively, week by week, off realized biomass.
 That is why it is trustworthy — and why it paces poorly: it cannot see that a
-week three months out will be short of the contract floor. The global engine's
-L1 planner solves the whole horizon tanklessly and produces a steady weekly
-harvest quantity, but its placement layer is a different (unvalidated) machine.
+week three months out will be short of the contract floor. The L1 planner
+(forecast/global_planner_poc.py) solves the whole horizon TANKLESSLY and
+produces a steady weekly harvest quantity.
 
 This module takes ONLY L1's per-week harvest quantity and hands it to the
 controller as a target, so the controller's own audited machinery executes a
-better-paced plan. L1 runs standalone here (~5s) — no L2/L3, no LP, no CP-SAT.
+better-paced plan. L1 is a quantity model, not a placement model, and runs
+standalone here in ~5s: no tanks are assigned, nothing is solved, and no part
+of the plan the operator receives comes from it except the harvest target.
 
 Two properties make this safe:
 

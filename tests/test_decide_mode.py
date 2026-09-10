@@ -76,7 +76,7 @@ def test_a_stored_retired_mode_name_does_not_crash_the_radio():
         assert f'"{old}"' in SRC[i_mig:i_mig + 600], old
 
 
-# --- the thirteen capabilities the mode audit found ------------------------
+# --- the capabilities the mode audit found ---------------------------------
 # Each entry: (what it is, a marker that proves it is still reachable).
 CAPABILITIES = [
     ("between-system CV lens", '"Most balanced across systems"'),
@@ -89,7 +89,14 @@ CAPABILITIES = [
     ("steadiest-harvest lens", '"Steadiest harvest"'),
     ("pick a plan without writing config", "_chosen_method"),
     ("force re-run / cache invalidation", "store.clear()"),
-    ("CP-SAT solve-depth control", "cpsat_depth"),
+    # "CP-SAT solve-depth control" (marker cpsat_depth) was the fourteenth entry.
+    # It did NOT go in the mode merge: it was removed 2026-09-09 with the whole
+    # GLOBAL method, because it set the per-week deterministic work budget for
+    # the CP-SAT placement solver and there is no longer a solver to budget.
+    # Global was retired for hard-gate failures (CP-SAT infeasible ~81% of weeks
+    # behind a silent uncapped fallback, LP with no density constraint, dropped
+    # batches). Nothing inherited the control — the capability is gone with the
+    # engine, which is the one legitimate reason an entry may leave this list.
     ("per-method metric readout", "_BOARD_LENSES"),
     ("emphasis presets on the knob sweep", "EMPHASIS"),
 ]
@@ -109,8 +116,13 @@ def test_the_retirement_is_documented():
     """House rule: a retired mode gets a dated section saying where its
     capabilities went. Two retirements now — Tune, and these three."""
     guide = io.open("docs/USER_GUIDE.md", encoding="utf-8").read()
-    assert "13.1 Tune mode retired" in guide
-    assert re.search(r"13\.4[^\n]*merged into Decide", guide), (
+    # Match the HEADING TEXT and its date, not the section number. Deleting an
+    # earlier section legitimately renumbers these (the Global removal moved
+    # them 13.x -> 12.x), and pinning the digits failed a docs edit that had
+    # changed nothing this test cares about.
+    assert re.search(r"#+ *[\d.]+ +Tune mode retired \(\d{4}-\d{2}-\d{2}\)", guide), (
+        "USER_GUIDE needs a dated section recording the Tune-mode retirement")
+    assert re.search(r"#+ *[\d.]+[^\n]*merged into Decide \(\d{4}-\d{2}-\d{2}\)", guide), (
         "USER_GUIDE needs a dated section recording the Analyze / Compare & "
         "Choose / Optimize merge")
 

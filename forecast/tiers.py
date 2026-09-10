@@ -118,11 +118,10 @@ def density_exempt(system_id: str, stage: str, purge_mode: bool = True) -> bool:
     yet frozen. In PRODUCTION mode 6N is an ordinary growout system and its cap
     applies exactly as anywhere else, so pass purge_mode=False then.
 
-    THIS IS THE ONE DEFINITION. It lives here, dependency-free, because the two
-    engine families judge density independently -- the controller through
-    placement.py and the audits, the Global arms through
-    global_tank_pick_poc -- and hand-copying the rule into each is how they
-    drift apart. Every density judgement in the codebase should route here.
+    THIS IS THE ONE DEFINITION. It lives here, dependency-free, because the
+    rule is judged in several places that do not share code -- placement.py,
+    the audits, the reports -- and hand-copying it into each is how they drift
+    apart. Every density judgement in the codebase should route here.
     """
     if str(stage).upper() == _STAGE_STARVE:
         return True

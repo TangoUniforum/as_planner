@@ -29,10 +29,10 @@ tools/run_tuned_tournament.py. Grading/present-layer concerns stay with the
 callers (each already has its own lens stack).
 
 ENGINE NOTE: the search harness (optimize.sweep / coordinate_descent) runs the
-CONTROLLER engine. That is correct for every method with a non-empty space
-today (the Global family's space is empty — forecast/methods.py has the
-evidence); tune_method guards against a future global space silently being
-measured on the wrong engine.
+CONTROLLER engine. That is correct for every registered method today, because
+the controller is the only engine there is; tune_method still guards the case,
+so a future non-controller method cannot be silently measured on the wrong
+engine.
 """
 from __future__ import annotations
 

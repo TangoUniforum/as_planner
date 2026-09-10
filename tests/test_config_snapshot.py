@@ -1,13 +1,14 @@
 """The `RunConfig` sheet: what travels in a workbook, and which sheet it is.
 
 Two DIFFERENT sheets are both called `RunConfig`:
-  * the controller family writes a re-importable YAML snapshot
+  * the controller writes a re-importable YAML snapshot
     (forecast.config_snapshot), and
-  * tools/run_global_forecast.py writes a Global METHOD STAMP — a key/value
-    record of what ran, with nothing to restore.
+  * the removed Global exporter wrote a METHOD STAMP — a key/value record of
+    what ran, with nothing to restore.
 
-Importing a Global workbook therefore restored nothing, and said so as though
-the file had no RunConfig at all. These pin the disambiguation, the honest
+Importing a stamped workbook therefore restored nothing, and said so as though
+the file had no RunConfig at all. Nothing writes a stamp any more, but those
+workbooks are still on disk, so these pin the disambiguation, the honest
 message, and the DELIBERATE exclusion of the analysis overlays.
 """
 from __future__ import annotations
@@ -39,7 +40,7 @@ def _seed(tmp_path) -> tuple[Path, Path]:
 
 
 def _stamp_wb():
-    """A Global method-stamp workbook, exactly as run_global_forecast writes it."""
+    """A method-stamp workbook, exactly as the old Global exporter wrote it."""
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = cs.SNAPSHOT_SHEET
@@ -135,16 +136,6 @@ class TestTheTwoRunConfigSheetsAreToldApart:
         assert "METHOD STAMP" in cs.describe_run_config_sheet(_stamp_wb())
         assert "no 'RunConfig' sheet" in cs.describe_run_config_sheet(
             openpyxl.Workbook())
-
-    def test_the_global_writer_still_stamps_the_marker_it_is_matched_on(self):
-        """run_config_kind() reads cell A1. If the Global writer's A1 text
-        drifts from KIND_STAMP_MARK, every Global workbook silently becomes
-        'unknown' again — so the two live in one assertion."""
-        import inspect
-        from tools import run_global_forecast as rgf
-        src = inspect.getsource(rgf)
-        assert '_cs.KIND_STAMP_MARK' in src
-        assert cs.KIND_STAMP_MARK == "RUN CONFIG — GLOBAL METHOD EXPORT"
 
 
 def test_an_old_workbook_without_the_a1_marker_still_imports(tmp_path):

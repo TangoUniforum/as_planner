@@ -1,17 +1,22 @@
-"""Co-pilot engine — the human-in-the-loop transfer/harvest recommender.
+"""Co-pilot engine — the human-in-the-loop harvest/6N recommender.
 
 Given the operator's manual override window (scenario/manual_events.yaml), this
-runs the planners forward and surfaces the NEXT week's recommended moves:
+runs the planner forward and surfaces the NEXT week's recommended moves:
 
   * harvest + OG->6N staging  ← the validated CONTROLLER (models the 3-pair 6N
     fallow rotation + dual-limit harvest setpoint), tagged priority 1/2.
-  * ranked OG<->OG transfers   ← the GLOBAL optimizer (genuinely optimized layout;
-    v1a surfaces the single global-LP plan, v1b adds ranked alternatives).
 
-Respect mode: the operator's manual transfers are FIXED. Both engines already
-honor the manual window (they advance through it, then plan forward), so the
-recommendation is simply the first week AFTER the window — and the optimizer's
-own transfer-minimisation keeps it continuous with the last manual week.
+OG<->OG TRANSFER RECOMMENDATIONS ARE GONE. They came from one source, the
+Global-LP optimizer, and that method was removed as non-conformant. Nothing
+else produces a ranked OG<->OG relocation plan, so `Proposal.transfer_options`
+is now always empty and the priority-3 lane is dead. The `Move` /
+`TransferOption` shapes stay because the approval path (`to_manual_events`)
+still understands them; restoring the lane means building a new source, not
+re-enabling a flag.
+
+Respect mode: the operator's manual transfers are FIXED. The planner already
+honors the manual window (it advances through it, then plans forward), so the
+recommendation is simply the first week AFTER the window.
 
 This module is deliberately UI-free (no Streamlit): it is the durable engine a
 thin shell renders. `propose_next_week()` returns a plain `Proposal`.
@@ -28,7 +33,7 @@ from pathlib import Path
 class Move:
     """One recommended operation for the handoff week."""
     kind: str            # "harvest" | "to_6n" | "grade_to_6n" | "og_transfer"
-    engine: str          # "controller" | "global-lp"
+    engine: str          # "controller" — the only producer left (see module docstring)
     priority: int        # 1 harvest/contract · 2 6N staging/cap · 3 transfer/balance
     from_tank: int
     to_tank: int | None
@@ -46,7 +51,9 @@ class Move:
 
 @dataclass
 class TransferOption:
-    """One ranked OG<->OG relocation alternative from the global optimizer."""
+    """One ranked OG<->OG relocation alternative. NOTHING BUILDS THESE TODAY —
+    the only producer was the removed Global-LP optimizer; kept as the shape a
+    future source would fill (see module docstring)."""
     label: str
     why: str
     moves: list          # list[Move]
@@ -58,7 +65,8 @@ class Proposal:
     window_week: int         # forecast-relative week# to script approved moves as
     harvest_recs: list       # list[Move] — controller harvests (priority 1)
     sixn_recs: list          # list[Move] — controller OG->6N staging (priority 2)
-    transfer_options: list   # list[TransferOption] — global OG<->OG (priority 3)
+    transfer_options: list   # list[TransferOption] — ALWAYS EMPTY since the
+                             # Global-LP optimizer was removed (priority 3)
     warnings: list = field(default_factory=list)
 
     def is_empty(self) -> bool:
@@ -208,8 +216,8 @@ def _staging_6n_tanks(control, d):
 
 def _short_horizon_config(config_dir, window_n, n_weeks, buffer):
     """(config_dir_to_use, temp_dir_or_None). The co-pilot only surfaces the next
-    n_weeks, so running the planners over the FULL config horizon — especially the
-    global optimiser's full-horizon placement solve — is minutes of wasted work.
+    n_weeks, so running the planner over the FULL config horizon is minutes of
+    wasted work.
 
     If (window_n + n_weeks + buffer) is STRICTLY shorter than the config's
     horizon_weeks, copy config_dir to a temp dir with that shortened horizon and
@@ -251,18 +259,18 @@ def _short_horizon_config(config_dir, window_n, n_weeks, buffer):
 
 
 def propose_upcoming(input_path, config_dir, scenario_dir, *,
-                     n_weeks=6, include_global=True, horizon_buffer=20) -> list:
-    """Run the planners forward ONCE from the current manual window and return a
+                     n_weeks=6, horizon_buffer=20) -> list:
+    """Run the planner forward ONCE from the current manual window and return a
     `Proposal` for each of the next `n_weeks` weeks (handoff = index 0, then the
     look-ahead weeks N+2, N+3, ...). Reads the CURRENT scenario/manual_events.yaml
-    — the caller must save the operator's edits first. Each planner runs to a
+    — the caller must save the operator's edits first. The planner runs to a
     single throwaway temp workbook that every week is extracted from; no production
     file is touched.
 
-    Because only the next `n_weeks` are surfaced, the planners run over a SHORT
+    Because only the next `n_weeks` are surfaced, the planner runs over a SHORT
     horizon (manual window + n_weeks + `horizon_buffer`) instead of the full config
-    horizon — the global optimiser's full-horizon solve is otherwise minutes of
-    wasted work. With the default buffer (20) the HANDOFF (the only approvable week)
+    horizon, which is otherwise minutes of wasted work. With the default buffer
+    (20) the HANDOFF (the only approvable week)
     is byte-identical to the full-horizon run and the look-ahead previews stay within
     ~20 fish with no structural change, at ~5x the speed (measured on the live config:
     full ~90s -> ~18s). Smaller buffers are faster but drift the look-ahead more (a
@@ -289,13 +297,15 @@ def propose_upcoming(input_path, config_dir, scenario_dir, *,
              for j in range(n_weeks)]
     warnings: list[str] = []
 
-    # Run the planners over just (manual window + look-ahead + buffer) weeks, not the
+    # Run the planner over just (manual window + look-ahead + buffer) weeks, not the
     # full config horizon — the co-pilot never reads past week n_weeks.
     plan_cfg, _cfg_tmp = _short_horizon_config(
         config_dir, window_week - 1, n_weeks, horizon_buffer)
     try:
-        # 1) CONTROLLER — the validated harvest + 6N-staging recommendation, extracted
-        #    for every upcoming week from a single forward run.
+        # CONTROLLER — the validated harvest + 6N-staging recommendation, extracted
+        # for every upcoming week from a single forward run. This is the only
+        # source of recommendations now (the OG<->OG leg went with Global-LP), so
+        # `warnings` stays empty unless a future source degrades.
         ctrl: dict = {}
         with tempfile.TemporaryDirectory() as td:
             out = Path(td) / "copilot_controller.xlsm"
@@ -310,34 +320,6 @@ def propose_upcoming(input_path, config_dir, scenario_dir, *,
                 )
             wb.close()
 
-        # 2) GLOBAL-LP — the optimized OG<->OG relocation plan, same single run.
-        glob: dict = {}
-        if include_global:
-            try:
-                from tools.run_global_forecast import run_global
-                with tempfile.TemporaryDirectory() as td:
-                    out = Path(td) / "copilot_global.xlsm"
-                    run_global(str(input_path), str(out), str(plan_cfg),
-                               str(scenario_dir), optimal=False)
-                    # Conservation gate — the controller run ships through the
-                    # audited pipeline, but the global plan reaches the operator
-                    # ONLY through this extraction: never surface transfer picks
-                    # from a plan that dropped or over-produced fish.
-                    from forecast.tuning import _conservation
-                    dropped, overprod = _conservation(str(out))
-                    if dropped or overprod:
-                        raise ValueError(
-                            f"plan fails conservation (dropped={dropped}, "
-                            f"over-produced={overprod}) — transfers withheld")
-                    wb = load_workbook(str(out), read_only=True, data_only=True)
-                    for wk, _ww, wd in weeks:
-                        glob[wk] = _extract_transfers(wb, wk, tank_sys, tank_loc,
-                                                      _is6n_for(wd),
-                                                      only_to_6n=False, engine="global-lp")
-                    wb.close()
-            except Exception as e:  # noqa: BLE001 — optimizer is optional; degrade gracefully
-                warnings.append(f"global optimizer unavailable "
-                                f"({type(e).__name__}: {e}) — harvest/6N only")
     finally:
         if _cfg_tmp:
             shutil.rmtree(_cfg_tmp, ignore_errors=True)
@@ -346,12 +328,6 @@ def propose_upcoming(input_path, config_dir, scenario_dir, *,
     for wk, ww, _wd in weeks:
         harvest_recs, sixn_recs = ctrl.get(wk, ([], []))
         transfer_options: list[TransferOption] = []
-        og = glob.get(wk, [])
-        if og:
-            transfer_options.append(TransferOption(
-                label="Global LP",
-                why="minimises cap breaches first, then number of transfers",
-                moves=og))
         proposals.append(Proposal(
             week_label=wk, window_week=ww,
             harvest_recs=harvest_recs, sixn_recs=sixn_recs,
@@ -359,12 +335,10 @@ def propose_upcoming(input_path, config_dir, scenario_dir, *,
     return proposals
 
 
-def propose_next_week(input_path, config_dir, scenario_dir, *,
-                      include_global=True) -> Proposal:
+def propose_next_week(input_path, config_dir, scenario_dir) -> Proposal:
     """Handoff week only — thin wrapper over `propose_upcoming` (see its docstring).
     Kept for callers that want just the next approvable week."""
-    return propose_upcoming(input_path, config_dir, scenario_dir,
-                            n_weeks=1, include_global=include_global)[0]
+    return propose_upcoming(input_path, config_dir, scenario_dir, n_weeks=1)[0]
 
 
 def to_manual_events(moves, window_week):

@@ -2,6 +2,10 @@
 
     python tools/fast_check.py --workbook <PR.xlsm> --weeks 12
 
+Runs the shipped default arm (controller-hybrid) via
+`forecast.methods.run_method`. It used to call `run_global`; that went with the
+Global method on 2026-09-09 and the run half was repointed in the same pass.
+
 WHY THIS EXISTS
 ---------------
 Every wrong answer on 2026-08-24/25 came from testing against a MODEL of the
@@ -176,14 +180,14 @@ def main() -> int:
     xlsx = Path(args.out) if args.out else scratch / f"fast_{args.weeks}w.xlsx"
 
     from forecast.config_io import load_config
-    from tools.run_global_forecast import run_global
+    from forecast.methods import REGISTRY, run_method
 
     t0 = time.time()
-    rc = run_global(args.workbook, str(xlsx), config_dir=str(cfg),
-                    scenario_dir=args.scenario_dir)
+    rc = run_method(REGISTRY["controller-hybrid"], args.workbook, str(xlsx),
+                    str(cfg), args.scenario_dir, quiet=False)
     dt = time.time() - t0
-    if rc != 0:
-        print(f"run_global FAILED rc={rc}")
+    if rc:
+        print(f"run_method(controller-hybrid) FAILED rc={rc}")
         return rc
 
     control, _t, _f = load_config(str(cfg))
@@ -202,8 +206,8 @@ def main() -> int:
           f"   (min_tank_control {a['mtc']:,.0f})   <- target 0")
     print("\n  NOTE: a short horizon does not reach 2028 production mode;"
           "\n  R3/R4 breaches from that era cannot appear here.")
-    print("\n  Conservation is judged by check_global_invariants.py:")
-    print(f"    python tools/check_global_invariants.py \"{xlsx}\"")
+    print("\n  Conservation is judged by the audit sheets the run itself writes"
+          "\n  (ReconciliationReport / InputConservationAudit / ValidationLog).")
     return 0
 
 

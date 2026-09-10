@@ -18,9 +18,15 @@ the floor — you cannot lose a fish, and turning LNS on can never make the fore
 worse.
 
 Build phases (each keeps greedy byte-identical when off):
-  A. (this) realized relocate + audit-gated accept, greedy hot-spot targeting.
-  B. CP-SAT window repair (choose the best SET of relocations at once).
-  C. LP guidance + rolling neighborhoods.
+  A. (this, and the only one built) realized relocate + audit-gated accept,
+     greedy hot-spot targeting.
+
+Phases B and C were to be a CP-SAT window repair (choose the best SET of
+relocations at once) and guidance from an LP relaxation over rolling
+neighborhoods. Neither was built. That LP was always internal to THIS design,
+never the Global method's — but OR-tools went out with Global on 2026-09-09,
+so B/C now have to re-argue a solver dependency before they can be started
+(docs/LP_GUIDED_LNS_PLACEMENT.md §8). What ships is solver-free.
 """
 from __future__ import annotations
 
@@ -335,9 +341,9 @@ def _density_legal(seg, tank_id, tank_by_id, batch_meta, tables):
     week of the segment (a no-volume tank cannot be checked — treat as legal,
     matching _best_target).
 
-    Judged through tiers.effective_density_cap — the SAME rule run.py's audit,
-    placement.py's fill sizing and the Global tank picker use. This was the last
-    density test in the codebase applying the raw per-tank cap directly, which
+    Judged through tiers.effective_density_cap — the SAME rule run.py's audit
+    and placement.py's fill sizing use. This was the last density test in the
+    codebase applying the raw per-tank cap directly, which
     made it the one place that could reject a move R8 permits: a segment whose
     fish are PREPARING FOR HARVEST (stage STARVE) carries no density constraint
     at all, because they are off feed, not growing, and gone within the hold.
@@ -370,7 +376,7 @@ def _best_target(seg, grow, hot_sys, hot_ratio, sys_tanks, occ, sb, sf, cap,
     # Must STRICTLY beat the hot spot AND land legal: without the 1.0 floor a
     # relocation could push a legal system over its cap just because it ends
     # cooler than the hot spot (a system over cap while another has room is a
-    # placement failure — see docs/GLOBAL placement design principle).
+    # placement failure, not a capacity one).
     best_worst = min(hot_ratio, 1.0)
     for s in grow:                                      # grow is sorted -> deterministic
         if s == hot_sys:

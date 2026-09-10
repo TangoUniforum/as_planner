@@ -7,12 +7,14 @@ trivially re-importable) in a single `RunConfig` sheet, one labelled block
 per file.
 
 TWO DIFFERENT SHEETS ARE BOTH CALLED `RunConfig`. This module writes the
-re-importable YAML snapshot (controller family). `tools/run_global_forecast.py`
-writes a Global METHOD STAMP under the same name: a key/value record of what
-ran (method, caps, conservation), with no YAML and nothing to restore. Both
-now carry an explicit kind marker in cell A1 so `run_config_kind()` can tell
-them apart, and the import path can say WHICH it found instead of reporting
-"no snapshot" on a workbook that plainly has a RunConfig sheet.
+re-importable YAML snapshot, the only kind still produced. The other kind is a
+METHOD STAMP under the same name: a key/value record of what ran (method,
+caps, conservation), with no YAML and nothing to restore. Nothing writes a
+stamp any more — the exporter that did went with the Global method — but
+stamped workbooks are still on disk, so both kinds carry an explicit marker in
+cell A1: `run_config_kind()` tells them apart and the import path says WHICH
+it found instead of reporting "no snapshot" on a workbook that plainly has a
+RunConfig sheet.
 """
 from __future__ import annotations
 
@@ -21,8 +23,9 @@ from pathlib import Path
 
 SNAPSHOT_SHEET = "RunConfig"
 
-# A1 markers — the sheet-kind discriminator. `KIND_STAMP_MARK` must stay in
-# sync with the A1 text run_global_forecast.py writes (a test pins the pair).
+# A1 markers — the sheet-kind discriminator. `KIND_STAMP_MARK` is the A1 text
+# the removed Global exporter wrote: read-only history now, and it must not
+# drift or those workbooks stop being recognised (a test pins the pair).
 KIND_SNAPSHOT_MARK = "RUN CONFIG SNAPSHOT"
 KIND_STAMP_MARK = "RUN CONFIG — GLOBAL METHOD EXPORT"
 

@@ -174,9 +174,9 @@ def _sixn_fill_capacity_fish(state: FacilityState, tank_id: int,
     t = state.tanks_by_id.get(tank_id)
     if t is None or avg_wt_g <= 0:
         return 0.0
-    # R8 via tiers — the SAME rule run.py's audit and the Global arms' tank
-    # picker apply. In purge the cap is +inf (the harvest schedule bounds a
-    # depuration tank, not kg/m3), so the arithmetic below needs no branch.
+    # R8 via tiers — the SAME rule run.py's audit and lns_placement.py apply.
+    # In purge the cap is +inf (the harvest schedule bounds a depuration tank,
+    # not kg/m3), so the arithmetic below needs no branch.
     _cap = _eff_density_cap(t.max_density_kg_m3, t.system_id, t.stage, purge)
     if _cap == float("inf"):
         return float("inf")
