@@ -34,3 +34,7 @@ Forecast_GLOBAL.xlsx
 
 # Forecast-vs-actuals FW calibration history (diagnostic, like the two above)
 fw_calibration_history.jsonl
+
+# Operating costs — commercially sensitive, kept out of git (2026-09-11)
+config/costs.yaml
+config/costs.yaml.tmp-*
