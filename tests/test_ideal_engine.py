@@ -516,7 +516,26 @@ def test_the_default_read_year_is_the_last_complete_year_of_the_horizon():
 
 # --- ONE real engine run -----------------------------------------------------
 
-def test_a_real_ideal_run_is_clean_plausible_and_isolated(engine, control):
+_LIMIT_GATES = ("Harvest every week", "Harvest floor", "Biomass cap",
+                "Tank density (R8)", "System limits", "Handling budget")
+
+
+def _limit_counts(y):
+    """Each facility-limit gate's breach count, as the YearRead holds it."""
+    return {"Harvest every week": y.zero_weeks,
+            "Harvest floor": y.under_floor_weeks,
+            "Biomass cap": y.over_cap_weeks,
+            "Tank density (R8)": y.r8_over_tank_weeks,
+            "System limits": y.sys_bio_over_weeks + y.sys_feed_over_weeks,
+            "Handling budget": y.weeks_over_move_budget}
+
+
+def test_a_real_ideal_run_is_clean_isolated_and_judged_on_hard_limits(
+        engine, control):
+    """Hard limits (operator ruling 2026-09-10): this rhythm may well break a
+    limit, so the run is not required to be within them. What is required:
+    the engine and its audits are clean, and each limit gate FAILs exactly
+    when its own breach count is above zero."""
     run = engine["run"]
     assert run.rc == 0
     assert run.horizon_weeks == ideal.HORIZON_WEEKS
@@ -525,8 +544,15 @@ def test_a_real_ideal_run_is_clean_plausible_and_isolated(engine, control):
     assert run.audits["manual_events_included"] is False
     assert run.audits["manual_events_file"] is None
     assert set(run.years) == {STEADY}             # year 3, not year 2
-    fails = [g for g in ie.gates(run, STEADY, control) if g.status == "FAIL"]
-    assert not fails, fails
+    g = {x.name: x for x in ie.gates(run, STEADY, control)}
+    assert set(_LIMIT_GATES) <= set(g)
+    for name in ("Engine finished", "Conservation audits", "Input conservation"):
+        assert g[name].status == "PASS", g[name]
+    y = run.years[STEADY]
+    for name, n in _limit_counts(y).items():
+        assert g[name].status == ("FAIL" if n > 0 else "PASS"), (name, n, g[name])
+    assert ie.plausible(list(g.values())) == (sum(_limit_counts(y).values()) == 0)
+    assert (y.over_cap_weeks > 0) == (y.peak_pct_of_cap > 1.0 + ie.CAP_EPSILON)
     assert run.years[STEADY].harvest_fish > 0
     assert any(run.layout.values())
     assert run.tank_sequence
@@ -615,6 +641,86 @@ def test_a_what_if_run_is_judged_against_the_limits_it_ran_with(
         assert run.audits["move_budget"] == 16
 
 
+def _clean_year(y):
+    """The run's YearRead with every facility limit met."""
+    return dataclasses.replace(
+        y, zero_weeks=0, under_floor_weeks=0, peak_pct_of_cap=0.95,
+        over_cap_weeks=0, r8_over_tank_weeks=0, r8_worst=None,
+        sys_bio_over_weeks=0, sys_feed_over_weeks=0, sys_worst=None,
+        weeks_over_move_budget=0)
+
+
+def _clean_run(run):
+    """The run with every limit met and the audits clean (no FW note)."""
+    a = dict(run.audits, reconciliation_flags=0, tank_continuity_flags=0,
+             input_conservation=[ln for ln in run.audits["input_conservation"]
+                                 if not ln.startswith("***")],
+             input_status={})
+    return dataclasses.replace(run, rc=0, audits=a,
+                               years={STEADY: _clean_year(run.years[STEADY])})
+
+
+_ONE_LIMIT = {
+    "Harvest every week": dict(zero_weeks=1),
+    "Harvest floor": dict(under_floor_weeks=2),
+    "Biomass cap": dict(peak_pct_of_cap=1.0 + 1e-6, over_cap_weeks=1),
+    "Tank density (R8)": dict(
+        r8_over_tank_weeks=3,
+        r8_worst=dict(week="x", tank=1, batch="b", density=99.0, cap=85.0,
+                      system="OG1N", stage="SW")),
+    "System limits": dict(
+        sys_feed_over_weeks=2,
+        sys_worst=dict(system="OG2S", week="x", kind="feed", value=3400.0,
+                       cap=3000.0, unit="kg/day", ratio=3400 / 3000)),
+    "Handling budget": dict(weeks_over_move_budget=1),
+}
+
+
+@pytest.mark.parametrize("gate_name", sorted(_ONE_LIMIT))
+def test_each_limit_alone_takes_the_plan_out_of_the_limits(engine, control,
+                                                            gate_name):
+    """Hard limits (operator ruling 2026-09-10): ONE breach of ONE limit is a
+    FAIL, and the plan is no longer within the limits."""
+    base = _clean_run(engine["run"])
+    assert ie.plausible(ie.gates(base, STEADY, control))
+    bad = dataclasses.replace(base, years={STEADY: dataclasses.replace(
+        base.years[STEADY], **_ONE_LIMIT[gate_name])})
+    g = {x.name: x for x in ie.gates(bad, STEADY, control)}
+    assert g[gate_name].status == "FAIL", g[gate_name]
+    assert [n for n, x in g.items() if x.status != "PASS"] == [gate_name]
+    assert not ie.plausible(list(g.values()))
+    if gate_name == "System limits":              # the configured buffer stays
+        assert "OG2S" in g[gate_name].detail
+        assert f"+{control.global_buffer_pct:.0%}" in g[gate_name].detail
+
+
+def test_the_cap_has_no_tolerance_in_the_engine(engine, control):
+    """The 2% L1 lag allowance is the quick scan's; in the engine a peak a
+    hair over the cap FAILs and one exactly at it passes."""
+    base = _clean_run(engine["run"])
+    for pct, want in ((1.0 + ideal.PEAK_TOLERANCE / 2, "FAIL"), (1.0, "PASS"),
+                      (1.0 + ie.CAP_EPSILON / 2, "PASS")):
+        run = dataclasses.replace(base, years={STEADY: dataclasses.replace(
+            base.years[STEADY], peak_pct_of_cap=pct)})
+        g = {x.name: x for x in ie.gates(run, STEADY, control)}
+        assert g["Biomass cap"].status == want, (pct, g["Biomass cap"])
+
+
+def test_fw_mass_balance_alone_stays_a_warn_and_the_plan_stays_within(
+        engine, control):
+    """A model-accounting note, not a facility limit: an empty start trips it
+    on one early batch by construction."""
+    base = _clean_run(engine["run"])
+    fw = dataclasses.replace(base, audits=dict(
+        base.audits, input_conservation=list(base.audits["input_conservation"])
+        + ["*** FW MASS-BALANCE BREACH: 1 batch(es) where the FW phase does "
+           "not conserve: S001 (+3.1%). ***"]))
+    g = {x.name: x for x in ie.gates(fw, STEADY, control)}
+    assert g["FW mass balance"].status == "WARN"
+    assert [n for n, x in g.items() if x.status != "PASS"] == ["FW mass balance"]
+    assert ie.plausible(list(g.values()))
+
+
 def test_gates_keep_their_order_and_only_fail_rows_decide(engine, control):
     run = engine["run"]
     base = ie.gates(run, STEADY, control)
@@ -624,20 +730,6 @@ def test_gates_keep_their_order_and_only_fail_rows_decide(engine, control):
     def with_year(**kw):
         return dataclasses.replace(
             run, years={STEADY: dataclasses.replace(y, **kw)})
-
-    warn_only = with_year(under_floor_weeks=2, weeks_over_move_budget=1,
-                          r8_over_tank_weeks=3,
-                          r8_worst=dict(week="x", tank=1, batch="b", density=99.0,
-                                        cap=85.0, system="OG1N", stage="SW"),
-                          sys_feed_over_weeks=2,
-                          sys_worst=dict(system="OG2S", week="x", kind="feed",
-                                         value=3400.0, cap=3000.0,
-                                         unit="kg/day", ratio=3400 / 3000))
-    g = ie.gates(warn_only, STEADY, control)
-    assert [x.name for x in g] == names
-    assert ie.plausible(g) and any(x.status == "WARN" for x in g)
-    sysg = next(x for x in g if x.name == "System limits")
-    assert sysg.status == "WARN" and "OG2S" in sysg.detail   # a WARN, never a FAIL
 
     for bad in (with_year(zero_weeks=1),
                 with_year(peak_pct_of_cap=1.0 + ideal.PEAK_TOLERANCE + 0.01),
@@ -788,6 +880,27 @@ def test_the_reader_agrees_with_the_workbooks_own_independent_sheets(kept):
         assert (Y.sys_worst is None) == (
             Y.sys_bio_over_weeks + Y.sys_feed_over_weeks == 0)
 
+        # Weeks over the cap, against Advisory's own per-week resolved cap
+        # (0 there = no cap); rounding decides only a borderline week.
+        slack = 0.5 * max(rows_in[w] for w in aw) + 0.5
+        lim = [(float(r["Total_Biomass (kg)"]), float(r["Biomass_Limit (kg)"]))
+               for r in aw.values() if r["Biomass_Limit (kg)"]]
+        assert (sum(1 for s, c in lim if s > c + slack) <= Y.over_cap_weeks
+                <= sum(1 for s, c in lim if s > c - slack)), y
+
+        # Biomass gain = live harvest + the standing change from the previous
+        # year's last week (the year's first week when there is none),
+        # rebuilt from Advisory's Harvest_Biomass and Total_Biomass alone.
+        wk = sorted(aw)
+        prev = sorted(str(r["Week"]) for r in adv
+                      if str(r["Week"]).startswith(f"{y - 1}-"))
+        tot = {str(r["Week"]): float(r["Total_Biomass (kg)"]) for r in adv}
+        want = (sum(float(r["Harvest_Biomass (kg)"] or 0.0) for r in aw.values())
+                + tot[wk[-1]] - tot[prev[-1] if prev else wk[0]])
+        assert math.isclose(Y.gain_t * 1000.0, want, rel_tol=1e-4,
+                            abs_tol=0.5 * sum(hv_rows[w] for w in aw)
+                            + 0.5 * len(aw) + 2 * slack), (y, Y.gain_t, want)
+
     # An empty facility has nothing big enough to harvest in its first weeks,
     # so the zero-week check above had real zeros to find.
     assert zero_total > 0
@@ -834,7 +947,8 @@ def test_an_override_of_zero_means_no_cap_and_no_floor_as_in_the_engine(kept):
     g1 = {x.name: x for x in ie.gates(
         dataclasses.replace(run, years={STEADY: y1}), STEADY, ctl)}
     assert g1["Biomass cap"].status == "FAIL"
-    assert g1["Harvest floor"].status == "WARN"
+    assert g1["Harvest floor"].status == "FAIL"          # hard limit (2026-09-10)
+    assert y1.over_cap_weeks == 1
     assert f"{floor:,.0f}" in g1["Harvest floor"].detail
     assert floor != ctl.min_harvest_per_week
 

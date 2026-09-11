@@ -47,6 +47,17 @@ rc 0 and clean conservation audits do NOT mean a plan is feasible: an
 overstocked run returned rc 0 at 9,329 kg/m3 and 1,685% of the cap. `gates`
 is the plausibility check, and a plan is plausible iff no gate FAILs.
 
+Hard limits (operator ruling 2026-09-10): a plan is within the limits iff no
+gate FAILs. Every facility limit is a FAIL when broken, with zero breaches
+allowed: every week harvests, the harvest floor, the biomass cap (no
+tolerance in the engine: the 2% ideal.PEAK_TOLERANCE is the tankless quick
+scan's one-week-lag allowance only), tank density (R8), the per-system
+biomass and feed limits (flagged, as the engine's SystemLimitsAudit flags
+them, above the limit x (1 + global_buffer_pct): the operator kept that
+buffer), and the weekly move budget. "FW mass balance" stays a WARN: it is a
+model-accounting note, not a facility limit, and an empty start trips it on
+one early batch by construction.
+
 Isolation: every run lives in tempfile.mkdtemp() and is removed afterwards
 unless `keep_dir` is given. The project's config/ and scenario/ are only
 read. run_method passes calib_log_path="", so the live FW calibration history
@@ -138,6 +149,9 @@ _PR_HEADER = ((6, "Opening Count"), (7, "Closing Count"),
               (10, "Opening Avg weight"), (11, "Closing Avg weight"))
 _VALIDATION_TOP_N = 8
 _LOG_TAIL_LINES = 40
+# The biomass cap is a HARD limit in the engine (operator, 2026-09-10): a week
+# is over it when standing / cap exceeds 1 by more than float noise.
+CAP_EPSILON = 1e-9
 
 
 @dataclass(frozen=True)
@@ -195,6 +209,19 @@ class YearRead:
     sys_bio_over_weeks: int = 0
     sys_feed_over_weeks: int = 0
     sys_worst: Optional[dict] = None
+    # Weeks whose standing biomass (OG + FW, as `standing_peak_kg`) exceeds
+    # that week's resolved cap by more than CAP_EPSILON; 0 when no week is
+    # capped. > 0 exactly when peak_pct_of_cap > 1 + CAP_EPSILON.
+    over_cap_weeks: int = 0
+    # Biomass gain in the year, tonnes: the LIVE (gross, round) weight
+    # harvested in the year (HarvestPlan "Gross_Biomass", the same source as
+    # `harvest_gross_t` and `avg_gross_kg`) plus the change in standing
+    # biomass (OG + FW) from the previous year's last week to this year's last
+    # week (from this year's first week when the run has no previous year).
+    # Fish that die are not gain: mortality lowers standing and is never
+    # added back, so this is growth net of losses. New eggs entering FW are
+    # counted as they arrive (a few kg against thousands of tonnes).
+    gain_t: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -897,6 +924,9 @@ def read_workbook(path, control, facility, bands, cv_pct: float,
     if not weeks_all:
         raise ValueError(f"{path}: the workbook has no weeks at all")
 
+    def _standing(w) -> float:
+        return og_kg.get(w, 0.0) + fw_kg.get(w, 0.0)
+
     reads, weekly = {}, {}
     for y in years:
         W = [w for w in weeks_all if _label_year(w) == y]
@@ -907,7 +937,9 @@ def read_workbook(path, control, facility, bands, cv_pct: float,
         # None = the engine applies no floor / no cap that week.
         floors = [resolve_facility_cap(METRIC_MIN_HARVEST, w, limits, control)
                   for w in W]
-        standing = [og_kg.get(w, 0.0) + fw_kg.get(w, 0.0) for w in W]
+        standing = [_standing(w) for w in W]
+        prev = [w for w in weeks_all if _label_year(w) == y - 1]
+        standing_before = _standing(prev[-1]) if prev else standing[0]
         caps = [resolve_facility_cap(METRIC_BIOMASS, w, limits, control)
                 for w in W]
         capped = [(s, float(c)) for s, c in zip(standing, caps) if c is not None]
@@ -960,6 +992,9 @@ def read_workbook(path, control, facility, bands, cv_pct: float,
             sys_bio_over_weeks=sys_over["biomass"].get(y, 0),
             sys_feed_over_weeks=sys_over["feed"].get(y, 0),
             sys_worst=sys_worst.get(y),
+            over_cap_weeks=sum(1 for s, c in capped
+                               if s / c > 1.0 + CAP_EPSILON),
+            gain_t=(gross_kg + standing[-1] - standing_before) / 1000.0,
         )
 
     # The layout: one mid-year week of the last read year, and every tank's
@@ -1197,14 +1232,22 @@ def _gate(name: str, bad: bool, status: str, bad_detail: str,
 def gates(run: EngineRun, year: int, control) -> list[Gate]:
     """The plausibility checks for one read year, in a fixed order.
 
-    A plan is plausible iff no gate FAILs (see `plausible`).
+    Hard limits (operator ruling 2026-09-10): a plan is within the limits iff
+    no gate FAILs (see `plausible`). Every facility limit FAILs when broken,
+    zero breaches allowed: "Harvest every week", "Harvest floor", "Biomass
+    cap" (peak standing above the resolved cap by more than CAP_EPSILON; no
+    tolerance here, ideal.PEAK_TOLERANCE belongs to the tankless quick scan),
+    "Tank density (R8)", "System limits" (flagged above the limit x (1 +
+    global_buffer_pct), exactly as the engine's SystemLimitsAudit flags them)
+    and "Handling budget". The engine and audit gates FAIL too. Only "FW mass
+    balance" is a WARN: a model-accounting note, not a facility limit (an
+    empty start trips it on one early batch by construction).
     """
     if year not in run.years:
         raise ValueError(f"year {year} was not read in this run (read: "
                          f"{sorted(run.years)})")
     y = run.years[year]
     a = run.audits
-    tol = ideal.PEAK_TOLERANCE
     w = y.r8_worst
     lines = list(a.get("input_conservation", ()))
     breach = [ln for ln in lines if ln.startswith("***")
@@ -1239,22 +1282,23 @@ def gates(run: EngineRun, year: int, control) -> list[Gate]:
               f"{y.zero_weeks} of {y.weeks} weeks harvest nothing",
               f"all {y.weeks} weeks harvest (min "
               f"{y.harvest_fish_wk_min:,.0f} fish)"),
-        _gate("Harvest floor", y.under_floor_weeks > 0, "WARN",
+        _gate("Harvest floor", y.under_floor_weeks > 0, "FAIL",
               f"{y.under_floor_weeks} weeks under the floor; {floor_s} (min "
               f"harvest {y.harvest_fish_wk_min:,.0f})",
               f"every week at or above the floor; {floor_s} (min harvest "
               f"{y.harvest_fish_wk_min:,.0f})"),
-        _gate("Biomass cap", y.peak_pct_of_cap > 1.0 + tol, "FAIL",
+        _gate("Biomass cap", y.peak_pct_of_cap > 1.0 + CAP_EPSILON, "FAIL",
               f"peak standing {y.standing_peak_kg / 1000:,.0f} t is "
-              f"{y.peak_pct_of_cap:.1%} of the cap (tolerance {tol:.0%})",
+              f"{y.peak_pct_of_cap:.1%} of the cap; {y.over_cap_weeks} "
+              f"week(s) over it (a hard limit: no tolerance in the engine)",
               cap_ok),
-        _gate("Tank density (R8)", y.r8_over_tank_weeks > 0, "WARN",
+        _gate("Tank density (R8)", y.r8_over_tank_weeks > 0, "FAIL",
               (f"{y.r8_over_tank_weeks} tank-weeks over their cap; worst tank "
                f"{w['tank']} ({w['system']}) {w['week']}: {w['density']:.1f} vs "
                f"{w['cap']:.0f} kg/m3 ({w['stage']})") if w else "",
               "no tank over its density cap"),
         _gate("System limits",
-              y.sys_bio_over_weeks + y.sys_feed_over_weeks > 0, "WARN",
+              y.sys_bio_over_weeks + y.sys_feed_over_weeks > 0, "FAIL",
               (f"{y.sys_bio_over_weeks} system-weeks over their biomass limit "
                f"and {y.sys_feed_over_weeks} over their feed limit (flagged "
                f"above the limit +{sys_buf:.0%}); worst {sw['system']} "
@@ -1262,7 +1306,7 @@ def gates(run: EngineRun, year: int, control) -> list[Gate]:
                f"{sw['cap']:,.0f} {sw['unit']}") if sw else "",
               f"every system within its biomass and feed limits (flagged "
               f"above the limit +{sys_buf:.0%})"),
-        _gate("Handling budget", y.weeks_over_move_budget > 0, "WARN",
+        _gate("Handling budget", y.weeks_over_move_budget > 0, "FAIL",
               f"{y.weeks_over_move_budget} weeks over "
               f"{budget} moves (max {y.moves_max})",
               f"at most {y.moves_max} moves a week (budget {budget})"),
@@ -1272,10 +1316,13 @@ def gates(run: EngineRun, year: int, control) -> list[Gate]:
         _gate("Input conservation", bool(breach) or n_dropped > 0, "FAIL",
               " | ".join(breach) or f"{n_dropped} batch(es) DROPPED",
               "every in-horizon batch placed, none over-produced"),
+        # A model-accounting note, not a facility limit: stays a WARN.
         _gate("FW mass balance", bool(fw), "WARN", " | ".join(fw),
               "FW phase conserves for every batch"),
     ]
 
 
 def plausible(gate_list: Sequence[Gate]) -> bool:
+    """Hard limits (operator ruling 2026-09-10): a plan is within the limits
+    iff no gate FAILs. A WARN (only "FW mass balance") never decides."""
     return not any(g.status == "FAIL" for g in gate_list)

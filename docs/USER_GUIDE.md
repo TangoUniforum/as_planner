@@ -2409,15 +2409,133 @@ out (and listed); and 6N runs in **production** mode, as it will after 2028,
 because an empty 6N cannot start its purge rotation. A small FW mass-balance
 warning on one early batch is expected for the same reason.
 
-**The checks decide whether the answer is real.** The engine finishing with
-clean conservation audits does not make a plan feasible — an overstocked run
-once "finished" at 1,685 % of the cap. So each run is graded: every week
-harvests, peak biomass within 2 % of the cap and the audits clean are FAILs if
-broken; the harvest floor, tank density, the per-system biomass and feed
-limits (flagged above the limit + your `global_buffer_pct`, exactly as the
-SystemLimitsAudit sheet flags them) and the 15-move budget are WARNs. A plan
-with a FAIL is not a result: its revenue prices fish the facility could not
-carry or land.
+**The checks decide whether the answer is real — and every limit is hard.**
+The engine finishing with clean conservation audits does not make a plan
+feasible — an overstocked run once "finished" at 1,685 % of the cap. So each
+run is graded, and your ruling (2026-09-10) is that a plan is **within the
+limits only with zero breaches**: every week harvests, the harvest floor, the
+biomass cap, tank density, the per-system biomass and feed limits and the
+weekly move budget are all FAILs when broken, as are the engine and its
+conservation audits. The biomass cap has **no tolerance** in the engine (the
+2 % allowance belongs to the tankless quick scan, whose envelope harvests a
+week late). The system limits are still flagged above the limit + your
+`global_buffer_pct`, exactly as the SystemLimitsAudit sheet flags them — you
+kept that buffer. **FW mass balance** stays a note (WARN): it is a
+model-accounting check, not a facility limit, and an empty start trips it on
+one early batch by construction. The headline reads **within every limit ✅**
+or **breaks the limits ❌**. A plan that breaks a limit is not an answer: its
+revenue prices fish the facility could not carry, feed, handle or land within
+its limits.
+
+### Optimizer — the best rhythm within every limit
+
+Inside step 2, the **Optimizer — best rhythm within every limit** expander
+searches stocking rhythms for you. It runs on exactly what the reference sheet
+runs on: step 2's biomass cap, its facility limits (the min harvest weight
+included — step 2's box follows step 1's after a scan), the **Tank & system
+limits** table and move budget, and the method and knobs ▶ Run forecast uses.
+
+- **Objective** — Revenue, Harvest tonnage (HOG), or Biomass gain: live weight
+  harvested plus the change in standing fish over the year (dead fish are not
+  gain). In a steady year the standing stock barely changes, so biomass gain
+  tracks tonnage and the two usually pick the same rhythm; revenue can pick
+  differently because it prices fish size.
+- **Input frequencies** — days between stockings, a comma list (default
+  42, 49, 56, 63).
+- **Batch sizes** — fish to OG per batch: from / to / in steps of (default
+  180,000 to 300,000 in steps of 20,000).
+
+Before you press **Find the best rhythm** the page states the grid size and
+the estimated time. Each rhythm is one real-engine run from an empty facility
+(~20 s), spread over the sidebar's **Computer power** workers; the default
+4 × 7 grid is 28 runs, plus one wave of up to 6 stability runs (below). It
+takes gaps of 7–140 days and batches of 50,000–600,000 fish (step 2's own
+ranges, so a winner always loads there), and refuses a grid with no frequency
+or size, or more than 60 rhythms.
+
+**What it accepts:** a rhythm counts only if it breaks **no** limit — the same
+checks as the reference sheet, zero breaches. Among those it picks the highest
+objective (a tie goes to the smaller batch, then the longer gap). If none
+qualifies it says so in red and names the closest rhythm — the fewest breaches
+— and what it breaks. A rhythm that fails a check which is not a limit (the
+engine not finishing, the conservation audits, input conservation) is never
+the closest while another only breaks limits: it is further from a plan. The
+table lists every rhythm, the ones within the limits first by the objective,
+then the ones that only break limits by total breaches, then those that fail
+another check, with one column per limit and an **Other failed checks**
+column naming those checks. A rhythm the engine failed on shows its error and
+never counts.
+
+**Cost of the limits** (a blue line under the answer, for scale only): the
+best rhythm in the grid if the limits were ignored, what it would score, how
+much more than the plan within every limit, and everything it breaks — for
+example 76 tank-weeks over density, 37 system-weeks over feed. When the
+best-scoring rhythm is itself within every limit the line says the limits
+cost nothing in this grid. If that rhythm also fails a check that is not a
+limit (the engine not finishing, the conservation audits, input
+conservation), the line says it is not a valid plan, so its score is not a
+real cost of the limits. It never has a Use button: a plan that breaks a
+limit is not an answer.
+
+**Stability check.** The planner switches between modes under small changes,
+so a rhythm with zero breaches can sit next to one that breaks a limit (49 d
+× 203k did, between two zero-breach sizes). After the grid, the optimizer
+takes the top 3 rhythms within every limit and runs each one's neighbours —
+the same gap, 5,000 fish per batch fewer and more — in one extra wave of at
+most 6 runs (a neighbour already in the grid is reused, not re-run). A rhythm
+is **stable** when both neighbours are within every limit. A stable winner
+gets a green **Stable** line. A fragile one gets a yellow **Fragile** warning
+naming the neighbour that breaks and what it breaks, then the best stable
+plan among the top 3 — or says none of them is stable, so treat any of them
+as fragile.
+
+**Using the answer.** When the winner is stable, **Use this rhythm in the
+reference sheet** loads it into step 2 (and step 3's size), the way the quick
+scan does. When the winner is fragile but another of the top 3 is stable, the
+main button is **Use the best stable plan** and a second button, **Use the top
+plan anyway**, loads the winner. When none is stable there is one button, for
+the winner. Then run the reference sheet to see its tanks and checks. Change
+any input afterwards and the result is marked stale, and the Use buttons are
+greyed out until you press **Find the best rhythm** again.
+
+What drives the answer is the load, fish per week (batch size × 7 ÷ days
+between stockings). Measured 2026-09-10 at 3,800 t with your promoted
+controller: below about 27,000 fish/week the harvest floor fails, and above
+about 29,000–30,000 tank density and system feed break — so the band that
+meets every limit is narrow.
+
+**Which rhythms meet every limit?** (2026-09-10; your engine, empty-facility
+start, 3,800 t cap, steady year 2029; 54 rhythms, input every 35–70 days ×
+135k–310k fish.) What decides it is **fish entering per week**. Below about
+28,000 a week the harvest floor fails, because there are too few fish. Above
+about 30,000 a week, tanks go over their density cap and systems over their
+feed limit. Eight rhythms meet every limit; the best and the nearest misses:
+
+| Rhythm | Fish / week | Revenue / yr | HOG / yr | Avg fish | Peak vs cap | Breaches |
+|---|---|---|---|---|---|---|
+| **49 d × 210k** | 30,000 | **$103.1M** | 4,874 t | 4.32 kg | 81 % | **0 ✅** |
+| 42 d × 180k | 30,000 | $96.6M | 4,692 t | 3.89 kg | 65 % | 0 ✅ |
+| 42 d × 174k | 29,000 | $91.9M | 4,455 t | 3.94 kg | 67 % | 0 ✅ |
+| 56 d × 232k | 29,000 | $91.4M | 4,430 t | 3.92 kg | 67 % | 0 ✅ |
+| 49 d × 200k | 28,571 | $89.3M | 4,383 t | 3.74 kg | 58 % | 0 ✅ |
+| 49 d × 203k | 29,000 | $96.9M | 4,676 t | 4.04 kg | 67 % | 1 (feed) |
+| 49 d × 217k | 31,000 | $121.0M | 5,643 t | 4.58 kg | 85 % | 17 (16 density, 1 feed) |
+| 49 d × 280k | 40,000 | $136.8M | 6,583 t | 4.05 kg | 93 % | 115 (76 density, 1 biomass, 37 feed, 1 floor) |
+
+Three things to take from this:
+
+1. **Hard limits cost about a quarter of the revenue with today's engine.**
+   $103M/yr against $137M for the 280k rhythm, which earlier looked ideal
+   but breaks limits 115 times.
+2. **The binding limits are tank density and system feed, not the biomass
+   cap.** The best plan within every limit peaks at only 81 % of the cap. The
+   fish fit the facility; the engine cannot spread them across the tanks
+   without some tanks going over their density cap or some systems over their
+   feed limit. That is the planning problem the density experiment targets.
+3. **A zero is fragile.** 49 d × 203k sits between two sizes with zero
+   breaches and still has one system-week over its feed limit: the planner
+   switches between modes under small changes (see §4). Before adopting a
+   rhythm, check that its neighbours are within the limits too.
 
 ### 3 · Transition — from today's fish
 
@@ -2438,13 +2556,21 @@ each year passes the checks. To adopt a proposal: keep a copy of
 Batches). Run forecast then runs it unchanged — its 85-week horizon shows only
 the start of the effect.
 
-**No worse than today?** Under the results, a table compares the two plans on
-every system constraint — tank-weeks over density, system-weeks over the
-biomass limit and over the feed limit, weeks over the move budget, weeks under
-the harvest floor and weeks with no harvest — totalled over the years both
-runs cover, each plan judged against the limits it ran with. Your rule
-(2026-09-10) is that a proposal must be no worse than today's plan on EVERY
-one; the page says in one line whether it is, and which constraints fail.
+**Within the limits?** Under the results, a table counts each plan's
+tank-weeks over density, system-weeks over the biomass limit and over the feed
+limit, weeks over the move budget, weeks under the harvest floor, weeks with
+no harvest and weeks over the biomass cap — totalled over the years both runs
+cover, each plan judged against the limits it ran with. Every limit is hard
+(your ruling, 2026-09-10): the proposal is within the limits only if **every
+one of its counts is zero** and it fails no check in any of those years (the
+per-year table's ✗, e.g. the conservation audits). The page says so in green,
+or names each broken constraint and its count, and each failed check and its
+years, in red — so the headline never contradicts the per-year table. If the
+two runs share no year there is nothing to compare, and the page says so in
+red instead of giving a verdict. Today's plan's counts are shown for reference
+only. Breaches in the first years can come from fish already stocked, which
+re-sizing future stockings cannot change — the per-year table shows where
+they fall.
 
 **Facility limits for this check** (optional expander): try a different biomass
 cap or harvest limits for the **proposal** — for example "what if the cap were
@@ -2458,6 +2584,11 @@ exactly as in Run forecast; the page lists which limits have dated rows and
 for which weeks (on the current config the biomass cap's rows cover late 2026,
 so a new cap takes effect from 2027). If your Control values change, the boxes
 reset to the new values rather than keep an old one.
+
+*The two tables below were measured under the EARLIER rule, "no worse than
+today" (2026-09-10, before the hard-limit ruling), and are kept as dated
+measurements. Under hard limits none of these plans passes — today's plan
+itself has 195 tank-weeks over density.*
 
 **Can the cap go up within the system constraints?** (2026-09-10; your engine,
 the 8/31 PR, 208 weeks; a new cap applies from 2027; breaches summed over
