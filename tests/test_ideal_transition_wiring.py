@@ -88,6 +88,56 @@ def test_tank_and_system_limits_reach_the_proposal_only(monkeypatch):
     assert kb["system_overrides"] == {"OG3N": {"biomass": 450_000.0}}
 
 
+def test_an_optimizer_cell_makes_the_check_buttons_proposal_call(monkeypatch,
+                                                                 tmp_path):
+    """One tool: a transition-optimizer cell runs the engine with EXACTLY the
+    call the Check button's proposal arm makes — the same proposed batches,
+    project, 208 weeks, manual events, method, promoted knobs, what-if limits
+    (the cell's cap in place of the cap box) and tank/system tables. Only the
+    PR's temp path differs."""
+    import datetime as dt
+    from types import SimpleNamespace
+    from forecast import ideal_engine
+    from forecast import transition as tr
+    from forecast import transition_optimize as to
+    from forecast.config_io import load_config
+    from forecast.models import BatchInput
+    calls = []
+    monkeypatch.setattr(ideal_engine, "run_schedule",
+                        lambda b, root, **kw: calls.append((b, root, kw))
+                        or SimpleNamespace(years={}, audits={}))
+    monkeypatch.setattr(app, "_cpu_workers", lambda: 1)
+    fs = dt.date(2026, 9, 1)
+    live = [BatchInput(
+        batch_id=f"X{i}", input_date=dt.datetime(2026, 8, 1)
+        + dt.timedelta(days=49 * i), input_count=570_000,
+        tran_sf_date=None, tran_og_date=dt.datetime(2027, 7, 1)
+        + dt.timedelta(days=49 * i), tran_og_count=340_000,
+        tran_og_avg_wt_g=370.0, tran_og_cv=16.0, fcr_model="FCR_116_Quick",
+        fw_correction=1.0, sgr_correction=1.0) for i in range(6)]
+    proposed, _changes = tr.propose(live, fs, fs, [300_000])
+    knobs = {"chronic_pressure_weeks": 6}
+    dens, sys_ov = {"OG3N": 95.0}, {"OG3N": {"biomass": 450_000.0}}
+    app._ideal_transition_runs(
+        live, proposed, b"pr", "pr.xlsm", "controller", knobs,
+        {"max_biomass_kg": 3_600_000.0, "min_harvest_per_week": 30_000.0},
+        dens, sys_ov)
+    pr = tmp_path / "pr.xlsm"
+    pr.write_bytes(b"pr")
+    to.run_cell((300_000, 3_600_000.0), str(app._ROOT), live=live,
+                forecast_start=fs, cutoff=fs, pr_path=pr,
+                overrides={"min_harvest_per_week": 30_000.0},
+                method="controller", method_overrides=knobs,
+                density_overrides=dens, system_overrides=sys_ov,
+                control=load_config(str(app._ROOT / "config"))[0])
+    (_b_a, _r_a, _kw_a), (b_arm, r_arm, kw_arm), (b_cell, r_cell, kw_cell) = calls
+    assert b_cell == b_arm == proposed and r_cell == r_arm == str(app._ROOT)
+    drop = lambda kw: {k: v for k, v in kw.items() if k != "pr_path"}
+    assert drop(kw_cell) == drop(kw_arm)
+    assert kw_cell["overrides"] == {"max_biomass_kg": 3_600_000.0,
+                                    "min_harvest_per_week": 30_000.0}
+
+
 def test_the_tank_limit_text_is_plain_units():
     txt = app._ideal_tank_limit_text(
         {"OG3N": 95.0}, {"OG3N": {"biomass": 450_000.0, "feed_per_day": 3500.0}},

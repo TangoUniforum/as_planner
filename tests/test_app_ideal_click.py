@@ -245,7 +245,7 @@ from forecast import ideal_engine as ie
 tree = ast.parse(open(ROOT + "/app.py", encoding="utf-8").read())
 want = {"_ideal_breach_text", "_ideal_opt_diff_text", "_ideal_opt_cost",
         "_ideal_opt_stability", "_ideal_opt_value_text", "_ideal_opt_use",
-        "_IDEAL_TR_LIMITS"}
+        "_ideal_tr_refill_seeds", "_IDEAL_TR_LIMITS"}
 ns = {"st": st}
 exec(compile(ast.Module(body=[
     n for n in tree.body
@@ -624,28 +624,57 @@ def _years(counts=None):
             for y in (2027, 2028, 2029)}
 
 
+def _gates(fails=None, years=(2027, 2028, 2029)):
+    """{year: the gates the proposal was judged with}: a FAIL per name in
+    `fails` ({year: [names]}), nothing else."""
+    from forecast.ideal_engine import Gate
+    fails = fails or {}
+    return {y: [Gate(n, "FAIL", "x") for n in fails.get(y, ())] for y in years}
+
+
 def test_step3_verdict_a_failed_check_blocks_the_green_verdict():
+    """The two-window rule (operator, 2026-09-11), effect year 2028: 2027 is
+    an early year (no worse than today), 2028-29 judged (zero)."""
     verdict = _app_functions("_ideal_tr_verdict")["_ideal_tr_verdict"]
-    clean = {y: [] for y in (2027, 2028, 2029)}
-    both, rows, broken, failed = verdict(_years(), _years(), clean)
-    assert both == [2027, 2028, 2029] and not broken and not failed
-    assert [r["Within the limits?"] for r in rows] == ["✓"] * 7
-    # Zero on every count, but the proposal fails a check in a compared year:
+    both, rows, v = verdict(_years(), _years(), _gates(), 2028)
+    assert both == [2027, 2028, 2029] and v.within_limits and not v.failures
+    assert [r["No worse than today?"] for r in rows] == ["✓"] * 7
+    assert [r["Zero breaches?"] for r in rows] == ["✓"] * 7
+    # Zero on every count, but the proposal fails a check in an EARLY year:
     # no green verdict, and the check is named with its year.
-    fails = {**clean, 2028: ["Conservation audits"]}
-    both, _rows, broken, failed = verdict(_years(), _years(), fails)
-    assert not broken and failed == {"Conservation audits": [2028]}
+    both, _rows, v = verdict(_years(), _years(),
+                             _gates({2027: ["Conservation audits"]}), 2028)
+    assert not v.within_limits
+    assert v.failed_checks == {"Conservation audits": (2027,)}
+    assert v.failures == ("fails Conservation audits in 2027",)
     # A year only the proposal covers is not compared.
     b = {**_years(), 2030: _years()[2029]}
-    _both, _r, _b, failed = verdict(_years(), b,
-                                    {**clean, 2030: ["Harvest floor"]})
-    assert failed == {}
-    # A count is a breach on its own; today's plan never decides.
-    both, rows, broken, failed = verdict(
+    g = _gates({2030: ["Harvest floor"]}, years=(2027, 2028, 2029, 2030))
+    _both, _r, v = verdict(_years(), b, g, 2028)
+    assert v.failed_checks == {} and v.within_limits
+    # Early years: today's breaches do not count against a proposal that is
+    # no worse; judged years: a count is a breach on its own.
+    both, rows, v = verdict(
         _years({2027: dict(r8_over_tank_weeks=5)}),
-        _years({2029: dict(sys_feed_over_weeks=2)}), clean)
-    assert broken == ["system-weeks over feed limit: 2"] and not failed
-    assert rows[0]["Today's plan"] == 5 and rows[0]["Within the limits?"] == "✓"
+        _years({2027: dict(r8_over_tank_weeks=5),
+                2029: dict(sys_feed_over_weeks=2)}), _gates(), 2028)
+    assert v.failures == ("2 system-weeks over feed in 2029",)
+    assert rows[0]["Today · early years"] == 5
+    assert rows[0]["Proposal · early years"] == 5
+    assert rows[0]["No worse than today?"] == "✓"
+    assert rows[2]["Proposal · judged years"] == 2
+    assert rows[2]["Zero breaches?"] == "✗ 2029"
+    # Worse than today in an early year, by one tank-week: named.
+    _b, rows, v = verdict(_years({2027: dict(r8_over_tank_weeks=5)}),
+                          _years({2027: dict(r8_over_tank_weeks=6)}),
+                          _gates(), 2028)
+    assert v.failures == (
+        "worse than today: 6 vs 5 tank-weeks over density in 2027",)
+    assert rows[0]["No worse than today?"] == "✗ 2027"
+    # No early year at all: that window says so instead of a count.
+    _b, rows, v = verdict(_years(), _years(), _gates(), 2027)
+    assert rows[0]["No worse than today?"] == "—"
+    assert rows[0]["Today · early years"] is None
 
 
 def test_step3_verdict_a_missing_count_raises_not_zero():
@@ -656,8 +685,334 @@ def test_step3_verdict_a_missing_count_raises_not_zero():
     broken_read = {y: SimpleNamespace(r8_over_tank_weeks=0)
                    for y in (2027, 2028)}
     with pytest.raises(AttributeError):
-        verdict(broken_read, broken_read, {2027: [], 2028: []})
-    assert verdict({}, _years(), {})[0] == []       # no shared year: none
+        verdict(broken_read, broken_read, {2027: [], 2028: []}, 2028)
+    both, _rows, v = verdict({}, _years(), {}, 2028)    # no shared year
+    assert both == [] and not v.within_limits
+
+
+# Step 3 on a SYNTHETIC page (no engine, no upload: AppTest cannot set a
+# file_uploader): the real _ideal* functions are lifted out of app.py by
+# name with a PR stub, and forecast.transition_optimize's two runners are
+# replaced by fakes, so the REAL optimize_transition, verdict and ranking run
+# on synthetic reads in seconds. Covers the caption, refusals with no run,
+# the winner / stability / table, Use filling step 3's sizes box and what-if
+# cap and both surviving a rerun and a mode round trip, stale disabling, the
+# loud no-plan error, and the Check's two-window verdict headline.
+_TR_OPT_DRIVER = r'''
+import sys
+sys.path.insert(0, %(root)r)
+try:
+    from streamlit.testing.v1 import AppTest
+except Exception as e:
+    print("SKIP no AppTest: %%s" %% e)
+    raise SystemExit(0)
+import datetime as dt
+from pathlib import Path
+from types import SimpleNamespace
+from forecast import ideal_engine as ie
+from forecast import transition_optimize as to
+
+def fail(msg):
+    print("FAIL " + msg)
+    raise SystemExit(1)
+
+def boom(at, what):
+    if at.exception:
+        fail(what + ": " + "; ".join(str(e)[:300] for e in at.exception))
+
+YEARS = (2026, 2027, 2028, 2029, 2030)
+ATTRS = [a for _k, a in to.YEAR_COUNTS]
+FAKE = {"mode": "stable"}
+
+def reads(rev, counts):
+    out = {}
+    for y in YEARS:
+        d = {a: 0 for a in ATTRS}
+        d.update(counts.get(y, {}))
+        out[y] = SimpleNamespace(revenue=rev, hog_t=1500.0, gain_t=1500.0, **d)
+    return out
+
+def fake_today(live, project_dir, **kw):
+    return to.TrCell(batch_size=0, cap_kg=3.8e6, today=True,
+                     reads=reads(1.0e8, {2027: {"r8_over_tank_weeks": 9}}),
+                     gates_by_year={y: () for y in YEARS})
+
+def fake_cell(cell, project_dir, **kw):
+    size, cap = cell
+    ok = FAKE["mode"] == "stable" and size <= 305_000
+    counts = {2027: {"r8_over_tank_weeks": 9}}
+    if not ok:
+        counts[2029] = {"r8_over_tank_weeks": 4}
+    # Revenue grows with the batch and as the cap falls.
+    return to.TrCell(batch_size=size, cap_kg=float(cap),
+                     reads=reads(size * 350.0 + (4e6 - cap) * 10, counts),
+                     gates_by_year={y: () for y in YEARS}, n_changed=5,
+                     first_tran_og=FAKE.get("first", dt.date(2027, 9, 23)))
+
+to.run_today, to.run_cell = fake_today, fake_cell
+REAL = to.optimize_transition
+CALLS = []
+
+def wrapped(live, fs, cutoff, sizes, caps, pr_path, **kw):
+    CALLS.append(dict(sizes=list(sizes), caps=list(caps),
+                      pr=Path(pr_path).read_bytes(),
+                      **{k: kw.get(k) for k in ("ceiling_kg", "overrides",
+                                                "method", "method_overrides",
+                                                "objective", "horizon_weeks")}))
+    return REAL(live, fs, cutoff, sizes, caps, pr_path, **kw)
+
+to.optimize_transition = wrapped          # app.py imports this very module
+
+SCRIPT = "ROOT = " + repr(%(root)r) + "\n" + r"""
+import ast, os, sys, datetime as dt
+from pathlib import Path
+from types import SimpleNamespace
+import streamlit as st
+sys.path.insert(0, ROOT)
+from forecast import ideal as im
+tree = ast.parse(open(ROOT + "/app.py", encoding="utf-8").read())
+
+def keep(n):
+    if isinstance(n, ast.FunctionDef):
+        return n.name.startswith("_ideal")
+    return isinstance(n, ast.Assign) and any(
+        getattr(t, "id", "").startswith(("_IDEAL", "_TR_", "_REF_"))
+        for t in n.targets)
+
+ns = {"st": st, "os": os, "_ROOT": Path(ROOT),
+      "uploaded": SimpleNamespace(name="pr.xlsm", getvalue=lambda: b"PR bytes"),
+      "pr": {"ok": True, "forecast_start": dt.datetime(2026, 9, 1)},
+      "_effective_method": lambda: ("controller",
+                                    {"chronic_pressure_weeks": 6}, "test"),
+      "_method_obj": lambda k: SimpleNamespace(label="Controller"),
+      "_config_fingerprint": lambda: "fp",
+      "_cpu_workers": lambda: 1}
+exec(compile(ast.Module(body=[n for n in tree.body if keep(n)],
+                        type_ignores=[]), "app.py", "exec"), ns)
+ctx = im.load_context(ROOT)
+mode = st.radio("Mode", ["Ideal", "Other"], key="app_mode")
+if mode == "Ideal":
+    ns["_ideal_restore"]()
+    ns["_ideal_transition"](ctx, (49, 340000), 3800)
+    ns["_ideal_save"]()
+else:
+    st.write("another mode")
+"""
+
+at = AppTest.from_string(SCRIPT, default_timeout=120)
+at.run()
+boom(at, "render")
+if not any(b.label == "Find the best transition" for b in at.button):
+    fail("the transition optimizer button is missing")
+got = (at.radio(key="ideal_tr_opt_obj").value,
+       at.number_input(key="ideal_tr_opt_smin").value,
+       at.number_input(key="ideal_tr_opt_smax").value,
+       at.number_input(key="ideal_tr_opt_sstep").value,
+       at.text_input(key="ideal_tr_opt_caps").value)
+if got != ("revenue", 240000, 340000, 20000, "3800, 3600, 3400, 3200"):
+    fail("the defaults: %%r" %% (got,))
+if not any("**24 cell(s)**" in c.value and "25 engine runs (+1 for today's plan)"
+           in c.value and "up to 10 stability runs" in c.value
+           and "min" in c.value for c in at.caption):
+    fail("no cells / runs / time caption: %%r"
+         %% [c.value[:200] for c in at.caption if "cell" in c.value])
+
+for bad, words in (("3900, 3800", "never searches above your cap slider"),
+                   ("abc", "not a whole number of tonnes"),
+                   ("", "one batch size and one cap")):
+    at.text_input(key="ideal_tr_opt_caps").set_value(bad).run()
+    boom(at, "caps %%r" %% bad)
+    if not any(words in e.value for e in at.error):
+        fail("caps %%r: no refusal naming %%r; errors %%r"
+             %% (bad, words, [e.value[:200] for e in at.error]))
+    if not at.button(key="ideal_tr_opt_run").disabled:
+        fail("caps %%r: the Find button is live" %% bad)
+    at.button(key="ideal_tr_opt_run").click().run()
+    if CALLS:
+        fail("caps %%r were refused but the optimizer ran" %% bad)
+
+at.number_input(key="ideal_tr_opt_smin").set_value(280000)
+at.number_input(key="ideal_tr_opt_smax").set_value(320000)
+at.text_input(key="ideal_tr_opt_caps").set_value("3800, 3600").run()
+boom(at, "grid")
+if not any("**6 cell(s)**" in c.value and "3 sizes × 2 caps" in c.value
+           for c in at.caption):
+    fail("the caption does not count 3 sizes x 2 caps")
+at.button(key="ideal_tr_opt_run").click().run()
+boom(at, "find")
+want = dict(sizes=[280000, 300000, 320000], caps=[3.8e6, 3.6e6],
+            pr=b"PR bytes", ceiling_kg=3.8e6, overrides={},
+            method="controller", method_overrides={"chronic_pressure_weeks": 6},
+            objective="revenue", horizon_weeks=208)   # the Check's horizon
+if CALLS != [want]:
+    fail("the optimizer was not asked for exactly this grid: %%r" %% CALLS)
+won = [s.value for s in at.success if "Best within the limits" in s.value]
+if not won or "300,000 fish per future batch @ 3,600 t" not in won[0]:
+    fail("no winner line naming the size and cap: %%r" %% won)
+if not any("**Effect year 2028**" in m.value and "2027-09-23" in m.value
+           and "2026–2027" in m.value and "2028–2030" in m.value
+           for m in at.markdown):
+    fail("the effect year is not stated in words")
+if not any(s.value.startswith("**Stable:**") and "295,000 and 305,000" in s.value
+           for s in at.success):
+    fail("no stability line")
+if not any("Cost of the limits" in i.value and "320,000 @ 3,600 t" in i.value
+           and "4 tank-weeks over density in 2029" in i.value for i in at.info):
+    fail("no cost-of-the-limits line naming what the top earner breaks")
+tbl = [d for d in at.dataframe if "Future batch size" in list(d.value.columns)]
+if not tbl:
+    fail("no transition optimizer table")
+df = tbl[0].value
+if (list(df["Future batch size"])[:1] != [300000]
+        or list(df["Cap (t)"])[:1] != [3600] or len(df) != 6):
+    fail("the table order / size: %%r" %% df[["Future batch size",
+                                             "Cap (t)"]].values.tolist())
+for col in ("Within the limits", "Early years: vs today",
+            "Judged years: breaches", "Revenue $M", "HOG t", "Effect year"):
+    if col not in df.columns:
+        fail("the table has no %%r column" %% col)
+bad = df[df["Within the limits"] == "✗"]
+if len(bad) != 2 or not all("tank-weeks over density in 2029" in x
+                            for x in bad["Judged years: breaches"]):
+    fail("the ✗ rows do not name their judged-year breach: %%r"
+         %% bad.values.tolist())
+if not all(x == "no worse than today ✓" for x in df["Early years: vs today"]):
+    fail("the early-years column: %%r" %% list(df["Early years: vs today"]))
+
+at.button(key="ideal_tr_opt_use").click().run()
+boom(at, "use")
+
+def handed_over(what):
+    got = (at.session_state["ideal_tr_sizes"], at.session_state["ideal_tr_cap"],
+           at.text_input(key="ideal_tr_sizes").value,
+           at.number_input(key="ideal_tr_cap").value)
+    if got != ("300000", 3600, "300000", 3600):
+        fail(what + ": the plan is not in step 3's boxes: %%r" %% (got,))
+    if any("Showing the last transition-optimizer run" in w.value
+           for w in at.warning):
+        fail(what + ": loading the plan made the optimizer result stale")
+    if at.button(key="ideal_tr_opt_use").disabled:
+        fail(what + ": the Use button is disabled")
+
+handed_over("after Use")
+at.run()
+boom(at, "rerun")
+handed_over("rerun")
+at.radio(key="app_mode").set_value("Other").run()
+at.radio(key="app_mode").set_value("Ideal").run()
+boom(at, "mode round trip")
+handed_over("mode round trip")
+if at.text_input(key="ideal_tr_opt_caps").value != "3800, 3600":
+    fail("the caps were lost on a mode round trip")
+
+at.radio(key="ideal_tr_opt_obj").set_value("hog").run()
+boom(at, "objective change")
+if not any("Showing the last transition-optimizer run" in w.value
+           for w in at.warning):
+    fail("changed the objective but the result is not marked stale")
+if not at.button(key="ideal_tr_opt_use").disabled:
+    fail("the Use button is live on a stale result")
+at.radio(key="ideal_tr_opt_obj").set_value("revenue").run()
+if at.button(key="ideal_tr_opt_use").disabled:
+    fail("the objective is back but Use is still disabled")
+
+FAKE["mode"] = "none"
+at.text_input(key="ideal_tr_opt_caps").set_value("3600").run()
+at.button(key="ideal_tr_opt_run").click().run()
+boom(at, "find with nothing within")
+errs = [e.value for e in at.error
+        if "No future batch size and cap in this grid is within the limits"
+        in e.value]
+if not errs or "Closest: **" not in errs[0] or "in 2029" not in errs[0]:
+    fail("no loud no-plan error naming the closest and what it fails: %%r"
+         %% [e.value[:200] for e in at.error])
+if any(b.key and b.key.startswith("ideal_tr_opt_use") for b in at.button):
+    fail("a Use button with no plan within the limits")
+
+# A first re-sized TranOG in the run's last year puts E after it: every year
+# is early, none judged — the winner is a warning, never green.
+FAKE["mode"], FAKE["first"] = "stable", dt.date(2030, 6, 1)
+at.button(key="ideal_tr_opt_run").click().run()
+boom(at, "find with no judged year")
+if any("Best within the limits" in s.value for s in at.success):
+    fail("a winner with no judged year is shown green")
+if not any("NOT certified within the limits" in w.value
+           and "No year of this run is judged" in w.value
+           and "300,000 fish per future batch @ 3,600 t" in w.value
+           for w in at.warning):
+    fail("no warning that no year of the run is judged: %%r"
+         %% [w.value[:200] for w in at.warning])
+FAKE.pop("first")
+
+# The Check's verdict: the two-window rule, effect year named.
+def yr(y, **c):
+    base = dict(year=y, weeks=52, harvest_fish=1.0e6, harvest_gross_t=5000.0,
+                hog_t=4500.0, revenue=1.0e8, avg_gross_kg=4.0,
+                share_over_8lb=0.2, harvest_fish_wk_min=26000.0,
+                harvest_fish_wk_max=40000.0, zero_weeks=0,
+                under_floor_weeks=0, standing_peak_kg=3.5e6,
+                standing_mean_kg=3.2e6, peak_pct_of_cap=0.95,
+                og_tanks_mean=60.0, og_tanks_max=70, og_tanks_total=80,
+                r8_over_tank_weeks=0, r8_worst=None, moves_mean=8.0,
+                moves_max=14, weeks_over_move_budget=0, per_system={},
+                capped_weeks=52)
+    base.update(c)
+    return ie.YearRead(**base)
+
+def run(dens27):
+    return SimpleNamespace(rc=0, overrides={}, audits=dict(
+        reconciliation_flags=0, tank_continuity_flags=0,
+        input_conservation=[], input_status={}, move_budget=15,
+        manual_events_file="2026-08-31.yaml"),
+        years={y: yr(y, r8_over_tank_weeks=dens27 if y == 2027 else 0)
+               for y in YEARS})
+
+for e_year, dens, want in (
+        (2028, 12, "worse than today: 12 vs 9 tank-weeks over density in "
+                   "2027"),
+        (2028, 9, None),
+        (2031, 9, "no judged year")):         # E after the run's last year
+    at.session_state["_ideal_tr"] = dict(
+        key=None, a=run(9), b=run(dens), note=None, ov={}, tank_txt="",
+        eff=(e_year, "the first re-sized batch reaches seawater (TranOG) on "
+                     "%%d-09-23" %% (e_year - 1)))
+    at.run()
+    boom(at, "check verdict %%r %%r" %% (e_year, dens))
+    if not any("effect year **%%d**" %% e_year in m.value
+               for m in at.markdown):
+        fail("the verdict headline does not name the effect year")
+    greens = [s.value for s in at.success
+              if "Within the limits (effect year" in s.value]
+    if want == "no judged year":
+        if greens or not any("Not certified within the limits" in w.value
+                             and "no year of this run is judged" in w.value
+                             for w in at.warning):
+            fail("a proposal with no judged year is not a warning: green "
+                 "%%r, warnings %%r" %% (greens,
+                                        [w.value[:200] for w in at.warning]))
+    elif want:
+        if not any("The proposal is not within the limits" in e.value
+                   and want in e.value for e in at.error):
+            fail("an early year worse than today is not named in red: %%r"
+                 %% [e.value[:200] for e in at.error])
+    elif not greens:
+        fail("no worse than today early and zero later is not green: %%r"
+             %% [e.value[:200] for e in at.error])
+    vt = [d for d in at.dataframe
+          if "No worse than today?" in list(d.value.columns)]
+    yt = [d for d in at.dataframe if "Rule" in list(d.value.columns)]
+    if not vt or not yt:
+        fail("the verdict or per-year table is missing")
+    n_early = len([y for y in YEARS if y < e_year])
+    if list(yt[0].value["Rule"]) != ["no worse than today"] * n_early + [
+            "zero breaches"] * (len(YEARS) - n_early):
+        fail("the per-year Rule column: %%r" %% list(yt[0].value["Rule"]))
+print("OK transition optimizer page")
+'''
+
+
+def test_the_transition_optimizer_page_hands_over_and_goes_stale():
+    _drive(_TR_OPT_DRIVER)
 
 
 def test_the_optimizer_progress_bar_never_goes_backwards():

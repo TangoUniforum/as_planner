@@ -2609,23 +2609,59 @@ years and shows, per year, peak biomass against the cap, tonnage and whether
 each year passes the checks. To adopt a proposal: keep a copy of
 `scenario/batches.yaml`, then replace it (or edit the same rows in Configure →
 Batches). Run forecast then runs it unchanged — its 85-week horizon shows only
-the start of the effect.
+the start of the effect. To have the size and cap searched for you, use the
+**transition optimizer** (below).
 
-**Within the limits?** Under the results, a table counts each plan's
-tank-weeks over density, system-weeks over the biomass limit and over the feed
-limit, weeks over the move budget, weeks under the harvest floor, weeks with
-no harvest and weeks over the biomass cap — totalled over the years both runs
-cover, each plan judged against the limits it ran with. Every limit is hard
-(your ruling, 2026-09-10): the proposal is within the limits only if **every
-one of its counts is zero** and it fails no check in any of those years (the
-per-year table's ✗, e.g. the conservation audits). The page says so in green,
-or names each broken constraint and its count, and each failed check and its
-years, in red — so the headline never contradicts the per-year table. If the
-two runs share no year there is nothing to compare, and the page says so in
-red instead of giving a verdict. Today's plan's counts are shown for reference
-only. Breaches in the first years can come from fish already stocked, which
-re-sizing future stockings cannot change — the per-year table shows where
-they fall.
+**Within the limits? — the two-window rule** (your ruling, 2026-09-11).
+Today's plan already breaks limits in the near years from fish already
+stocked — on the 8/31 PR, over 2027–29: 195 tank-weeks over density,
+3 / 137 system-weeks over biomass / feed and 2 weeks over the move budget.
+Re-sizing future stockings cannot change those fish, so a flat zero-breach
+rule would reject every proposal. Instead the check splits the run at the
+**effect year**:
+
+- **Effect year** — the first calendar year that starts on or after the day
+  the first re-sized batch reaches seawater (its TranOG date). A first
+  re-sized TranOG on 2027-09-23 gives 2028; one on 1 January 2028 gives 2028.
+  With no re-sized batch (only the cap changes) it is the first year the
+  what-if cap applies to every week with no dated per-week cap row winning —
+  2027 on today's limits file, whose dated cap rows are all 2026 — and, if
+  that cannot be read, the second calendar year of the run. When nothing is
+  re-sized and the cap is not changed either (only the harvest limits, the
+  move budget or the tank & system table change), the same rule places the
+  same year, and the page says the cap was not changed. The page names the
+  effect year and why.
+- **Early years** (before the effect year): the proposal must be **no worse
+  than today's plan**, year by year and limit by limit — tank-weeks over
+  density, system-weeks over biomass, system-weeks over feed, weeks over the
+  move budget, weeks under the harvest floor, weeks with no harvest and weeks
+  over the biomass cap. Being better in 2026 does not make up for being worse
+  in 2027.
+- **Judged years** (the effect year on, a partial last year included): **zero
+  breaches** on every limit.
+- In every year the proposal may fail no other check (the engine not
+  finishing, the conservation audits, input conservation).
+
+The proposal is within the limits only if all of these hold, each plan
+judged against the limits it ran with. The page says so in green and names
+the effect year. Otherwise it names each failure in red — for example "worse
+than today: 12 vs 9 tank-weeks over density in 2027" or "3 tank-weeks over
+density in 2029" — so the headline never contradicts the tables. The table
+under it shows, per limit, today's and the proposal's totals in the early
+years (✗ names each year the proposal is worse) and in the judged years (✗
+names each year with a breach). The per-year table has a **Rule** column —
+"no worse than today" or "zero breaches". The proposal's ✓/✗ follows that
+rule; today's plan's column names every check it fails outright, for
+reference. If the two runs share no year there is nothing to compare, and the
+page says so in red instead of giving a verdict.
+
+**No judged year = not certified.** If the effect year falls after the run's
+last year (a late **Change stockings after** date: the first re-sized batch
+reaches seawater in the run's last year or later), every year is an early
+year and none is held to zero breaches. A proposal that is merely no worse
+than today's plan everywhere then passes the rule's letter, but the page
+shows it as a **yellow warning — "Not certified within the limits"**, never
+green. Move the date earlier to see its effect judged.
 
 **Facility limits for this check** (optional expander): try a different biomass
 cap or harvest limits for the **proposal** — for example "what if the cap were
@@ -2640,10 +2676,12 @@ for which weeks (on the current config the biomass cap's rows cover late 2026,
 so a new cap takes effect from 2027). If your Control values change, the boxes
 reset to the new values rather than keep an old one.
 
-*The two tables below were measured under the EARLIER rule, "no worse than
-today" (2026-09-10, before the hard-limit ruling), and are kept as dated
-measurements. Under hard limits none of these plans passes — today's plan
-itself has 195 tank-weeks over density.*
+*The two tables below were measured under an EARLIER rule, "no worse than
+today" totalled over 2027–29 (2026-09-10, before the hard-limit ruling), and
+are kept as dated measurements. A flat zero-breach test rejected every one of
+them — today's plan itself has 195 tank-weeks over density — which is why the
+two-window rule above replaced it (2026-09-11). Re-judge any of them with the
+Check button or the transition optimizer below.*
 
 **Can the cap go up within the system constraints?** (2026-09-10; your engine,
 the 8/31 PR, 208 weeks; a new cap applies from 2027; breaches summed over
@@ -2715,6 +2753,114 @@ about the same revenue — today's plan earns most in 2028, 300k most in 2029.
 **The choice is tonnage now against fish size later**, and it is yours. (The
 hybrid engine answers differently — it held today's plan 3–6 % over the cap —
 which is why the page always runs the method Run forecast uses.)
+
+### Transition optimizer — best future batch size and cap within the limits
+
+Inside step 3, once the PR is loaded, the **Optimizer — best future batch
+size and cap within the limits** expander searches the two levers a
+transition has: the size of **future** stockings and the **biomass cap**.
+Every stocking after the **Change stockings after** date is re-sized, as the
+sizes box does it, and dates and cadence are kept. The optimizer looks for the
+plan that scores highest while staying within the limits under the two-window
+rule above.
+
+It runs on what the Check button runs on: the harvest limits and move budget
+in **Facility limits for this check**, the **Tank & system limits** table,
+and the method and knobs ▶ Run forecast uses. It uses the **caps to try**
+instead of the what-if cap box. Each size and cap is one run of the real
+engine on your PR — 208 weeks, with your manual events, the same call the
+Check button makes for the proposal. **Today's plan** runs once beside them
+at your current limits; the early years are compared with it.
+
+- **Objective** — Revenue, Harvest tonnage (HOG) or Biomass gain, **summed
+  over every year of the run** (2026–2030 on the 8/31 PR; the first and last
+  years are partial; every plan covers the same years).
+- **Future batch size** — from / to / in steps of (default 240,000 to
+  340,000 in steps of 20,000, so today's 340k is in the grid).
+- **Caps to try (t)** — whole tonnes, a comma list. The default is your **cap
+  slider in step 1** and three 200 t steps below it (3,800, 3,600, 3,400,
+  3,200 at a 3,800 t slider); move the slider and the list is re-filled from
+  it. **The optimizer never searches above your cap slider:** a cap above it,
+  a cap under 500 t or an entry that is not a whole number is refused in red,
+  and nothing runs. At most 60 plans (sizes × caps).
+
+Before you press **Find the best transition**, the page states the number of
+plans and engine runs — one per plan, +1 for today's plan, then up to 10
+stability runs — and the time, at about 90 s per engine run spread over the
+sidebar's **Computer power** workers. The default 6 sizes × 4 caps is
+24 plans and 25 runs, plus up to 10 stability runs. The progress bar counts
+every run and never goes backwards.
+
+**The answer.** The page first names the **effect year** and why, and which
+years are early and which are judged. A plan with no re-sized batch (only the
+cap changes) can have an earlier effect year; the page names those plans
+separately. Then come today's plan's totals, and the **best within the
+limits**: its size and cap, its objective total and the difference from
+today's plan, its revenue and HOG, and how many future batches it re-sizes.
+A tie goes to the smaller batch, then the higher cap. If the winner's effect
+year is after the run's last year (no year judged), the winner line is a
+yellow **"Best by the rule, but NOT certified within the limits"** warning
+instead of green, for the reason given under **No judged year** above.
+
+If no plan qualifies, the page says so in red. It names the closest plan and
+what it fails. The closest plan has the fewest failures: how far it is worse
+than today in the early years, plus its breaches in the judged years.
+
+**Cost of the limits** (a blue line, for scale only) shows the best-scoring
+plan whatever it breaks, and what keeps it out of the limits. It never has a
+Use button.
+
+**Stability**: the top 5 plans within the limits are re-run with 5,000 fish
+per batch fewer and 5,000 more, at the same cap — at most 10 extra runs. A
+stable winner gets a green line. A fragile winner gets a yellow warning
+naming what breaks, and the best stable plan among the top 5.
+
+The table lists every plan: size, cap, batches re-sized, effect year, within
+✓/✗, revenue, HOG, biomass gain, the difference from today's plan, **Early
+years: vs today** ("no worse than today ✓", or each year and limit it is
+worse on), **Judged years: breaches** ("zero ✓", or each breach) and any
+other failed check.
+
+**Using the answer.** **Use this plan** puts the size into step 3's **Fish to
+OG per future batch** box, and the cap, in whole tonnes, into the what-if
+**Biomass cap** box. When the winner is fragile the buttons are **Use the
+best stable plan** and **Use the top plan anyway**. Nothing in step 2
+changes. **▶ Check both schedules** then runs exactly that proposal, and
+**⬇ Download the proposed batches.yaml** hands it over; adopting it is still
+your act. Loading a plan does not make the optimizer's answer stale. Changing
+the PR, the cutoff date, the sizes, the caps, the objective, the other
+limits, the tank & system table, the engine or the config does, and greys
+out the Use buttons until you press **Find the best transition** again.
+
+**What it found on the 8/31 PR** (2026-09-11; your engine, your limits,
+future stockings re-sized from the PR onward, 208 weeks, your manual events).
+The first re-sized batch reaches seawater on 2027-09-23, so the effect year is
+**2028**: 2026–27 must be no worse than today's plan, and 2028–30 must have
+zero breaches. Today's plan earns $584.4M over the run (28,749 t HOG).
+
+**No future batch size and cap tried meets the limits**: 0 of 24 (240k–340k ×
+3,200–3,800 t) and 0 of 21 (200k–260k × 3,000–3,400 t). The closest:
+
+| Future batches @ cap | Revenue 2026–30 | Before 2028: no worse than today? | 2028–30: zero breaches? |
+|---|---|---|---|
+| 210k @ 3,200 t | $487.7M | ✗ 2 weeks over the cap in 2027 | ✗ 1 system-week over biomass |
+| 240k @ 3,400 t | $519.9M | ✓ | ✗ 23 tank-weeks over density, 7 system-weeks over feed |
+| 200k–230k @ 3,000 t | $465–481M | ✗ 6–7 weeks over the cap in 2027 | ✗ 1–5 breaches |
+| 340k @ 3,800 t (the best-earning plan) | $593.5M | ✗ 2026: 25 vs 23 tank-weeks over density, 2 vs 0 weeks over the move budget | ✗ 260 tank-weeks over density, 182 system-weeks over feed, 4 over biomass, 8 weeks over the cap |
+
+Why:
+
+- **From 2028 on, every plan at 3,400 t and above breaks tank density, and
+  most also break system feed.** At 3,000–3,200 t, 1–9 breaches remain
+  (feed, density, system biomass, the cap, the floor).
+- **A lower cap takes effect from 2027.** That is where the limits pipeline
+  applies it: your dated per-week rows cover 2026 only. In 2027 today's
+  larger batches are still in the tanks, so a 3,000–3,200 t cap is
+  overshot for 2–7 weeks. The optimizer applies your constraints exactly as
+  the inputs define them. It invents no phase-in date. If the cap is
+  meant to fall later, enter it as dated rows in Configure → Limits.
+- The closest plan misses by three weeks in five years. Check it with
+  **Check both schedules** to see where those weeks fall.
 
 ### What it CANNOT tell you
 

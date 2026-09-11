@@ -562,6 +562,32 @@ def test_a_dead_pool_still_falls_back_one_at_a_time(monkeypatch):
     assert [c.batch_size for c in res.cells] == [200_000, 220_000]
 
 
+def test_optimize_runs_both_waves_through_run_cell_the_default(monkeypatch):
+    """Step 2 passes no runner: _run_wave's default, this module's run_cell,
+    runs the grid and the stability wave (transition_optimize passes its
+    own)."""
+    waves, fns, real = [], [], io._run_wave
+
+    def spy(*a, **k):
+        waves.append((len(a), k))
+        return real(*a, **k)
+    monkeypatch.setattr(io, "_run_wave", spy)
+    pool = _fake_pool([])
+
+    class Recording(pool):
+        def submit(self, fn, *a, **k):
+            fns.append(fn)
+            return super().submit(fn, *a, **k)
+    monkeypatch.setattr(io, "ProcessPoolExecutor", Recording)
+    monkeypatch.setattr(io, "run_cell", _fake_runner([]))
+    res = io.optimize([49], [200_000, 220_000], 3_800_000, ROOT, workers=2,
+                      control=object())
+    assert res.best is not None and res.stability
+    assert waves == [(6, {}), (6, {})]        # grid + stability, no runner
+    assert len(fns) > len(res.cells)          # both waves went to the pool
+    assert all(f is io.run_cell for f in fns)
+
+
 def test_an_unknown_objective_is_refused():
     with pytest.raises(ValueError):
         io.objective_value(_cell(49, 200_000), "profit")

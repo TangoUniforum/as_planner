@@ -376,10 +376,27 @@ def judge_stability(candidates: Sequence[Cell], ran: dict) -> tuple:
 
 
 def _run_wave(jobs: list, project_dir, kw: dict, workers: int,
-              record: Callable, what: str) -> Optional[str]:
-    """Run each (cadence, size, cap_kg) in `jobs` — each at its OWN cap,
-    through `run_cell` with the same `kw` — and `record(i, cell)` as each
-    finishes.
+              record: Callable, what: str,
+              runner: Optional[Callable] = None) -> Optional[str]:
+    """Run each job in `jobs` and `record(i, cell)` as each finishes. The ONE
+    process-pool wave: step 2's grid and stability runs, and
+    forecast.transition_optimize's.
+
+    A job is either
+      * (cadence, size, cap_kg) — each at its OWN cap, through `runner` with
+        the same `kw`: runner((cadence, size), cap_kg, str(project_dir),
+        **kw). `runner` defaults to this module's `run_cell`, looked up when
+        the wave runs (step 2's optimizer passes none); or
+      * (fn, args, kwargs) — a job that names its own runner, run as
+        fn(*args, **kwargs) (`project_dir`, `kw` and `runner` unused): a wave
+        that mixes runners, e.g. transition_optimize's today's plan beside
+        its grid cells.
+    The two are told apart by `callable(job[0])`: a cadence is an int, never
+    callable. `runner` is for a caller whose whole wave uses one runner with
+    one `kw`; today NO production code passes it (step 2 takes the default,
+    transition_optimize names its runners in the jobs) — only tests do.
+    Every runner must be a TOP-LEVEL function: a process pool pickles a
+    function by its qualified name, so a lambda or a closure cannot run in it.
 
     A process pool of `workers` when that is 2+ and there is more than one
     job. ONLY a pool that cannot start or dies falls back to one-at-a-time
@@ -388,6 +405,10 @@ def _run_wave(jobs: list, project_dir, kw: dict, workers: int,
     `record` — cancels the jobs not yet started and does NOT wait for the
     ones running, then re-raises: the page must never block for the rest of
     the grid."""
+    run = run_cell if runner is None else runner
+    calls = [j if callable(j[0])
+             else (run, ((j[0], j[1]), j[2], str(project_dir)), kw)
+             for j in jobs]
     done: set = set()
     note = None
 
@@ -395,22 +416,21 @@ def _run_wave(jobs: list, project_dir, kw: dict, workers: int,
         done.add(i)
         record(i, cell)
 
-    if workers >= 2 and len(jobs) > 1:
+    if workers >= 2 and len(calls) > 1:
         try:
-            ex = ProcessPoolExecutor(max_workers=min(int(workers), len(jobs)))
+            ex = ProcessPoolExecutor(max_workers=min(int(workers), len(calls)))
         except OSError as e:
             note = (f"Parallel run unavailable ({type(e).__name__}: {e}) — "
                     f"ran {what} one at a time instead.")
         else:
             try:
-                futs = {ex.submit(run_cell, (j[0], j[1]), j[2],
-                                  str(project_dir), **kw): i
-                        for i, j in enumerate(jobs)}
+                futs = {ex.submit(fn, *a, **k): i
+                        for i, (fn, a, k) in enumerate(calls)}
                 for f in as_completed(futs):
                     _rec(futs[f], f.result())
             except (BrokenProcessPool, PicklingError) as e:
                 note = (f"Parallel run unavailable ({type(e).__name__}: "
-                        f"{e}) — ran the remaining {len(jobs) - len(done)} "
+                        f"{e}) — ran the remaining {len(calls) - len(done)} "
                         f"of {what} one at a time instead.")
                 ex.shutdown(wait=True, cancel_futures=True)
             except BaseException:
@@ -418,9 +438,9 @@ def _run_wave(jobs: list, project_dir, kw: dict, workers: int,
                 raise
             else:
                 ex.shutdown(wait=True)
-    for i, j in enumerate(jobs):
+    for i, (fn, a, k) in enumerate(calls):
         if i not in done:
-            _rec(i, run_cell((j[0], j[1]), j[2], str(project_dir), **kw))
+            _rec(i, fn(*a, **k))
     return note
 
 

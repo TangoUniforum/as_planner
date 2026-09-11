@@ -5033,7 +5033,10 @@ _IDEAL_KEEP = ("ideal_cap_t", "ideal_cads", "ideal_sizes", "ideal_ref_cad",
                "ideal_tr_feed", "ideal_min_wt",
                # step 2's optimizer
                "ideal_opt_obj", "ideal_opt_cads", "ideal_opt_smin",
-               "ideal_opt_smax", "ideal_opt_sstep", "ideal_opt_caps")
+               "ideal_opt_smax", "ideal_opt_sstep", "ideal_opt_caps",
+               # step 3's optimizer
+               "ideal_tr_opt_obj", "ideal_tr_opt_smin", "ideal_tr_opt_smax",
+               "ideal_tr_opt_sstep", "ideal_tr_opt_caps")
 
 
 def _ideal_restore():
@@ -5350,7 +5353,7 @@ def _ideal():
     st.divider()
     _ideal_reference(ctx, today, cap_t)
     st.divider()
-    _ideal_transition(ctx, today)
+    _ideal_transition(ctx, today, cap_t)
     _ideal_save()
 
 
@@ -5773,6 +5776,25 @@ def _ideal_parse_caps(txt, ceiling_t):
     return out
 
 
+def _ideal_tr_refill_seeds(ss, tr_seeds):
+    """Step 3 re-fills its what-if boxes from Control whenever its stored
+    seeds differ from `tr_seeds` (_ideal_tr_seeds of today's Control) — on
+    its first draw too — which would drop a cap a Use button just set. So a
+    Use callback does that re-fill first, then sets the cap on the fresh
+    boxes. When step 3 would have said so (boxes it had filled, from an older
+    Control), `_ideal_tr_reset_note` is left for step 3 to show once. No-op
+    when `tr_seeds` is None or already current."""
+    if tr_seeds is None or ss.get("_ideal_tr_seeds") == tr_seeds:
+        return
+    if "_ideal_tr_seeds" in ss and any(
+            ("_keep_" + k) in ss for k, *_ in _IDEAL_TR_LIMITS):
+        ss["_ideal_tr_reset_note"] = True
+    for k, *_ in _IDEAL_TR_LIMITS:
+        ss.pop(k, None)
+        ss.pop("_keep_" + k, None)
+    ss["_ideal_tr_seeds"] = tr_seeds
+
+
 def _ideal_opt_use(cad, size, cap_kg=None, tr_seeds=None):
     """on_click of the Use buttons: hand the rhythm to step 2 the way step 1
     does (ideal_ref_cad / ideal_ref_size / ideal_tr_sizes + a table refill),
@@ -5795,14 +5817,7 @@ def _ideal_opt_use(cad, size, cap_kg=None, tr_seeds=None):
     ss["_ideal_ref_regen"] = True
     if cap_kg is not None:
         cap_t = int(round(float(cap_kg) / 1000.0))
-        if tr_seeds is not None and ss.get("_ideal_tr_seeds") != tr_seeds:
-            if "_ideal_tr_seeds" in ss and any(
-                    ("_keep_" + k) in ss for k, *_ in _IDEAL_TR_LIMITS):
-                ss["_ideal_tr_reset_note"] = True
-            for k, *_ in _IDEAL_TR_LIMITS:
-                ss.pop(k, None)
-                ss.pop("_keep_" + k, None)
-            ss["_ideal_tr_seeds"] = tr_seeds
+        _ideal_tr_refill_seeds(ss, tr_seeds)
         ss["ideal_ref_cap"] = cap_t
         ss["ideal_tr_cap"] = cap_t
         ss["_ideal_ref_cap_by_opt"] = cap_t
@@ -5948,17 +5963,20 @@ def _ideal_opt_stability(res, stale, tr_seeds=None):
                   disabled=stale, help=why)
 
 
-def _ideal_opt_progress(done, total, n_grid):
+def _ideal_opt_progress(done, total, n_grid, n_stab=None, what="rhythms"):
     """The optimizer's progress bar -> (fraction, text). The bar is sized
     for the grid plus the largest stability wave from the start, and the
     wave's runs fill the rest, so it never goes backwards when the wave is
-    added to the total (3 / 3 used to read 100% and then drop to 4 / 5)."""
+    added to the total (3 / 3 used to read 100% and then drop to 4 / 5).
+    `n_stab` is the largest wave (default step 2's, 2 x
+    MAX_STABILITY_CANDIDATES); `what` names the first wave's runs."""
     from forecast import ideal_optimize as _io
-    n_stab = 2 * _io.MAX_STABILITY_CANDIDATES
+    if n_stab is None:
+        n_stab = 2 * _io.MAX_STABILITY_CANDIDATES
     span = n_grid + n_stab
     if done <= n_grid or total <= n_grid:
         return (min(1.0, done / span),
-                f"{done} / {n_grid} rhythms (then up to {n_stab} stability "
+                f"{done} / {n_grid} {what} (then up to {n_stab} stability "
                 f"runs)")
     frac = (n_grid + (done - n_grid) * n_stab / (total - n_grid)) / span
     return (min(1.0, frac),
@@ -6278,50 +6296,509 @@ def _ideal_transition_runs(live, proposed, pr_bytes, pr_name, method,
         _sh.rmtree(tmp, ignore_errors=True)
 
 
-def _ideal_tr_verdict(years_a, years_b, prop_fails):
-    """Step 3's hard-limits verdict, pure (no Streamlit): today's plan
+def _ideal_tr_verdict(years_a, years_b, prop_gates, effect_year):
+    """Step 3's verdict, pure (no Streamlit): the two-window rule
+    (operator, 2026-09-11) of forecast.transition_optimize.verdict — the
+    SAME rule the transition optimizer judges its cells with. Today's plan
     (`years_a`) and the proposal (`years_b`), each {year: YearRead}, over the
-    years BOTH cover; `prop_fails` is {year: [names of the gates the
-    proposal FAILs]} for every proposal year.
-    -> (both, vrows, broken, failed): the compared years; one table row per
-    constraint; the proposal's nonzero totals in words; {check: [years]} for
-    every check the proposal FAILs in a compared year. The proposal is within
-    the limits only when `broken` and `failed` are both empty, so the headline
-    can never contradict the per-year table's ✗."""
-    both = sorted(set(years_a) & set(years_b))
-    cons = (("Tank-weeks over density", "r8_over_tank_weeks"),
-            ("System-weeks over biomass limit", "sys_bio_over_weeks"),
-            ("System-weeks over feed limit", "sys_feed_over_weeks"),
-            ("Weeks over the move budget", "weeks_over_move_budget"),
-            ("Weeks under the harvest floor", "under_floor_weeks"),
-            ("Weeks with no harvest", "zero_weeks"),
-            ("Weeks over the biomass cap", "over_cap_weeks"))
-    vrows, broken = [], []
-    for label, attr in cons:
-        # Plain getattr: a missing count must raise, not read as 0 (detect,
-        # don't coerce).
-        va = sum(getattr(years_a[y], attr) for y in both)
-        vb = sum(getattr(years_b[y], attr) for y in both)
-        if vb > 0:
-            broken.append(f"{label.lower()}: {vb:,}")
-        vrows.append({"Constraint": label, "Today's plan": va, "Proposal": vb,
-                      "Within the limits?": "✓" if vb == 0 else "✗"})
-    failed = {}                # check name -> the years it fails
-    for y in both:
-        for name in prop_fails[y]:
-            failed.setdefault(name, []).append(y)
-    return both, vrows, broken, failed
+    years BOTH cover; `prop_gates` is {year: the ideal_engine.gates the
+    proposal was judged with} for each of them; `effect_year` is E
+    (transition_optimize.effect_year). Early years (< E): no worse than
+    today, year by year and limit by limit. Judged years (>= E): zero
+    breaches. Every compared year: no non-limit check FAILs.
+    -> (both, vrows, v): the compared years; one table row per constraint
+    with today's and the proposal's totals in the early and the judged years
+    and whether each window passes; and the verdict record, whose
+    `within_limits` is the headline — so the headline can never contradict
+    the table's ✗. A missing count raises (the verdict reads each with a
+    plain getattr: detect, don't coerce)."""
+    from forecast import transition_optimize as _to
+    v = _to.verdict(years_a, years_b, prop_gates, effect_year)
+    cons = (("density", "Tank-weeks over density"),
+            ("sys_biomass", "System-weeks over biomass limit"),
+            ("sys_feed", "System-weeks over feed limit"),
+            ("moves", "Weeks over the move budget"),
+            ("floor", "Weeks under the harvest floor"),
+            ("zero", "Weeks with no harvest"),
+            ("over_cap", "Weeks over the biomass cap"))
+    ey, jy = v.early_years, v.judged_years
+    vrows = []
+    for k, label in cons:
+        cnt = v.counts[k]
+        vrows.append({
+            "Constraint": label,
+            "Today · early years": (sum(cnt[y][0] for y in ey)
+                                    if ey else None),
+            "Proposal · early years": (sum(cnt[y][1] for y in ey)
+                                       if ey else None),
+            "No worse than today?": (
+                "—" if not ey else
+                "✗ " + ", ".join(map(str, sorted(v.worse[k])))
+                if v.worse[k] else "✓"),
+            "Today · judged years": (sum(cnt[y][0] for y in jy)
+                                     if jy else None),
+            "Proposal · judged years": (sum(cnt[y][1] for y in jy)
+                                        if jy else None),
+            "Zero breaches?": (
+                "—" if not jy else
+                "✗ " + ", ".join(map(str, sorted(v.breached[k])))
+                if v.breached[k] else "✓")})
+    return list(v.years), vrows, v
 
 
-def _ideal_transition(ctx, today):
+# Step 3's optimizer: one engine run on the real PR (208 weeks), in seconds.
+_IDEAL_TR_OPT_SECS_PER_RUN = 90
+
+
+def _ideal_tr_opt_use(size, cap_kg, tr_seeds=None):
+    """on_click of step 3's optimizer Use buttons: the plan's future batch
+    size into step 3's sizes box (`ideal_tr_sizes`) and its cap, in whole
+    tonnes, into step 3's what-if biomass cap (`ideal_tr_cap`), so ▶ Check
+    both schedules and the download then show and hand over that exact
+    proposal. Step 2 is not touched. Both keys are drawn widgets and only a
+    callback — it runs before the next rerun — may set a drawn widget's key;
+    each key's _keep_ shadow is set with it, so a rerun and a mode round trip
+    keep them. Step 3's seeds re-fill runs first, exactly as in
+    _ideal_opt_use (_ideal_tr_refill_seeds)."""
+    ss = st.session_state
+    _ideal_tr_refill_seeds(ss, tr_seeds)
+    ss["ideal_tr_sizes"] = str(int(size))
+    ss["ideal_tr_cap"] = int(round(float(cap_kg) / 1000.0))
+    for k in ("ideal_tr_sizes", "ideal_tr_cap"):
+        ss["_keep_" + k] = ss[k]
+
+
+def _ideal_tr_fail_text(cell, limit=6):
+    """What keeps a transition cell out of the limits, in plain words (its
+    verdict's failures: 'worse than today: 12 vs 9 tank-weeks over density in
+    2027', '3 tank-weeks over density in 2029', 'fails Conservation audits in
+    2027'), at most `limit` of them, then how many more."""
+    if cell.error:
+        return f"the engine failed ({cell.error})"
+    v = cell.verdict
+    if v is None:
+        return "not judged"
+    f = list(v.failures)
+    if not f:
+        return "nothing"
+    more = len(f) - limit
+    return "; ".join(f[:limit]) + (f"; and {more} more" if more > 0 else "")
+
+
+def _ideal_tr_window_text(cell, window):
+    """The early-years ('early') or judged-years ('judged') verdict of a
+    transition cell for its table."""
+    v = cell.verdict
+    if v is None:
+        return None
+    if window == "early":
+        if not v.early_years:
+            return "— (no early year)"
+        return ("no worse than today ✓" if not v.early_failures
+                else "✗ " + "; ".join(v.early_failures))
+    if not v.judged_years:
+        return "— (no judged year)"
+    return ("zero ✓" if not v.judged_failures
+            else "✗ " + "; ".join(v.judged_failures))
+
+
+def _ideal_tr_effect_text(res):
+    """The effect year E of a transition-optimizer result in words, and what
+    the two windows mean for it. When cells differ (a cap-only cell has no
+    re-sized batch) the most common E leads and the others are named."""
+    from collections import Counter
+    from forecast import transition_optimize as _to
+    effs = Counter((c.effect, c.effect_why) for c in res.cells
+                   if c.error is None and c.effect is not None)
+    if not effs:
+        return ""
+    ys = res.today.years
+    (e, why), _n = effs.most_common(1)[0]
+    early = [y for y in ys if y < e]
+    judged = [y for y in ys if y >= e]
+    txt = (f"**Effect year {e}** — {why}. So "
+           + (f"{_to.years_text(early)} (fish already stocked) must be "
+              f"**no worse than today's plan**, year by year and limit by "
+              f"limit, and " if early else "")
+           + (f"{_to.years_text(judged)} must have **zero breaches**"
+              if judged else "no year of this run is held to zero breaches")
+           + ".")
+    rest = effs.most_common()[1:]
+    if rest:
+        txt += " " + "; ".join(
+            f"Effect year {e2} for {n2} cell(s): {why2}"
+            for (e2, why2), n2 in rest) + "."
+    return txt
+
+
+def _ideal_tr_opt_cost(res):
+    """DISPLAY ONLY: what the limits cost in this grid — the best-scoring
+    size and cap whatever it breaks (ideal_optimize.ignoring_limits), what
+    it would score and what keeps it out. Never an accepted plan: no Use
+    button. A cell that fails a check that is not a limit is not a valid
+    plan, so its score is not priced as the cost of the limits."""
+    from forecast import ideal_optimize as _io
+    u, b = res.unconstrained, res.best
+    if u is None:                           # nothing ran
+        return
+    if b is not None and u.key == b.key:
+        st.info("The limits cost nothing in this grid: the best-scoring size "
+                "and cap are within the limits.")
+        return
+    diff = (f" ({_ideal_opt_diff_text(u, b, res.objective)} vs the plan "
+            f"within the limits)" if b is not None else "")
+    others = _io.other_failed_checks(u)
+    tail = (f"it is not a valid plan — it fails {', '.join(others)} — so its "
+            f"score is not a real cost of the limits" if others
+            else f"it is not within the limits: {_ideal_tr_fail_text(u)}")
+    st.info(f"**Cost of the limits:** ignoring them, the best here would be "
+            f"**{u.label}** — {_ideal_opt_value_text(u, res.objective)}{diff}"
+            f", but {tail}. Shown for scale only — a plan that breaks a limit "
+            f"is not an answer.")
+
+
+def _ideal_tr_opt_stability(res, stale, tr_seeds=None):
+    """The winner's stability line and the Use button(s) of step 3's
+    optimizer. Stable = its sizes +/- NEIGHBOUR_STEP (same cap) are within
+    the limits too (the decision is ideal_optimize.judge_stability's). A
+    fragile winner is said LOUDLY; when a lower candidate is stable the
+    primary button loads that one and a secondary still loads the winner.
+    Every Use button is disabled while the result is stale."""
+    from forecast import ideal_optimize as _io
+    b, bs = res.best, res.best_stable
+    ok = res.stability[0][2] if res.stability else None
+    if ok:
+        ns = res.stability[0][1]
+        st.success("**Stable:** " + " and ".join(f"{n.batch_size:,}"
+                                                  for n in ns)
+                   + f" fish per future batch at {b.cap_t:,.0f} t"
+                   + (" are" if len(ns) > 1 else " is")
+                   + " also within the limits.")
+    elif ok is False:
+        bad = [n for n in res.stability[0][1]
+               if not (n.error is None and n.within_limits)]
+        msg = (f"**Fragile:** at ±{_io.NEIGHBOUR_STEP:,} fish per future "
+               f"batch (same cap), "
+               + "; ".join(
+                   f"{n.label} could not run ({n.error})" if n.error else
+                   f"{n.label} is not within the limits "
+                   f"({_ideal_tr_fail_text(n, 3)})" for n in bad)
+               + " — a small difference in the real batches could break the "
+                 "limits.\n\n")
+        if bs is not None:
+            msg += (f"Best stable plan: **{bs.label}** — "
+                    f"{_ideal_opt_value_text(bs, res.objective)}.")
+        elif len(res.stability) > 1:
+            msg += (f"None of the top {len(res.stability)} plans is stable — "
+                    f"treat any of them as fragile.")
+        else:
+            msg += ("It is the only plan within the limits, and it is not "
+                    "stable — treat it as fragile.")
+        st.warning(msg)
+    why = ("Recompute first — the inputs changed since this run." if stale
+           else "Puts the size in step 3's sizes box and the cap in its "
+                "what-if biomass cap; then ▶ Check both schedules and "
+                "download the proposal.")
+    if ok is False and bs is not None:
+        c1, c2 = st.columns(2)
+        c1.button(f"Use the best stable plan ({bs.label})",
+                  key="ideal_tr_opt_use_stable", type="primary",
+                  on_click=_ideal_tr_opt_use,
+                  args=(bs.batch_size, bs.cap_kg, tr_seeds),
+                  disabled=stale, help=why)
+        c2.button(f"Use the top plan anyway ({b.label})",
+                  key="ideal_tr_opt_use", on_click=_ideal_tr_opt_use,
+                  args=(b.batch_size, b.cap_kg, tr_seeds),
+                  disabled=stale, help=why)
+    else:
+        st.button(f"Use this plan ({b.label})", key="ideal_tr_opt_use",
+                  on_click=_ideal_tr_opt_use,
+                  args=(b.batch_size, b.cap_kg, tr_seeds),
+                  disabled=stale, help=why)
+
+
+def _ideal_tr_opt_rows(res):
+    """Step 3's optimizer table: within-limits first by the objective, then
+    by how far outside (ideal_optimize.table_order)."""
+    from forecast import ideal_optimize as _io
+    errs = any(c.error for c in res.cells)
+    rows = []
+    for c in _io.table_order(res.cells, res.objective):
+        ran = c.error is None
+        row = {"Future batch size": c.batch_size, "Cap (t)": round(c.cap_t),
+               "Batches re-sized": c.n_changed if ran else None,
+               "Effect year": c.effect if ran else None,
+               "Within the limits": ("✓" if c.within_limits else
+                                     "✗" if ran else "engine error"),
+               "Revenue $M": round(c.revenue / 1e6, 1) if ran else None,
+               "HOG t": round(c.hog_t) if ran else None,
+               "Biomass gain t": round(c.gain_t) if ran else None,
+               "vs today's plan": (_ideal_opt_diff_text(c, res.today,
+                                                        res.objective)
+                                   if ran else None),
+               "Early years: vs today": _ideal_tr_window_text(c, "early"),
+               "Judged years: breaches": _ideal_tr_window_text(c, "judged"),
+               "Other failed checks": (", ".join(_io.other_failed_checks(c))
+                                       if ran else None)}
+        if errs:
+            row["Error"] = c.error or ""
+        rows.append(row)
+    return rows
+
+
+def _ideal_tr_optimizer(ctx, live, fs, cutoff, pr_file, tr_ov, tr_dens,
+                        tr_sys, m_key, m_ov, cap_slider_t, tr_seeds):
+    """Step 3's optimizer: the best FUTURE batch size and biomass cap from
+    today's fish, within the limits (forecast.transition_optimize).
+
+    The operator's spec (2026-09-11): "hit the targets, maximize biomass
+    produced or revenue" within the limits, from today's fish. The levers are
+    the size of future stockings (every stocking after `cutoff`, dates kept)
+    and the cap — only at or below step 1's cap slider (`cap_slider_t`).
+    Every cell is one engine run on the uploaded PR with the SAME call the
+    Check button's proposal arm makes: the what-if limits of this step
+    (`tr_ov` minus its cap), the tank & system table (`tr_dens`, `tr_sys`),
+    the method and promoted knobs ▶ Run forecast uses; today's plan runs once
+    beside them at the current limits. Judged by the two-window rule; Use
+    hands the plan to the sizes box and the what-if cap. Nothing is written
+    to config/ or scenario/."""
+    import hashlib as _hl
+    import json as _json
+    import math as _math
+    import shutil as _sh
+    import tempfile as _tf
+    import pandas as _pd
+    from forecast import ideal_optimize as _io
+    from forecast import transition_optimize as _to
+
+    with st.expander("Optimizer — best future batch size and cap within the "
+                     "limits"):
+        ss = st.session_state
+        slider_t = int(cap_slider_t)
+        # The what-if limits minus the cap: each cell runs at its own cap.
+        run_ov = {k: v for k, v in tr_ov.items() if k != "max_biomass_kg"}
+        ctrl = ctx["control"]
+        budget = int(_io.judging_control(ctrl, m_ov,
+                                         run_ov).max_transfers_per_week)
+        lim_txt = "; ".join(x for x in (
+            _ideal_limit_text(run_ov, ctrl),
+            _ideal_tank_limit_text(tr_dens, tr_sys, {})) if x)
+        st.caption(
+            "Runs the real engine on your PR once per **future batch size** "
+            "(every stocking after the date above re-sized, its dates kept) "
+            "and **biomass cap** — never above your cap slider in step 1 "
+            f"(**{slider_t:,} t**) — with the other limits of this check"
+            + (f" ({lim_txt})" if lim_txt else " (your Control values)")
+            + f", a move budget of {budget}/week, and the engine ▶ Run "
+            "forecast uses. Today's plan runs once beside them, at your "
+            "current limits. **The rule:** years before the **effect year** "
+            "(the first calendar year that starts on or after the first "
+            "re-sized batch reaches seawater) hold fish already stocked, so "
+            "there a plan must be **no worse than today's plan**, year by "
+            "year and limit by limit; from the effect year on it must have "
+            "**zero breaches**; and it may fail no check. The best is the "
+            "plan that passes with the highest objective, summed over every "
+            "year of the run.")
+        for k, v in (("ideal_tr_opt_obj", "revenue"),
+                     ("ideal_tr_opt_smin", 240_000),
+                     ("ideal_tr_opt_smax", 340_000),
+                     ("ideal_tr_opt_sstep", 20_000)):
+            if k not in ss:            # seeded, never value= (see the slider)
+                ss[k] = v
+        labels = {"revenue": "Revenue", "hog": "Harvest tonnage (HOG)",
+                  "gain": "Biomass gain"}
+        obj = st.radio("Objective", list(_IDEAL_OPT_OBJECTIVES),
+                       format_func=labels.get, horizontal=True,
+                       key="ideal_tr_opt_obj",
+                       help="Summed over every year of the run. Revenue "
+                            "prices each fish on the economics bands; HOG is "
+                            "harvested head-on-gutted tonnes; biomass gain is "
+                            "live weight harvested plus the change in standing "
+                            "fish (dead fish are not gain).")
+        c1, c2, c3 = st.columns(3)
+        smin = c1.number_input("Future batch size from (fish)",
+                               min_value=10_000, max_value=1_000_000,
+                               step=10_000, key="ideal_tr_opt_smin")
+        smax = c2.number_input("to (fish)", min_value=10_000,
+                               max_value=1_000_000, step=10_000,
+                               key="ideal_tr_opt_smax")
+        sstep = c3.number_input("in steps of (fish)", min_value=1_000,
+                                step=5_000, key="ideal_tr_opt_sstep")
+        # The caps start from step 1's slider (the operator's ceiling) and
+        # its next three 200 t steps down; re-seeded when the slider moves.
+        caps_seed = ", ".join(str(slider_t - d) for d in (0, 200, 400, 600))
+        if ss.get("_ideal_tr_opt_caps_seed") != slider_t:
+            ss.pop("ideal_tr_opt_caps", None)
+            ss.pop("_keep_ideal_tr_opt_caps", None)
+            ss["_ideal_tr_opt_caps_seed"] = slider_t
+        if "ideal_tr_opt_caps" not in ss:
+            ss["ideal_tr_opt_caps"] = caps_seed
+        caps_txt = st.text_input(
+            "Caps to try (t)", key="ideal_tr_opt_caps",
+            help="Biomass caps to run every size at, a comma list in whole "
+                 "tonnes. Never above your cap slider in step 1; re-filled "
+                 "from it when it moves. They replace the what-if cap box "
+                 "above for this search.")
+        grid = None
+        try:
+            if int(smax) < int(smin):
+                raise ValueError("the largest batch size is below the smallest")
+            caps_t = _ideal_parse_caps(caps_txt, slider_t)
+            grid = _to.check_grid(
+                list(range(int(smin), int(smax) + 1, int(sstep))),
+                [c * 1000.0 for c in caps_t], float(slider_t) * 1000.0)
+        except ValueError as e:
+            st.error(f"Can't build that grid — {e}")
+        workers = _cpu_workers()
+        g_sizes = sorted({s for s, _p in grid or ()})
+        g_caps = sorted({p for _s, p in grid or ()}, reverse=True)
+        n_stab = 2 * _to.TR_MAX_STABILITY_CANDIDATES
+        if grid:
+            n_runs = len(grid) + 1                  # + today's plan
+            n_w = max(1, min(workers, n_runs))
+            mins = (_math.ceil(n_runs / n_w) * _IDEAL_TR_OPT_SECS_PER_RUN
+                    / 60.0)
+            mins_s = (_math.ceil(n_stab / max(1, min(workers, n_stab)))
+                      * _IDEAL_TR_OPT_SECS_PER_RUN / 60.0)
+            st.caption(
+                f"**{len(grid)} cell(s)** ({len(g_sizes)} sizes × "
+                f"{len(g_caps)} caps: "
+                f"{', '.join(f'{p / 1000:,.0f}' for p in g_caps)} t) = "
+                f"{n_runs} engine runs (+1 for today's plan), then up to "
+                f"{n_stab} stability runs, over {n_w} worker(s) (sidebar "
+                f"**Computer power**) — about {mins:,.0f} min, plus up to "
+                f"{mins_s:,.0f} min for the stability runs, at "
+                f"~{_IDEAL_TR_OPT_SECS_PER_RUN} s per engine run.")
+        # The caps searched are the parsed list, never the what-if cap box:
+        # a plan loaded into that box must not make this result stale.
+        sig = _hl.md5(_json.dumps(
+            [ss.get("_pr_key"), str(cutoff), grid, obj, run_ov, tr_dens,
+             tr_sys, m_key, m_ov, _config_fingerprint()],
+            sort_keys=True, default=str).encode()).hexdigest()
+        if st.button("Find the best transition", key="ideal_tr_opt_run",
+                     type="primary", disabled=not grid) and grid:
+            n_first = len(grid) + 1
+            bar = st.progress(0.0, text=f"0 / {n_first} runs")
+
+            def _tick(done, total, cell):
+                frac, txt = _ideal_opt_progress(done, total, n_first,
+                                                n_stab=n_stab, what="runs")
+                bar.progress(frac, text=f"{txt} — last: {cell.label}")
+            tmp = _tf.mkdtemp(prefix="ideal_tr_opt_")
+            res = None
+            try:
+                prp = os.path.join(tmp, "pr" + (
+                    os.path.splitext(pr_file.name)[1] or ".xlsm"))
+                with open(prp, "wb") as f:
+                    f.write(pr_file.getvalue())
+                res = _to.optimize_transition(
+                    live, fs, cutoff, g_sizes, g_caps, prp,
+                    ceiling_kg=float(slider_t) * 1000.0,
+                    project_dir=str(_ROOT), objective=obj, workers=workers,
+                    progress=_tick, overrides=run_ov, method=m_key,
+                    method_overrides=m_ov, density_overrides=tr_dens or None,
+                    system_overrides=tr_sys or None, control=ctrl,
+                    horizon_weeks=_TR_HORIZON_WEEKS)   # the Check's horizon
+            except (ValueError, RuntimeError, OSError) as e:
+                st.error(f"The transition optimizer could not run — "
+                         f"{type(e).__name__}: {e}")
+            finally:
+                _sh.rmtree(tmp, ignore_errors=True)
+            bar.empty()
+            if res is not None:
+                ss["_ideal_tr_opt"] = dict(sig=sig, res=res,
+                                           caps_kg=tuple(g_caps))
+        o = ss.get("_ideal_tr_opt")
+        if not o:
+            return
+        res = o["res"]
+        stale = o["sig"] != sig
+        if stale:
+            st.warning("Showing the last transition-optimizer run — the PR, "
+                       "cutoff, sizes, caps, objective, limits, engine or "
+                       "config have changed since. Press **Find the best "
+                       "transition** to recompute.")
+        if res.note:
+            st.warning(res.note)
+        errs = [c for c in res.cells if c.error]
+        if errs:
+            st.error(f"**The engine failed on {len(errs)} of {len(res.cells)} "
+                     f"cell(s)** — they are not counted as within the limits: "
+                     + "; ".join(f"{c.label}: {c.error}" for c in errs[:5]))
+        t = res.today
+        span = _to.years_text(t.years)
+        eff = _ideal_tr_effect_text(res)
+        if eff:
+            st.markdown(eff)
+        st.caption(f"Today's plan (your current limits, {t.cap_t:,.0f} t) "
+                   f"over {span}: revenue ${t.revenue / 1e6:,.1f}M, HOG "
+                   f"{t.hog_t:,.0f} t, biomass gain {t.gain_t:,.0f} t.")
+        caps_ran = ", ".join(f"{p / 1000:,.0f}"
+                             for p in o.get("caps_kg", ())) + " t"
+        b = res.best
+        if b is not None:
+            win = (f"{b.batch_size:,} fish per future batch @ {b.cap_t:,.0f} "
+                   f"t** (caps tried: {caps_ran}) — "
+                   f"{_ideal_opt_value_text(b, res.objective)} over {span} "
+                   f"({_ideal_opt_diff_text(b, t, res.objective)} vs today's "
+                   f"plan); revenue ${b.revenue / 1e6:,.1f}M, HOG "
+                   f"{b.hog_t:,.0f} t; {b.n_changed} future batch(es) "
+                   f"re-sized, effect year {b.effect}.")
+            if b.verdict is not None and not b.verdict.judged_years:
+                # Every year was only "no worse than today": nothing was held
+                # to zero breaches, so the rule cannot certify this plan.
+                st.warning(
+                    "**Best by the rule, but NOT certified within the limits: "
+                    + win + f" No year of this run is judged — its effect "
+                    f"year {b.effect} is after the run's last year "
+                    f"({max(t.years) if t.years else '—'}), so every year "
+                    f"only had to be no worse than today's plan and none was "
+                    f"held to zero breaches. Move **Change stockings after** "
+                    f"earlier (or lengthen the run) before relying on it.")
+            else:
+                st.success("**Best within the limits: " + win)
+            _ideal_tr_opt_cost(res)
+            _ideal_tr_opt_stability(res, stale, tr_seeds)
+        else:
+            c = res.closest
+            st.error(
+                f"**No future batch size and cap in this grid is within the "
+                f"limits (caps tried: {caps_ran}).** "
+                + (f"Closest: **{c.label}** — {_ideal_tr_fail_text(c)}. "
+                   if c is not None else "No cell ran at all. ")
+                + "A plan that breaks a limit is not an answer: try other "
+                  "sizes or lower caps, or test higher limits in the tables "
+                  "above.")
+            _ideal_tr_opt_cost(res)
+        st.dataframe(_pd.DataFrame(_ideal_tr_opt_rows(res)),
+                     hide_index=True, width="stretch")
+        st.caption(
+            f"One real-engine run per size and cap on your PR, "
+            f"{_TR_HORIZON_WEEKS} weeks; totals over {span} (first and last "
+            "years partial). **Early years: vs today** — the years before a "
+            "plan's effect year, where each limit's count must be no higher "
+            "than today's plan's that year. **Judged years: breaches** — "
+            "from the effect year on, where every count must be zero. "
+            "Batches re-sized 0 = only the cap changes.")
+
+
+def _ideal_transition(ctx, today, cap_slider_t=None):
     """Step 3 — from today's fish to the rhythm. Only FUTURE stockings change
     (forecast.transition, pure); both schedules can be checked in the real
     engine on the uploaded PR; the proposal is handed over as a download.
-    The live scenario is never written: adopting it is the operator's act."""
+    The live scenario is never written: adopting it is the operator's act.
+    `cap_slider_t` is step 1's cap slider: the transition optimizer never
+    searches a cap above it. Judged by the two-window rule
+    (forecast.transition_optimize.verdict)."""
     import pandas as _pd
     from forecast import ideal_engine as _ie
     from forecast import transition as _tr
+    from forecast import transition_optimize as _to
     from forecast.scenario_io import load_batches
+
+    if cap_slider_t is None:
+        cap_slider_t = st.session_state.get("ideal_cap_t") or int(round(
+            float(ctx["control"].max_biomass_kg) / 1000.0))
 
     st.subheader("3 · Transition — from today's fish to the ideal")
     st.caption(
@@ -6424,7 +6901,9 @@ def _ideal_transition(ctx, today):
         st.info("Your Control limits changed, so the what-if limit boxes "
                 "below were reset to the new values.")
     # Which limits have dated per-week rows (they win for their weeks), read
-    # from the limits file itself rather than stated from memory.
+    # from the limits file itself rather than stated from memory. `_fl` also
+    # places a cap-only change's effect year (transition_optimize).
+    _fl = None
     try:
         from forecast.caps import (METRIC_BIOMASS, METRIC_FEED_DAY,
                                    METRIC_MAX_HARVEST, METRIC_MIN_HARVEST)
@@ -6489,6 +6968,12 @@ def _ideal_transition(ctx, today):
         "ideal_tr_feed": tr_feed})
     tr_ov.update(tr_ctl)                   # the move budget, if changed
 
+    # The transition optimizer: on exactly these limits (its caps replace the
+    # cap box), this cutoff, engine and knobs; its Use button fills the sizes
+    # box and the what-if cap, so the Check below then runs that proposal.
+    _ideal_tr_optimizer(ctx, live, fs, cutoff, uploaded, tr_ov, tr_dens,
+                        tr_sys, m_key, m_ov, cap_slider_t, seeds)
+
     # PR, proposal, engine, limits AND config/scenario (batches.yaml = today).
     key = (st.session_state.get("_pr_key"), str(cutoff), tuple(sizes),
            _config_fingerprint(), m_key, str(sorted(m_ov.items())),
@@ -6512,10 +6997,25 @@ def _ideal_transition(ctx, today):
                 st.error(f"The engine could not run the transition — "
                          f"{type(e).__name__}: {e}")
                 return
+        # The effect year of what this check ran (the two-window rule): the
+        # first re-sized batch's TranOG, else the first year the what-if cap
+        # applies with no dated per-week row winning. When the cap box is not
+        # moved either (only other limits change) the same rule places it,
+        # and the reason says the cap was not changed.
+        _yrs = sorted(set(a.years) | set(b.years))
+        eff = _to.effect_year(summ, _yrs, undated_cap_year=(
+            _to.undated_cap_year(_fl, _yrs) if _fl is not None else None),
+            cap_changed="max_biomass_kg" in tr_ov)
         st.session_state["_ideal_tr"] = dict(key=key, a=a, b=b, note=note,
-                                             ov=dict(tr_ov), tank_txt=tank_txt)
+                                             ov=dict(tr_ov), tank_txt=tank_txt,
+                                             eff=eff)
     t = st.session_state.get("_ideal_tr")
     if not t:
+        return
+    if "eff" not in t:
+        # A check kept from before the two-window rule (2026-09-11).
+        st.info("The last check predates the two-window rule — press **Check "
+                "both schedules** to run it again.")
         return
     if t["key"] != key:
         st.warning("Showing the last check — an input has changed since (the "
@@ -6544,53 +7044,68 @@ def _ideal_transition(ctx, today):
     ctrls = {"Today's plan": _io.judging_control(ctx["control"], m_ov, {}),
              "Proposal": _io.judging_control(ctx["control"], m_ov,
                                              t.get("ov", {}))}
+    e_year, e_why = t["eff"]
+    gates_by = {"Today's plan": {}, "Proposal": {}}
+    for tag, run in (("Today's plan", t["a"]), ("Proposal", t["b"])):
+        for yr in run.years:
+            gates_by[tag][yr] = _ie.gates(run, yr, ctrls[tag])
+    # The two-window rule (operator, 2026-09-11) — the SAME verdict the
+    # transition optimizer judges its cells with. Each plan is judged against
+    # the limits it RAN with.
+    both, vrows, v = _ideal_tr_verdict(t["a"].years, t["b"].years,
+                                       gates_by["Proposal"], e_year)
     rows = []
-    prop_fails = {}            # year -> the proposal's FAIL gate names
     for yr in sorted(set(t["a"].years) | set(t["b"].years)):
-        row = {"Year": yr}
+        row = {"Year": yr,
+               "Rule": ("not compared" if yr not in v.years else
+                        "no worse than today" if yr < e_year
+                        else "zero breaches")}
         for tag, run in (("Today's plan", t["a"]), ("Proposal", t["b"])):
             yy = run.years.get(yr)
             if yy is None:
                 continue
-            g = _ie.gates(run, yr, ctrls[tag])
-            fails = [x.name for x in g if x.status == "FAIL"]
-            if tag == "Proposal":
-                prop_fails[yr] = fails
             row["Weeks"] = yy.weeks
             row[f"{tag}: peak % of cap"] = round(100 * yy.peak_pct_of_cap)
             row[f"{tag}: HOG t"] = round(yy.hog_t)
-            # Every limit is hard (2026-09-10); the counts stay in their own
-            # columns so the size of each breach is visible, not just a ✗.
+            # The counts stay in their own columns so the size of each
+            # breach is visible, not just a ✗.
             row[f"{tag}: tank-weeks over density"] = yy.r8_over_tank_weeks
             # Per-system limits, biomass and feed SEPARATELY: a sum let fewer
             # feed breaches hide more biomass ones (and a system-week over
             # both limits counted twice).
             row[f"{tag}: system-weeks over biomass limit"] = yy.sys_bio_over_weeks
             row[f"{tag}: system-weeks over feed limit"] = yy.sys_feed_over_weeks
-            row[f"{tag}: within the limits"] = ("✓" if not fails
-                                                else "✗ " + ", ".join(fails))
+            if tag == "Proposal":
+                yf = v.year_failures.get(yr)
+                row[f"{tag}: within the limits"] = (
+                    "—" if yf is None else "✓" if not yf
+                    else "✗ " + "; ".join(yf))
+            else:
+                fails = [x.name for x in gates_by[tag][yr]
+                         if x.status == "FAIL"]
+                row[f"{tag}: within the limits"] = (
+                    "✓" if not fails else "✗ " + ", ".join(fails))
         rows.append(row)
     st.dataframe(_pd.DataFrame(rows), hide_index=True, width="stretch")
     st.caption(
         "Today's plan runs with your current limits; the proposal with any "
         "limits changed above. "
         "First and last years are partial (the run starts at the PR and lasts "
-        f"{_TR_HORIZON_WEEKS} weeks). Every limit is hard (your ruling, "
-        "2026-09-10): ✓ means the year breaks none; ✗ names each check it "
-        "breaks — a tank over its density cap, a system over its biomass or "
-        "feed limit (flagged above the limit + your "
+        f"{_TR_HORIZON_WEEKS} weeks). **Rule** — the two-window rule (your "
+        f"ruling, 2026-09-11): the years before the effect year {e_year} hold "
+        "fish already stocked, which re-sizing future stockings cannot "
+        "change, so there the proposal must be **no worse than today's plan** "
+        f"on every limit, that year; from {e_year} on it must have **zero "
+        "breaches**. The proposal's ✓/✗ follows that rule and ✗ names what "
+        "fails; today's plan's column names every check it fails outright, "
+        "for reference. The limits: a tank over its density cap, a system "
+        "over its biomass or feed limit (flagged above the limit + your "
         f"{float(getattr(ctx['control'], 'global_buffer_pct', 0.0) or 0.0):.0%}"
         " buffer, exactly as the SystemLimitsAudit sheet flags them), the move "
-        "budget, the harvest floor, a week with no harvest or the biomass cap. "
-        "A ✗ year is not a real result: its tonnage prices fish the facility "
-        "could not carry, feed, handle or land within its limits.")
+        "budget, the harvest floor, a week with no harvest and the biomass "
+        "cap. A ✗ year is not a real result: its tonnage prices fish the "
+        "facility could not carry, feed, handle or land within its limits.")
 
-    # Hard limits (operator ruling 2026-09-10): the proposal is acceptable only
-    # with ZERO breaches on every constraint and no failed check. Totals over
-    # the years both runs cover; each plan is judged against the limits it RAN
-    # with. Today's counts are shown for reference only.
-    both, vrows, broken, failed = _ideal_tr_verdict(t["a"].years,
-                                                    t["b"].years, prop_fails)
     if not both:
         st.error("**The two runs share no year**, so there is nothing to "
                  "compare and no verdict — press **Check both schedules** "
@@ -6599,28 +7114,39 @@ def _ideal_transition(ctx, today):
         return
     rev_a = sum(t["a"].years[y].revenue for y in both) / 1e6
     rev_b = sum(t["b"].years[y].revenue for y in both) / 1e6
-    st.markdown("**Within the limits?** — every limit is hard: the proposal "
-                "needs zero breaches on every one")
-    if broken or failed:
-        bits = list(broken) + ([
-            "failed checks: " + "; ".join(
-                f"{n} ({', '.join(map(str, ys))})" for n, ys in failed.items())]
-            if failed else [])
-        st.error(f"**The proposal "
-                 f"{'breaks the limits' if broken else 'fails the checks'}** "
-                 f"over {both[0]}–{both[-1]} — " + "; ".join(bits) + ". A plan "
-                 "that breaks a limit or fails a check is not an answer.")
+    early_s = _to.years_text(v.early_years)
+    judged_s = _to.years_text(v.judged_years)
+    st.markdown(f"**Within the limits?** — the two-window rule, effect year "
+                f"**{e_year}**: {e_why}.")
+    if v.within_limits and not v.judged_years:
+        # The rule passes, but only on "no worse than today": no year was
+        # held to zero breaches, so it cannot certify the proposal.
+        st.warning(
+            f"**Not certified within the limits** (effect year {e_year}): in "
+            f"{early_s} the proposal is no worse than today's plan on every "
+            f"limit and fails no check, but **no year of this run is judged** "
+            f"— the effect year is after the run's last year, so no year was "
+            f"held to zero breaches and the rule cannot certify this plan. "
+            f"Move **Change stockings after** earlier (or lengthen the run).")
+    elif v.within_limits:
+        st.success(
+            f"Within the limits (effect year {e_year}): "
+            + (f"in {early_s} the proposal is no worse than today's plan on "
+               f"every limit, year by year; " if v.early_years else "")
+            + (f"in {judged_s} it has zero breaches; " if v.judged_years
+               else "")
+            + "and it fails no check.")
     else:
-        st.success(f"Within the limits: the proposal has zero breaches on "
-                   f"every constraint over {both[0]}–{both[-1]}.")
+        st.error(f"**The proposal is not within the limits** (effect year "
+                 f"{e_year}) — " + "; ".join(v.failures) + ". A plan that "
+                 "breaks a limit or fails a check is not an answer.")
     st.dataframe(_pd.DataFrame(vrows), hide_index=True, width="stretch")
-    st.caption(f"Totals over {both[0]}–{both[-1]} (first and last years "
-               f"partial); today's plan is shown for reference. Revenue over "
-               f"the same years: today's plan ${rev_a:,.1f}M, proposal "
+    st.caption(f"Early years ({early_s}): totals, and ✗ names each year the "
+               f"proposal is worse than today's plan on that limit. Judged "
+               f"years ({judged_s}): totals, and ✗ names each year with a "
+               f"breach. First and last years partial. Revenue over "
+               f"{both[0]}–{both[-1]}: today's plan ${rev_a:,.1f}M, proposal "
                f"${rev_b:,.1f}M.")
-    st.caption("Breaches in the first years can come from fish already "
-               "stocked, which re-sizing future stockings cannot change — the "
-               "per-year table above shows where they fall.")
 
 
 # ============================================================
