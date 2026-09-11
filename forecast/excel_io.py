@@ -1491,6 +1491,29 @@ def _feed_by_batch_type_week(batch_locations, biology_states_by_batch, tables,
     return fbtw, wk_start
 
 
+def _feed_by_type_month(ftw, wk_start, report_start=None):
+    """(feed_name, "YYYY-MM") -> kg, plus the set of months, from the
+    `_feed_by_type_week` output (ftw, wk_start).
+
+    Feed is a DAILY flow, so a week straddling a month boundary is split
+    between the two months by calendar-day fraction (not dumped into the
+    week-start's month). Pure calendar attribution — totals are unchanged.
+    The ONE month roll-up behind FeedForecastMonthly's by-type matrix and
+    the CostsAndProfit sheet (forecast.costs_report), so the two tie.
+    """
+    from collections import defaultdict
+    from .time_grid import calendar_day_month_split
+    ftm: dict[tuple[str, str], float] = defaultdict(float)  # (feed_type, month) -> kg
+    months: set[str] = set()
+    for (name, wk), v in ftw.items():
+        ws_ = wk_start.get(wk)
+        for (yr, mon), frac in calendar_day_month_split(ws_, clip_start=report_start).items():
+            mo = f"{yr}-{mon:02d}"
+            months.add(mo)
+            ftm[(name, mo)] += v * frac
+    return ftm, months
+
+
 def write_feed_forecast_weekly(
     wb,
     batch_locations,
@@ -1568,17 +1591,7 @@ def write_feed_forecast_monthly(
     ftw, wk_start = _feed_by_type_week(
         batch_locations, biology_states_by_batch, tables, batches,
         sixn_move_in_feed=sixn_move_in_feed)
-    # Feed is a DAILY flow, so a week straddling a month boundary is split
-    # between the two months by calendar-day fraction (not dumped into the
-    # week-start's month). Pure calendar attribution — totals are unchanged.
-    ftm: dict[tuple[str, str], float] = defaultdict(float)  # (feed_type, month) -> kg
-    months: set[str] = set()
-    for (name, wk), v in ftw.items():
-        ws_ = wk_start.get(wk)
-        for (yr, mon), frac in calendar_day_month_split(ws_, clip_start=report_start).items():
-            mo = f"{yr}-{mon:02d}"
-            months.add(mo)
-            ftm[(name, mo)] += v * frac
+    ftm, months = _feed_by_type_month(ftw, wk_start, report_start)
     months_sorted = sorted(months)
     mo_dates = [_date(int(m[:4]), int(m[5:7]), 1) for m in months_sorted]
     if tables is not None and getattr(tables, "feed_types", None):

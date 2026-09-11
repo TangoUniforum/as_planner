@@ -34,6 +34,16 @@ Pure orchestration: no Streamlit, no planning logic, and nothing is written to
 config/ or scenario/ (each run lives in its own temp copy, see ideal_engine).
 An engine exception is recorded on its cell (`Cell.error`), never swallowed
 and never counted as feasible.
+
+COSTS (2026-09-11, additive). Given `costs` (config/costs.yaml, validated
+once into ONE snapshot that every worker prices from), each cell also carries
+its cash-view cost — forecast.costs.year_cost on the year read — and profit
+= revenue - cost. The "profit" objective ranks on it. It is refused
+(ValueError) before anything runs when costs are not set or a model feed type
+has no price, and a cell that ran but could not be fully priced is an error
+cell under it (`require_price`), never ranked on a cost of 0. The other
+objectives never read the cost fields, so their picks are the same with or
+without costs.
 """
 from __future__ import annotations
 
@@ -43,18 +53,27 @@ import numbers
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from concurrent.futures.process import BrokenProcessPool
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from pickle import PicklingError
 from typing import Callable, Optional, Sequence
 
+from forecast import costs as costs_mod
 from forecast import ideal
 from forecast import ideal_engine as ie
 
 # objective key -> (Cell attribute, label)
 OBJECTIVES = {"revenue": ("revenue", "Revenue"),
               "hog": ("hog_t", "Harvest tonnage (HOG)"),
-              "gain": ("gain_t", "Biomass gain")}
+              "gain": ("gain_t", "Biomass gain"),
+              "profit": ("profit", "Profit")}
+# The error prefix of a cell that ran but could not be priced under the
+# profit objective (`require_price`); an engine error keeps its own type.
+COST_ERROR = "CostError"
+# forecast.costs.period_cost fields summed across years (`sum_cost_parts`).
+_COST_SUM_FIELDS = ("feed", "shipping", "oxygen", "chemicals", "eggs_n",
+                    "eggs", "fixed", "variable", "total", "feed_kg",
+                    "unpriced_kg")
 MAX_CELLS = 150                 # cadences x sizes x caps
 MIN_SIZE = 1000                 # fish: no real batch is smaller
 MIN_CADENCE = 7                 # days: one stocking a week at most
@@ -109,6 +128,15 @@ class Cell:
     within_limits: bool = False
     error: Optional[str] = None     # "Type: message" when the engine raised
     elapsed_s: float = 0.0
+    # --- cash-view cost of the year read, only when costs were given ---
+    # Floats, never None: table_order computes objective_value for every
+    # cell. The page blanks them while `costs_applied` is False.
+    cost: float = 0.0               # forecast.costs.year_cost(...)["total"]
+    profit: float = 0.0             # revenue - cost
+    costs_applied: bool = False
+    cost_parts: dict = field(default_factory=dict)   # sum_cost_parts(...)
+    unpriced_feed_kg: float = 0.0   # feed kg of a type with no price
+    cost_error: Optional[str] = None   # why a ran cell could not be priced
 
     @property
     def rhythm(self) -> str:
@@ -166,6 +194,110 @@ def objective_value(cell: Cell, objective: str) -> float:
     return float(getattr(cell, OBJECTIVES[objective][0]))
 
 
+# --------------------------------------------------------------------------- #
+# Costs (the cash view, forecast.costs)
+# --------------------------------------------------------------------------- #
+def feed_type_names(project_dir) -> list:
+    """The model feed-type names of `project_dir`/config/biology.yaml, in
+    size order: the types every engine run in that project feeds by."""
+    from forecast.config_io import load_biology_tables
+    tables = load_biology_tables(str(Path(project_dir) / "config"))
+    return [n for _s, n in sorted(tables.feed_types, key=lambda x: x[0])]
+
+
+def check_costs(costs, objective: str, feed_names=None) -> Optional[dict]:
+    """The ONE cost snapshot every cell is priced from (a validated copy of
+    `costs`), or None when no costs are given.
+
+    Refused with ValueError, before anything runs: the profit objective with
+    no costs; the profit objective while a model feed type in `feed_names`
+    has no price (its feed would be left out of the cost); and a costs
+    mapping forecast.costs.validate_costs refuses. Nothing is defaulted."""
+    if costs is None:
+        if objective == "profit":
+            raise ValueError(
+                "the Profit objective needs config/costs.yaml — set the costs "
+                "in Configure → Targets & prices → Costs")
+        return None
+    snap = costs_mod.validate_costs(costs)
+    if objective == "profit":
+        missing = costs_mod.missing_feed_prices(snap, list(feed_names or ()))
+        if missing:
+            raise ValueError(
+                f"the Profit objective needs a price for every feed type — "
+                f"no price for {', '.join(missing)} (Configure → Targets & "
+                f"prices → Costs)")
+    return snap
+
+
+def sum_cost_parts(parts: Sequence[dict]) -> dict:
+    """forecast.costs.period_cost dicts summed field by field (one per year),
+    with every unpriced feed type named once, in order."""
+    out = {f: float(sum(p[f] for p in parts)) for f in _COST_SUM_FIELDS}
+    out["unpriced_types"] = list(dict.fromkeys(
+        t for p in parts for t in p["unpriced_types"]))
+    return out
+
+
+def cost_fields(reads: Sequence, revenue: float, costs) -> dict:
+    """The cost fields of a Cell / TrCell for the YearReads `reads`, each
+    priced by forecast.costs.year_cost (the one cost function) and summed:
+    cost, profit = revenue - cost, costs_applied, cost_parts,
+    unpriced_feed_kg. {} when `costs` is None. A read that cannot be priced
+    (for example one read without cost drivers) gives `cost_error` instead,
+    naming why: it is never priced as 0."""
+    if costs is None:
+        return {}
+    try:
+        tot = sum_cost_parts([costs_mod.year_cost(y, costs) for y in reads])
+    except Exception as e:  # noqa: BLE001 — recorded on the cell, not hidden
+        return {"cost_error": f"{type(e).__name__}: {e}"}
+    return dict(cost=tot["total"], profit=float(revenue) - tot["total"],
+                costs_applied=True, cost_parts=tot,
+                unpriced_feed_kg=tot["unpriced_kg"])
+
+
+def require_price(cell, objective: str):
+    """Under the profit objective, a cell that RAN but was not fully priced
+    (no costs applied, or feed of a type with no price) comes back as an
+    error cell — `COST_ERROR: why` — so it is never ranked on a missing or
+    understated cost. Any other objective, or a cell that already failed,
+    comes back unchanged. Works for Cell and TrCell alike."""
+    if objective != "profit" or cell.error is not None:
+        return cell
+    if not cell.costs_applied:
+        why = cell.cost_error or "no costs were applied"
+    elif cell.unpriced_feed_kg > 0:
+        why = (f"{cell.unpriced_feed_kg:,.0f} kg of feed has no price ("
+               + ", ".join(cell.cost_parts.get("unpriced_types") or ())
+               + ")")
+    else:
+        return cell
+    return replace(cell, error=f"{COST_ERROR}: {why}", within_limits=False)
+
+
+def is_cost_error(cell) -> bool:
+    """True when a cell's error is `require_price`'s, not the engine's."""
+    return bool(cell.error) and cell.error.startswith(COST_ERROR + ":")
+
+
+def ran_within_limits(cell) -> bool:
+    """The limits verdict of a cell AS IT RAN, for display: a cell
+    `require_price` turned into an error under Profit keeps the verdict it
+    ran with (its pricing is a separate matter, named in its error), and an
+    engine error is never within the limits. A TrCell's is its two-window
+    verdict; a Cell's is ideal_engine.plausible on its gates, exactly how
+    run_cell set it. Never used to rank: an error cell is never ranked."""
+    if cell.error is not None and not is_cost_error(cell):
+        return False
+    if not is_cost_error(cell):
+        return bool(cell.within_limits)
+    v = getattr(cell, "verdict", None)
+    if v is not None:
+        return bool(v.within_limits)
+    return ie.plausible(cell.gates)
+
+
 def _whole(v, what: str, least: int) -> int:
     if (isinstance(v, bool) or not isinstance(v, numbers.Integral)
             or v < least):
@@ -212,7 +344,8 @@ def run_cell(rhythm, cap_kg: float, project_dir, *, template=None,
              density_overrides: Optional[dict] = None,
              system_overrides: Optional[dict] = None,
              control=None,
-             horizon_weeks: int = ideal.HORIZON_WEEKS) -> Cell:
+             horizon_weeks: int = ideal.HORIZON_WEEKS,
+             costs: Optional[dict] = None) -> Cell:
     """One (cadence_days, batch_size) through `ideal_engine.ideal_run`, read
     and judged. Top level and picklable, so a process pool can run it.
 
@@ -221,7 +354,9 @@ def run_cell(rhythm, cap_kg: float, project_dir, *, template=None,
     facility limits (incl. min_harvest_weight_g and max_transfers_per_week);
     `control` is the live Control to judge from (loaded from `project_dir`
     when None). An exception from the engine is recorded on the cell as
-    `error` and the cell is never within the limits.
+    `error` and the cell is never within the limits. `costs` (the
+    optimizer's one snapshot) fills the cost fields (`cost_fields`); a read
+    that cannot be priced records `cost_error` and is otherwise unchanged.
     """
     cad, size = int(rhythm[0]), int(rhythm[1])
     fpw = size * 7.0 / cad
@@ -254,7 +389,8 @@ def run_cell(rhythm, cap_kg: float, project_dir, *, template=None,
                 avg_gross_kg=y.avg_gross_kg, peak_pct_of_cap=y.peak_pct_of_cap,
                 breaches=b, total=int(sum(b.values())), gates=g,
                 within_limits=ie.plausible(g),
-                elapsed_s=time.perf_counter() - t0)
+                elapsed_s=time.perf_counter() - t0,
+                **cost_fields([y], y.revenue, costs))
 
 
 def other_failed_checks(cell: Cell) -> tuple:
@@ -454,9 +590,18 @@ def optimize(cadences: Sequence[int], sizes: Sequence[int], cap_kg: float,
              density_overrides: Optional[dict] = None,
              system_overrides: Optional[dict] = None,
              control=None,
-             horizon_weeks: int = ideal.HORIZON_WEEKS) -> Result:
+             horizon_weeks: int = ideal.HORIZON_WEEKS,
+             costs: Optional[dict] = None) -> Result:
     """Run every (cadence, size, cap) cell and pick the best within every
     limit.
+
+    `costs` (config/costs.yaml as forecast.costs.load_costs returns it) is
+    validated ONCE (`check_costs`) and that snapshot goes to every worker,
+    so every cell is priced alike; with costs, every objective's cells carry
+    cost and profit for display. The "profit" objective is refused with
+    ValueError before anything runs when `costs` is None or a model feed type
+    of `project_dir`'s biology has no price, and under it a cell that ran but
+    could not be fully priced becomes an error cell (`require_price`).
 
     `caps` (kg) are the biomass caps to try; None runs at `cap_kg` alone
     (exactly as before the cap was searched). `cap_kg` is the operator's
@@ -488,6 +633,10 @@ def optimize(cadences: Sequence[int], sizes: Sequence[int], cap_kg: float,
     if objective not in OBJECTIVES:
         raise ValueError(f"objective must be one of {sorted(OBJECTIVES)}, "
                          f"got {objective!r}")
+    snap = check_costs(costs, objective,
+                       feed_type_names(project_dir)
+                       if objective == "profit" and costs is not None
+                       else None)
     ceiling = _cap(cap_kg)
     jobs = check_grid(cadences, sizes, [ceiling] if caps is None else caps)
     above = sorted({j[2] for j in jobs if j[2] > ceiling}, reverse=True)
@@ -517,6 +666,10 @@ def optimize(cadences: Sequence[int], sizes: Sequence[int], cap_kg: float,
               density_overrides=density_overrides,
               system_overrides=system_overrides, control=control,
               horizon_weeks=horizon_weeks)
+    if snap is not None:
+        # Only when given: a costs-free search sends exactly what it always
+        # did, to run_cell or to any runner a caller injected.
+        kw["costs"] = snap
     count = {"done": 0, "total": len(jobs)}
 
     def _tick(cell):
@@ -531,13 +684,16 @@ def optimize(cadences: Sequence[int], sizes: Sequence[int], cap_kg: float,
         _tick(cell)
 
     note = _run_wave(jobs, project_dir, kw, workers, _record, "the grid")
-    cells = tuple(done[i] for i in range(len(jobs)))
+    ran_cells = tuple(done[i] for i in range(len(jobs)))
+    cells = tuple(require_price(c, objective) for c in ran_cells)
     b = best(cells, objective)
 
     stability, best_stable = (), None
     if b is not None:
         cands = stability_candidates(cells, objective)
-        ran = {c.key: c for c in cells}
+        # Stability is about the LIMITS: a neighbour is judged as it ran,
+        # never on whether it could be priced.
+        ran = {c.key: c for c in ran_cells}
         extra = []                          # candidate order, then -/+ step
         for c in cands:
             for r in neighbour_rhythms(c):

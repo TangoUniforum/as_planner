@@ -163,36 +163,45 @@ def harvest_rows(out_path) -> list[dict]:
     try:
         if "HarvestPlan" not in wb.sheetnames:
             return []
-        ws = wb["HarvestPlan"]
-        header = None
-        rows: list[dict] = []
-        for r in ws.iter_rows(values_only=True):
-            if header is None:
-                if r and str(r[0]).strip() == "Week" and any(
-                        str(c).strip() == "Batch" for c in r if c):
-                    header = {str(c).strip(): i for i, c in enumerate(r) if c}
-                continue
-            if not r or not str(r[0]).startswith("20"):
-                continue
-
-            def _num(prefix, _r=r, _h=header):
-                k = next((c for c in _h if c.startswith(prefix)), None)
-                v = _r[_h[k]] if k is not None and _h[k] < len(_r) else None
-                return float(v) if isinstance(v, (int, float)) else 0.0
-
-            count = _num("Count")
-            hog_kg = _num("HOG_Biomass")
-            rows.append({
-                "week": str(r[0]).strip(),
-                "count": count,
-                "gross_avg_kg": _num("Gross_AvgWt"),
-                "gross_kg": _num("Gross_Biomass"),
-                "hog_kg": hog_kg,
-                "hog_avg_kg": (hog_kg / count) if count > 0 else 0.0,
-            })
-        return rows
+        return harvest_rows_from_ws(wb["HarvestPlan"])
     finally:
         wb.close()
+
+
+def harvest_rows_from_ws(ws) -> list[dict]:
+    """harvest_rows' parser, for a HarvestPlan worksheet that is already open.
+
+    The one header parser for HarvestPlan rows: the saved-file reader above
+    and the CostsAndProfit sheet (forecast.costs_report, which reads the
+    in-memory workbook run.py is about to save) both use it. Anything with
+    `iter_rows(values_only=True)` works."""
+    header = None
+    rows: list[dict] = []
+    for r in ws.iter_rows(values_only=True):
+        if header is None:
+            if r and str(r[0]).strip() == "Week" and any(
+                    str(c).strip() == "Batch" for c in r if c):
+                header = {str(c).strip(): i for i, c in enumerate(r) if c}
+            continue
+        if not r or not str(r[0]).startswith("20"):
+            continue
+
+        def _num(prefix, _r=r, _h=header):
+            k = next((c for c in _h if c.startswith(prefix)), None)
+            v = _r[_h[k]] if k is not None and _h[k] < len(_r) else None
+            return float(v) if isinstance(v, (int, float)) else 0.0
+
+        count = _num("Count")
+        hog_kg = _num("HOG_Biomass")
+        rows.append({
+            "week": str(r[0]).strip(),
+            "count": count,
+            "gross_avg_kg": _num("Gross_AvgWt"),
+            "gross_kg": _num("Gross_Biomass"),
+            "hog_kg": hog_kg,
+            "hog_avg_kg": (hog_kg / count) if count > 0 else 0.0,
+        })
+    return rows
 
 
 def harvest_by_period(rows: list[dict], basis: str = "hog"

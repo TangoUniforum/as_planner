@@ -4143,7 +4143,13 @@ def _current_horizon_start():
 # harvest target or a price band changes no run's output, so they must not
 # invalidate cached board legs / sweep results (which would force hours of
 # re-runs to change a number the checklist re-judges instantly).
-_NON_ENGINE_CONFIG = {"targets.yaml", "economics.yaml", "analysis_defaults.yaml"}
+# costs.yaml (2026-09-11) is the same kind of file: operating costs PRICE a
+# finished plan (the CostsAndProfit sheet, the Ideal Profit objective) and
+# change nothing the engine plans, so a costs save must not bust the PR
+# verdict, sweeps, the template cache, the board or the Ideal sigs. Pages
+# that show costs carry their own staleness check (forecast.costs.costs_sig).
+_NON_ENGINE_CONFIG = {"targets.yaml", "economics.yaml", "analysis_defaults.yaml",
+                      "costs.yaml"}
 
 
 def _config_fingerprint() -> str:
@@ -4306,7 +4312,8 @@ def _config_io_section():
                    "The analysis overlays are deliberately NOT carried in a "
                    "workbook and are never overwritten by an import: "
                    "`analysis_defaults.yaml` (your promoted Quick-run default), "
-                   "`targets.yaml` and `economics.yaml` (the scoring yardstick). "
+                   "`targets.yaml` and `economics.yaml` (the scoring yardstick) "
+                   "and `costs.yaml` (your operating costs). "
                    "They steer how a run is judged, not what it computes — a "
                    "workbook must not be able to move them.")
         imp = st.file_uploader("Config template or saved workbook",
@@ -4986,6 +4993,227 @@ def _edit_targets_prices():
                        f"re-judges instantly; no runs are invalidated.")
 
 
+def _edit_costs():
+    """Operating costs — config/costs.yaml (forecast.costs), the cash view.
+
+    Its own function, not part of _edit_targets_prices: that one returns
+    early when targets.yaml or economics.yaml fails to load, and a bad
+    economics file must not hide Costs. Its own Save writes ONLY
+    config/costs.yaml (forecast.costs.save_costs: validated first, then
+    atomic). The feed table follows the SAVED biology.yaml feed types (never
+    unsaved Biology edits): the price is keyed by the MODEL feed type, the
+    operator's item name is a label. Inputs start from the saved file, and
+    EMPTY — never 0 — when there is none."""
+    import hashlib as _hl
+    import json as _json
+    import math as _math
+    from forecast import analysis as _ana
+    from forecast import costs as _costs
+    from forecast.config_io import load_biology_tables
+
+    st.markdown("**Costs** — what running the facility costs, so a plan is "
+                "priced as **profit**: the Run page's *Costs & profit* tab, "
+                "the Ideal optimizers' Cost / Profit columns and step 2's "
+                "**Profit** objective. Cash view: "
+                "each month's spend against that month's sales, so a month "
+                "with little harvest shows a loss. Saving here changes no "
+                "forecast. The file is kept out of git — the numbers are "
+                "commercially sensitive.")
+    _ok, c = _read_or_explain(
+        lambda: _costs.load_costs(CONFIG_DIR), "config/costs.yaml",
+        hint="Fix config/costs.yaml on disk (the message names the field), "
+             "or delete it and enter the costs again here. An import never "
+             "restores it.")
+    if not _ok:
+        return
+    _okb, bio = _read_or_explain(lambda: load_biology_tables(CONFIG_DIR),
+                                 "config/biology.yaml")
+    if not _okb:
+        return
+    try:
+        _econ = _ana.load_economics(CONFIG_DIR)
+    except Exception:  # noqa: BLE001 — a label only; the section above names it
+        _econ = None
+    cur = _econ["currency"] if _econ else None
+    unit = cur or "your currency"
+    if cur is None:
+        st.caption("economics.yaml sets no currency, so these amounts are in "
+                   "your own currency — the label is for display only.")
+    if c is None:
+        st.info("Costs not set — nothing is priced and **Profit** is "
+                "unavailable until you save this section.")
+
+    def _v(k):
+        return c[k] if c else None            # empty, never 0, when not set
+
+    # Every input's key carries the file's signature. A keyed number_input
+    # ignores value= after its first render, so without it a costs.yaml
+    # changed on disk (another session, a hand edit) would keep showing the
+    # old numbers, and Save would write them back.
+    try:
+        _ks = "_" + _costs.costs_sig(CONFIG_DIR)[:12]
+    except OSError:
+        _ks = "_unread"
+    k1, k2 = st.columns(2)
+    fixed = k1.number_input(
+        f"Fixed cost per month ({unit})", min_value=0.0, step=1000.0,
+        format="%.2f", value=_v("fixed_monthly"), key="cost_fixed" + _ks,
+        help=f"Everything that does not scale with feed or eggs — staff, "
+             f"energy, maintenance, rent — per calendar month, in {unit}. "
+             f"A month the forecast only partly covers is charged by its "
+             f"days (15 of 30 days = half).")
+    egg = k2.number_input(
+        f"Egg price ({unit} per egg)", min_value=0.0, step=0.01,
+        format="%.4f", value=_v("egg_price"), key="cost_egg" + _ks,
+        help=f"What one egg costs, in {unit}. Charged on each batch's "
+             f"input_count (Configure → Batches), counted as eggs, in the "
+             f"month the batch is stocked; eggs stocked before the forecast "
+             f"opens are not charged.")
+    f1, f2, f3 = st.columns(3)
+    ship = f1.number_input(
+        f"Feed shipping ({unit} per kg feed)", min_value=0.0, step=0.01,
+        format="%.4f", value=_v("feed_shipping_per_kg"), key="cost_ship" + _ks,
+        help=f"Freight per kg of feed delivered, in {unit}/kg. Charged on "
+             f"ALL feed kg — every feed type, freshwater and seawater, "
+             f"priced or not — like oxygen and chemicals.")
+    o2 = f2.number_input(
+        f"Oxygen ({unit} per kg feed)", min_value=0.0, step=0.01,
+        format="%.4f", value=_v("oxygen_per_kg_feed"), key="cost_o2" + _ks,
+        help=f"Oxygen cost per kg of feed fed, in {unit}/kg feed. Charged "
+             f"on ALL feed kg (every feed type, freshwater and seawater).")
+    chem = f3.number_input(
+        f"Chemicals ({unit} per kg feed)", min_value=0.0, step=0.01,
+        format="%.4f", value=_v("chemicals_per_kg_feed"),
+        key="cost_chem" + _ks,
+        help=f"Chemicals cost per kg of feed fed, in {unit}/kg feed. "
+             f"Charged on ALL feed kg (every feed type, freshwater and "
+             f"seawater).")
+
+    # Size order, ties in file order: the order of ideal_optimize.
+    # feed_type_names, so the warnings name types the way the optimizers do.
+    ftypes = sorted(bio.feed_types, key=lambda x: x[0])
+    names = [n for _s, n in ftypes]
+    prices = (c or {}).get("feed_prices") or {}
+    st.markdown("**Feed prices** — one row per **model feed type** in "
+                "Configure → Biology models (the saved file). The price is "
+                "keyed by the model feed type; type your own product name in "
+                "**Item** and the price per kg.")
+    orphans = _costs.orphan_feed_prices(c, names) if c else []
+    if not names:
+        st.warning("Biology has no feed types, so there is no feed to price "
+                   "— add them in Configure → Biology models.")
+    if c is not None:
+        missing = _costs.missing_feed_prices(c, names)
+        if missing:
+            st.warning(f"No price yet for {len(missing)} feed type(s): "
+                       f"{', '.join(missing)} — shown blank. **Profit** stays "
+                       f"unavailable until every feed type has a price.")
+        if orphans:
+            st.warning(f"costs.yaml prices {', '.join(orphans)}, which "
+                       f"{'is' if len(orphans) == 1 else 'are'} not a feed "
+                       f"type in Biology (renamed or removed?) — removed when "
+                       f"you save.")
+    _fd = pd.DataFrame(
+        [{"Feed type": n, "Up to size (g)": float(s),
+          "Item": prices[n]["item"] if n in prices else "",
+          "Price / kg": prices[n]["price_per_kg"] if n in prices else None}
+         for s, n in ftypes],
+        columns=["Feed type", "Up to size (g)", "Item", "Price / kg"])
+    # An all-empty column is dtype object, and a NumberColumn over it renders
+    # READ-ONLY (the same trap as the targets grid): force float.
+    _fd["Price / kg"] = pd.to_numeric(_fd["Price / kg"],
+                                      errors="coerce").astype(float)
+    # A new editor whenever Biology's feed types change, so a price never
+    # lands on the wrong row, and whenever costs.yaml changes on disk.
+    fdf = st.data_editor(
+        _fd, num_rows="fixed", hide_index=True, width="stretch",
+        key="cost_feed_" + _hl.md5(_json.dumps([ftypes, _ks]).encode()
+                                   ).hexdigest()[:12],
+        column_config={
+            "Feed type": st.column_config.TextColumn(
+                "Feed type", disabled=True,
+                help="The MODEL feed type from Configure → Biology models: "
+                     "the name the engine feeds by, and the name each price "
+                     "is keyed by. Read-only here — rename it in Biology, "
+                     "then enter its price again."),
+            "Up to size (g)": st.column_config.NumberColumn(
+                "Up to size (g)", disabled=True, format="%.0f",
+                help="Fish are fed this type up to this weight, in grams "
+                     "(from Biology). Read-only."),
+            "Item": st.column_config.TextColumn(
+                "Item",
+                help="Your own name for the product you buy as this feed "
+                     "type, e.g. the supplier's product name. A label only: "
+                     "the price is keyed by the model feed type. Blank is "
+                     "allowed."),
+            # "plain" and no step: the stored price is shown in full and any
+            # number of decimals can be typed. A rounded display, retyped,
+            # would save a different price.
+            "Price / kg": st.column_config.NumberColumn(
+                f"Price / kg ({unit})", min_value=0.0, format="plain",
+                help=f"What one kg of this feed costs you, in {unit}. Every "
+                     f"feed type needs a price before you can save; 0 only "
+                     f"if you type it."),
+        })
+
+    if st.button("💾 Save costs", key="cost_save", type="primary",
+                 help="Writes ONLY config/costs.yaml, after checking that "
+                      "every cost is filled in, none is negative and every "
+                      "feed type has a price. No forecast is invalidated: "
+                      "the Run page shows the costs from the next run; a "
+                      "step-2 Ideal search ranked on Profit is marked out of "
+                      "date, any other search keeps its pick."):
+        errs, scal = [], {}
+        for fld, v, label in (
+                ("fixed_monthly", fixed, "Fixed cost per month"),
+                ("oxygen_per_kg_feed", o2, "Oxygen"),
+                ("chemicals_per_kg_feed", chem, "Chemicals"),
+                ("feed_shipping_per_kg", ship, "Feed shipping"),
+                ("egg_price", egg, "Egg price")):
+            if v is None:
+                errs.append(f"{label} is empty — every cost is required (type "
+                            f"0 if it truly costs nothing)")
+            elif not _math.isfinite(float(v)) or float(v) < 0:
+                errs.append(f"{label} must be a number of at least 0 "
+                            f"(got {v!r})")
+            else:
+                scal[fld] = float(v)
+        feed_prices = {}
+        for rec in _records(fdf):
+            name = str(rec.get("Feed type") or "")
+            p, item = rec.get("Price / kg"), rec.get("Item")
+            if p is None:                    # _records turns NaN into None
+                errs.append(f"feed type {name!r} has no price")
+                continue
+            if not _math.isfinite(float(p)) or float(p) < 0:
+                errs.append(f"feed type {name!r}: the price must be a number "
+                            f"of at least 0 (got {p!r})")
+                continue
+            feed_prices[name] = {"item": "" if item is None
+                                 else str(item).strip(),
+                                 "price_per_kg": float(p)}
+        if errs:
+            for x in errs:
+                st.error(x)
+        else:
+            try:
+                _costs.save_costs(str(CONFIG_DIR), {
+                    "schema": _costs.SCHEMA, **scal,
+                    "feed_prices": feed_prices})
+            except (ValueError, OSError) as e:
+                st.error(f"Costs not saved — {type(e).__name__}: {e}")
+            else:
+                st.success(
+                    "Saved costs — no forecast or engine run is invalidated. "
+                    "The Run page shows them from the next run. On the Ideal "
+                    "page a step-2 search ranked on **Profit** is marked out "
+                    "of date (its ranking used the old costs); any other "
+                    "search (step 3 never ranks by profit) keeps its pick "
+                    "and notes that its cost columns used the old costs."
+                    + (f" Dropped the price for {', '.join(orphans)} (no "
+                       f"longer a feed type)." if orphans else ""))
+
+
 def _config_editor():
     st.header("⚙️ Configure — models & control")
     st.caption("Build the forecast config here — saved to `config/` + `scenario/` "
@@ -5013,6 +5241,8 @@ def _config_editor():
         _edit_limits()
     with tabs[5]:
         _edit_targets_prices()
+        st.divider()
+        _edit_costs()
 
 
 # ============================================================
@@ -5316,7 +5546,13 @@ def _ideal():
     _ctl_q.min_harvest_weight_g = float(min_wt)
     ctx_q = dict(ctx, control=_ctl_q)          # the scan's own min weight
     if st.button("🎯 Find the ideal rhythm", type="primary",
-                 disabled=not (cads and sizes_k)):
+                 disabled=not (cads and sizes_k),
+                 help="Measures every rhythm in the grid with the quick "
+                      "tankless model and ranks them by revenue on the "
+                      "economics bands. There is no Profit here: this model "
+                      "has no feed or egg quantities to price. Profit is in "
+                      "step 2's and step 3's optimizers, from the costs in "
+                      "Configure → Targets & prices → Costs."):
         cap_kg = float(cap_t) * 1000.0
         grid = dict(cadences=sorted(cads), sizes=[k * 1000 for k in sorted(sizes_k)])
         with st.spinner(f"Measuring {len(cads) * len(sizes_k)} rhythms at "
@@ -5435,6 +5671,12 @@ def _ideal_quick_results(_im, res, key):
   bands say, a slower, bigger-fish rhythm may be the better call — that is
   your judgement, not the model's.
 - **Hatchery cost is not included** — fewer smolt is cheaper than shown.
+  The **Profit** objective of step 2's optimizer does include it (eggs, feed
+  and fixed cost, from Configure → Targets & prices → Costs). Step 3's
+  optimizer shows cost and profit for every plan but does not rank by
+  profit: over its run window, batches stocked late are charged their eggs
+  and feed while their fish are sold after the run ends, which would favour
+  smaller future batches.
 - **This quick model has no tanks.** It runs well above the real engine on
   the same rhythm — measured 2026-09-10 with your promoted controller, about
   16% high on tonnage and 19% on revenue (the engine grows smaller fish under
@@ -5639,7 +5881,10 @@ def _ideal_reference(ctx, today, cap_t):
                           "min_harvest_weight_g", "max_feed_per_day_kg"))
                 and not (r_dens or r_sys or r_ctl),
             tank_limits=_ideal_tank_limit_text(r_dens, r_sys, r_ctl),
-            rhythm=st.session_state["ideal_ref_from"])
+            rhythm=st.session_state["ideal_ref_from"],
+            # The price bands its revenue was priced with: a later edit is
+            # flagged under the Cost / Profit metrics (revenue is as run).
+            econ_sig=_ideal_pricing()["econ_sig"])
 
     r = st.session_state.get("_ideal_ref")
     if not r:
@@ -5662,6 +5907,7 @@ def _ideal_reference(ctx, today, cap_t):
     m[4].metric("Peak vs cap", f"{y.peak_pct_of_cap:.0%}")
     m[5].metric("OG tanks used", f"{y.og_tanks_mean:.0f} / {y.og_tanks_total}",
                 help=f"Mean over the year; the busiest week used {y.og_tanks_max}.")
+    _ideal_ref_cost_metrics(y, _ideal_pricing(), r.get("econ_sig"))
     if not ok:
         st.caption("A plan that breaks a limit is not an answer. Every limit "
                    "is hard (your ruling, 2026-09-10): its revenue prices fish "
@@ -5722,7 +5968,12 @@ def _ideal_reference(ctx, today, cap_t):
 
 # Step 2's optimizer: objective keys (forecast.ideal_optimize.OBJECTIVES) in
 # radio order, and each per-limit breach count's table column.
-_IDEAL_OPT_OBJECTIVES = ("revenue", "hog", "gain")
+# "profit" is ALWAYS an option in step 2, costs or no costs: a remembered
+# "profit" in the page's kept state must stay a valid option (Streamlit
+# raises on one that is not). Without complete costs its Find button is
+# disabled instead. Step 3 lists transition_optimize.TR_OBJECTIVES (no
+# profit) and resets a remembered one (_ideal_tr_obj_reset).
+_IDEAL_OPT_OBJECTIVES = ("revenue", "hog", "gain", "profit")
 _IDEAL_BREACH_COLS = (("density", "Tank-weeks over density"),
                       ("sys_biomass", "System-weeks over biomass limit"),
                       ("sys_feed", "System-weeks over feed limit"),
@@ -5731,6 +5982,241 @@ _IDEAL_BREACH_COLS = (("density", "Tank-weeks over density"),
                       ("zero", "Weeks with no harvest"),
                       ("over_cap", "Weeks over the biomass cap"))
 _IDEAL_OPT_SECS_PER_RUN = 20
+
+
+def _ideal_pricing():
+    """The pricing behind the Ideal page's Profit objective and cost figures,
+    read from the SAVED files (three small reads, every call):
+
+      {"costs": the validated config/costs.yaml, or None,
+       "problem": why Profit is unavailable, or None,
+       "econ_sig": the identity of economics.yaml (the price bands),
+       "costs_sig": the identity of costs.yaml,
+       "sig": both}
+
+    Never raises: an unreadable file becomes the named problem. `costs`
+    stays set when only a feed price is missing, so the other objectives
+    still show costs (the unpriced feed named); Profit needs `problem` None.
+    _config_fingerprint leaves the pricing files out (they change no run),
+    so the optimizers add them to their staleness signatures themselves:
+    `econ_sig` always (revenue, and so every objective's money, is priced
+    with the bands), `costs_sig` only for step 2's Profit search (another
+    objective's pick does not depend on the costs, and step 3 never ranks
+    by profit, so its signature never carries them)."""
+    from forecast import costs as _costs
+    cfg = _ROOT / "config"
+    try:
+        econ_sig = _costs.economics_sig(cfg)
+        c_sig = _costs.costs_sig(cfg)
+    except OSError as e:
+        econ_sig = c_sig = f"unreadable: {type(e).__name__}"
+    out = {"costs": None, "problem": None, "sig": econ_sig + "|" + c_sig,
+           "econ_sig": econ_sig, "costs_sig": c_sig}
+    try:
+        c = _costs.load_costs(cfg)
+    except Exception as e:  # noqa: BLE001 — named, not hidden
+        out["problem"] = (f"config/costs.yaml could not be read — "
+                          f"{type(e).__name__}: {e}")
+        return out
+    if c is None:
+        out["problem"] = ("costs are not set — enter them in Configure → "
+                          "Targets & prices → Costs")
+        return out
+    out["costs"] = c
+    from forecast import ideal_optimize as _io
+    try:
+        names = _io.feed_type_names(_ROOT)
+    except Exception as e:  # noqa: BLE001 — named, not hidden
+        out["problem"] = (f"config/biology.yaml could not be read to check "
+                          f"the feed prices — {type(e).__name__}: {e}")
+        return out
+    # The optimizers' own refusal, so the page's Profit gate and theirs are
+    # one rule (a missing feed price, in their words).
+    try:
+        _io.check_costs(c, "profit", names)
+    except ValueError as e:
+        out["problem"] = str(e)
+    return out
+
+
+def _ideal_money(v):
+    """'$12.3M' / '−$0.4M' — a dollar amount in millions."""
+    return f"{'−' if v < 0 else ''}${abs(v) / 1e6:,.1f}M"
+
+
+def _ideal_cost_line(cell, per="/yr", per_kg=True, withhold_unpriced=False):
+    """One line under an optimizer winner (a Cell or TrCell): its cash-view
+    cost and the parts, then profit and — with `per_kg`, for step 2's
+    steady year, where stocking and harvest balance — the cost per kg HOG.
+    Step 3 passes per_kg=False: over a run window the spend includes fish
+    not yet sold, so a per-kg figure would read as a unit cost it is not.
+    Step 3 also passes withhold_unpriced=True: its profit is display only,
+    so when feed with no price was left out of the cost (understated) the
+    profit (overstated) is not shown — as the Run page withholds it.
+    None when no costs were applied (costs not set); the reason when
+    pricing failed — never a cost of 0."""
+    from forecast import costs as _costs
+    if not getattr(cell, "costs_applied", False):
+        err = getattr(cell, "cost_error", None)
+        return f"Cost not priced — {err}" if err else None
+    p, m = cell.cost_parts, _ideal_money
+    unpriced = getattr(cell, "unpriced_feed_kg", 0.0) > 0
+    kg_txt = ""
+    if per_kg:
+        v = _costs.cost_per_kg_hog(cell.cost, cell.hog_t * 1000.0)
+        kg_txt = (f" · ${v:,.2f}/kg HOG" if v is not None
+                  else " · no harvest, so no cost per kg HOG")
+    prof_txt = ("profit not shown (the cost leaves out feed with no price, "
+                "so it would be overstated)"
+                if withhold_unpriced and unpriced
+                else f"profit {m(cell.profit)}{per}")
+    txt = (f"Cost {m(cell.cost)}{per} = feed {m(p['feed'])} + shipping "
+           f"{m(p['shipping'])} + oxygen {m(p['oxygen'])} + chemicals "
+           f"{m(p['chemicals'])} + eggs {m(p['eggs'])} + fixed "
+           f"{m(p['fixed'])} → {prof_txt}" + kg_txt
+           + " (cash view: the spend in those weeks against their sales; "
+             "revenue on the Ideal pricing).")
+    if unpriced:
+        txt += (f" ⚠ {cell.unpriced_feed_kg:,.0f} kg of feed has no price ("
+                + ", ".join(p.get("unpriced_types") or ())
+                + ") and is left out of the feed cost.")
+    return txt
+
+
+def _ideal_unpriced_warning(cells, profit_withheld=False):
+    """A warning when priced cells left feed out of their cost (a feed type
+    with no price) — the objective is not Profit, which refuses that.
+    `profit_withheld` (step 3, where profit is display only): those plans
+    show no profit, and the warning says so."""
+    types = sorted({t for c in cells
+                    if getattr(c, "unpriced_feed_kg", 0.0) > 0
+                    for t in (c.cost_parts.get("unpriced_types") or ())})
+    if not types:
+        return
+    if profit_withheld:
+        st.warning(f"Cost leaves out feed with no price ({', '.join(types)}), "
+                   f"so it is understated, and Profit is not shown for those "
+                   f"plans (it would be overstated) — add its price in "
+                   f"Configure → Targets & prices → Costs.")
+    else:
+        st.warning(f"Cost and Profit leave out feed with no price "
+                   f"({', '.join(types)}) — add its price in Configure → "
+                   f"Targets & prices → Costs.")
+
+
+def _ideal_tr_end_stock_t(reads):
+    """The stock (t, OG + FW) still in the water when a transition run ends:
+    its last read year's standing_end_kg — or None when the reads do not
+    carry it (a result kept from before it was read)."""
+    if not reads:
+        return None
+    v = getattr(reads[max(reads)], "standing_end_kg", None)
+    return None if v is None else float(v) / 1000.0
+
+
+def _ideal_tr_cash_note(today_reads, plan_reads, plan="this plan"):
+    """Step 3's Profit caveat, in one sentence: Profit there is cash over the
+    run window, so fish still in the water when the run ends carry their
+    eggs and feed but none of their sales, which favours smaller future
+    batches — with each arm's stock left at the end when the reads carry it
+    (the cash view is the operator's ruling; nothing is revalued here)."""
+    a = _ideal_tr_end_stock_t(today_reads)
+    b = _ideal_tr_end_stock_t(plan_reads)
+    stock = (f" ({plan} ends the run with {b:,.0f} t still in the water, "
+             f"today's plan with {a:,.0f} t)"
+             if a is not None and b is not None else "")
+    return (" **Cash over the run window:** fish still in the water when the "
+            "run ends carry their eggs and feed but none of their sales"
+            + stock + ", so Profit favours smaller future batches — weigh it "
+            "against the stock left at the end.")
+
+
+def _ideal_ref_cost_metrics(y, pricing, econ_sig=None):
+    """Step 2's Cost / Profit metrics for the steady year read `y`, priced
+    NOW with the saved costs (forecast.costs.year_cost on the run's cost
+    drivers) — a cost edit shows here without a re-run. Revenue is as the
+    sheet RAN: `econ_sig` (economics.yaml's identity then) differing from
+    today's is warned, since Revenue / yr and Profit / yr then use the old
+    price bands. Says why when there is nothing to price."""
+    from forecast import costs as _costs
+    if econ_sig is not None and econ_sig != pricing["econ_sig"]:
+        st.warning("Your price bands (economics.yaml) changed since this "
+                   "reference sheet ran — Revenue / yr and Profit / yr use "
+                   "the bands as they were then. Press **Run the reference "
+                   "sheet** again to re-price.")
+    costs = pricing["costs"]
+    if costs is None:
+        st.caption(f"Cost and profit not shown — {pricing['problem']}.")
+        return
+    try:
+        cp = _costs.year_cost(y, costs)
+    except ValueError as e:
+        st.caption(f"Cost and profit not shown — {e}. Press **Run the "
+                   f"reference sheet** again to read the cost drivers.")
+        return
+    per_kg = _costs.cost_per_kg_hog(cp["total"], y.hog_t * 1000.0)
+    m = st.columns(3)
+    m[0].metric("Cost / yr", _ideal_money(cp["total"]),
+                help="Cash-view spend in this steady year: feed (each model "
+                     "feed type at its price) + shipping, oxygen and "
+                     "chemicals (per kg of ALL feed) + eggs stocked + the "
+                     "fixed monthly cost for the calendar days of the year's "
+                     "weeks (52 weeks = 364 days) — from Configure → Targets & "
+                     "prices → Costs, priced now, so a cost edit shows here "
+                     "without a re-run.")
+    m[1].metric("Profit / yr", _ideal_money(y.revenue - cp["total"]),
+                help="Revenue / yr as this sheet ran (the Ideal pricing, on "
+                     "the price bands of that moment) minus Cost / yr priced "
+                     "now from your saved costs. Cash view: the year's spend "
+                     "against the year's sales.")
+    m[2].metric("Cost per kg HOG",
+                f"${per_kg:,.2f}" if per_kg is not None else "—",
+                help="Cost / yr ÷ the HOG kg harvested that year. In a "
+                     "steady year stocking and harvest balance, so this is "
+                     "close to the cost of producing a kg; — when nothing "
+                     "was harvested.")
+    st.caption(f"Cost = feed {_ideal_money(cp['feed'])} + shipping "
+               f"{_ideal_money(cp['shipping'])} + oxygen "
+               f"{_ideal_money(cp['oxygen'])} + chemicals "
+               f"{_ideal_money(cp['chemicals'])} + eggs "
+               f"{_ideal_money(cp['eggs'])} ({cp['eggs_n']:,.0f} eggs) + "
+               f"fixed {_ideal_money(cp['fixed'])}.")
+    if cp["unpriced_kg"] > 0:
+        st.warning(f"{cp['unpriced_kg']:,.0f} kg of feed has no price ("
+                   f"{', '.join(cp['unpriced_types'])}) and is left out of "
+                   f"the cost — add its price in Configure → Targets & "
+                   f"prices → Costs.")
+
+
+def _ideal_tr_check_cost_text(a_years, b_years, both):
+    """Step 3's check caption, the cost part: each arm's cash-view cost and
+    profit over the years both runs cover (ideal_optimize.cost_fields, the
+    optimizer's own), priced NOW with the saved costs — or why not."""
+    from forecast import ideal_optimize as _io
+    pricing = _ideal_pricing()
+    if pricing["costs"] is None:
+        return f" Cost and profit not shown — {pricing['problem']}."
+    got = {}
+    for tag, yrs in (("a", a_years), ("b", b_years)):
+        reads = [yrs[y] for y in both]
+        got[tag] = _io.cost_fields(reads, sum(r.revenue for r in reads),
+                                   pricing["costs"])
+    bad = [g.get("cost_error") for g in got.values()
+           if not g.get("costs_applied")]
+    if bad:
+        return (f" Cost and profit not shown — {bad[0]}. Press **Check both "
+                f"schedules** again to read the cost drivers.")
+    m = _ideal_money
+    txt = (f" Cost over {both[0]}–{both[-1]} (cash view, your Configure "
+           f"costs): today's plan {m(got['a']['cost'])}, proposal "
+           f"{m(got['b']['cost'])}; profit {m(got['a']['profit'])} and "
+           f"{m(got['b']['profit'])}.")
+    types = sorted({t for g in got.values()
+                    for t in g["cost_parts"]["unpriced_types"]})
+    if types:
+        txt += (f" ⚠ Feed with no price ({', '.join(types)}) is left out of "
+                f"the cost.")
+    return txt + _ideal_tr_cash_note(a_years, b_years, plan="the proposal")
 
 
 def _ideal_parse_cadences(txt):
@@ -5832,6 +6318,12 @@ def _ideal_opt_value_text(cell, objective):
         return f"HOG {cell.hog_t:,.0f} t"
     if objective == "gain":
         return f"biomass gain {cell.gain_t:,.0f} t"
+    if objective == "profit":
+        # Never a profit of 0 for a cell nothing was priced on.
+        if not getattr(cell, "costs_applied", False):
+            return "profit — (not priced)"
+        p = cell.profit
+        return f"profit {'−' if p < 0 else ''}${abs(p) / 1e6:,.1f}M"
     return f"revenue ${cell.revenue / 1e6:,.1f}M"
 
 
@@ -5855,11 +6347,17 @@ def _ideal_breach_text(cell):
 
 
 def _ideal_opt_diff_text(cell, ref, objective):
-    """'+$33.7M' / '+1,709 t' — `cell` minus `ref` on the objective."""
+    """'+$33.7M' / '+1,709 t' — `cell` minus `ref` on the objective. For
+    profit, '—' unless BOTH were priced: never a difference against an
+    unpriced 0."""
     from forecast import ideal_optimize as _io
+    if objective == "profit" and not (getattr(cell, "costs_applied", False)
+                                      and getattr(ref, "costs_applied",
+                                                  False)):
+        return "—"
     d = (_io.objective_value(cell, objective)
          - _io.objective_value(ref, objective))
-    if objective == "revenue":
+    if objective in ("revenue", "profit"):
         return f"{'+' if d >= 0 else '−'}${abs(d) / 1e6:,.1f}M"
     return f"{d:+,.0f} t"
 
@@ -5919,7 +6417,10 @@ def _ideal_opt_stability(res, stale, tr_seeds=None):
                    + " and × ".join(f"{n.batch_size:,}" for n in ns)
                    + f" at {b.cap_t:,.0f} t"
                    + (" are" if len(ns) > 1 else " is")
-                   + " also within every limit.")
+                   + " also within every limit — a check at "
+                     f"±{_io.NEIGHBOUR_STEP:,} fish per batch, same cadence "
+                     "and cap; not a test against growth-model error or a "
+                     "different cadence or cap.")
     elif ok is False:
         bad = [n for n in res.stability[0][1]
                if not (n.error is None and n.within_limits)]
@@ -5987,15 +6488,23 @@ def _ideal_opt_rows(cells, objective):
     """The optimizer table: within-limits first by the objective, then by
     total breaches (forecast.ideal_optimize.table_order)."""
     from forecast import ideal_optimize as _io
-    errs = any(c.error for c in cells)
+    errs = any(c.error and not _io.is_cost_error(c) for c in cells)
+    unpriced_any = any(_io.is_cost_error(c) for c in cells)
     rows = []
     for c in _io.table_order(cells, objective):
-        ran = c.error is None
+        # A cell Profit could not price RAN: its numbers and its limits
+        # verdict are real, it is just not counted
+        # (ideal_optimize.require_price) — its pricing has its own column.
+        unpriced = _io.is_cost_error(c)
+        ran = c.error is None or unpriced
+        priced = ran and getattr(c, "costs_applied", False)
         row = {"Rhythm": c.rhythm, "Cap (t)": round(c.cap_t),
                "Fish / week": round(c.fish_per_week),
-               "Within every limit": ("✓" if c.within_limits else
-                                      "✗" if ran else "engine error"),
+               "Within every limit": (("✓" if _io.ran_within_limits(c)
+                                       else "✗") if ran else "engine error"),
                "Revenue $M/yr": round(c.revenue / 1e6, 1) if ran else None,
+               "Cost $M/yr": round(c.cost / 1e6, 1) if priced else None,
+               "Profit $M/yr": round(c.profit / 1e6, 1) if priced else None,
                "HOG t/yr": round(c.hog_t) if ran else None,
                "Biomass gain t/yr": round(c.gain_t) if ran else None,
                "Avg kg (gross)": round(c.avg_gross_kg, 2) if ran else None,
@@ -6008,10 +6517,22 @@ def _ideal_opt_rows(cells, objective):
         # conservation): a ✗ with 0 breaches must still say what failed.
         row["Other failed checks"] = (", ".join(_io.other_failed_checks(c))
                                       if ran else None)
+        if unpriced_any:
+            row["Priced for Profit"] = _ideal_priced_text(c)
         if errs:
-            row["Error"] = c.error or ""
+            row["Error"] = "" if unpriced else (c.error or "")
         rows.append(row)
     return rows
+
+
+def _ideal_priced_text(cell):
+    """A table's "Priced for Profit" cell: '✓', '✗ <why>' for a cell
+    ideal_optimize.require_price could not price, None for one that did not
+    run (its engine error is in the Error column)."""
+    from forecast import ideal_optimize as _io
+    if _io.is_cost_error(cell):
+        return "✗ " + cell.error[len(_io.COST_ERROR) + 1:].strip()
+    return "✓" if cell.error is None else None
 
 
 def _ideal_optimizer(ctx, ov, r_dens, r_sys, m_key, m_ov, cap_slider_t):
@@ -6055,7 +6576,7 @@ def _ideal_optimizer(ctx, ov, r_dens, r_sys, m_key, m_ov, cap_slider_t):
             "sheet); the best is the one that scores highest on your "
             "objective among those.")
         labels = {"revenue": "Revenue", "hog": "Harvest tonnage (HOG)",
-                  "gain": "Biomass gain"}
+                  "gain": "Biomass gain", "profit": "Profit"}
         obj = st.radio("Objective", list(_IDEAL_OPT_OBJECTIVES),
                        format_func=labels.get, horizontal=True,
                        key="ideal_opt_obj",
@@ -6063,25 +6584,46 @@ def _ideal_optimizer(ctx, ov, r_dens, r_sys, m_key, m_ov, cap_slider_t):
                             "HOG is harvested head-on-gutted tonnes; biomass "
                             "gain is live weight harvested plus the change in "
                             "standing fish over the year (dead fish are not "
-                            "gain). In a steady year gain tracks tonnage.",
+                            "gain). In a steady year gain tracks tonnage. "
+                            "Profit is revenue minus that year's costs from "
+                            "Configure → Targets & prices → Costs (cash view: "
+                            "feed, shipping, oxygen, chemicals, eggs and the "
+                            "fixed monthly cost); it needs every cost set.",
                        **_ideal_default("ideal_opt_obj", 0, "index"))
+        # Read once per render. The options above never depend on it.
+        pricing = _ideal_pricing()
+        blocked = obj == "profit" and pricing["problem"] is not None
+        if blocked:
+            st.warning(f"**Profit is unavailable** — {pricing['problem']}. "
+                       f"Pick another objective, or save the costs first.")
         c1, c2, c3, c4 = st.columns([3, 2, 2, 2])
         cads_txt = c1.text_input(
             "Input frequencies (days between stockings, comma list)",
             key="ideal_opt_cads",
+            help="Days between stockings to try, a comma list of whole days "
+                 "from 7 to 140, e.g. 42, 49, 56. Every one is run with every "
+                 "batch size and cap below.",
             **_ideal_default("ideal_opt_cads", "42, 49, 56, 63"))
         # The same ranges as step 2's rhythm inputs, which the winner is
         # loaded into: a value outside a number_input's range would raise.
         smin = c2.number_input("Batch size from (fish)", min_value=50_000,
                                max_value=600_000, step=10_000,
                                key="ideal_opt_smin",
+                               help="The smallest batch to try, in fish to OG "
+                                    "per stocking (50,000–600,000, step 2's "
+                                    "range).",
                                **_ideal_default("ideal_opt_smin", 180_000))
         smax = c3.number_input("to (fish)", min_value=50_000,
                                max_value=600_000, step=10_000,
                                key="ideal_opt_smax",
+                               help="The largest batch to try, in fish to OG "
+                                    "per stocking (at least the smallest).",
                                **_ideal_default("ideal_opt_smax", 300_000))
         sstep = c4.number_input("in steps of (fish)", min_value=1_000,
                                 step=5_000, key="ideal_opt_sstep",
+                                help="The gap between batch sizes tried, in "
+                                     "fish: 180,000 to 300,000 in steps of "
+                                     "20,000 is 7 sizes.",
                                 **_ideal_default("ideal_opt_sstep", 20_000))
         # The caps start from step 1's slider (the operator's ceiling) and
         # its next three 200 t steps down; when the slider moves they are
@@ -6135,12 +6677,24 @@ def _ideal_optimizer(ctx, ov, r_dens, r_sys, m_key, m_ov, cap_slider_t):
                 f"~{_IDEAL_OPT_SECS_PER_RUN} s per engine run.")
         # The caps searched are the parsed list, never step 2's cap box: a
         # winner loaded into that box must not make this result stale.
+        # The price bands are part of every answer (revenue, and so every
+        # objective's money, is priced with them); the costs only of a
+        # Profit search — another objective's pick does not depend on them,
+        # and its Cost / Profit columns say when the costs changed since.
         sig = _hl.md5(_json.dumps(
             [grid, obj, g_caps, run_ov, r_dens, r_sys, m_key, m_ov,
-             _config_fingerprint(), ctx["template"].batch_id],
+             _config_fingerprint(), ctx["template"].batch_id,
+             pricing["econ_sig"],
+             pricing["costs_sig"] if obj == "profit" else None],
             sort_keys=True, default=str).encode()).hexdigest()
         if st.button("Find the best rhythm", key="ideal_opt_run",
-                     type="primary", disabled=not grid) and grid:
+                     type="primary", disabled=not grid or blocked,
+                     help="Runs every rhythm at every cap to try in the real "
+                          "engine (then the stability check) and picks the "
+                          "best within every limit on your objective. Greyed "
+                          "out while the grid above is refused, or while "
+                          "Profit is picked without complete costs."
+                     ) and grid and not blocked:
             bar = st.progress(0.0, text=f"0 / {len(grid)} rhythms")
 
             def _tick(done, total, cell):
@@ -6153,14 +6707,16 @@ def _ideal_optimizer(ctx, ov, r_dens, r_sys, m_key, m_ov, cap_slider_t):
                     progress=_tick, template=ctx["template"], overrides=run_ov,
                     method=m_key, method_overrides=m_ov,
                     density_overrides=r_dens or None,
-                    system_overrides=r_sys or None, control=ctx["control"])
+                    system_overrides=r_sys or None, control=ctx["control"],
+                    costs=pricing["costs"])
             except (ValueError, OSError) as e:
                 st.error(f"The optimizer could not run — {type(e).__name__}: {e}")
                 res = None
             bar.empty()
             if res is not None:
-                st.session_state["_ideal_opt"] = dict(sig=sig, res=res,
-                                                      caps_kg=tuple(g_caps))
+                st.session_state["_ideal_opt"] = dict(
+                    sig=sig, res=res, caps_kg=tuple(g_caps),
+                    costs_sig=pricing["costs_sig"])
         o = st.session_state.get("_ideal_opt")
         if not o:
             return
@@ -6174,18 +6730,30 @@ def _ideal_optimizer(ctx, ov, r_dens, r_sys, m_key, m_ov, cap_slider_t):
         stale = o["sig"] != sig
         if stale:
             st.warning("Showing the last optimizer run — the grid, caps, "
-                       "objective, limits, engine or config have changed "
-                       "since. Press **Find the best rhythm** to recompute.")
+                       "objective, limits, price bands (economics.yaml), "
+                       "engine or config have changed since (for Profit, the "
+                       "costs too). Press **Find the best rhythm** to "
+                       "recompute.")
         caps_ran = ", ".join(f"{p / 1000:,.0f}"
                              for p in o.get("caps_kg", ())) + " t"
         res = o["res"]
+        _ideal_costs_changed_note(o, res, stale, pricing, "Find the best rhythm")
         if res.note:
             st.warning(res.note)
-        errs = [c for c in res.cells if c.error]
+        errs = [c for c in res.cells
+                if c.error and not _io.is_cost_error(c)]
         if errs:
             st.error(f"**The engine failed on {len(errs)} of {len(res.cells)} "
                      f"rhythm(s)** — they are not counted as within the limits: "
                      + "; ".join(f"{c.label}: {c.error}" for c in errs[:5]))
+        unpriced = [c for c in res.cells if _io.is_cost_error(c)]
+        if unpriced:
+            st.error(f"**{len(unpriced)} of {len(res.cells)} rhythm(s) could "
+                     f"not be priced** — with the Profit objective they are "
+                     f"not counted: "
+                     + "; ".join(f"{c.label}: {c.error}"
+                                 for c in unpriced[:5]))
+        _ideal_unpriced_warning(res.cells)
         b = res.best
         if b is not None:
             st.success(
@@ -6195,19 +6763,37 @@ def _ideal_optimizer(ctx, ov, r_dens, r_sys, m_key, m_ov, cap_slider_t):
                 f"{_ideal_opt_value_text(b, res.objective)}; revenue "
                 f"${b.revenue / 1e6:,.1f}M, HOG {b.hog_t:,.0f} t, avg fish "
                 f"{b.avg_gross_kg:.2f} kg (steady year {b.year}).")
+            _line = _ideal_cost_line(b)
+            if _line:
+                st.caption(_line)
             _ideal_opt_cost(res)
             _ideal_opt_stability(res, stale, _ideal_tr_seeds(ctx["control"]))
         else:
             c = res.closest
-            st.error(
-                f"**No rhythm in this grid is within every limit at any cap "
-                f"tried ({caps_ran}).** "
-                + (f"Closest: {c.label} ({c.fish_per_week:,.0f} fish/week) "
-                   f"with {c.total:,} breaches — {_ideal_breach_text(c)}. "
-                   if c is not None else "No rhythm ran at all. ")
-                + "A plan that breaks a limit is not an answer: try smaller "
-                  "batches, longer gaps between stockings or lower caps, or "
-                  "test higher limits in the tables above.")
+            if c is None and unpriced:
+                # Every rhythm that ran is unpriced: they RAN (and may be
+                # within the limits) — Profit just cannot rank them.
+                st.error(f"**Profit cannot rank this grid** — "
+                         f"{len(unpriced)} of {len(res.cells)} rhythm(s) ran "
+                         f"but could not be priced (the reason is above), "
+                         f"and no other rhythm ran. Price every feed type in "
+                         f"Configure → Targets & prices → Costs, or pick "
+                         f"another objective.")
+            else:
+                st.error(
+                    (f"**No rhythm that could be priced is within every "
+                     f"limit at any cap tried ({caps_ran}).** "
+                     f"{len(unpriced)} rhythm(s) could not be priced and are "
+                     f"not counted (above). " if unpriced else
+                     f"**No rhythm in this grid is within every limit at any "
+                     f"cap tried ({caps_ran}).** ")
+                    + (f"Closest: {c.label} ({c.fish_per_week:,.0f} "
+                       f"fish/week) with {c.total:,} breaches — "
+                       f"{_ideal_breach_text(c)}. "
+                       if c is not None else "No rhythm ran at all. ")
+                    + "A plan that breaks a limit is not an answer: try "
+                      "smaller batches, longer gaps between stockings or "
+                      "lower caps, or test higher limits in the tables above.")
             _ideal_opt_cost(res)
         st.dataframe(_pd.DataFrame(_ideal_opt_rows(res.cells, res.objective)),
                      hide_index=True, width="stretch")
@@ -6217,7 +6803,31 @@ def _ideal_optimizer(ctx, ov, r_dens, r_sys, m_key, m_ov, cap_slider_t):
             "at. Breach columns count weeks (tank-weeks, system-weeks) over "
             "each limit that year; ✓ needs every one at zero and clean audits. "
             "Fish / week = batch size × 7 ÷ days between stockings — the load "
-            "the limits respond to.")
+            "the limits respond to. **Cost / Profit $M/yr** — that year's "
+            "cash-view spend (Configure → Targets & prices → Costs: feed by "
+            "model feed type, shipping, oxygen and chemicals per kg of all "
+            "feed, eggs stocked, the fixed monthly cost) and revenue minus "
+            "it; blank when costs are not set. Revenue here is the Ideal "
+            "pricing (the economics bands on a normal size spread, always "
+            "HOG, no monthly overrides), so it can differ from the Run page's "
+            "on the same harvest.")
+
+
+def _ideal_costs_changed_note(o, res, stale, pricing, button):
+    """Under a current optimizer result ranked on anything but Profit (in
+    step 3, every result): a note when the saved costs changed since the
+    search. Its pick does not depend on them (so it is not stale and its
+    Use buttons stay live), but its Cost / Profit figures were priced with
+    the costs as they were. Step 2's Profit search carries the costs in its
+    signature instead (stale)."""
+    if stale or res.objective == "profit":
+        return
+    was = o.get("costs_sig")
+    if was is not None and was != pricing["costs_sig"]:
+        st.caption(f"Your costs have changed since this search: its Cost / "
+                   f"Profit figures use the costs as they were then (blank "
+                   f"where none were set). The pick does not depend on them "
+                   f"— press **{button}** to re-price.")
 
 
 def _ideal_parse_sizes(txt):
@@ -6473,7 +7083,10 @@ def _ideal_tr_opt_stability(res, stale, tr_seeds=None):
                                                   for n in ns)
                    + f" fish per future batch at {b.cap_t:,.0f} t"
                    + (" are" if len(ns) > 1 else " is")
-                   + " also within the limits.")
+                   + " also within the limits — a check at "
+                     f"±{_io.NEIGHBOUR_STEP:,} fish per future batch, same "
+                     "cap; not a test against growth-model error or a "
+                     "different cap.")
     elif ok is False:
         bad = [n for n in res.stability[0][1]
                if not (n.error is None and n.within_limits)]
@@ -6517,20 +7130,57 @@ def _ideal_tr_opt_stability(res, stale, tr_seeds=None):
                   disabled=stale, help=why)
 
 
+def _ideal_tr_obj_reset(ss, objectives):
+    """Step 3's optimizer ranks only by `objectives`
+    (transition_optimize.TR_OBJECTIVES — no Profit, the operator's ruling of
+    2026-09-11). Called before its radio draws: a remembered objective that
+    is not one of them ("profit" from before the ruling, in the widget key
+    or its _keep_ shadow) becomes "revenue" — Streamlit raises on a radio
+    value outside its options — and a kept search ranked on one is dropped
+    (its pick was ranked by profit). -> a one-time note saying so, or None
+    (nothing to reset: the next render has nothing to say)."""
+    key = "ideal_tr_opt_obj"
+    reset = False
+    for k in (key, "_keep_" + key):
+        if k in ss and ss[k] not in objectives:
+            ss[k] = "revenue"
+            reset = True
+    o = ss.get("_ideal_tr_opt")
+    dropped = bool(o) and getattr(o.get("res"), "objective",
+                                  None) not in objectives
+    if dropped:
+        ss.pop("_ideal_tr_opt", None)
+    if not (reset or dropped):
+        return None
+    return ("Step 3's optimizer no longer ranks by **Profit**"
+            + (", so its objective is back to **Revenue**" if reset else "")
+            + (" and the last search, which was ranked by profit, was "
+               "cleared" if dropped else "")
+            + ". Cost and profit are still shown for every plan; step 2's "
+              "optimizer ranks by profit.")
+
+
 def _ideal_tr_opt_rows(res):
     """Step 3's optimizer table: within-limits first by the objective, then
-    by how far outside (ideal_optimize.table_order)."""
+    by how far outside (ideal_optimize.table_order). Cost $M / Profit $M are
+    display only: blank for a plan that was not priced, never 0; Profit is
+    also blank for a plan whose cost left out feed with no price (it would
+    be overstated — the Run page withholds it the same way)."""
     from forecast import ideal_optimize as _io
     errs = any(c.error for c in res.cells)
     rows = []
     for c in _io.table_order(res.cells, res.objective):
         ran = c.error is None
+        priced = ran and getattr(c, "costs_applied", False)
+        profit_ok = priced and not getattr(c, "unpriced_feed_kg", 0.0) > 0
         row = {"Future batch size": c.batch_size, "Cap (t)": round(c.cap_t),
                "Batches re-sized": c.n_changed if ran else None,
                "Effect year": c.effect if ran else None,
-               "Within the limits": ("✓" if c.within_limits else
-                                     "✗" if ran else "engine error"),
+               "Within the limits": (("✓" if _io.ran_within_limits(c)
+                                      else "✗") if ran else "engine error"),
                "Revenue $M": round(c.revenue / 1e6, 1) if ran else None,
+               "Cost $M": round(c.cost / 1e6, 1) if priced else None,
+               "Profit $M": round(c.profit / 1e6, 1) if profit_ok else None,
                "HOG t": round(c.hog_t) if ran else None,
                "Biomass gain t": round(c.gain_t) if ran else None,
                "vs today's plan": (_ideal_opt_diff_text(c, res.today,
@@ -6561,7 +7211,12 @@ def _ideal_tr_optimizer(ctx, live, fs, cutoff, pr_file, tr_ov, tr_dens,
     the method and promoted knobs ▶ Run forecast uses; today's plan runs once
     beside them at the current limits. Judged by the two-window rule; Use
     hands the plan to the sizes box and the what-if cap. Nothing is written
-    to config/ or scenario/."""
+    to config/ or scenario/.
+
+    Objectives: revenue, HOG, biomass gain (transition_optimize.
+    TR_OBJECTIVES). Cost and profit are shown, never ranked on (operator,
+    2026-09-11: the run-window cash view favours smaller future batches);
+    profit ranking is step 2's."""
     import hashlib as _hl
     import json as _json
     import math as _math
@@ -6605,25 +7260,52 @@ def _ideal_tr_optimizer(ctx, live, fs, cutoff, pr_file, tr_ov, tr_dens,
                      ("ideal_tr_opt_sstep", 20_000)):
             if k not in ss:            # seeded, never value= (see the slider)
                 ss[k] = v
-        labels = {"revenue": "Revenue", "hog": "Harvest tonnage (HOG)",
-                  "gain": "Biomass gain"}
-        obj = st.radio("Objective", list(_IDEAL_OPT_OBJECTIVES),
-                       format_func=labels.get, horizontal=True,
-                       key="ideal_tr_opt_obj",
+        # Revenue / HOG / biomass gain only (operator, 2026-09-11: show
+        # profit, don't rank by it). A "profit" remembered from before is
+        # reset before the radio draws, with a one-time note.
+        _reset = _ideal_tr_obj_reset(ss, _to.TR_OBJECTIVES)
+        if _reset:
+            st.info(_reset)
+        obj = st.radio("Objective", list(_to.TR_OBJECTIVES),
+                       format_func=lambda k: _to.TR_OBJECTIVES[k][1],
+                       horizontal=True, key="ideal_tr_opt_obj",
                        help="Summed over every year of the run. Revenue "
                             "prices each fish on the economics bands; HOG is "
                             "harvested head-on-gutted tonnes; biomass gain is "
                             "live weight harvested plus the change in standing "
-                            "fish (dead fish are not gain).")
+                            "fish (dead fish are not gain). There is no "
+                            "Profit objective here (the note below says "
+                            "why); step 2's optimizer ranks by profit.")
+        st.caption(
+            "**Why step 3 does not rank by profit:** its profit is cash over "
+            "the run window. Batches stocked late in the run are charged "
+            "their eggs and feed, but their fish are sold after the run "
+            "ends, so ranking by profit would always favour smaller future "
+            "batches. Cost and profit are still shown for every plan, for "
+            "information. To rank by profit, use step 2's optimizer: in its "
+            "steady year the spend and the sales balance.")
+        # Read once per render: the price bands are part of every answer;
+        # the costs only price the Cost / Profit columns (display).
+        pricing = _ideal_pricing()
         c1, c2, c3 = st.columns(3)
         smin = c1.number_input("Future batch size from (fish)",
                                min_value=10_000, max_value=1_000_000,
-                               step=10_000, key="ideal_tr_opt_smin")
+                               step=10_000, key="ideal_tr_opt_smin",
+                               help="The smallest future batch to try, in "
+                                    "fish to OG per stocking. Each size "
+                                    "tried re-sizes every stocking after the "
+                                    "date above to that size.")
         smax = c2.number_input("to (fish)", min_value=10_000,
                                max_value=1_000_000, step=10_000,
-                               key="ideal_tr_opt_smax")
+                               key="ideal_tr_opt_smax",
+                               help="The largest future batch to try, in fish "
+                                    "to OG per stocking (at least the "
+                                    "smallest).")
         sstep = c3.number_input("in steps of (fish)", min_value=1_000,
-                                step=5_000, key="ideal_tr_opt_sstep")
+                                step=5_000, key="ideal_tr_opt_sstep",
+                                help="The gap between batch sizes tried, in "
+                                     "fish: 240,000 to 340,000 in steps of "
+                                     "20,000 is 6 sizes.")
         # The caps start from step 1's slider (the operator's ceiling) and
         # its next three 200 t steps down; re-seeded when the slider moves.
         caps_seed = ", ".join(str(slider_t - d) for d in (0, 200, 400, 600))
@@ -6671,12 +7353,22 @@ def _ideal_tr_optimizer(ctx, live, fs, cutoff, pr_file, tr_ov, tr_dens,
                 f"~{_IDEAL_TR_OPT_SECS_PER_RUN} s per engine run.")
         # The caps searched are the parsed list, never the what-if cap box:
         # a plan loaded into that box must not make this result stale.
+        # The price bands are part of every answer. The costs are not: no
+        # step-3 search ranks by profit, so a costs save leaves the pick
+        # current, and _ideal_costs_changed_note says its Cost / Profit
+        # columns used the costs as of the search.
         sig = _hl.md5(_json.dumps(
             [ss.get("_pr_key"), str(cutoff), grid, obj, run_ov, tr_dens,
-             tr_sys, m_key, m_ov, _config_fingerprint()],
+             tr_sys, m_key, m_ov, _config_fingerprint(), pricing["econ_sig"]],
             sort_keys=True, default=str).encode()).hexdigest()
         if st.button("Find the best transition", key="ideal_tr_opt_run",
-                     type="primary", disabled=not grid) and grid:
+                     type="primary", disabled=not grid,
+                     help="Runs today's plan once and every future batch size "
+                          "at every cap to try on your PR in the real engine "
+                          "(then the stability check), and picks the best "
+                          "within the two-window rule on your objective. "
+                          "Greyed out while the grid above is refused."
+                     ) and grid:
             n_first = len(grid) + 1
             bar = st.progress(0.0, text=f"0 / {n_first} runs")
 
@@ -6698,7 +7390,8 @@ def _ideal_tr_optimizer(ctx, live, fs, cutoff, pr_file, tr_ov, tr_dens,
                     progress=_tick, overrides=run_ov, method=m_key,
                     method_overrides=m_ov, density_overrides=tr_dens or None,
                     system_overrides=tr_sys or None, control=ctrl,
-                    horizon_weeks=_TR_HORIZON_WEEKS)   # the Check's horizon
+                    horizon_weeks=_TR_HORIZON_WEEKS,   # the Check's horizon
+                    costs=pricing["costs"])
             except (ValueError, RuntimeError, OSError) as e:
                 st.error(f"The transition optimizer could not run — "
                          f"{type(e).__name__}: {e}")
@@ -6707,7 +7400,8 @@ def _ideal_tr_optimizer(ctx, live, fs, cutoff, pr_file, tr_ov, tr_dens,
             bar.empty()
             if res is not None:
                 ss["_ideal_tr_opt"] = dict(sig=sig, res=res,
-                                           caps_kg=tuple(g_caps))
+                                           caps_kg=tuple(g_caps),
+                                           costs_sig=pricing["costs_sig"])
         o = ss.get("_ideal_tr_opt")
         if not o:
             return
@@ -6715,9 +7409,12 @@ def _ideal_tr_optimizer(ctx, live, fs, cutoff, pr_file, tr_ov, tr_dens,
         stale = o["sig"] != sig
         if stale:
             st.warning("Showing the last transition-optimizer run — the PR, "
-                       "cutoff, sizes, caps, objective, limits, engine or "
-                       "config have changed since. Press **Find the best "
-                       "transition** to recompute.")
+                       "cutoff, sizes, caps, objective, limits, price bands "
+                       "(economics.yaml), engine or config have changed "
+                       "since. Press **Find the best transition** to "
+                       "recompute.")
+        _ideal_costs_changed_note(o, res, stale, pricing,
+                                  "Find the best transition")
         if res.note:
             st.warning(res.note)
         errs = [c for c in res.cells if c.error]
@@ -6725,14 +7422,27 @@ def _ideal_tr_optimizer(ctx, live, fs, cutoff, pr_file, tr_ov, tr_dens,
             st.error(f"**The engine failed on {len(errs)} of {len(res.cells)} "
                      f"cell(s)** — they are not counted as within the limits: "
                      + "; ".join(f"{c.label}: {c.error}" for c in errs[:5]))
+        _ideal_unpriced_warning(
+            [*res.cells, *([res.today] if res.today is not None else [])],
+            profit_withheld=True)
         t = res.today
         span = _to.years_text(t.years)
         eff = _ideal_tr_effect_text(res)
         if eff:
             st.markdown(eff)
+        _end_t = _ideal_tr_end_stock_t(t.reads)
         st.caption(f"Today's plan (your current limits, {t.cap_t:,.0f} t) "
                    f"over {span}: revenue ${t.revenue / 1e6:,.1f}M, HOG "
-                   f"{t.hog_t:,.0f} t, biomass gain {t.gain_t:,.0f} t.")
+                   f"{t.hog_t:,.0f} t, biomass gain {t.gain_t:,.0f} t"
+                   + ((f"; cost {_ideal_money(t.cost)}, profit not shown "
+                       f"(the cost leaves out feed with no price) (cash view)"
+                       if getattr(t, "unpriced_feed_kg", 0.0) > 0 else
+                       f"; cost {_ideal_money(t.cost)}, profit "
+                       f"{_ideal_money(t.profit)} (cash view)")
+                      if getattr(t, "costs_applied", False) else "")
+                   + (f"; {_end_t:,.0f} t still in the water when the run "
+                      f"ends" if _end_t is not None else "")
+                   + ".")
         caps_ran = ", ".join(f"{p / 1000:,.0f}"
                              for p in o.get("caps_kg", ())) + " t"
         b = res.best
@@ -6743,7 +7453,10 @@ def _ideal_tr_optimizer(ctx, live, fs, cutoff, pr_file, tr_ov, tr_dens,
                    f"({_ideal_opt_diff_text(b, t, res.objective)} vs today's "
                    f"plan); revenue ${b.revenue / 1e6:,.1f}M, HOG "
                    f"{b.hog_t:,.0f} t; {b.n_changed} future batch(es) "
-                   f"re-sized, effect year {b.effect}.")
+                   f"re-sized, effect year {b.effect}."
+                   + (f" Judged at the what-if limits it ran with "
+                      f"({lim_txt}); today's plan at your current limits."
+                      if lim_txt else ""))
             if b.verdict is not None and not b.verdict.judged_years:
                 # Every year was only "no worse than today": nothing was held
                 # to zero breaches, so the rule cannot certify this plan.
@@ -6757,18 +7470,25 @@ def _ideal_tr_optimizer(ctx, live, fs, cutoff, pr_file, tr_ov, tr_dens,
                     f"earlier (or lengthen the run) before relying on it.")
             else:
                 st.success("**Best within the limits: " + win)
+            # No cost per kg HOG over a run window: its spend includes fish
+            # not yet sold (the cash note says so).
+            _line = _ideal_cost_line(b, per=f" over {span}", per_kg=False,
+                                     withhold_unpriced=True)
+            if _line:
+                st.caption(_line + (_ideal_tr_cash_note(t.reads, b.reads)
+                                    if getattr(b, "costs_applied", False)
+                                    else ""))
             _ideal_tr_opt_cost(res)
             _ideal_tr_opt_stability(res, stale, tr_seeds)
         else:
             c = res.closest
-            st.error(
-                f"**No future batch size and cap in this grid is within the "
-                f"limits (caps tried: {caps_ran}).** "
-                + (f"Closest: **{c.label}** — {_ideal_tr_fail_text(c)}. "
-                   if c is not None else "No cell ran at all. ")
-                + "A plan that breaks a limit is not an answer: try other "
-                  "sizes or lower caps, or test higher limits in the tables "
-                  "above.")
+            st.error(f"**No future batch size and cap in this grid is within "
+                     f"the limits (caps tried: {caps_ran}).** "
+                     + (f"Closest: **{c.label}** — {_ideal_tr_fail_text(c)}. "
+                        if c is not None else "No cell ran at all. ")
+                     + "A plan that breaks a limit is not an answer: try "
+                       "other sizes or lower caps, or test higher limits in "
+                       "the tables above.")
             _ideal_tr_opt_cost(res)
         st.dataframe(_pd.DataFrame(_ideal_tr_opt_rows(res)),
                      hide_index=True, width="stretch")
@@ -6779,7 +7499,13 @@ def _ideal_tr_optimizer(ctx, live, fs, cutoff, pr_file, tr_ov, tr_dens,
             "plan's effect year, where each limit's count must be no higher "
             "than today's plan's that year. **Judged years: breaches** — "
             "from the effect year on, where every count must be zero. "
-            "Batches re-sized 0 = only the cap changes.")
+            "Batches re-sized 0 = only the cap changes. **Cost $M / Profit "
+            "$M** — the cash-view spend over the same years (Configure → "
+            "Targets & prices → Costs) and revenue minus it, shown for "
+            "information: this search does not rank by profit (the note "
+            "under the objective says why). Blank when costs are not set; "
+            "Profit is also blank for a plan whose cost leaves out feed with "
+            "no price (it would be overstated).")
 
 
 def _ideal_transition(ctx, today, cap_slider_t=None):
@@ -7116,6 +7842,11 @@ def _ideal_transition(ctx, today, cap_slider_t=None):
     rev_b = sum(t["b"].years[y].revenue for y in both) / 1e6
     early_s = _to.years_text(v.early_years)
     judged_s = _to.years_text(v.judged_years)
+    # With what-if limits the proposal's counts are judged at ITS limits and
+    # today's at the current ones: "no worse than today" then compares two
+    # rulers, so every headline says which (the verdict is unchanged).
+    wi = (f" The proposal is judged at the what-if limits it ran with "
+          f"({_ran}); today's plan at your current limits." if _ran else "")
     st.markdown(f"**Within the limits?** — the two-window rule, effect year "
                 f"**{e_year}**: {e_why}.")
     if v.within_limits and not v.judged_years:
@@ -7127,26 +7858,34 @@ def _ideal_transition(ctx, today, cap_slider_t=None):
             f"limit and fails no check, but **no year of this run is judged** "
             f"— the effect year is after the run's last year, so no year was "
             f"held to zero breaches and the rule cannot certify this plan. "
-            f"Move **Change stockings after** earlier (or lengthen the run).")
+            f"Move **Change stockings after** earlier (or lengthen the run)."
+            + wi)
     elif v.within_limits:
         st.success(
-            f"Within the limits (effect year {e_year}): "
+            f"Within the {'what-if ' if _ran else ''}limits (effect year "
+            f"{e_year}): "
             + (f"in {early_s} the proposal is no worse than today's plan on "
                f"every limit, year by year; " if v.early_years else "")
             + (f"in {judged_s} it has zero breaches; " if v.judged_years
                else "")
-            + "and it fails no check.")
+            + "and it fails no check." + wi)
     else:
         st.error(f"**The proposal is not within the limits** (effect year "
                  f"{e_year}) — " + "; ".join(v.failures) + ". A plan that "
-                 "breaks a limit or fails a check is not an answer.")
-    st.dataframe(_pd.DataFrame(vrows), hide_index=True, width="stretch")
+                 "breaks a limit or fails a check is not an answer." + wi)
+    _vdf = _pd.DataFrame(vrows)
+    if _ran:
+        _vdf = _vdf.rename(columns={
+            "No worse than today?":
+                "No worse than today? (proposal at its what-if limits)"})
+    st.dataframe(_vdf, hide_index=True, width="stretch")
     st.caption(f"Early years ({early_s}): totals, and ✗ names each year the "
                f"proposal is worse than today's plan on that limit. Judged "
                f"years ({judged_s}): totals, and ✗ names each year with a "
                f"breach. First and last years partial. Revenue over "
                f"{both[0]}–{both[-1]}: today's plan ${rev_a:,.1f}M, proposal "
-               f"${rev_b:,.1f}M.")
+               f"${rev_b:,.1f}M."
+               + _ideal_tr_check_cost_text(t["a"].years, t["b"].years, both))
 
 
 # ============================================================
@@ -7304,7 +8043,11 @@ facility: which batch sits in which tank, at what count and weight. The
 forecast start date is **derived** from the PR's closing date (+1 day) — the
 config value is only a seed. Models and knobs come from Configure
 (`config/` + `scenario/` YAML): biology curves, the facility's tanks, the
-batch schedule, per-week cap overrides.
+batch schedule, per-week cap overrides. Operating costs (`config/costs.yaml`,
+Configure → Targets & prices → Costs) are **not** an engine input: they only
+price a finished plan — the CostsAndProfit sheet and the Run page's *Costs &
+profit* tab, the Ideal optimizers' Cost / Profit columns and step 2's
+**Profit** objective.
 
 **What it may never do.** The PR is *state only* — it carries no instructions.
 Nothing else is read from the workbook, and the source file is never written
@@ -8953,7 +9696,249 @@ def _parse_output_workbook(path: Path, config_dir=None) -> dict:
         "yearly": yearly,
         "plan_summary": plan_summary,
         "flow_template": flow_template,
+        "costs": _parse_costs_sheet(wb),
     }
+
+
+# ============================================================
+# Costs & profit — the Run page's 8th tab (2026-09-11, additive)
+# ============================================================
+
+def _parse_costs_sheet(wb) -> dict:
+    """The CostsAndProfit sheet of a run as data
+    (forecast.costs_report.read_costs_sheet): {"status": "absent"} when the
+    run wrote none (costs.yaml was not set), {"status": "error", "error"}
+    when it cannot be read. Never raises: a bad costs sheet must not cost
+    the rest of the results page."""
+    from forecast import costs_report as _cr
+    if _cr.COSTS_SHEET not in wb.sheetnames:
+        return {"status": "absent"}
+    try:
+        return _cr.read_costs_sheet(wb[_cr.COSTS_SHEET])
+    except Exception as e:  # noqa: BLE001 — named on the tab, not hidden
+        return {"status": "error", "error": f"{type(e).__name__}: {e}"}
+
+
+def _run_money(v, cur, per_kg=False):
+    """'$12.34M' in USD, '12.34M EUR' otherwise ('$3.21/kg' / '3.21 EUR/kg'
+    with per_kg), and '—' for a figure that does not exist — never a 0."""
+    if v is None:
+        return "—"
+    s = "−" if v < 0 else ""
+    a = abs(float(v))
+    if per_kg:
+        return f"{s}${a:,.2f}/kg" if cur == "USD" else f"{s}{a:,.2f} {cur}/kg"
+    return f"{s}${a / 1e6:,.2f}M" if cur == "USD" else f"{s}{a / 1e6:,.2f}M {cur}"
+
+
+def _run_costs_unpriced(c):
+    """(kg, [types]) of feed a parsed CostsAndProfit sheet left out of the
+    cost because its type has no price, or None when all feed was priced.
+    The types are the feed-by-type rows with kg whose price reads
+    "(unpriced)"."""
+    t = (c or {}).get("total") or {}
+    kg = t.get("unpriced_kg")
+    if isinstance(kg, bool) or not isinstance(kg, (int, float)) or kg <= 0:
+        return None
+    types = [str(x.get("feed_type")) for x in (c.get("feed_by_type") or [])
+             if not isinstance(x.get("price_per_kg"), (int, float))
+             and isinstance(x.get("feed_kg"), (int, float))
+             and x["feed_kg"] > 0]
+    return float(kg), types
+
+
+def _run_costs_caption(r):
+    """The one line under the KPI row, or None when this run has no priced
+    CostsAndProfit sheet (the tab says why). Profit is withheld when feed
+    of a type with no price was left out of the cost — it would be
+    overstated (the Ideal page refuses Profit in that case too)."""
+    c = r.get("costs") or {}
+    t = c.get("total") if c.get("status") == "ok" else None
+    if not t:
+        return None
+    cur = c.get("currency")
+    up = _run_costs_unpriced(c)
+    if up:
+        kg, types = up
+        return (f"Cost over the horizon {_run_money(t.get('total'), cur)} — "
+                f"profit not shown: {kg:,.0f} kg of feed "
+                f"({', '.join(types) or 'a type with no price'}) has no "
+                f"price, so the cost is understated · cash view · **Costs & "
+                f"profit** tab")
+    if t.get("profit") is None:
+        return (f"Cost over the horizon {_run_money(t.get('total'), cur)} — "
+                f"revenue not priced (economics.yaml), so no profit · cash "
+                f"view · **Costs & profit** tab")
+    return (f"Profit over the horizon {_run_money(t['profit'], cur)} "
+            f"(revenue {_run_money(t.get('revenue'), cur)} − cost "
+            f"{_run_money(t.get('total'), cur)}, cash view) — **Costs & "
+            f"profit** tab")
+
+
+def _run_costs_tab(r, config_dir):
+    """The Run page's "Costs & profit" tab: THIS run's CostsAndProfit sheet
+    (_parse_costs_sheet), the cash view. Says plainly when the result
+    predates costs, costs were not set, the sheet was NOT COMPUTED or could
+    not be read, and warns when config/costs.yaml has changed since the run
+    (the sheet carries its sha)."""
+    from forecast import costs as _costs
+    from forecast import costs_report as _cr
+    st.subheader("Costs & profit — cash view")
+    if "costs" not in r:
+        st.info("This result predates costs — re-run the forecast to see "
+                "them.")
+        return
+    c = r["costs"] or {}
+    status = c.get("status")
+    if status == "absent":
+        st.info("Costs not set — enter them in **Configure → Targets & "
+                "prices → Costs**, then re-run. Nothing is priced until "
+                "then.")
+        return
+    if status == "not_computed":
+        st.error(f"Costs were **not computed** for this run — "
+                 f"{c.get('error') or 'no reason recorded'}. Fix the costs in "
+                 f"Configure → Targets & prices → Costs, then re-run.")
+        return
+    if status != "ok":
+        st.error(f"The CostsAndProfit sheet could not be read — "
+                 f"{c.get('error') or f'status {status!r}'}.")
+        return
+    try:
+        now = _costs.costs_sig(config_dir)
+    except OSError as e:
+        now = None
+        st.caption(f"Could not read config/costs.yaml to check it is "
+                   f"unchanged since this run — {type(e).__name__}: {e}")
+    if now == "none":
+        st.warning("config/costs.yaml has been removed since this run — these "
+                   "figures use the costs as they were when it ran.")
+    elif now is not None and c.get("sha") and now[:8] != c["sha"]:
+        st.warning("Costs changed since this run — re-run to refresh. These "
+                   "figures use the costs as they were when it ran.")
+    # Revenue and profit are priced with economics.yaml as it was at run
+    # time: say so when the price bands changed since (the sheet carries
+    # their signature too; a sheet without it cannot be checked).
+    esha = c.get("economics_sha")
+    if esha is not None:
+        try:
+            enow = _costs.economics_sig(config_dir)
+        except OSError as e:
+            enow = None
+            st.caption(f"Could not read config/economics.yaml to check the "
+                       f"price bands are unchanged since this run — "
+                       f"{type(e).__name__}: {e}")
+        if enow is not None and enow[:8] != esha:
+            st.warning("Your price bands (config/economics.yaml) changed "
+                       "since this run — revenue and profit here use the "
+                       "bands as they were when it ran. Re-run to refresh.")
+    up = _run_costs_unpriced(c)
+    if up:
+        kg, types = up
+        st.warning(f"**{kg:,.0f} kg of feed has no price** "
+                   f"({', '.join(types) or 'a feed type with no price'}) — "
+                   f"it is left out of the feed cost, so **Total cost is "
+                   f"understated and Profit is not shown** (it would be "
+                   f"overstated). Rows with unpriced feed show no profit. "
+                   f"Price every feed type in Configure → Targets & prices "
+                   f"→ Costs, then re-run.")
+    cur = c.get("currency") or _cr.NO_CURRENCY
+    t = c.get("total") or {}
+    m = st.columns(4)
+    m[0].metric("Revenue", _run_money(t.get("revenue"), cur),
+                help="Sales over the horizon: every harvest priced on the "
+                     "economics.yaml price bands (the Analyze pricing), in "
+                     "the month of its harvest week. — when economics.yaml "
+                     "sets no price bands.")
+    m[1].metric("Total cost", _run_money(t.get("total"), cur),
+                help="Feed (each model feed type at its price) + feed "
+                     "shipping, oxygen and chemicals (per kg of ALL feed) + "
+                     "eggs stocked in the horizon + the fixed monthly cost "
+                     "(part months by day) — from config/costs.yaml as it "
+                     "was when this forecast ran. Feed of a type with no "
+                     "price is left out (the warning above names it).")
+    m[2].metric("Profit", "—" if up else _run_money(t.get("profit"), cur),
+                help="Revenue − total cost. Cash view: each month's spend "
+                     "against that month's sales, so a month with little "
+                     "harvest shows a loss. — when revenue is not priced, "
+                     "or when some feed has no price (the cost would be "
+                     "understated and the profit overstated).")
+    m[3].metric("Spend per kg HOG sold",
+                _run_money(t.get("cost_per_kg_hog"), cur, per_kg=True),
+                help="Total spend over the horizon ÷ the HOG kg harvested in "
+                     "it. Not the cost of producing the fish sold: in the "
+                     "cash view the spend includes eggs and feed for fish "
+                     "still in the tanks at the end, and leaves out what was "
+                     "spent before the forecast on fish sold early in it. — "
+                     "when nothing was harvested.")
+    st.caption("**Cash view:** each month's spend against that month's "
+               "sales — a month with little harvest shows a loss, even while "
+               "the fish in the tanks gain value. There is no cost carried "
+               "with the fish to the month they are sold.")
+    months = c.get("months") or []
+    if months:
+        _long = pd.DataFrame(
+            [{"Month": x["period"], "Series": s, "Amount": x.get(f)}
+             for x in months for s, f in (("Revenue", "revenue"),
+                                          ("Total cost", "total"))
+             if x.get(f) is not None])
+        if not _long.empty:
+            fig = px.bar(_long, x="Month", y="Amount", color="Series",
+                         barmode="group",
+                         title=f"Revenue and cost by month ({cur}, cash view)")
+            st.plotly_chart(fig, use_container_width=True)
+        _cols = (("Revenue", "revenue"), ("Total cost", "total"),
+                 ("Profit", "profit"), ("Feed", "feed"),
+                 ("Shipping", "shipping"), ("Oxygen", "oxygen"),
+                 ("Chemicals", "chemicals"), ("Eggs", "eggs"),
+                 ("Fixed", "fixed"))
+
+        def _row(x, label):
+            d = {"Period": label}
+            d.update({f"{h} ({cur})": x.get(f) for h, f in _cols})
+            if (x.get("unpriced_kg") or 0) > 0:
+                d[f"Profit ({cur})"] = None     # it would be overstated
+            d.update({"Feed (kg)": x.get("feed_kg"),
+                      "Eggs stocked": x.get("eggs_n"),
+                      "HOG harvested (kg)": x.get("hog_kg"),
+                      f"Spend per kg HOG sold ({cur})":
+                          x.get("cost_per_kg_hog"),
+                      "Unpriced feed (kg)": x.get("unpriced_kg")})
+            return d
+        st.markdown("**By month**")
+        st.dataframe(pd.DataFrame([_row(x, x["period"] + (
+            " (before report opens)" if x.get("kind") == _cr.KIND_PRE_START
+            else "")) for x in months]), hide_index=True, width="stretch")
+        _yrs = list(c.get("years") or []) + ([t] if t else [])
+        if _yrs:
+            st.markdown("**By calendar year, and the whole horizon**")
+            st.dataframe(pd.DataFrame([_row(x, str(x.get("period")))
+                                       for x in _yrs]),
+                         hide_index=True, width="stretch")
+    fb = list(c.get("feed_by_type") or [])
+    if fb:
+        def _num(v):
+            return v if isinstance(v, (int, float)) else None
+        st.markdown("**Feed by type** — priced by the MODEL feed type; the "
+                    "item is your own product name.")
+        st.dataframe(pd.DataFrame(
+            [{"Feed type": x.get("feed_type"), "Item": x.get("item") or "",
+              f"Price per kg ({cur})": _num(x.get("price_per_kg")),
+              "Feed (kg)": _num(x.get("feed_kg")),
+              f"Feed ({cur})": _num(x.get("feed")),
+              "Priced": ("✓" if _num(x.get("price_per_kg")) is not None
+                         else "✗ no price — left out of the cost")}
+             for x in fb]
+            + ([{"Feed type": "Total", "Item": "",
+                 f"Price per kg ({cur})": None,
+                 "Feed (kg)": _num(c["feed_total"].get("feed_kg")),
+                 f"Feed ({cur})": _num(c["feed_total"].get("feed")),
+                 "Priced": ""}] if c.get("feed_total") else [])),
+            hide_index=True, width="stretch")
+    st.caption((c.get("note") or "")
+               + " The Ideal page prices revenue its own way (the bands on a "
+                 "normal size spread, always HOG, no monthly overrides), so "
+                 "the two can differ on the same harvest.")
 
 
 # ============================================================
@@ -11845,6 +12830,9 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
         k4.metric("Total harvest", f"{r['harvest_kg']/1000:,.1f} t",
                   help="Sum of all harvest events across the horizon")
         k5.metric("Run time", f"{r['elapsed']:.1f}s")
+        _costs_line = _run_costs_caption(r)
+        if _costs_line:
+            st.caption(_costs_line)
     # Grading degradations qualify EVERYTHING on this page, so they are stated
     # here rather than printed: the parse runs after the stdout capture closes,
     # so a print reaches the terminal and never the operator.
@@ -11872,7 +12860,7 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
                       lambda: pd.DataFrame(r.get("biology_projection", [])))
 
     (tab_over, tab_batch, tab_period, tab_harvest, tab_feed, tab_yearly,
-     tab_plan) = st.tabs([
+     tab_plan, tab_costs) = st.tabs([
         "Overview",
         "Per-Batch",
         "Period Summary",
@@ -11880,6 +12868,7 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
         "Feed",
         "Yearly",
         "Plan",
+        "Costs & profit",       # appended LAST: no existing tab moves
     ])
 
     # ============================================================
@@ -12726,6 +13715,10 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
                 data=_rv_memo("tp_csv", _rid,
                               lambda: tp_df.to_csv(index=False).encode()),
                 file_name="transfer_plan.csv", mime="text/csv")
+
+    # ---- Costs & profit (2026-09-11): this run's CostsAndProfit sheet ----
+    with tab_costs:
+        _run_costs_tab(r, CONFIG_DIR)
 
     # ---- Run log (collapsed) ----
     with st.expander("Run log (console output)"):

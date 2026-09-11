@@ -108,7 +108,7 @@ import tempfile
 import time
 import warnings
 from collections import Counter, defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as _dc_replace
 from pathlib import Path
 from typing import Optional, Sequence
 
@@ -222,6 +222,22 @@ class YearRead:
     # added back, so this is growth net of losses. New eggs entering FW are
     # counted as they arrive (a few kg against thousands of tonnes).
     gain_t: float = 0.0
+    # Cost DRIVERS (2026-09-11), never dollars: read_workbook never reads
+    # costs.yaml. None = not read (a workbook without FeedForecastWeekly, or
+    # a caller that did not ask); forecast.costs.year_cost refuses None
+    # loudly, so a missing driver is never priced as 0.
+    feed_kg_by_type: Optional[dict] = None   # {feed name: kg} over the year's
+                                             # weeks from the run's start
+    eggs: Optional[float] = None             # eggs stocked in the year
+    # The first ISO week read for the year ("YYYY-Www"). With `weeks` it
+    # names the calendar days the year's figures cover, so
+    # forecast.costs.year_cost charges the fixed monthly cost by those days
+    # (a 53-week year is 371 days, not 12 months). None = not read.
+    first_week: Optional[str] = None
+    # Standing biomass (OG + FW, kg, as `standing_peak_kg`) in the year's
+    # last week read: the fish still in the water when the year - or, for
+    # the last year, the run - ends. None = not read.
+    standing_end_kg: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -809,10 +825,98 @@ def last_complete_year(start, horizon_weeks: int) -> int:
     return max(full)
 
 
+FEED_SHEET = "FeedForecastWeekly"
+_WEEK_LABEL_RE = re.compile(r"^\d{4}-W\d{2}$")
+
+
+def _feed_by_type_years(wb, years, from_label=None) -> Optional[dict]:
+    """{year: {feed type: kg}} from the FeedForecastWeekly matrix, or None.
+
+    The sheet (excel_io.write_feed_forecast_weekly): a header row
+    `Feed Type, Max Size (g), <ISO week labels>`, a row of week starts (blank
+    first cell), one row per feed type, then `Total (kg)`. A year's figure
+    sums the week columns whose label-year is that year and whose label is
+    on or after `from_label` (the run's first horizon week; None = every
+    week). The cells are written rounded to whole kg, so a year carries up
+    to 0.5 kg of rounding per type-week.
+
+    TOLERANT, it never raises for the sheet's content: None when the sheet
+    is missing or not the shape above, and a year with no week column in the
+    sheet maps to None. None means "not read", which forecast.costs.year_cost
+    refuses loudly; it is never a zero."""
+    if FEED_SHEET not in wb.sheetnames:
+        return None
+    want = {int(y) for y in years}
+    cols: dict = {}
+    acc: dict = {}
+    header = False
+    for r in wb[FEED_SHEET].iter_rows(values_only=True):
+        if not header:
+            if r and r[0] == "Feed Type":
+                header = True
+                for i, lab in enumerate(r[2:], start=2):
+                    if lab is None:
+                        continue
+                    s = str(lab)
+                    if not _WEEK_LABEL_RE.match(s):
+                        return None
+                    y = _label_year(s)
+                    if y in want and (from_label is None or s >= from_label):
+                        cols[i] = y
+            continue
+        name = r[0] if r else None
+        if (not isinstance(name, str) or not name.strip()
+                or name.strip().startswith("Total")):
+            continue                  # the week-start row and the Total row
+        for i, y in cols.items():
+            v = r[i] if i < len(r) else None
+            if (isinstance(v, bool) or not isinstance(v, numbers.Real)
+                    or not math.isfinite(v) or v < 0):
+                return None
+            d = acc.setdefault(y, {})
+            d[name] = d.get(name, 0.0) + float(v)
+    if not header:
+        return None
+    covered = set(cols.values())
+    return {y: (acc.get(y, {}) if y in covered else None)
+            for y in sorted(want)}
+
+
+def eggs_by_year(batches, start, years, *, end=None) -> dict:
+    """{year: eggs stocked} for each label-year in `years`.
+
+    A batch counts its BatchInput.input_count (the egg count the EGG stage
+    starts from) in the label-year of the ISO week its input_date falls in,
+    when start <= input_date (< end when `end` is given). Batches stocked
+    before the start are not the run's spend. A year with none is 0: that
+    is a count, not a default."""
+    s = _as_date(start, "start")
+    e = _as_date(end, "end") if end is not None else None
+    out = {y: 0.0 for y in sorted({int(y) for y in years})}
+    for b in batches:
+        d = _as_date(b.input_date, f"batch {b.batch_id} input_date")
+        if d < s or (e is not None and d >= e):
+            continue
+        y = _label_year(_week_label(d))
+        if y not in out:
+            continue
+        n = b.input_count
+        if (isinstance(n, bool) or not isinstance(n, numbers.Real)
+                or not math.isfinite(n) or n < 0):
+            raise ValueError(f"batch {b.batch_id}: input_count {n!r} is not "
+                             f"a number of eggs")
+        out[y] += float(n)
+    return out
+
+
 def read_workbook(path, control, facility, bands, cv_pct: float,
                   hog_yield: float, years: Sequence[int], *,
-                  facility_limits=None) -> dict:
+                  facility_limits=None, start=None) -> dict:
     """Read an engine workbook into YearReads + layout + audits.
+
+    `start` (the run's forecast start) limits the feed cost driver
+    (YearRead.feed_kg_by_type, from FeedForecastWeekly) to weeks on or after
+    the start's ISO week; None reads every week. Nothing else uses it.
 
     `facility_limits` (scenario_io.load_limits(...)[0]) feeds
     `caps.resolve_facility_cap`, the engine's own per-week rule for the
@@ -826,8 +930,11 @@ def read_workbook(path, control, facility, bands, cv_pct: float,
     if not years:
         raise ValueError("no years to read")
     limits = facility_limits if facility_limits is not None else FacilityLimits()
+    from_label = (_week_label(_as_date(start, "start"))
+                  if start is not None else None)
     wb = openpyxl.load_workbook(str(path), read_only=True, data_only=True)
     try:
+        feed = _feed_by_type_years(wb, years, from_label)
         bh, bl = _table(wb, "BatchLocations", "Week")
         hh, hp = _table(wb, "HarvestPlan", "Week")
         th, tp = _table(wb, "TransferPlan", "Week")
@@ -995,6 +1102,9 @@ def read_workbook(path, control, facility, bands, cv_pct: float,
             over_cap_weeks=sum(1 for s, c in capped
                                if s / c > 1.0 + CAP_EPSILON),
             gain_t=(gross_kg + standing[-1] - standing_before) / 1000.0,
+            feed_kg_by_type=feed.get(y) if feed is not None else None,
+            first_week=W[0],
+            standing_end_kg=standing[-1],
         )
 
     # The layout: one mid-year week of the last read year, and every tank's
@@ -1084,6 +1194,7 @@ def run_schedule(batches: Sequence[BatchInput], project_dir, *, pr_path=None,
     if kd is not None and kd.exists() and any(kd.iterdir()):
         raise ValueError(f"keep_dir {kd} is not empty; give an empty or new "
                          f"directory so one run's files never mix with another's")
+    batches = list(batches)          # read twice: prepare, then the egg count
     work = tempfile.mkdtemp(prefix="ideal_engine_")
     try:
         prep = prepare(work, batches, project_dir, start=start,
@@ -1131,7 +1242,16 @@ def run_schedule(batches: Sequence[BatchInput], project_dir, *, pr_path=None,
                             ideal.price_bands(economics),
                             float(economics.get("model_cv_pct", 18.0)),
                             float(control.default_hog_yield), years,
-                            facility_limits=flimits)
+                            facility_limits=flimits, start=start_d)
+        # Cost DRIVER: eggs stocked, from the batches the run actually kept
+        # (prepare drops those already in OG at an empty start), inside the
+        # horizon. The workbook does not carry it, so it is added here.
+        gone = set(prep["dropped"])
+        eggs = eggs_by_year(
+            [b for b in batches if b.batch_id not in gone], start_d, years,
+            end=start_d + dt.timedelta(weeks=int(horizon_weeks)))
+        years_read = {y: _dc_replace(r, eggs=eggs[y])
+                      for y, r in got["years"].items()}
         audits = dict(got["audits"],
                       manual_events_included=bool(include_manual_events),
                       manual_events_file=prep["manual_events_file"],
@@ -1151,7 +1271,7 @@ def run_schedule(batches: Sequence[BatchInput], project_dir, *, pr_path=None,
         return EngineRun(
             rc=rc, elapsed_s=elapsed, method=method, start=start_d,
             horizon_weeks=int(horizon_weeks), overrides=prep["overrides"],
-            dropped_batches=tuple(prep["dropped"]), years=got["years"],
+            dropped_batches=tuple(prep["dropped"]), years=years_read,
             layout_week=got["layout_week"], layout=got["layout"],
             tank_sequence=got["tank_sequence"], audits=audits,
             validation_top=got["validation_top"],

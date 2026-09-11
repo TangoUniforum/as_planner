@@ -830,6 +830,7 @@ board are pinned `off` so you can always see them side by side.
 | **WeeklyReport Grouped / MonthlyReport Grouped** | the SAME rows with a **blank line between periods**, for reading and printing. **Do not filter these** — a blank row ends Excel's contiguous range, so a filter would silently cover only the first period | reading a period end-to-end |
 | **Diagnostics** | FW-calibration: per batch, the target vs projected pre-cull avg weight at TranOG, the residual, and a back-solved `Suggested_FW_Correction` | tuning `fw_correction` (§7 step 2) |
 | **RunConfig** | the exact config + scenario embedded in the output | reproducibility |
+| **CostsAndProfit** | only when `config/costs.yaml` exists; always the LAST tab: per month, per year and horizon — feed kg, feed / shipping / oxygen / chemicals / eggs / fixed cost, total cost, HOG, revenue, **profit**, spend per kg HOG sold, unpriced feed kg; then **feed by type** with your item names. Row 2 says when feed had no price (profit then overstated). NOT COMPUTED (with the reason) when the file is invalid | the cash-view P&L — §15 |
 
 > **`PR FW WEIGHT DERIVED`** (console WARN + ValidationLog). A freshwater batch
 > the ProductionReport gives a COUNT but no BIOMASS used to seed the projection
@@ -1952,7 +1953,10 @@ targets in kg (HOG or gross) judged with a tolerance — *penalized, never
 disqualifying* — and price-per-kg bands by fish size that turn each plan into
 a revenue figure. Harvest outside every band is reported **unpriced** rather
 than silently priced. These are analysis overlays: editing them re-judges
-existing results instantly and never invalidates cached runs.
+existing results instantly and never invalidates cached runs. Below them on
+the same tab, **Costs** holds your operating costs (feed by type, shipping,
+oxygen, chemicals, eggs, the fixed monthly cost) — see §15. Like the targets
+and prices, costs price a plan and change nothing it computes.
 
 **The promoted default** lives in `config/analysis_defaults.yaml`, alongside
 the rest of your config, and is **never written to an output workbook** — so it
@@ -1963,7 +1967,9 @@ not**: a workbook you open from last month would otherwise silently re-point
 today's Quick run at a plan that won a tournament on a different PR. The same
 goes for `targets.yaml` and `economics.yaml`, the yardstick a run is *judged*
 against. The `RunConfig` sheet names all three omissions in its own header, so
-the gap is visible in the workbook rather than inferred. Promotion is **manual by design**:
+the gap is visible in the workbook rather than inferred. `costs.yaml` (§15) is
+never carried in a workbook either, and an import never overwrites it; the
+RunConfig header does not list it, so that sheet stays exactly as it was. Promotion is **manual by design**:
 the tool never changes its own defaults. Once promoted, the **⚡ Quick run**
 card at the top of Analyze re-validates that exact plan (one run + the
 checklist, minutes not hours) — use it as the everyday sanity check and the
@@ -2338,6 +2344,10 @@ the last six batches in your scenario) measured at the same cap, and a table
 of every rhythm tried. Move the slider afterwards and the page says the result
 is stale until you press the button again.
 
+The quick scan ranks by revenue and has **no Profit**: the tankless model has
+no feed or egg quantities to price (the button's help says so). Profit is an
+objective of the optimizers in steps 2 and 3, from your costs (§15).
+
 ### How it is measured
 
 Each rhythm is a synthetic stream — one batch every *cadence* days, all the
@@ -2388,7 +2398,15 @@ run only; your Control values are the defaults and are not changed.
 three years and reads the steady third year: tonnage, revenue, harvest weight,
 the share over 8 lb, peak biomass against the cap, tanks in use per system, one
 week's full tank layout, each tank's batch sequence, and the checks. Download
-the workbook to keep it.
+the workbook to keep it. With costs set (§15) it also shows **Cost / yr**,
+**Profit / yr** and **Cost per kg HOG** for the steady year, with the cost
+broken into feed, shipping, oxygen, chemicals, eggs and fixed. They are priced
+from your saved costs when the page draws, so a cost edit shows without a
+re-run; a result kept from before costs existed says to run it again. Revenue
+is as the sheet **ran**: if you edit the price bands afterwards, a warning says
+Revenue / yr and Profit / yr still use the old bands until you run it again.
+In a steady year stocking and harvest balance, so Cost per kg HOG here is close
+to the cost of producing a kg.
 
 **Tank & system limits for this run** (optional expander, also in step 3 for
 the proposal): one row per seawater system with its tanks, **tank density cap**
@@ -2436,11 +2454,21 @@ included — step 2's box follows step 1's after a scan), the **Tank & system
 limits** table and move budget, and the method and knobs ▶ Run forecast uses
 — at each of the **caps to try** (below) instead of step 2's cap box.
 
-- **Objective** — Revenue, Harvest tonnage (HOG), or Biomass gain: live weight
-  harvested plus the change in standing fish over the year (dead fish are not
-  gain). In a steady year the standing stock barely changes, so biomass gain
-  tracks tonnage and the two usually pick the same rhythm; revenue can pick
-  differently because it prices fish size.
+- **Objective** — Revenue, Harvest tonnage (HOG), Biomass gain (live weight
+  harvested plus the change in standing fish over the year; dead fish are not
+  gain), or **Profit**. In a steady year the standing stock barely changes, so
+  biomass gain tracks tonnage and the two usually pick the same rhythm;
+  revenue can pick differently because it prices fish size. **Profit** is
+  revenue minus the year's cash-view cost from your costs (§15): feed by type,
+  shipping, oxygen and chemicals per kg of all feed, the eggs stocked that
+  year and the fixed cost for the calendar days of its weeks (the 52 weeks of
+  2029 run Mon 1 Jan to Sun 30 Dec: 11 months + 30/31; a 53-week year is 371
+  days, about 12.19 months). Profit needs every cost set and every
+  feed type priced. Until then it stays in the list, but **Find the best
+  rhythm** is greyed out under a warning that says what is missing. With costs
+  set, the table shows **Cost $M/yr** and **Profit $M/yr** for every
+  objective, and the winner gets a one-line cost breakdown (feed + shipping +
+  oxygen + chemicals + eggs + fixed → profit, and the cost per kg HOG).
 - **Input frequencies** — days between stockings, a comma list (default
   42, 49, 56, 63).
 - **Batch sizes** — fish to OG per batch: from / to / in steps of (default
@@ -2501,7 +2529,16 @@ reused, not re-run). A rhythm is **stable** when both neighbours are within
 every limit. A stable winner gets a green **Stable** line naming its cap. A
 fragile one gets a yellow **Fragile** warning naming the neighbour that
 breaks and what it breaks, then the best stable plan among the top 10 — or
-says none of them is stable, so treat any of them as fragile.
+says none of them is stable, so treat any of them as fragile. **Stable is a
+narrow check:** ±5,000 fish per batch at the same cadence and cap, each run
+once. It is not a test against the growth model's error (a few percent hot,
+§13) or against a different cadence or cap, and the line says so.
+
+**A rhythm that ran but could not be priced** (Profit only — for example a
+reference read without its cost drivers) is not ranked. The table keeps its
+**Within every limit** ✓/✗ as it ran and gives the reason in a **Priced for
+Profit** column. If no rhythm could be priced, the page says **Profit cannot
+rank this grid**, never that nothing ran.
 
 **Using the answer.** When the winner is stable, **Use this rhythm and cap in
 the reference sheet** loads the rhythm into step 2 (and step 3's size), the
@@ -2515,9 +2552,12 @@ best stable plan** and a second button, **Use the top plan anyway**, loads
 the winner; both hand over their own cap. When none is stable there is one
 button, for the winner. Then run the reference sheet to see its tanks and
 checks. Loading a plan does not make the optimizer's answer stale. Change any
-of its inputs afterwards — the frequencies, sizes, caps, objective or limits
-— and the result is marked stale, and the Use buttons are greyed out until you
-press **Find the best rhythm** again.
+of its inputs afterwards — the frequencies, sizes, caps, objective or limits,
+or your price bands — and the result is marked stale, and the Use buttons are
+greyed out until you press **Find the best rhythm** again. Your **costs** make
+only a **Profit** search stale: a search on another objective does not depend
+on them, so it stays current and a note says its Cost / Profit figures used
+the costs as they were.
 
 What drives the answer is the load, fish per week (batch size × 7 ÷ days
 between stockings). Measured 2026-09-10 at 3,800 t with your promoted
@@ -2610,7 +2650,9 @@ each year passes the checks. To adopt a proposal: keep a copy of
 `scenario/batches.yaml`, then replace it (or edit the same rows in Configure →
 Batches). Run forecast then runs it unchanged — its 85-week horizon shows only
 the start of the effect. To have the size and cap searched for you, use the
-**transition optimizer** (below).
+**transition optimizer** (below). With costs set (§15), the caption under the
+verdict table also gives each schedule's cost and profit over the years both
+runs cover, priced from your saved costs when the page draws.
 
 **Within the limits? — the two-window rule** (your ruling, 2026-09-11).
 Today's plan already breaks limits in the near years from fish already
@@ -2644,7 +2686,12 @@ rule would reject every proposal. Instead the check splits the run at the
 
 The proposal is within the limits only if all of these hold, each plan
 judged against the limits it ran with. The page says so in green and names
-the effect year. Otherwise it names each failure in red — for example "worse
+the effect year. **With what-if limits** (the Facility limits for this check,
+or the Tank & system table) the proposal's counts are judged at those looser
+or tighter limits and today's at your current ones, so "no worse than today"
+compares two rulers: the headline then reads **Within the what-if limits**,
+names the limits the proposal ran with, and the early-years column reads **No
+worse than today? (proposal at its what-if limits)**. Otherwise it names each failure in red — for example "worse
 than today: 12 vs 9 tank-weeks over density in 2027" or "3 tank-weeks over
 density in 2029" — so the headline never contradicts the tables. The table
 under it shows, per limit, today's and the proposal's totals in the early
@@ -2775,6 +2822,27 @@ at your current limits; the early years are compared with it.
 - **Objective** — Revenue, Harvest tonnage (HOG) or Biomass gain, **summed
   over every year of the run** (2026–2030 on the 8/31 PR; the first and last
   years are partial; every plan covers the same years).
+- **Profit is shown, not ranked on** (your ruling, 2026-09-11). With costs
+  set (§15), today's plan's line and the table (**Cost $M**, **Profit $M**)
+  show cost and profit, and the winner gets a cost breakdown — with no cost
+  per kg HOG, because over a run window the spend includes fish not yet
+  sold. But there is no Profit objective here, and a note under the
+  objective says why: a transition's profit is **cash over the run window**.
+  Batches stocked late in the run are charged their eggs and feed, but their
+  fish are sold after the run ends, so their sales never count. A smaller
+  batch cuts that spend with no sales penalty inside the window, so ranking
+  by profit would always favour smaller future batches. Revenue, HOG and
+  biomass gain are not biased this way (unsold fish add nothing to them, and
+  gain counts standing fish). Each plan's cost line also shows the **stock
+  still in the water when the run ends** — weigh its profit against that.
+  To rank by profit, use **step 2's optimizer**: in a steady year the spend
+  and the sales balance. With no costs set, the Cost and Profit columns are
+  blank (never 0) and every objective still runs. A plan whose cost leaves
+  out feed with no price (§15) shows its Cost but **no Profit** — in the
+  table, the winner's cost line and today's plan's line — since the profit
+  would be overstated; a yellow warning names the feed type. A Profit objective you
+  picked here before the ruling is set back to Revenue once, with a note (a
+  search already ranked by profit is cleared with it).
 - **Future batch size** — from / to / in steps of (default 240,000 to
   340,000 in steps of 20,000, so today's 340k is in the grid).
 - **Caps to try (t)** — whole tonnes, a comma list. The default is your **cap
@@ -2813,10 +2881,14 @@ Use button.
 **Stability**: the top 5 plans within the limits are re-run with 5,000 fish
 per batch fewer and 5,000 more, at the same cap — at most 10 extra runs. A
 stable winner gets a green line. A fragile winner gets a yellow warning
-naming what breaks, and the best stable plan among the top 5.
+naming what breaks, and the best stable plan among the top 5. As in step 2,
+this is a narrow check (±5,000 fish at the same cap), not a test against the
+growth model's error or a different cap. The winner line says when the plans
+were judged at what-if limits (today's plan runs at your current limits).
 
 The table lists every plan: size, cap, batches re-sized, effect year, within
-✓/✗, revenue, HOG, biomass gain, the difference from today's plan, **Early
+✓/✗, revenue, **Cost $M** and **Profit $M** (shown, not ranked on; blank
+without costs), HOG, biomass gain, the difference from today's plan, **Early
 years: vs today** ("no worse than today ✓", or each year and limit it is
 worse on), **Judged years: breaches** ("zero ✓", or each breach) and any
 other failed check.
@@ -2829,8 +2901,11 @@ changes. **▶ Check both schedules** then runs exactly that proposal, and
 **⬇ Download the proposed batches.yaml** hands it over; adopting it is still
 your act. Loading a plan does not make the optimizer's answer stale. Changing
 the PR, the cutoff date, the sizes, the caps, the objective, the other
-limits, the tank & system table, the engine or the config does, and greys
-out the Use buttons until you press **Find the best transition** again.
+limits, the tank & system table, the engine, the config, or your price bands
+does, and greys out the Use buttons until you press **Find the best
+transition** again. Your costs never do: no step-3 search ranks by profit, so
+the answer stays current, with a note that its cost figures used the costs as
+they were.
 
 **What it found on the 8/31 PR** (2026-09-11; your engine, your limits,
 future stockings re-sized from the PR onward, 208 weeks, your manual events).
@@ -2874,4 +2949,146 @@ Why:
 - **Prices are flat above 8 lb**, so the ranking favours tonnage over size. If
   the market pays more for large fish than the bands say, a slower, bigger-fish
   rhythm may be the better call. That is your judgement, not the model's.
-- **Hatchery cost is not included** — fewer smolt is cheaper than shown.
+- **Hatchery cost is not included** in the quick scan or in the Revenue, HOG
+  and Biomass gain objectives — fewer smolt is cheaper than shown there. The
+  **Profit** objective of step 2's optimizer does include it (eggs, feed and
+  fixed cost; §15). Step 3's optimizer shows cost and profit but does not
+  rank by profit: over its run window that favours smaller future batches
+  (see the transition optimizer above).
+
+## 15. Costs & profit — the cash view (2026-09-11)
+
+Your operating costs, so a plan can be read as **profit**, not just revenue.
+Set them in **Configure → Targets & prices → Costs**, below the price bands.
+They are saved to `config/costs.yaml`. That file is **kept out of git**,
+because the numbers are commercially sensitive: back it up yourself. No
+workbook carries it, and a config import never overwrites it.
+
+### The inputs
+
+| Input | Unit | What it charges |
+|---|---|---|
+| **Fixed cost per month** | currency per calendar month | Everything that does not scale with feed or eggs (staff, energy, maintenance, rent). A month the forecast only partly covers is charged by its days: 15 of 30 days = half. |
+| **Egg price** | currency per egg | Each batch's `input_count` (Configure → Batches), counted as eggs, in the month the batch is stocked. Eggs stocked before the forecast opens are not charged. |
+| **Feed shipping** | currency per kg of feed | **All** feed kg: every feed type, freshwater and seawater, priced or not. |
+| **Oxygen** | currency per kg of feed | All feed kg, the same way. |
+| **Chemicals** | currency per kg of feed | All feed kg, the same way. |
+| **Feed prices** | currency per kg | One row per **model feed type** in Configure → Biology models (the saved file). *Feed type* and *Up to size (g)* are read-only; **Item** is your own product name (a label only, blank allowed); **Price / kg** is what that feed costs you. |
+
+The currency is the one set with the price bands (`economics.yaml`), and it is
+a label only. Every input is required. An empty box stays **empty, never 0**:
+type 0 only if something truly costs nothing. A negative number is refused,
+and **Save costs** refuses to save until every feed type has a price. The
+price belongs to the model feed type (the name the engine feeds by). If you
+rename or remove a feed type in Biology, its old price is flagged ("removed
+when you save"), and the new name shows blank until you price it. **Save
+costs** writes only `config/costs.yaml`. It invalidates no forecast: costs are
+not an engine input, so no cached run, sweep or board is thrown away. On the
+Ideal page a step-2 optimizer search ranked on **Profit** is marked out of
+date (its ranking used the old costs); any other search keeps its pick (step
+3 never ranks by profit).
+
+### The arithmetic — monthly spend (the cash view)
+
+Each month's **spend** is set against that month's **sales**:
+
+    feed      = Σ over feed types: kg fed × that type's price per kg
+    shipping  = all feed kg × feed shipping per kg
+    oxygen    = all feed kg × oxygen per kg of feed
+    chemicals = all feed kg × chemicals per kg of feed
+    eggs      = eggs stocked × egg price
+    fixed     = fixed cost per month × months covered (part months by day)
+    total     = feed + shipping + oxygen + chemicals + eggs + fixed
+    profit    = revenue − total
+    spend per kg HOG sold = total ÷ HOG kg harvested in the same period
+
+**Spend per kg HOG sold is a cash figure, not a unit cost.** A month's spend
+includes eggs for fish sold years later and the fixed cost, so the figure
+swings with harvest timing; over the horizon it includes eggs and feed for
+fish still in the tanks at the end and leaves out what was spent before the
+forecast on fish sold early in it. (The Ideal reference sheet's steady year
+keeps the name **Cost per kg HOG**: there stocking and harvest balance.)
+
+**Fixed cost is charged by calendar days**, on every surface: a part month by
+its days, and on the Ideal page each year by the days of its ISO weeks — so
+the same days carry the same fixed cost on the Run sheet and the Ideal page.
+
+**Feed with no price is never priced at 0.** If a feed type has no price (for
+example after a rename in Biology), its kg are left out of the feed cost, so
+the total cost is understated and the profit would be overstated. The sheet's
+row 2 says so; the Run page then **withholds Profit** — in the line under the
+KPI row, in the Profit metric and in every row with unpriced feed — with a
+warning naming the type and the kg, as step 2 of the Ideal page refuses
+ranking by Profit. Step 3's optimizer, which only shows profit, withholds it
+the same way: that plan's Profit column and cost line show no profit.
+
+**A month with little harvest shows a loss**, even while the fish in the
+tanks gain value: this is the cash view, your ruling of 2026-09-10. No cost is
+carried with the fish to the month they are sold. The alternative, matching
+cost to the fish sold, is written up in the design but not built. It needs an
+opening cost for fish already in the water, which the forecast never fed.
+
+### Where it shows
+
+- **The output workbook** — a **CostsAndProfit** sheet, the last tab, written
+  whenever `costs.yaml` exists. It has one row per month, then one per
+  calendar year, then the whole horizon: feed kg, each cost, total cost, HOG
+  harvested, revenue, profit, spend per kg HOG sold and any unpriced feed kg. A
+  **feed by type** block below it gives each type's item, price, kg and cost.
+  Feed kg ties to the FeedForecastMonthly sheet. Row 2 names the pricing,
+  the currency and the first 8 characters of the fingerprints of `costs.yaml`
+  and `economics.yaml`. If
+  the file is invalid, the sheet says **NOT COMPUTED** and why, and the run
+  still finishes. With no `costs.yaml`, the workbook is exactly as it was
+  before costs existed.
+- **Run forecast** — one line under the KPI row ("Profit over the horizon …")
+  and an eighth tab, **Costs & profit**. The tab shows revenue, total cost,
+  profit and spend per kg HOG sold; revenue and cost by month; the monthly and
+  yearly tables; and feed by type with your item names. It says plainly when
+  a result predates costs ("re-run"), when costs were not set, or when the
+  sheet was not computed. It warns when `costs.yaml` has changed since the run
+  ("re-run to refresh"), and when your price bands (`economics.yaml`) have
+  changed since (revenue and profit use the bands as they were). It withholds
+  Profit when some feed had no price (above).
+- **Ideal** — the Cost / Profit columns in both optimizers, a cost breakdown
+  under each winner, Cost / Profit / Cost per kg HOG on the step-2 reference
+  sheet, and cost and profit in step 3's check (§14). **Only step 2's
+  optimizer ranks by profit** (its **Profit** objective): its steady year's
+  spend and sales balance. Step 3's optimizer shows cost and profit for every
+  plan but does not rank by them — over its run window the eggs and feed of
+  batches stocked late are charged while their fish are sold after the run
+  ends, so ranking by profit would favour smaller future batches (your
+  ruling, 2026-09-11). The quick scan (step 1) has no Profit, because it has
+  no feed or egg quantities.
+
+**Two revenue pricings.** Run forecast and the CostsAndProfit sheet price
+revenue the Analyze way: the economics bands with the size-biased lognormal
+spread, your price basis and the per-month overrides. The Ideal page uses its
+own pricing: a normal size spread, always HOG, no monthly overrides. The same
+harvest can therefore show slightly different revenue on the two pages; each
+page says which pricing it uses.
+
+### The file
+
+`config/costs.yaml`, schema 1. Every key is required. **The numbers below are
+made up**, for the shape only, and the feed-type names must be your own model
+feed types from `biology.yaml`:
+
+```yaml
+schema: 1
+fixed_monthly: 100000.0          # per calendar month
+oxygen_per_kg_feed: 0.10         # per kg of feed fed
+chemicals_per_kg_feed: 0.05      # per kg of feed fed
+feed_shipping_per_kg: 0.08       # per kg of feed delivered
+egg_price: 0.20                  # per egg
+feed_prices:                     # keyed by the MODEL feed type
+  "Starter 0.5": {item: "Example Crumble 0.5", price_per_kg: 3.00}
+  "Grower 9.0": {item: "", price_per_kg: 1.50}
+```
+
+A missing or empty file means "costs not set": nothing is priced, and Profit
+is unavailable. A file that is present but malformed (a missing or unknown
+key, a word where a number belongs, a negative number, a feed type named
+twice) is refused, and the message names the field. The Costs section then
+shows that message instead of its inputs; fix the file or delete it and enter
+the costs again.

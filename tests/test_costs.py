@@ -399,26 +399,82 @@ def test_pricing_refuses_missing_inputs():
         C.feed_cost({"Grower 9.0": 1.0}, bad)
 
 
-def test_iso_year_fixed_months():
+def _months_by_hand(first_day, days):
+    """Fixed-cost months of `days` calendar days from first_day, one day
+    at a time: each day is 1 / (days in its month) of a month."""
+    import calendar
+    out = 0.0
+    for i in range(days):
+        d = first_day + dt.timedelta(days=i)
+        out += 1.0 / calendar.monthrange(d.year, d.month)[1]
+    return out
+
+
+def test_iso_weeks_fixed_months_charges_the_calendar_days():
     assert dt.date(2026, 12, 28).isocalendar()[1] == 53
     assert dt.date(2027, 12, 28).isocalendar()[1] == 52
-    assert C.iso_year_fixed_months(2026, 53) == pytest.approx(12.0)
-    assert C.iso_year_fixed_months(2027, 52) == pytest.approx(12.0)
-    assert C.iso_year_fixed_months(2027, 26) == pytest.approx(6.0)
-    assert C.iso_year_fixed_months(2026, 17) == pytest.approx(12.0 * 17 / 53)
-    assert C.iso_year_fixed_months(2027, 0) == 0.0
-    with pytest.raises(ValueError):
-        C.iso_year_fixed_months(2027, 53)          # 2027 has only 52
-    with pytest.raises(ValueError):
-        C.iso_year_fixed_months(2026, -1)
+    # 52 weeks of 2029: Mon 2029-01-01 .. Sun 2029-12-30 - December 30/31.
+    assert C.iso_weeks_fixed_months("2029-W01", 52) == pytest.approx(
+        11 + 30 / 31)
+    # 53 weeks of 2026: Mon 2025-12-29 .. Sun 2027-01-03 = 371 days, never
+    # "12 months" (the sanity check's 53-week flag).
+    assert C.iso_weeks_fixed_months("2026-W01", 53) == pytest.approx(
+        3 / 31 + 12 + 3 / 31)
+    # A part year from the run's first week (2026-W36 is Mon 08-31).
+    assert C.iso_weeks_fixed_months("2026-W36", 18) == pytest.approx(
+        _months_by_hand(dt.date(2026, 8, 31), 18 * 7))
+    for wk, n in (("2027-W01", 26), ("2028-W10", 30), ("2030-W01", 35)):
+        y, w = int(wk[:4]), int(wk[6:])
+        assert C.iso_weeks_fixed_months(wk, n) == pytest.approx(
+            _months_by_hand(dt.date.fromisocalendar(y, w, 1), 7 * n))
+    assert C.iso_weeks_fixed_months("2027-W01", 0) == 0.0
+    for bad in (("2027-53", 1), ("2027-W53", 1), ("2027-W01", -1),
+                ("2027-W01", 1.5), ("2027-W01", True)):
+        with pytest.raises(ValueError):
+            C.iso_weeks_fixed_months(*bad)
+
+
+def test_the_ideal_year_and_the_sheet_charge_the_same_days_alike():
+    """One day split: a label-year's fixed months equal monthly_pl's
+    pro-rating of the same calendar days (the sanity check's Ideal-vs-sheet
+    comparison differed by exactly 1/31 of a month before)."""
+    first, last = dt.date(2029, 1, 1), dt.date(2029, 12, 30)
+    md = C.month_days(C.span_months(first, last), first, last)
+    pl = C.monthly_pl({}, {}, None, {}, md, _valid())
+    y = types.SimpleNamespace(year=2029, weeks=52, feed_kg_by_type={},
+                              eggs=0, first_week="2029-W01")
+    assert C.year_cost(y, _valid())["fixed"] == pytest.approx(
+        pl["total"]["fixed"], rel=1e-12)
+
+
+def test_year_weeks_fixed_months_needs_to_know_a_part_years_weeks():
+    ns = types.SimpleNamespace
+    # A whole ISO year needs no first_week: its weeks are W01 on.
+    assert C.year_weeks_fixed_months(ns(year=2029, weeks=52)) == \
+        pytest.approx(11 + 30 / 31)
+    assert C.year_weeks_fixed_months(ns(year=2026, weeks=0)) == 0.0
+    # A part year without first_week is refused, never guessed.
+    with pytest.raises(ValueError, match="without cost drivers.*first_week"):
+        C.year_weeks_fixed_months(ns(year=2026, weeks=18))
+    assert C.year_weeks_fixed_months(
+        ns(year=2026, weeks=18, first_week="2026-W36")) == pytest.approx(
+        C.iso_weeks_fixed_months("2026-W36", 18))
+    for bad in (ns(year=2027, weeks=53),                       # 2027 has 52
+                ns(year=2026, weeks=-1),
+                ns(year=2026, weeks=18, first_week="2027-W01"),  # other year
+                ns(year=2026, weeks=18, first_week="2026-W40")):  # past W53
+        with pytest.raises(ValueError):
+            C.year_weeks_fixed_months(bad)
 
 
 def test_year_cost_prices_the_drivers():
     feed = {"Starter 0.5": 10.0, "Grower 9.0": 90.0}
     y = types.SimpleNamespace(year=2027, weeks=26, feed_kg_by_type=feed,
-                              eggs=500)
-    assert C.year_cost(y, _valid()) == C.period_cost(feed, 500, 6.0, _valid())
-    assert C.year_cost(y, _valid())["fixed"] == pytest.approx(6000.0)
+                              eggs=500, first_week="2027-W01")
+    months = _months_by_hand(dt.date(2027, 1, 4), 26 * 7)  # 01-04 .. 07-04
+    assert C.year_cost(y, _valid()) == C.period_cost(
+        feed, 500, C.iso_weeks_fixed_months("2027-W01", 26), _valid())
+    assert C.year_cost(y, _valid())["fixed"] == pytest.approx(1000.0 * months)
 
 
 @pytest.mark.parametrize("fields", [

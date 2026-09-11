@@ -667,7 +667,40 @@ def _pool_step2(rhythm, cap_kg, project_dir, **kw):
     return rhythm, cap_kg, project_dir, kw, os.getpid()
 
 
+def _pool_sleep(seconds):
+    """A TOP-LEVEL job that hangs (for the deadline's negative control)."""
+    import time
+    time.sleep(seconds)
+    return seconds
+
+
+# A hung worker must FAIL the real-pool test within this bound, never block
+# the suite (the waves below take seconds: three small pools).
+REAL_POOL_DEADLINE_S = 180
+
+
 def test_a_real_two_worker_pool_runs_top_level_runners():
+    from _pool_deadline import pool_deadline
+    with pool_deadline(io, REAL_POOL_DEADLINE_S, "the real two-worker pool"):
+        _real_two_worker_pool_checks()
+
+
+def test_a_hung_real_pool_fails_within_its_deadline():
+    """Negative control for the bound above: two jobs that would sleep for
+    ten minutes, a 3 s deadline. The wave must fail fast and leave no worker
+    running."""
+    import time
+    from _pool_deadline import pool_deadline
+    t0 = time.monotonic()
+    with pytest.raises(pytest.fail.Exception, match="within 3 s"):
+        with pool_deadline(io, 3, "a hung pool") as procs:
+            io._run_wave([(_pool_sleep, (600,), {}), (_pool_sleep, (600,), {})],
+                         "unused", {}, 2, lambda i, c: None, "the grid")
+    assert time.monotonic() - t0 < 120
+    assert procs and not any(p.is_alive() for p in procs)
+
+
+def _real_two_worker_pool_checks():
     sizes = (1_000, 2_000, 3_000)
     rec = {}
     note = io._run_wave([(_pool_cell, ((s, CAP), "pd"), {"x": 1})

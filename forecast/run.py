@@ -107,6 +107,11 @@ def main(
     t0 = time.time()
     print(f"Loading {in_path} ...")
     wb = load_workbook(in_path)
+    # Costs & profit (additive, 2026-09-11): drop a CostsAndProfit sheet carried
+    # in from an earlier planned workbook before anything else sees the
+    # workbook. It is re-written at the end only when config/costs.yaml exists.
+    from .costs_report import drop_stale_costs_sheet
+    drop_stale_costs_sheet(wb)
 
     from .config_io import load_config
     from .scenario_io import load_batches as _load_scenario_batches
@@ -1382,6 +1387,16 @@ def main(
     # Per-batch handling (moves/fish) onto the Batch Plan. LAST: it reads
     # TransferPlan and InputConservationAudit, so every sheet must exist.
     annotate_batch_plan_handling(wb)
+    # Costs & profit (additive, 2026-09-11): ONLY when config/costs.yaml exists;
+    # appended LAST so every existing sheet's XML, index and style ids stay put.
+    if (Path(config_dir) / "costs.yaml").is_file():
+        from .costs_report import write_costs_sheet
+        write_costs_sheet(wb, config_dir=config_dir,
+                          batch_locations=placement.batch_locations,
+                          states_by_batch=rl_states_by_batch, tables=tables,
+                          batch_by_id=batch_by_id, batches=batches,
+                          sixn_move_in_feed=getattr(placement, "sixn_move_in_feed", None),
+                          report_start=report_start)
     wb.save(out_path)
     wb.close()
     print(f"\nSaved workbook {out_path}  ({elapsed:.2f}s, status={status}, "

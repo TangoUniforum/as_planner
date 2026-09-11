@@ -589,10 +589,12 @@ def test_optimize_runs_both_waves_through_run_cell_the_default(monkeypatch):
 
 
 def test_an_unknown_objective_is_refused():
+    # "profit" is an objective since 2026-09-11 (tests/test_profit_objective.py
+    # covers its refusal without costs); "margin" is not.
     with pytest.raises(ValueError):
-        io.objective_value(_cell(49, 200_000), "profit")
+        io.objective_value(_cell(49, 200_000), "margin")
     with pytest.raises(ValueError):
-        io.optimize([49], [200_000], 3_800_000, ROOT, objective="profit")
+        io.optimize([49], [200_000], 3_800_000, ROOT, objective="margin")
 
 
 # --- refusals, before anything runs -------------------------------------------
@@ -720,21 +722,31 @@ def test_the_judging_control_carries_the_knobs_then_the_runs_limits():
 
 # --- ONE small real grid, end to end -------------------------------------------
 
+# The real grid below (two cells, then their stability neighbours, two at a
+# time) measured 31 s on 2026-09-11. A worker that hangs must FAIL the
+# fixture within this bound (about 8x that), never block the suite.
+REAL_GRID_DEADLINE_S = 240
+
+
 @pytest.fixture(scope="module")
 def real_grid():
-    """Two real engine cells through the process pool (~20-40 s)."""
+    """Two real engine cells through the process pool (~20-40 s each)."""
+    from _pool_deadline import pool_deadline
     ctl = load_config(str(ROOT / "config"))[0]
     before = _repo_hashes()
     seen = []
-    res = io.optimize([56], [200_000, 240_000], 3_800_000.0, ROOT,
-                      objective="hog", workers=2,
-                      progress=lambda d, n, c: seen.append(d), control=ctl)
+    with pool_deadline(io, REAL_GRID_DEADLINE_S, "the real grid"):
+        res = io.optimize([56], [200_000, 240_000], 3_800_000.0, ROOT,
+                          objective="hog", workers=2,
+                          progress=lambda d, n, c: seen.append(d),
+                          control=ctl)
     after = _repo_hashes()
     return dict(res=res, before=before, after=after, seen=seen, control=ctl)
 
 
 def test_a_real_grid_judges_every_cell_as_plausible_gates(real_grid):
     res = real_grid["res"]
+    assert res.note is None               # the real pool ran: no fallback
     assert real_grid["after"] == real_grid["before"]    # config/ scenario/ only read
     assert [c.key for c in res.cells] == [(56, 200_000, 3_800_000.0),
                                           (56, 240_000, 3_800_000.0)]

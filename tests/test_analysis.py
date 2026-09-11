@@ -591,3 +591,44 @@ def test_absent_sheet_is_not_a_pass():
     compliant — unknown is not the same as clean."""
     assert A._gate_system_feed({})[0] == "N/A"
     assert A._gate_system_feed({"system_feed": None})[0] == "N/A"
+
+
+# --------------------------------------------------------------------------- #
+# harvest_rows_from_ws: the behaviour-neutral split of harvest_rows (2026-09-11)
+# --------------------------------------------------------------------------- #
+def test_harvest_rows_from_ws_is_harvest_rows(tmp_path):
+    """The file reader and the open-sheet parser give the same rows, from the
+    in-memory sheet, the saved file, and the saved file loaded both ways."""
+    import datetime as dt
+    from types import SimpleNamespace
+
+    import openpyxl
+
+    from forecast.excel_io import write_harvest_plan_output
+    evs = [SimpleNamespace(event_date=dt.datetime(2026, 9, d), batch_id=b,
+                           source_tank_id=t, count=n, avg_wt_g=g)
+           for d, b, t, n, g in ((2, "B1", 3, 4000.4, 2800.0),
+                                 (2, "B2", 5, 999.6, 3100.0),
+                                 (29, "B1", 3, 5000.0, 3320.0))]
+    wb = openpyxl.Workbook()
+    write_harvest_plan_output(wb, evs, default_hog_yield=0.88,
+                              facility_limits_hog={"2026-W40": 0.9})
+    in_memory = A.harvest_rows_from_ws(wb["HarvestPlan"])
+    p = tmp_path / "hp.xlsx"
+    wb.save(p)
+    from_file = A.harvest_rows(p)
+    assert from_file == in_memory
+    assert [r["week"] for r in from_file] == ["2026-W36", "2026-W36",
+                                              "2026-W40"]
+    assert from_file[2]["hog_kg"] == round(5000 * 3.32 * 0.9, 0)
+    assert from_file[2]["hog_avg_kg"] == from_file[2]["hog_kg"] / 5000
+    for read_only in (True, False):
+        w2 = openpyxl.load_workbook(p, read_only=read_only, data_only=True)
+        try:
+            assert A.harvest_rows_from_ws(w2["HarvestPlan"]) == from_file
+        finally:
+            w2.close()
+    empty = openpyxl.Workbook()
+    q = tmp_path / "none.xlsx"
+    empty.save(q)
+    assert A.harvest_rows(q) == []

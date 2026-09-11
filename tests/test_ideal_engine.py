@@ -621,8 +621,11 @@ def test_a_what_if_run_is_judged_against_the_limits_it_ran_with(
     years = sorted(run.years)
     rest = (ideal.price_bands(econ), float(econ.get("model_cv_pct", 18.0)),
             kc.default_hog_yield, years)
-    mine = ie.read_workbook(run.out_path, kc, kf, *rest, facility_limits=fl)
-    assert mine["years"] == run.years
+    mine = ie.read_workbook(run.out_path, kc, kf, *rest, facility_limits=fl,
+                            start=run.start)
+    # (run_schedule adds only the eggs stocked, from its own batch list)
+    assert mine["years"] == {y: dataclasses.replace(r, eggs=None)
+                             for y, r in run.years.items()}
     # ... and the live density caps (same control, so only the cap differs)
     # never count fewer tank-weeks over.
     livecap = ie.read_workbook(run.out_path, kc, lf, *rest, facility_limits=fl)
@@ -748,12 +751,198 @@ def test_gates_keep_their_order_and_only_fail_rows_decide(engine, control):
 
 def test_read_workbook_is_deterministic_and_matches_the_run(kept):
     run = kept["run"]
-    a = ie.read_workbook(*kept["args"], [STEADY], facility_limits=kept["flimits"])
-    b = ie.read_workbook(*kept["args"], [STEADY], facility_limits=kept["flimits"])
+    a = ie.read_workbook(*kept["args"], [STEADY], facility_limits=kept["flimits"],
+                         start=run.start)
+    b = ie.read_workbook(*kept["args"], [STEADY], facility_limits=kept["flimits"],
+                         start=run.start)
     assert a == b
-    assert a["years"] == run.years
+    # run_schedule adds one field the workbook does not carry: the eggs
+    # stocked, counted from its own batch list. Everything else IS the read.
+    assert all(r.eggs is not None for r in run.years.values())
+    assert a["years"] == {y: dataclasses.replace(r, eggs=None)
+                          for y, r in run.years.items()}
     assert a["layout"] == run.layout
     assert a["tank_sequence"] == run.tank_sequence
+
+
+# --- cost DRIVERS (2026-09-11): feed kg by type and eggs, never dollars -------
+
+def _ffw_book(path, weeks, rows, *, sheet=True, header="Feed Type"):
+    """A workbook with a FeedForecastWeekly laid out as excel_io writes it."""
+    wb = openpyxl.Workbook()
+    wb.active.title = "Other"
+    if sheet:
+        f = wb.create_sheet(ie.FEED_SHEET)
+        f.append(["WEEKLY FEED FORECAST BY TYPE (kg)"])
+        f.append([])
+        f.append([header, "Max Size (g)"] + list(weeks))
+        f.append(["", ""] + [
+            dt.date.fromisocalendar(int(w[:4]), int(w[6:8]), 1)
+            if re.fullmatch(r"\d{4}-W\d{2}", w) else None for w in weeks])
+        for name, size, vals in rows:
+            f.append([name, size] + list(vals))
+        f.append(["Total (kg)", ""] + [
+            sum(v[i] for _n, _s, v in rows if isinstance(v[i], (int, float)))
+            for i in range(len(weeks))])
+    wb.save(path)
+
+
+def _read_ffw(path, years, from_label=None):
+    wb = openpyxl.load_workbook(str(path), read_only=True, data_only=True)
+    try:
+        return ie._feed_by_type_years(wb, years, from_label)
+    finally:
+        wb.close()
+
+
+_FFW_WEEKS = ["2026-W52", "2026-W53", "2027-W01", "2027-W02", "2028-W01"]
+_FFW_ROWS = [("Starter 0.5", 500, [1, 2, 3, 4, 5]),
+             ("Grower 9.0", 9000, [10, 20, 30, 40, 50])]
+
+
+def test_feed_by_type_years_sums_label_years_from_the_start(tmp_path):
+    p = tmp_path / "f.xlsx"
+    _ffw_book(p, _FFW_WEEKS, _FFW_ROWS)
+    y27 = {"Starter 0.5": 7.0, "Grower 9.0": 70.0}
+    assert _read_ffw(p, [2026, 2027]) == {
+        2026: {"Starter 0.5": 3.0, "Grower 9.0": 30.0}, 2027: y27}
+    # the start filter drops the weeks before the run's first horizon week
+    assert _read_ffw(p, [2026, 2027], "2026-W53") == {
+        2026: {"Starter 0.5": 2.0, "Grower 9.0": 20.0}, 2027: y27}
+    assert _read_ffw(p, [2027], "2027-W02") == {
+        2027: {"Starter 0.5": 4.0, "Grower 9.0": 40.0}}
+    # a year the sheet has no week of is NOT READ (None), never {} or 0
+    assert _read_ffw(p, [2029, 2027]) == {2027: y27, 2029: None}
+    assert _read_ffw(p, [2026], "2027-W01") == {2026: None}
+
+
+@pytest.mark.parametrize("kw, rows", [
+    (dict(sheet=False), _FFW_ROWS),                       # no sheet
+    (dict(header="Feed"), _FFW_ROWS),                     # no header row
+    ({}, [("Starter 0.5", 500, [1, 2, "x", 4, 5])]),      # a non-number
+    ({}, [("Starter 0.5", 500, [1, 2, -3, 4, 5])]),       # a negative
+    ({}, [("Starter 0.5", 500, [1, 2, None, 4, 5])]),     # a blank
+])
+def test_feed_by_type_years_is_tolerant_and_never_invents(tmp_path, kw, rows):
+    p = tmp_path / "f.xlsx"
+    _ffw_book(p, _FFW_WEEKS, rows, **kw)
+    assert _read_ffw(p, [2027]) is None
+
+
+def test_a_bad_week_label_is_not_read(tmp_path):
+    p = tmp_path / "f.xlsx"
+    _ffw_book(p, ["2027-W01", "week 2"], [("Starter 0.5", 500, [1, 2])])
+    assert _read_ffw(p, [2027]) is None
+
+
+def _bi(bid, input_date, count, tran_og=None):
+    from forecast.models import BatchInput
+    return BatchInput(
+        batch_id=bid, input_date=dt.datetime.combine(input_date, dt.time()),
+        input_count=count, tran_sf_date=None,
+        tran_og_date=(dt.datetime.combine(tran_og, dt.time())
+                      if tran_og else None),
+        tran_og_count=None, tran_og_avg_wt_g=None, tran_og_cv=10.0,
+        fcr_model="FCR_118", fw_correction=1.0, sgr_correction=1.0)
+
+
+def test_eggs_by_year_counts_eggs_stocked_inside_the_run():
+    start, end = dt.date(2027, 1, 4), dt.date(2029, 1, 1)
+    batches = [
+        _bi("PRE", dt.date(2026, 11, 2), 111, tran_og=dt.date(2027, 1, 1)),
+        _bi("A", dt.date(2027, 1, 4), 1000),           # on the start: in
+        _bi("B", dt.date(2027, 6, 1), 2000),
+        _bi("C", dt.date(2028, 1, 1), 4000),           # ISO 2027-W52 -> 2027
+        _bi("D", dt.date(2028, 3, 1), 8000),
+        _bi("E", dt.date(2029, 1, 1), 16000),          # on the end: out
+    ]
+    assert ie.eggs_by_year(batches, start, [2027, 2028], end=end) == {
+        2027: 7000.0, 2028: 8000.0}
+    assert ie.eggs_by_year(batches, start, [2028, 2029]) == {
+        2028: 8000.0, 2029: 16000.0}
+    assert ie.eggs_by_year(batches, start, [2030]) == {2030: 0.0}
+    with pytest.raises(ValueError, match="BAD"):
+        ie.eggs_by_year([_bi("BAD", dt.date(2027, 2, 1), None)], start, [2027])
+
+
+def test_the_run_carries_both_cost_drivers(engine, kept):
+    """The kept real run: feed by type against an independent parse of its
+    FeedForecastWeekly, eggs against the stream ideal_run stocked."""
+    run = engine["run"]
+    y = run.years[STEADY]
+    wb = openpyxl.load_workbook(str(run.out_path), read_only=True,
+                                data_only=True)
+    try:
+        want, hdr = defaultdict(float), None
+        for r in wb[ie.FEED_SHEET].iter_rows(values_only=True):
+            if hdr is None:
+                hdr = list(r) if r and r[0] == "Feed Type" else None
+                continue
+            if isinstance(r[0], str) and r[0].strip() and r[0] != "Total (kg)":
+                for lab, v in zip(hdr[2:], r[2:]):
+                    if lab is not None and int(str(lab)[:4]) == STEADY:
+                        want[r[0]] += v
+    finally:
+        wb.close()
+    assert y.feed_kg_by_type == pytest.approx(dict(want))
+    assert sum(y.feed_kg_by_type.values()) > 0
+    stream = ideal.synthetic_stream(
+        ideal.default_template(sio.load_batches(str(ROOT / "scenario"))),
+        49, 280_000, horizon_weeks=ideal.HORIZON_WEEKS, start=START)
+    start = ie._as_date(START, "start")
+    days = [(b, ie._as_date(b.input_date, b.batch_id)) for b in stream]
+    by_hand = sum(float(b.input_count) for b, d in days
+                  if d >= start and d.isocalendar()[0] == STEADY)
+    assert y.eggs == by_hand > 0
+    assert y.eggs == ie.eggs_by_year(
+        stream, start, [STEADY],
+        end=start + dt.timedelta(weeks=ideal.HORIZON_WEEKS))[STEADY]
+    # The drivers are priceable, and only by forecast.costs.
+    from forecast import costs as C
+    made_up = {"schema": 1, "fixed_monthly": 1.0, "oxygen_per_kg_feed": 0.0,
+               "chemicals_per_kg_feed": 0.0, "feed_shipping_per_kg": 0.0,
+               "egg_price": 0.0, "feed_prices": {}}
+    got = C.year_cost(y, made_up)
+    assert got["feed_kg"] == pytest.approx(sum(y.feed_kg_by_type.values()))
+    # The fixed cost covers the calendar days of the year's weeks, from the
+    # first week read (a steady year: all of them, W01 on).
+    assert y.first_week == f"{STEADY}-W01"
+    assert y.weeks == ie._iso_weeks_in(STEADY)
+    assert got["fixed"] == pytest.approx(
+        C.iso_weeks_fixed_months(y.first_week, y.weeks))
+    # The stock left in the water at the year's end is its last week's
+    # standing (OG + FW), the same series gain_t is built from.
+    assert y.standing_end_kg is not None and y.standing_end_kg > 0
+    assert y.standing_end_kg <= y.standing_peak_kg
+
+
+def test_without_the_feed_sheet_only_the_feed_driver_changes(kept, tmp_path):
+    """A workbook with no FeedForecastWeekly reads feed_kg_by_type None and
+    every other field, the layout and the audits exactly as before."""
+    run = kept["run"]
+    src = openpyxl.load_workbook(str(run.out_path))
+    with_sheet = tmp_path / "with.xlsx"
+    src.save(with_sheet)
+    del src[ie.FEED_SHEET]
+    without = tmp_path / "without.xlsx"
+    src.save(without)
+    args = (kept["args"][1:])
+    a = ie.read_workbook(with_sheet, *args, [STEADY],
+                         facility_limits=kept["flimits"], start=run.start)
+    b = ie.read_workbook(without, *args, [STEADY],
+                         facility_limits=kept["flimits"], start=run.start)
+    assert a["years"][STEADY].feed_kg_by_type
+    assert b["years"][STEADY].feed_kg_by_type is None
+    assert {k: v for k, v in b.items() if k != "years"} == \
+        {k: v for k, v in a.items() if k != "years"}
+    assert b["years"][STEADY] == dataclasses.replace(
+        a["years"][STEADY], feed_kg_by_type=None)
+    with pytest.raises(ValueError, match="without cost drivers"):
+        from forecast import costs as C
+        C.year_cost(b["years"][STEADY], {
+            "schema": 1, "fixed_monthly": 1.0, "oxygen_per_kg_feed": 0.0,
+            "chemicals_per_kg_feed": 0.0, "feed_shipping_per_kg": 0.0,
+            "egg_price": 0.0, "feed_prices": {}})
 
 
 # --- the reader, checked against the workbook's OWN independent sheets -------

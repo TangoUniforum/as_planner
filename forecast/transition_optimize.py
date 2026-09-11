@@ -55,6 +55,24 @@ Pure orchestration: no Streamlit, no planning logic, and nothing is written to
 config/ or scenario/ (each run lives in its own temp copy, see ideal_engine).
 An engine exception is recorded on its cell (`TrCell.error`), never swallowed
 and never counted as within the limits.
+
+COSTS (2026-09-11, additive): given `costs`, today's plan and every cell are
+priced from ONE validated snapshot (ideal_optimize.check_costs), summed over
+the same years as revenue (ideal_optimize.cost_fields -> forecast.costs.
+year_cost per year), in this process, from the reads the runs return — for
+DISPLAY only. With no costs the cost fields stay unapplied (the page shows
+them blank, never 0).
+
+SHOW PROFIT, DON'T RANK BY IT (operator ruling, 2026-09-11). The objectives
+are TR_OBJECTIVES: ideal_optimize.OBJECTIVES minus "profit" (revenue, HOG,
+biomass gain). A transition's profit is cash over the run window: the eggs
+and feed of batches stocked late in the run are charged, but their fish are
+sold after it ends, so ranking by it systematically favours smaller future
+batches. optimize_transition refuses "profit" before anything runs
+(PROFIT_NOT_RANKED says why); ranking by profit is offered only for the
+steady year (step 2, ideal_optimize), where the year's spend and sales
+balance. No objective reads the cost fields, so a pick is the same with or
+without costs.
 """
 from __future__ import annotations
 
@@ -81,6 +99,15 @@ TR_MAX_STABILITY_CANDIDATES = 5
 # ranking reused from ideal_optimize reads a cadence; one constant for every
 # cell means it never decides a tie.
 TR_CADENCE = 0
+# The transition's objectives: step 2's (ideal_optimize.OBJECTIVES, the one
+# source) minus "profit" — shown per plan, never ranked on (module docstring).
+TR_OBJECTIVES = {k: v for k, v in io.OBJECTIVES.items() if k != "profit"}
+PROFIT_NOT_RANKED = (
+    "the transition optimizer does not rank by profit: its profit is cash "
+    "over the run window, so the eggs and feed of batches stocked late in "
+    "the run are charged but their fish are sold after it ends, which "
+    "favours smaller future batches. Profit is shown for every plan; "
+    "ranking by profit is only offered for the steady year (step 2)")
 # Each breach count (ideal_optimize.BREACH_KEYS) and the YearRead count it is
 # (the same pairing as ideal_optimize.run_cell's per-cell breaches).
 YEAR_COUNTS = (("density", "r8_over_tank_weeks"),
@@ -309,6 +336,14 @@ class TrCell:
     total: int = 0
     gates: tuple = ()               # the non-limit FAIL gates, one per name
     within_limits: bool = False
+    # --- cash-view cost over `years`, only when costs were given ---
+    # (ideal_optimize.cost_fields; the same fields and defaults as Cell)
+    cost: float = 0.0
+    profit: float = 0.0
+    costs_applied: bool = False
+    cost_parts: dict = field(default_factory=dict)
+    unpriced_feed_kg: float = 0.0
+    cost_error: Optional[str] = None
 
     @property
     def cadence_days(self) -> int:
@@ -450,30 +485,35 @@ def run_cell(cell, project_dir, *, live, forecast_start, cutoff, pr_path,
                   manual_events_file=ev, elapsed_s=time.perf_counter() - t0)
 
 
-def _totals(cell: TrCell, years) -> dict:
+def _totals(cell: TrCell, years, costs: Optional[dict] = None) -> dict:
+    """The objective totals over `years`; with `costs`, the cost fields over
+    the same years (ideal_optimize.cost_fields)."""
     ys = tuple(sorted(years))
-    return dict(years=ys,
-                revenue=float(sum(cell.reads[y].revenue for y in ys)),
+    revenue = float(sum(cell.reads[y].revenue for y in ys))
+    return dict(years=ys, revenue=revenue,
                 hog_t=float(sum(cell.reads[y].hog_t for y in ys)),
-                gain_t=float(sum(cell.reads[y].gain_t for y in ys)))
+                gain_t=float(sum(cell.reads[y].gain_t for y in ys)),
+                **io.cost_fields([cell.reads[y] for y in ys], revenue, costs))
 
 
-def judge_today(today: TrCell) -> TrCell:
+def judge_today(today: TrCell, *, costs: Optional[dict] = None) -> TrCell:
     """Today's plan's totals over every year it ran (the same years every
-    cell covers: one PR, one horizon)."""
+    cell covers: one PR, one horizon), priced with `costs` when given."""
     if today.error is not None:
         return today
-    return replace(today, **_totals(today, today.reads))
+    return replace(today, **_totals(today, today.reads, costs))
 
 
 def judge_cell(cell: TrCell, today: TrCell, *,
-               undated: Optional[int] = None) -> TrCell:
+               undated: Optional[int] = None,
+               costs: Optional[dict] = None) -> TrCell:
     """The cell against today's plan: its effect year, the two-window
-    `verdict`, the objective totals over every year both runs cover, and the
-    fields ideal_optimize's ranking reads (`breaches` = how far worse than
-    today in the early years + breaches in the judged years, per key;
-    `total`; `gates` = the non-limit FAIL gates, one per name). An errored
-    cell comes back as it is (never within the limits)."""
+    `verdict`, the objective totals over every year both runs cover (and,
+    with `costs`, the cost over those years), and the fields
+    ideal_optimize's ranking reads (`breaches` = how far worse than today in
+    the early years + breaches in the judged years, per key; `total`;
+    `gates` = the non-limit FAIL gates, one per name). An errored cell comes
+    back as it is (never within the limits)."""
     if cell.error is not None:
         return cell
     if today.error is not None:
@@ -495,9 +535,10 @@ def judge_cell(cell: TrCell, today: TrCell, *,
                     and g.name not in seen):
                 seen.add(g.name)
                 gates.append(g)
-    return replace(cell, **_totals(cell, years), effect=e, effect_why=why,
-                   verdict=v, breaches=b, total=int(sum(b.values())),
-                   gates=tuple(gates), within_limits=v.within_limits)
+    return replace(cell, **_totals(cell, years, costs), effect=e,
+                   effect_why=why, verdict=v, breaches=b,
+                   total=int(sum(b.values())), gates=tuple(gates),
+                   within_limits=v.within_limits)
 
 
 # --------------------------------------------------------------------------- #
@@ -543,7 +584,8 @@ def optimize_transition(live, forecast_start, cutoff, sizes: Sequence[int],
                         density_overrides: Optional[dict] = None,
                         system_overrides: Optional[dict] = None,
                         control=None,
-                        horizon_weeks: int = TR_HORIZON_WEEKS) -> TrResult:
+                        horizon_weeks: int = TR_HORIZON_WEEKS,
+                        costs: Optional[dict] = None) -> TrResult:
     """Run today's plan ONCE (current limits) and every (size, cap) cell, and
     pick the best cell within the limits under the two-window rule.
 
@@ -552,7 +594,7 @@ def optimize_transition(live, forecast_start, cutoff, sizes: Sequence[int],
     runs, and is judged, at its own cap, with `overrides` (the what-if limits
     EXCEPT the cap — a max_biomass_kg there is refused), the tank/system
     what-ifs, the method and the promoted knobs (`run_cell`). The objective
-    (ideal_optimize.OBJECTIVES: revenue, HOG, biomass gain) is SUMMED over
+    (TR_OBJECTIVES: revenue, HOG, biomass gain) is SUMMED over
     every year both the cell and today's plan cover (one PR, one horizon: the
     same years for every cell). Ranking, tie-break (the smaller batch, then
     the higher cap), closest, `unconstrained` and the stability decision are
@@ -561,7 +603,9 @@ def optimize_transition(live, forecast_start, cutoff, sizes: Sequence[int],
     same cap, in one extra wave of at most 2 x TR_MAX_STABILITY_CANDIDATES
     runs (a grid cell with that size and cap is reused, not re-run).
 
-    Refused with ValueError before anything runs: an unknown objective, a bad
+    Refused with ValueError before anything runs: the "profit" objective
+    (PROFIT_NOT_RANKED: the run-window cash view favours smaller batches),
+    an unknown objective, a malformed `costs` mapping, a bad
     grid (`check_grid`: empty, a size under MIN_SIZE, a cap <= 0 or above
     `ceiling_kg`, more than TR_MAX_CELLS cells), a cap in `overrides`, a
     workers value that is not a positive whole number, a PR that is not a
@@ -570,10 +614,18 @@ def optimize_transition(live, forecast_start, cutoff, sizes: Sequence[int],
     total grows by the stability wave). Pool behaviour:
     ideal_optimize._run_wave, each job naming its runner. Today's
     plan failing raises RuntimeError: nothing can be judged without it.
+
+    `costs` (optional) is validated once (ideal_optimize.check_costs) and
+    that snapshot prices today's plan and every cell over the years compared,
+    for display only: cost and profit (revenue minus that cost). A cell whose
+    reads cannot be priced keeps its `cost_error`; it ranks as it ran.
     """
-    if objective not in io.OBJECTIVES:
-        raise ValueError(f"objective must be one of {sorted(io.OBJECTIVES)}, "
+    if objective == "profit":
+        raise ValueError(PROFIT_NOT_RANKED)
+    if objective not in TR_OBJECTIVES:
+        raise ValueError(f"objective must be one of {sorted(TR_OBJECTIVES)}, "
                          f"got {objective!r}")
+    snap = io.check_costs(costs, objective)
     jobs = check_grid(sizes, caps, ceiling_kg)
     ov = dict(overrides or {})
     if "max_biomass_kg" in ov:
@@ -624,9 +676,10 @@ def optimize_transition(live, forecast_start, cutoff, sizes: Sequence[int],
     if today.error is not None:
         raise RuntimeError(f"today's plan could not run — {today.error}: "
                            f"there is nothing to judge the proposals against")
-    today = judge_today(today)
+    today = judge_today(today, costs=snap)
     undated = undated_cap_year(flimits, today.reads)
-    cells = tuple(judge_cell(first[i + 1], today, undated=undated)
+    cells = tuple(judge_cell(first[i + 1], today, undated=undated,
+                             costs=snap)
                   for i in range(len(jobs)))
     b = io.best(cells, objective)
 
@@ -651,7 +704,8 @@ def optimize_transition(live, forecast_start, cutoff, sizes: Sequence[int],
             note2 = io._run_wave([(run_cell, ((r[1], r[2]), pd_), cell_kw)
                                   for r in extra], pd_, {}, workers,
                                  _record_more, "the stability runs")
-            ran.update({r: judge_cell(more[i], today, undated=undated)
+            ran.update({r: judge_cell(more[i], today, undated=undated,
+                                      costs=snap)
                         for i, r in enumerate(extra)})
             note = " ".join(x for x in (note, note2) if x) or None
         stability, best_stable = io.judge_stability(cands, ran)

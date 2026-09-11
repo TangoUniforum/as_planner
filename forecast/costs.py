@@ -242,14 +242,27 @@ def save_costs(config_dir, costs) -> Path:
     return path
 
 
+def _file_sig(path: Path) -> str:
+    """md5 of a file's bytes, or "none" when it is missing. Never decodes."""
+    if not path.is_file():
+        return "none"
+    return hashlib.md5(_read_bytes(path)).hexdigest()
+
+
 def costs_sig(config_dir) -> str:
     """md5 of costs.yaml's bytes, or "none" when the file is missing. Used by
     the UI staleness signatures. Never decodes, so a file that is not UTF-8
     still gets a signature (load_costs is where it is refused)."""
-    path = Path(config_dir) / COSTS_FILE
-    if not path.is_file():
-        return "none"
-    return hashlib.md5(_read_bytes(path)).hexdigest()
+    return _file_sig(Path(config_dir) / COSTS_FILE)
+
+
+def economics_sig(config_dir) -> str:
+    """md5 of economics.yaml's bytes (the price bands revenue, and so profit,
+    is priced with), or "none" when the file is missing. The CostsAndProfit
+    sheet carries it and the Ideal page keeps it with a result, so a page can
+    say when the price bands changed since the figures were priced."""
+    from .analysis import ECONOMICS_FILE
+    return _file_sig(Path(config_dir) / ECONOMICS_FILE)
 
 
 def missing_feed_prices(costs, feed_names) -> list:
@@ -339,21 +352,104 @@ def period_cost(feed_kg_by_type, eggs, fixed_months, costs) -> dict:
             "unpriced_types": fc["unpriced_types"]}
 
 
-def iso_year_fixed_months(year: int, weeks: int) -> float:
-    """Months of fixed cost in `weeks` ISO weeks of label-year `year`:
-    12 x weeks / (ISO weeks in the year). A 52- or 53-week year is 12. The
-    rule for ISO weeks per year is the one ideal_engine._iso_weeks_in uses."""
-    n = dt.date(int(year), 12, 28).isocalendar()[1]
-    if isinstance(weeks, bool) or not isinstance(weeks, numbers.Real) \
+def month_days(months, start: dt.date, end: dt.date) -> dict:
+    """{"YYYY-MM": (days of [start, end] in the month, days in the month)}:
+    the day split every fixed cost is pro-rated by (monthly_pl's
+    `month_days` input, and `fixed_months_between`)."""
+    out = {}
+    for m in months:
+        y, mo = int(m[:4]), int(m[5:7])
+        n = calendar.monthrange(y, mo)[1]
+        lo = max(dt.date(y, mo, 1), start)
+        hi = min(dt.date(y, mo, n), end)
+        out[m] = ((hi - lo).days + 1 if hi >= lo else 0, n)
+    return out
+
+
+def span_months(start: dt.date, end: dt.date) -> list:
+    """Every "YYYY-MM" from start's month to end's, in order ([] when end
+    is before start)."""
+    out, y, m = [], start.year, start.month
+    while (y, m) <= (end.year, end.month):
+        out.append(f"{y}-{m:02d}")
+        y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+    return out
+
+
+def fixed_months_between(first_day: dt.date, last_day: dt.date) -> float:
+    """Months of fixed cost from first_day to last_day, both included: each
+    calendar month's days in the span over that month's length - the rule
+    monthly_pl pro-rates a part month by, so a span priced here and the same
+    days on the CostsAndProfit sheet carry the same fixed cost."""
+    if last_day < first_day:
+        return 0.0
+    md = month_days(span_months(first_day, last_day), first_day, last_day)
+    return float(sum(c / n for c, n in md.values()))
+
+
+_ISO_WEEK_RE = re.compile(r"^(\d{4})-W(\d{2})$")
+
+
+def iso_weeks_fixed_months(first_week, weeks) -> float:
+    """Months of fixed cost in `weeks` consecutive ISO weeks from
+    `first_week` ("YYYY-Www"): the calendar days they span, Monday of the
+    first to Sunday of the last, split by `fixed_months_between`. So the 52
+    weeks of 2029 (Mon 2029-01-01 .. Sun 2029-12-30) are 11 + 30/31 months
+    and the 53 weeks of 2026 (Mon 2025-12-29 .. Sun 2027-01-03) are
+    3/31 + 12 + 3/31: a 53-week year is 371 days, never "12 months"."""
+    m = _ISO_WEEK_RE.match(str(first_week))
+    if not m:
+        raise ValueError(f"first week {first_week!r} is not an ISO week "
+                         f"label 'YYYY-Www'")
+    try:
+        monday = dt.date.fromisocalendar(int(m[1]), int(m[2]), 1)
+    except ValueError:
+        raise ValueError(f"first week {first_week!r} is not a week of "
+                         f"{m[1]}") from None
+    if isinstance(weeks, bool) or not isinstance(weeks, numbers.Integral) \
+            or weeks < 0:
+        raise ValueError(f"weeks must be a whole number of weeks, got "
+                         f"{weeks!r}")
+    if weeks == 0:
+        return 0.0
+    return fixed_months_between(monday,
+                                monday + dt.timedelta(days=7 * weeks - 1))
+
+
+def year_weeks_fixed_months(yread) -> float:
+    """Months of fixed cost for one engine label-year read: its `weeks`
+    ISO weeks from its `first_week` (iso_weeks_fixed_months). A read that
+    covers the whole ISO year needs no first_week (its weeks are W01 on); a
+    PART year without one cannot be placed and raises - its fixed cost is
+    never guessed. The weeks must lie inside the label-year."""
+    year = int(yread.year)
+    weeks = yread.weeks
+    n = dt.date(year, 12, 28).isocalendar()[1]
+    if isinstance(weeks, bool) or not isinstance(weeks, numbers.Integral) \
             or not 0 <= weeks <= n:
         raise ValueError(f"{year} has {n} ISO weeks; got weeks={weeks!r}")
-    return 12.0 * weeks / n
+    first = getattr(yread, "first_week", None)
+    if first is None:
+        if weeks not in (0, n):
+            raise ValueError(
+                f"year {year}: this run was read without cost drivers "
+                f"(first_week is None, and {weeks} of its {n} ISO weeks do "
+                f"not say which) - its fixed cost cannot be pro-rated")
+        first = f"{year}-W01"
+    m = _ISO_WEEK_RE.match(str(first))
+    if not m or int(m[1]) != year or int(m[2]) + weeks - 1 > n:
+        raise ValueError(f"year {year}: first week {first!r} and {weeks} "
+                         f"week(s) do not lie inside the year's {n} ISO "
+                         f"weeks")
+    return iso_weeks_fixed_months(first, weeks)
 
 
 def year_cost(yread, costs) -> dict:
     """period_cost for one engine label-year. `yread` must carry the cost
-    drivers `feed_kg_by_type` and `eggs`. A read without them raises
-    ValueError. Its cost is never passed off as 0."""
+    drivers `feed_kg_by_type` and `eggs` (and `first_week` for a part
+    year). A read without them raises ValueError. Its cost is never passed
+    off as 0. The fixed cost covers the calendar days of the year's weeks
+    (year_weeks_fixed_months), as the CostsAndProfit sheet charges days."""
     feed = getattr(yread, "feed_kg_by_type", None)
     eggs = getattr(yread, "eggs", None)
     if feed is None or eggs is None:
@@ -362,8 +458,7 @@ def year_cost(yread, costs) -> dict:
         raise ValueError(
             f"year {getattr(yread, 'year', '?')}: this run was read without "
             f"cost drivers ({', '.join(gone)} is None) - it cannot be priced")
-    return period_cost(feed, eggs,
-                       iso_year_fixed_months(yread.year, yread.weeks), costs)
+    return period_cost(feed, eggs, year_weeks_fixed_months(yread), costs)
 
 
 def cost_per_kg_hog(total, hog_kg) -> Optional[float]:
