@@ -24,10 +24,22 @@ the call), and at session end the file's content (or absence) must be what
 it was — which also catches a subprocess (AppTest) or a direct write. Tests
 use a tmp config dir with made-up numbers. `COSTS_GUARD_PATH` overrides the
 watched file for the guard's negative control (tests/test_costs_guard.py).
+
+Nor may a test COPY the live costs file (2026-09-11: hundreds of pytest temp
+project copies were found under %TEMP%, and a pipeline run on such a copy
+also writes a CostsAndProfit sheet priced with the real numbers). A test that
+copies the project config uses `copy_config` (it leaves every costs.yaml
+out); a test that hands a project dir to code that copies it (e.g.
+forecast.ideal_engine.prepare copies config/ whole) uses
+`project_without_costs`; a test that needs costs writes its own made-up ones.
+At session end no file under the basetemp may match the live costs.yaml
+(compared by md5, never printed) — `_no_live_costs_in_temp_copies`.
 """
 import functools
 import hashlib
 import os
+import shutil
+from pathlib import Path
 
 import pytest
 
@@ -79,6 +91,83 @@ def _live_costs_never_written():
             f"it and give it a tmp config dir with made-up numbers. (If you "
             f"saved costs from THIS checkout's app while the suite ran, that "
             f"is the cause instead.)", pytrace=False)
+
+
+def _is_costs_file(name) -> bool:
+    """costs.yaml, or one of its atomic-write siblings (costs.yaml.tmp-*)."""
+    return name == "costs.yaml" or name.startswith("costs.yaml.")
+
+
+def copy_config_without_costs(src, dst, ignore_patterns=()):
+    """shutil.copytree(src, dst) leaving out every costs.yaml (and its
+    costs.yaml.tmp-* siblings) at any depth, plus `ignore_patterns`
+    (shutil.ignore_patterns style). The copy for a test that needs the
+    project config in a temp dir — never the operator's costs."""
+    extra = shutil.ignore_patterns(*ignore_patterns) if ignore_patterns else None
+
+    def _ignore(d, names):
+        out = {n for n in names if _is_costs_file(n)}
+        if extra is not None:
+            out |= set(extra(d, names))
+        return out
+    return shutil.copytree(src, dst, ignore=_ignore)
+
+
+def _md5(path):
+    try:
+        with open(path, "rb") as fh:
+            return hashlib.md5(fh.read()).hexdigest()
+    except FileNotFoundError:
+        return None
+
+
+def live_costs_copies(root, live=None) -> list:
+    """Every file named costs.yaml under `root` whose md5 equals the live
+    costs file's (`live`, default the watched LIVE_COSTS) — paths only, never
+    content. [] when the live file does not exist."""
+    ref = _md5(LIVE_COSTS if live is None else live)
+    if ref is None or not os.path.isdir(root):
+        return []
+    return sorted(str(p) for p in Path(root).rglob("costs.yaml")
+                  if p.is_file() and _md5(p) == ref)
+
+
+@pytest.fixture(scope="session")
+def copy_config():
+    """copy_config(src, dst, ignore_patterns=()) — copytree without costs."""
+    return copy_config_without_costs
+
+
+@pytest.fixture(scope="session")
+def live_costs_scan():
+    """live_costs_scan(root, live=None) -> [paths matching the live costs]."""
+    return live_costs_copies
+
+
+@pytest.fixture(scope="session")
+def project_without_costs(tmp_path_factory):
+    """A project copy — config/ without costs.yaml, and scenario/ — for a
+    test that hands a project dir to code that copies it into a temp run
+    (forecast.ideal_engine.prepare copies config/ whole). Read-only by
+    convention: a test that edits project files makes its own copy."""
+    d = tmp_path_factory.mktemp("project_nocosts")
+    copy_config_without_costs(os.path.join(ROOT, "config"), d / "config")
+    shutil.copytree(os.path.join(ROOT, "scenario"), d / "scenario")
+    return d
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _no_live_costs_in_temp_copies(tmp_path_factory):
+    yield
+    leaks = live_costs_copies(tmp_path_factory.getbasetemp())
+    if leaks:
+        pytest.fail(
+            f"{len(leaks)} temp project cop{'y' if len(leaks) == 1 else 'ies'} "
+            f"under the pytest basetemp hold the live costs file (same md5), "
+            f"e.g. {leaks[0]}. A test copied config/ with costs.yaml in it — "
+            f"use the copy_config or project_without_costs fixture "
+            f"(tests/conftest.py), and give a test that needs costs its own "
+            f"made-up ones.", pytrace=False)
 
 
 def _stamp(path):

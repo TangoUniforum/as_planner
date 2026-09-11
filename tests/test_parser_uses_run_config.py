@@ -63,10 +63,11 @@ pytestmark = pytest.mark.skipif(
 
 
 @pytest.fixture
-def alt_config(tmp_path):
-    """A config copy whose welfare line differs from the global one."""
+def alt_config(tmp_path, copy_config):
+    """A config copy whose welfare line differs from the global one (never
+    the operator's costs.yaml — tests/conftest.py)."""
     d = tmp_path / "cfg"
-    shutil.copytree(os.path.join(ROOT, "config"), d)
+    copy_config(os.path.join(ROOT, "config"), d)
     p = d / "control.yaml"
     cy = yaml.safe_load(p.read_text()) or {}
     cy["density_welfare_threshold_kg_m3"] = 42.0

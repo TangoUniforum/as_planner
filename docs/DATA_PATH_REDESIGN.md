@@ -1,6 +1,14 @@
 # Data-Path Redesign — App as Source of Truth, Excel as Export
 
-**Status:** Draft for review (2026-06-04)
+**Status (updated 2026-09-11):** the data-path inversion of Phases 1-3 SHIPPED.
+Config lives in `config/*.yaml`, the scenario in `scenario/*.yaml`, only the
+ProductionReport is uploaded, and the app writes a separate output workbook. It
+shipped as flat YAML, not SQLite (see Q1). Phase 7 is realised in part by the
+Ideal mode (2026-09-10) — see the note under 'Strategic optimizer'. Phases 4-5
+are not built; Phase 6 was attempted as the Global method and withdrawn
+2026-09-10 (see Q5). The rest of this page is the 2026-06-04 draft, kept for its
+reasoning; 'Today' below means June 2026.
+*(Original status: Draft for review, 2026-06-04.)*
 **Goal:** Invert the data flow. Today the monolithic `Forecast.xlsm` is the
 system of record for *all* inputs AND the destination for all outputs — which
 causes (a) cross-sheet mismatch when only some sheets are refreshed, and
@@ -192,6 +200,15 @@ the strategic optimizer, so they return as a first-class input, not report-only.
 
 ### Strategic optimizer — formulation sketch (objective resolved 2026-06-04)
 
+> **Status 2026-09-11:** built in part as the **Ideal** mode (USER_GUIDE §14).
+> Step 2's optimizer searches input frequency × batch size × biomass cap in the
+> real engine. It treats the facility limits as HARD constraints (zero breaches)
+> rather than weighted objectives, and ranks on one chosen objective — revenue,
+> harvest tonnage (HOG), biomass gain, or profit (from `config/costs.yaml`, cash
+> view). Monthly targets are not an Ideal objective. The forward schedule did NOT
+> become an optimizer output: step 3's transition is a `batches.yaml` download the
+> operator adopts by hand, judged by the two-window rule.
+
 The operator selected **all four objectives** — so this is an explicitly
 **multi-objective** problem with built-in tensions, not a single cost function.
 
@@ -244,10 +261,13 @@ extended in place; the mother ship is new UI + the structured store.
 
 ## Open questions
 
-1. **Persistence (decided by capability #1):** SQLite for the model registry +
-   scenarios + runs (needs versioning + reproducibility), with YAML/JSON
-   import/export for portability. Flat-YAML-only is ruled out by the versioned
-   mother-ship requirement.
+1. **Persistence:** proposed as SQLite (2026-06-04) for a versioned model
+   registry + scenarios + runs, with YAML/JSON import/export for portability.
+   **What shipped is flat YAML** (`config/`, `scenario/`, atomic writes via
+   `forecast/yaml_atomic.py`); reproducibility comes from the RunConfig snapshot
+   sheet embedded in every output workbook, not from versioned models. SQLite
+   remains a proposal tied to the unbuilt Phase 4. (Also in Phase 2 below:
+   'scenario store (SQLite)' shipped as `scenario/*.yaml`.)
 2. **Strategic optimizer objective:** RESOLVED (2026-06-04) — all four
    (even tonnage + monthly targets + max utilization + min overstocking/cost),
    multi-objective. See the formulation sketch above. Remaining sub-question: the
@@ -292,6 +312,7 @@ extended in place; the mother ship is new UI + the structured store.
 - **Phase 7 — Strategic optimizer.** Designs the stocking plan (input frequency +
   batch sizes) against the objective from Q2; forward batch schedule becomes an
   optimizer output with operator override; MonthlyTargets returns as a first-class
-  input.
+  input. *(2026-09-11: built in part as the Ideal mode — see the status note under
+  'Strategic optimizer' above. The schedule stays an operator input.)*
 
 Phases 4–7 can reorder by priority once the foundation is in place.

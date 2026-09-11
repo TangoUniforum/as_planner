@@ -1070,7 +1070,12 @@ _WIDGETS = {"button", "download_button", "number_input", "text_input",
             "Column", "TextColumn", "NumberColumn", "SelectboxColumn",
             "CheckboxColumn", "DateColumn", "ListColumn", "LinkColumn",
             "ProgressColumn"}
-_HELP_FUNCS = ("_edit_costs", "_ideal_optimizer", "_ideal_tr_optimizer",
+# Configure → Costs, every step of the Ideal page (1 quick scan and its
+# results, 2 reference sheet + the tank & system limits table, 3 transition),
+# both optimizers, and the Run page's Costs & profit tab.
+_HELP_FUNCS = ("_edit_costs", "_ideal", "_ideal_quick_results",
+               "_ideal_reference", "_ideal_limits_table", "_ideal_transition",
+               "_ideal_optimizer", "_ideal_tr_optimizer",
                "_ideal_opt_stability", "_ideal_tr_opt_stability",
                "_ideal_ref_cost_metrics", "_run_costs_tab")
 
@@ -1113,6 +1118,44 @@ def test_every_new_widget_has_help():
         ["Feed type", "Up to size (g)", "Item", "Price / kg"])
 
 
+def test_every_widget_in_any_ideal_function_has_help():
+    """Not only the functions named above: EVERY top-level _ideal* function,
+    so a new Ideal helper that draws a widget without help= fails the suite
+    the day it lands."""
+    tree = ast.parse(APP.read_text(encoding="utf-8"))
+    fns = [n for n in tree.body if isinstance(n, ast.FunctionDef)
+           and n.name.startswith("_ideal")]
+    assert len(fns) > 20, [f.name for f in fns]      # the sweep is not empty
+    seen = 0
+    bad = {}
+    for f in fns:
+        b, n = _widgets_without_help(f)
+        seen += n
+        if b:
+            bad[f.name] = b
+    assert seen > 40, seen
+    assert not bad, f"Ideal widgets with no help=: {bad}"
+
+
+def test_the_limits_table_configures_every_column_with_help():
+    """The tank & system limits table (steps 2 and 3): each of its columns —
+    the two read-only ones included — has a column_config entry (whose help
+    the sweep above checks)."""
+    tree = ast.parse(APP.read_text(encoding="utf-8"))
+    fn = _func(tree, "_ideal_limits_table")
+    de = next(n for n in ast.walk(fn) if isinstance(n, ast.Call)
+              and getattr(n.func, "attr", "") == "data_editor")
+    cc = {k.arg: k.value for k in de.keywords}["column_config"]
+    configured = sorted(k.value for k in cc.keys)
+    frame = next(n for n in ast.walk(fn) if isinstance(n, ast.Dict)
+                 and any(isinstance(k, ast.Constant) and k.value == "System"
+                         for k in n.keys))
+    assert configured == sorted(k.value for k in frame.keys)
+    assert configured == sorted(
+        ["System", "Tanks", "Tank density cap (kg/m³)",
+         "System biomass limit (t)", "System feed limit (kg/day)"])
+
+
 def test_the_help_scan_catches_a_missing_help():
     fn = ast.parse(
         "def f(c1, x):\n"
@@ -1133,7 +1176,8 @@ def test_the_help_scan_catches_a_missing_help():
 def test_profit_texts_never_show_an_unpriced_zero():
     from types import SimpleNamespace as NS
     ns = _app_functions("_ideal_opt_value_text", "_ideal_opt_diff_text",
-                        "_ideal_money")
+                        "_ideal_money", "_ideal_currency",
+                        _ROOT=ROOT)            # USD, the live price bands
     val, diff = ns["_ideal_opt_value_text"], ns["_ideal_opt_diff_text"]
     priced = NS(costs_applied=True, profit=-1.5e6, revenue=2e6, hog_t=1.0,
                 gain_t=1.0)
@@ -1149,3 +1193,56 @@ def test_profit_texts_never_show_an_unpriced_zero():
     assert diff(priced, bare, "profit") == "—"
     assert diff(priced, other, "revenue") == "+$1.0M"   # unchanged
     assert ns["_ideal_money"](-4e5) == "−$0.4M"
+
+
+@pytest.mark.parametrize("currency,money,per_kg,unit", [
+    ("USD", "−$0.4M", "$3.21", "$M"),
+    ("EUR", "−0.4M EUR", "3.21 EUR", "M EUR"),
+    (None, "−0.4M", "3.21", "M"),            # no economics.yaml: no mark
+])
+def test_ideal_money_follows_the_economics_currency(tmp_path, currency, money,
+                                                    per_kg, unit):
+    """The Ideal page's money is in economics.yaml's currency, the way the
+    Run page formats it (_run_money) — never a '$' the files do not state.
+    Made-up economics, one price band."""
+    import yaml
+    cfg = tmp_path / "config"                  # read as _ROOT/config
+    cfg.mkdir()
+    if currency is not None:
+        (cfg / "economics.yaml").write_text(yaml.safe_dump(
+            {"currency": currency, "basis": "hog", "price_bands": [
+                {"min_kg": 0.0, "max_kg": 99.0, "price_per_kg": 1.0}]}),
+            encoding="utf-8")
+    ns = _app_functions("_ideal_money", "_ideal_money_unit",
+                        "_ideal_currency", _ROOT=tmp_path)
+    assert ns["_ideal_currency"]() == currency
+    assert ns["_ideal_money"](-4e5) == money
+    assert ns["_ideal_money"](3.214, per_kg=True) == per_kg
+    assert ns["_ideal_money_unit"]() == unit
+
+
+def test_no_dollar_sign_is_hardcoded_on_the_ideal_page():
+    """Every Ideal money figure goes through _ideal_money / _ideal_money_unit:
+    no string literal in an _ideal* function other than those two writes a
+    '$' before a number, and no f-string does ('${')."""
+    tree = ast.parse(APP.read_text(encoding="utf-8"))
+    hits = []
+    for f in tree.body:
+        if not (isinstance(f, ast.FunctionDef) and f.name.startswith("_ideal")
+                and f.name not in ("_ideal_money", "_ideal_money_unit")):
+            continue
+        doc = (f.body[0].value if f.body and isinstance(f.body[0], ast.Expr)
+               and isinstance(f.body[0].value, ast.Constant) else None)
+        for n in ast.walk(f):
+            if n is doc:                     # a docstring describes; skip it
+                continue
+            if isinstance(n, ast.JoinedStr):
+                parts = n.values
+                for a, b in zip(parts, parts[1:]):
+                    if (isinstance(a, ast.Constant) and str(a.value)
+                            .endswith("$") and isinstance(b, ast.FormattedValue)):
+                        hits.append((f.name, n.lineno))
+            elif (isinstance(n, ast.Constant) and isinstance(n.value, str)
+                  and ("$M" in n.value or "$/kg" in n.value)):
+                hits.append((f.name, n.lineno))
+    assert not hits, hits

@@ -8,7 +8,7 @@ anything.
 
 The merge is a WRAPPER: the three functions are unchanged and rendered as tabs.
 That is deliberate. This repo's documented failure mode is retiring a mode and
-losing the capabilities that lived only inside it (USER_GUIDE 13.1 exists
+losing the capabilities that lived only inside it (USER_GUIDE 12.1 exists
 because of it), and the mode audit found thirteen such capabilities in Compare
 and Optimize alone. A wrapper cannot drop them; a future deeper integration
 could, and these tests are what would catch it.
@@ -112,7 +112,7 @@ def test_capability_survives_the_merge(what, marker):
     assert marker in SRC, (
         f"'{what}' lost in the mode merge — its marker {marker!r} is gone from "
         f"app.py. Retiring a mode in this repo requires a dated record of where "
-        f"each capability went (USER_GUIDE 13.1 precedent); losing one silently "
+        f"each capability went (USER_GUIDE 12.1 precedent); losing one silently "
         f"is the failure this test exists to prevent.")
 
 

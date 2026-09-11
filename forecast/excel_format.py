@@ -73,7 +73,7 @@ SKIP = frozenset({
     "Control",            # input cells the VBA and the app both write
 })
 
-# Tab colours by role, so a 24-sheet workbook is navigable at a glance.
+# Tab colours by role, so a 27-28-sheet workbook is navigable at a glance.
 TAB_PLAN = "1F4E78"    # the plan itself
 TAB_REPORT = "2E75B6"  # derived reporting
 TAB_AUDIT = "C55A11"   # gates and audits

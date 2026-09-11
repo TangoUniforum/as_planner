@@ -34,7 +34,13 @@ from forecast.caps import METRIC_BIOMASS, METRIC_MIN_HARVEST, FacilityLimits
 from forecast.config_io import load_config
 from forecast.production_report import find_pr_sheet, parse_pr_worksheet
 
-ROOT = Path(__file__).resolve().parents[1]
+REPO = Path(__file__).resolve().parents[1]
+# The project every run here is handed. Replaced, for each test in this
+# module, by a copy WITHOUT config/costs.yaml (_project_root_without_costs):
+# prepare copies config/ whole, and a kept or tmp_path work dir outlives the
+# test, so running on the real project left the operator's costs in the
+# pytest temp dirs.
+ROOT = REPO
 START = ideal.STEADY_START
 PROD = {"sixn_production_start": "2026-01-01"}     # 6N production from day one
 STEADY = START.year + 2          # year 3: what a 156-week Ideal run reads
@@ -55,6 +61,17 @@ def _repo_hashes() -> dict:
 
 def _stale_temp_dirs() -> set:
     return set(Path(tempfile.gettempdir()).glob("ideal_engine_*"))
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _project_root_without_costs(project_without_costs):
+    """Every test here runs on a project copy without config/costs.yaml
+    (tests/conftest.py) — config/ and scenario/ otherwise byte-identical, so
+    each comparison against ROOT's files still compares like with like."""
+    global ROOT
+    ROOT = project_without_costs
+    yield
+    ROOT = REPO
 
 
 @pytest.fixture
@@ -138,6 +155,43 @@ def test_prepare_writes_only_under_work_dir(tmp_path, stream):
     for p in (ROOT / "config").iterdir():
         if p.is_file() and p.name != "control.yaml":
             assert (Path(prep["config_dir"]) / p.name).read_bytes() == p.read_bytes()
+
+
+def _files(d: Path) -> list:
+    return sorted(p.relative_to(d).as_posix() for p in d.rglob("*")
+                  if p.is_file())
+
+
+def test_prepare_copies_a_costs_file_verbatim_and_nothing_else(tmp_path, stream):
+    """The Run/Ideal temp run writes CostsAndProfit only when its config holds
+    costs.yaml, and prepare is what puts it there (it copies config/ whole).
+    This module runs on a costs-free project copy, so this is the one check
+    of that copy: a private project with MADE-UP costs — never the operator's
+    file — must reach the run's config byte for byte, with no other file
+    added or dropped, and none in the scenario copy."""
+    from forecast import costs as C
+    proj = tmp_path / "proj"
+    ie._copy_tree(ROOT / "config", proj / "config")
+    ie._copy_tree(ROOT / "scenario", proj / "scenario")
+    assert not (proj / "config" / C.COSTS_FILE).exists()   # none inherited
+    C.save_costs(proj / "config", {
+        "schema": 1, "fixed_monthly": 12.5, "oxygen_per_kg_feed": 0.01,
+        "chemicals_per_kg_feed": 0.02, "feed_shipping_per_kg": 0.03,
+        "egg_price": 0.04,
+        "feed_prices": {"Made-up feed": {"item": "test item",
+                                         "price_per_kg": 1.25}}})
+    src = proj / "config"
+    prep = ie.prepare(tmp_path / "w", stream, proj, start=START,
+                      horizon_weeks=60, overrides=PROD)
+    cfg = Path(prep["config_dir"])
+    assert (cfg / C.COSTS_FILE).read_bytes() == (src / C.COSTS_FILE).read_bytes()
+    assert C.load_costs(cfg) == C.load_costs(src)
+    assert _files(cfg) == _files(src)
+    for name in _files(src):
+        if name != "control.yaml":
+            assert (cfg / name).read_bytes() == (src / name).read_bytes(), name
+    assert not [p for p in Path(prep["scenario_dir"]).rglob("*")
+                if p.name.startswith(C.COSTS_FILE)]
 
 
 def test_unknown_override_is_refused_before_anything_is_written(tmp_path, stream):
@@ -1163,7 +1217,7 @@ def test_moves_count_distinct_tank_pairs_not_rows():
 def _short_stream():
     from pathlib import Path
     from forecast import ideal as _im
-    root = Path(__file__).resolve().parents[1]
+    root = ROOT                    # the project copy without costs.yaml
     t = _im.load_context(root)["template"]
     return root, _im.synthetic_stream(t, 49, 280_000, horizon_weeks=60)
 
@@ -1224,8 +1278,8 @@ def test_real_pr_mode_carries_the_what_if_limits(tmp_path):
     from pathlib import Path
     from forecast import scenario_io as sio
     from forecast.ideal_engine import prepare
-    root = Path(__file__).resolve().parents[1]
-    pr = root / "tests" / "fixtures" / "reference" / "production_report.xlsx"
+    root = ROOT                    # the project copy without costs.yaml
+    pr = REPO / "tests" / "fixtures" / "reference" / "production_report.xlsx"
     assert pr.is_file(), pr
     batches = sio.load_batches(str(root / "scenario"))
     prep = prepare(tmp_path / "w", batches, root, horizon_weeks=60, pr_path=pr,

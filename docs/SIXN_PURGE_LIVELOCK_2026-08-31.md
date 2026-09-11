@@ -3,6 +3,14 @@
 **Status:** defect CONFIRMED and quantified. Two fixes measured and REJECTED.
 Both knobs ship off; the shipped plan is unchanged. 2026-08-31.
 
+> **Superseded in part, 2026-09-06 (cff4f2f):** `sixn_overdue_drain_weeks` now
+> ships at 3 (od3, not the od4 measured below) as a guard that enforces the purge
+> cycle; on the live plan it changed nothing (the cycle already held), and it has
+> not been re-measured on the eight states in this note. So the "both knobs ship
+> off" line no longer holds. `sixn_drain_largest_first` still ships off. Read
+> this note for the root-cause analysis; take current behaviour from
+> `config/control.yaml` and gate 11, "Fish stuck in 6N purge".
+
 ## The defect
 
 `_run_sixn_purge_week` defers a 6N tank whose fish would not fit in the week's
@@ -165,7 +173,7 @@ tank over two weeks. It is an operator/architecture decision, not a tuning one.
 
 ### Meanwhile the defect is at least VISIBLE
 
-A soft gate — **"Fish stuck in 6N purge"**, gate 12 — now reports it: PASS when
+A soft gate — **"Fish stuck in 6N purge"**, gate 11 — now reports it: PASS when
 every tank drains within its rotation, WARN past 5 weeks, FAIL past 8. Soft on
 purpose: the root cause is unfixed, so a hard gate would disqualify most plans
 with no way to pass. On the live workbook it reads WARN (8 spells past 5 weeks,

@@ -15,8 +15,8 @@ Phases 2–4 of §7 — the CP-SAT window repair and the **LP guidance this titl
 are not built, and are not buildable as written. That LP was always internal to *this*
 design (an LP relaxation over the placement model in §2, used to choose neighborhoods);
 it was never the Global method's LP. But OR-tools and every CP-SAT / MILP / LP solve
-were removed from the project on 2026-09-09 together with the Global method, which was
-the only caller — CP-SAT there went infeasible on ~81% of weeks behind a silent
+were removed from the project on 2026-09-10 together with the Global method (commit
+932d018), which was the only caller — CP-SAT there went infeasible on ~81% of weeks behind a silent
 uncapped fallback. §§2–3 and phases 2–4 stand below as the design of record; read them
 as an unbuilt proposal that would have to re-argue its solver dependency first (§8).
 
@@ -251,7 +251,7 @@ leaves the greedy default untouched.
   it runs the real continuity audit it gates on), so turning `placement_method="lns"`
   on installs nothing. The solver this design assumed —
   Google OR-tools (CP-SAT), or PuLP+CBC — is **no longer a project dependency**: it
-  was removed on 2026-09-09 with the Global method, its only caller. Reviving phases
+  was removed on 2026-09-10 with the Global method, its only caller. Reviving phases
   2–4 means re-adding and re-pinning it *and* answering the measurement that got it
   dropped: CP-SAT infeasible on ~81% of weeks, with a silent uncapped fallback
   labelled "optimal".

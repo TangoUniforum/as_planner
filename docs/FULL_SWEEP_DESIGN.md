@@ -1,6 +1,10 @@
 # Full Sweep — design
 
-**Status:** design, not built. Preconditions complete 2026-08-30.
+**Status (updated 2026-09-11):** the mode half shipped on 2026-08-31: Analyze,
+Compare & Choose and Optimize merged into **Decide** (1 · Check · 2 · Search ·
+3 · Drill in; USER_GUIDE §12.4). The run-set / preset spine in §§3-5 is still
+not built. §1 describes the app before that merge. *(Original status: design,
+not built. Preconditions complete 2026-08-30.)*
 **Operator brief:** *"one long run to decide on the best method, then use that
 method more quickly"* — and *"the best plan, not just the best score."*
 
@@ -115,7 +119,7 @@ the expensive artifact is produced exactly once. This is the whole design:
 
 | artifact | keyed by | produced by | cost |
 |---|---|---|---|
-| **A** run set | PR md5 + config fingerprint + engine fingerprint + method + knobs | Phase 1 | ~15 s/run (controller) |
+| **A** run set | PR md5 + config fingerprint + engine fingerprint + method + knobs | Phase 1 | ~13-16 s/run (controller arms at stock, 8.31.26 PR, 85-week horizon, one run at a time; measured 2026-09-11) |
 | **B** metrics | A + `METRICS_SCHEMA` | Phase 1 | reading, seconds |
 | **C** gate verdicts | A + gate registry | Phase 2 | seconds |
 | **D** scores | B + emphasis weights | Phase 2 | **free** |
@@ -147,8 +151,19 @@ Real sizes, measured:
 
 - controller knob space = 5 knobs -> **162 combinations**
 - 4 controller arms (`FULL_ROSTER` — `controller`, `controller-hybrid`,
-  `controller-lns`, `controller-feasible`) -> **648 runs ≈ 2.7 h** at ~15 s —
-  genuinely exhaustive
+  `controller-lns`, `controller-feasible`) -> **648 runs ≈ 2.4-2.8 h** serial
+  at the measured 13.2-15.6 s (less with parallel workers) — genuinely
+  exhaustive
+
+Where the per-run figure comes from: 2026-09-11, the four arms at stock on
+the 8.31.26 PR at the live 85-week horizon, run one after another with no
+other forecast or test run alongside
+(`_backups/2026-09-10_v2_harness/neutral/runner.py`): V1 13.2-14.1 s, V2
+13.6-15.6 s per run. Knob variants were not timed. The horizon drives the
+cost: the V2 session's 208-week runs on a real PR took ~50-100 s each while
+other runs shared the machine (2026-09-10/11), which would put 648 runs at
+~9-18 h. The app's Run-budget caption says "~30-40 s each"; that is a hint
+string in the UI, not a measurement.
 
 **Re-measure the per-run cost on your own PR before planning around a total.**
 A per-run figure quoted from an earlier scenario was once wrong by 10x
@@ -202,7 +217,7 @@ Not different algorithms — different **coverage targets** over the same spine.
 | level | covers | ~time | typical use |
 |---|---|---|---|
 | **Quick** | cache-warm; runs only what is missing | minutes | after a small config edit |
-| **Full** | 4 controller arms x full knob grid | ~2.7 h | monthly, after a new PR |
+| **Full** | 4 controller arms x full knob grid | ~2.4-2.8 h serial at 85 weeks (§4) | monthly, after a new PR |
 
 Two levels, not three: one engine family is registered, so `FULL_ROSTER` is the
 same list as `DEFAULT_ROSTER` and a Full sweep is simply every registered arm at
@@ -237,7 +252,8 @@ Plus one the merge plan originally missed:
     legs silently
 
 **House rule:** this repo retires a mode with a dated section enumerating where
-each capability went (see USER_GUIDE §13.1, "Tune mode retired 2026-08-06").
+each capability went (see USER_GUIDE §12.1, "Tune mode retired 2026-08-06", and
+§12.4, "Analyze, Compare & Choose and Optimize merged into Decide 2026-08-31").
 Retiring two modes without that record is the documented failure mode.
 
 ---

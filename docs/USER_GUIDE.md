@@ -38,41 +38,48 @@ streamlit run app.py
 Opens `localhost:8501`. Flow: **upload** a Production Report → **▶ Run forecast**
 → review KPIs + tabs → **download** the output workbook.
 
-The sidebar **Mode** selector lists seven windows, in the order you normally work
-in them. Each carries a one-line caption in the app itself; the same list, with
-pointers into this guide (the seventh, **Accuracy (forecast vs actuals)** — which
-grades a past forecast against the ProductionReport that followed it — is §13):
+The sidebar **Mode** selector lists six windows, in the order you normally work
+in them. Each carries a one-line caption in the app itself:
 
 | Mode | What it is for | Section |
 |---|---|---|
-| **Configure (models & control)** | Set up once — biology curves, tanks, batches, per-week limits, control knobs, harvest targets and prices | §3 |
-| **Run forecast** | The everyday step — run your chosen plan on today's PR and download the workbook | §5 |
-| **Analyze (find my best plan)** | "Which plan should I use?" — runs every engine, searches the knobs, grades them all, recommends ONE | §12 |
-| **Compare & Choose (all methods)** | Run the engines side by side and pick which whole plan becomes the report. **This is where the planning method is chosen** | §7.4 |
-| **Optimize (multi-objective)** | Sweep control knobs on ONE engine and rank the settings on an objective you choose | §7.2 |
-| **How it works (the rules)** | The plain-language rulebook — what each layer decides, what it may never do, the honest limits | — |
+| **Configure (models & control)** | Set up once: biology curves, tanks, batches, per-week limits, control knobs, harvest targets, prices and costs | §3, §15 |
+| **Run forecast** | The everyday step: run your chosen plan on today's PR and download the workbook | §5 |
+| **Decide (which plan should I run?)** | One page, three steps. 1 Check (the monthly lever check) · 2 Search (every engine plus a knob search, graded on the twelve-gate checklist, ending in the recommended plan with ✅ Adopt / ⭐ Promote) · 3 Drill in (Compare engines, Tune knobs) | §12, §12.4 |
+| **Ideal (what should we stock?)** | The steady stocking rhythm, a reference sheet in the real engine, and the transition from today's fish | §14 |
+| **Accuracy (forecast vs actuals)** | Grades a past forecast against the PR that followed it | §13 |
+| **How it works (the rules)** | The plain-language rulebook | — |
 
 The app still *lands* on **Run forecast**; the ordering above is reading order,
 not a change of entry point.
 
 > **Retired:** the old **Tune (density knobs)** mode is gone. Its density
 > distribution and severe-batch readout are now a checklist gate plus a
-> per-candidate drill-in on the **Analyze** board, and the stocking frontier
+> per-candidate drill-in on **Decide → 2 · Search**, and the stocking frontier
 > moved there with it (§12.1). The headless sweep remains: `python
-> tools/tune_sweep.py`.
+> tools/tune_sweep.py`. **Analyze**, **Compare & Choose** and **Optimize**
+> were merged into **Decide** on 2026-08-31 (§12.4).
 >
-> **Also gone:** the sidebar no longer has a **Planning method** selector. The
-> method is chosen on the **Compare & Choose** board, where you can see every
-> engine graded side by side first; ▶ Run forecast then re-runs whichever plan
-> you picked. The current pick is shown in the sidebar above the Run button.
+> **Also gone:** the sidebar no longer has a **Planning method** selector.
+> ▶ Run forecast uses, in this order: (1) a plan you picked this session:
+> ✅ Adopt on the 🏆 Recommended plan card in Decide step 2, or **Use this
+> plan** on Decide → Compare engines; else (2) the **promoted default** in
+> `config/analysis_defaults.yaml` (⭐ Promote in Decide), with that
+> candidate's own knobs layered over control.yaml for the run (control.yaml
+> is not written); else (3) the app default, Controller — hybrid. The sidebar
+> above the Run button names the method and where it came from ("picked this
+> session" / "promoted <date>" / "app default").
 
 At the top of the sidebar, above the Mode selector, a **Computer power** slider
 (10–100%, default **40%**) sets how much of the machine the *heavy* runs may
-use — the Optimize sweeps. The caption under it translates the percent into
-processor cores ("up to N of M"). Raising it lets those runs go wider, but other
-applications feel slower and Optimize sweeps use more memory while a run is
-going (at 100% every core may be busy — an explicit opt-in). A plain controller
-**▶ Run forecast** and **Tune** are sequential and unaffected by this setting.
+use: Decide's knob search (step 2) and Tune-knobs sweeps (step 3), the Ideal
+quick scan, both Ideal optimizers (step 2 and step 3), and step 3's **Check
+both schedules** (the two schedules run side by side when 2+ workers are
+allowed). The caption under it translates the percent into processor cores
+("up to N of M"). Raising it lets those runs go wider, but other applications
+feel slower and sweeps use more memory while a run is going (at 100% every
+core may be busy — an explicit opt-in). A plain controller **▶ Run forecast**
+is sequential and unaffected by this setting.
 
 **How much it actually buys depends on the shape of the work.** Optimize sweeps
 scale nearly linearly — each variant is a whole forecast in its own process, so
@@ -81,20 +88,21 @@ construction (each knob depends on the previous best), so it parallelizes only
 the candidate values within a knob — a smaller win (§7.2).
 
 Lower in the sidebar (visible in every mode, but it governs **▶ Run forecast**)
-the app shows **which planning method is currently picked**, and — when it is
-the default — why. You change it on **Compare & Choose** (§7.4), not here. The
-shipped default is **Controller — hybrid (L1-guided harvest)** — but note that
-and it **does steer** — two independent routes turn its levers on and
-either alone suffices: `config/control.yaml` ships `hybrid_purge_lever: true`
-and `hybrid_production_lever: true`, **and** the `controller-hybrid` method
-pins both `True` in its own overrides, so setting the config values back to
-`false` would not make that arm inert. The **production** half is live; the
-**purge** half is refused outright while `sixn_level_drains: false`, and the
-guide logs that refusal to the ValidationLog. That was the arm measured
-throughout this guide. ⚠ **On 2026-09-08 the operator set `sixn_level_drains:
-true`, which lifts the refusal** — so `full` on the live tree would now steer
-both halves, which has never been measured. See §4.5. (Until 2026-09-03 this section said
-the arm was inert. That was wrong, and it predated the 2026-08-27 pins.)
+the app shows **which planning method ▶ Run forecast will run** and where it
+came from. You change it in **Decide** (Adopt or Promote in step 2, or Compare
+engines in step 3), not here. The **app default** is Controller — hybrid
+(L1-guided harvest), but it is used only when nothing is picked or promoted.
+The repo's `config/analysis_defaults.yaml` promotes the plain controller
+(method `controller`, which pins `hybrid_follow: off`) with its own tuned
+knobs. So ▶ Run forecast runs that plain controller until you pick or promote
+another plan; the sidebar says which. When the hybrid does run, it steers: its
+method pins both levers `True` (`forecast/methods.py`), so setting the config
+values to `false` would not make that arm inert. The purge half is refused
+while `sixn_level_drains: false` and the refusal is logged to the
+ValidationLog. ⚠ **On 2026-09-08 the operator set `sixn_level_drains: true`,
+which lifts the refusal** — so the hybrid on the live tree would now steer both
+halves, which has never been measured. See §4.5. (Until 2026-09-03 this section
+said the arm was inert. That was wrong, and it predated the 2026-08-27 pins.)
 
 ### CLI
 ```
@@ -132,15 +140,15 @@ Facility-wide knobs read into `ControlParams`:
 
 | Knob | Meaning | Typical |
 |---|---|---|
-| `horizon_weeks` | forecast length | 130 |
+| `horizon_weeks` | forecast length | *(none — must be set)*; 85 in the shipped config |
 | `max_biomass_kg` | facility biomass cap — checked against **TOTAL** facility biomass (FW + OG + 6N purge), per-week overrides in FacilityLimits | (config default; overridable per week) |
 | `max_feed_per_day_kg` | facility daily feed cap — checked against total **feeding** (SW + FW) feed/day; off-feed purge fish excluded (§4.1) | (config default) |
 | `max_harvest_per_week` | **THE** weekly processing limit (fish) — a **constraint** the demand-driven harvest respects, never a level to plan up to: harvest = what biomass/density/floor/contracts need, capped here (the 6N drain holds a purge tank back one rotation rather than exceed it). The removed `harvest_target_per_week` knob is ignored with a console note if an old config still carries it | 55,000 |
-| `harvest_relief_pct` | pressure-relief band used to **judge** a plan: derived absolute ceiling = `max_harvest_per_week × (1 + relief)` = 60,500. **No engine reads this knob** — the planner's own weekly ceiling is the limit itself; weeks land in the relief band when a whole 6N pair had to drain or an INV-5 force-empty overdrew (that overage is borrowed back from the next week). What the knob decides is how such weeks are SCORED: the Analyze checklist shows amber at 1–3 relief weeks and red beyond 3 — or on any week past the derived ceiling — telling you to ramp harvests up earlier instead. It also drives the manual-window over-ceiling lint. 0 = no band | 0.10 |
-| `min_harvest_per_week` | weekly harvest floor | 30,000 |
+| `harvest_relief_pct` | pressure-relief band used to **judge** a plan: derived absolute ceiling = `max_harvest_per_week × (1 + relief)` = 60,500. **No engine reads this knob** — the planner's own weekly ceiling is the limit itself; weeks land in the relief band when a whole 6N pair had to drain or an INV-5 force-empty overdrew (that overage is borrowed back from the next week). What the knob decides is how such weeks are SCORED: the Decide checklist shows amber at 1–3 relief weeks and red beyond 3 — or on any week past the derived ceiling — telling you to ramp harvests up earlier instead. It also drives the manual-window over-ceiling lint. 0 = no band | 0.10 |
+| `min_harvest_per_week` | weekly harvest floor | *(none — must be set)*; 30,000 in the committed config, 26,000 in the operator's live tree (the value §14's measurements used) |
 | `plan_tank_feasibility` | **Plan within the tanks you actually have.** The precalc canvas already detects, weeks ahead, that OG tank demand exceeds placeable supply (`tank_supply` bottleneck) — and then plans past it: that list is handed to `_build_facility_assignment_plan` and only ever *appended* to, never read. The excess is not real need — each SW week's `tanks_needed_at_density_cap` is raised to that batch's own peak over the next 6 weeks so it can claim grow-out early, per batch, with nothing arbitrating the sum. On: the canvas hands those forward reservations back, deepest slack first and **never below a batch's need for that week**, until each week fits. **Measured on 3 PR closings and it does NOT win** — the tank-supply shortfall goes to zero, transfer legs fall on all three (626→585, 604→589, 550→516), ceiling breaches improve on 2 of 3, and worst grow-out density improves sharply on 2 of 3 (198.7→109.6 kg/m³ on 8/19) — but HOG slips on all three (−54.0, −4.2, −24.3 t), refused transfers **rise** (the forward claim was doing real work: hand it back and batches get boxed in later), and 1–3 weeks per horizon exceed the 15-move handling budget. Off by default; the **Controller — plan-feasible tanks** method in Compare pins it on. | false |
 | `max_transfers_per_week` | weekly HANDLING BUDGET (transfer moves/week). A "move" = one distinct src→dst tank transfer with fish in it, exactly what a TransferPlan `Transfer` row shows (same-week duplicate legs are merged into one row; 0-fish float-residue legs are dropped; TranOG/Grade rows are not moves) — the engine's internal budget counts the **same unit**. Once a week's moves reach the budget, the deferrable quality passes (plan-diff *evening* top-ups, even-out, balancer, variable-quantity, remnant sweep) wait for a calmer week and the leveling resumes there; essential moves (6N rotation fills, arrival make-room/vacates, plan-diff *source drains* — tanks another batch takes over) are never blocked. A week can still end 1-2 moves OVER the budget, because the essential passes run LAST: the deferrable work spends the budget out to the cap and the essential moves that follow land on top. That is common, not exceptional — measured across **8 test months, 5 of them contain a week over 15 moves**, which is why the handling-budget gate is soft (§12). Two anticipatory layers that close that gap are BUILT but shipped **off** (`_ANTICIPATE_ARRIVAL_RESERVE` / `_ANTICIPATE_PACING_DEFER` in `placement.py` — engineering switches, not knobs, with no config key): a 4-arm x 3-PR x 2-knob-set ablation measured that they buy full budget compliance by starving the quality rebalancer, and pay for it out of the **harvest floor** — on the operator's own PR, weeks under `min_harvest_per_week` go 3 -> 5 and the shortfall more than doubles, and on one PR a 69,677-fish week lands past the 60,500 relief ceiling. Steady harvest outranks handling, so the plan may show a 16-17 move week instead. An overrun on the handling gate (WARN >12 / FAIL >15) means the week's quality work and essential work together exceeded the budget — most often a TranOG arrival week coinciding with a 6N rotation fill. 0 = off. **One scope limit worth knowing:** the *split* pass is NOT budget-gated (the `_rebalance_systems_realized` split pass, which takes its own `split_budget` and does not consult the weekly move budget) | 15 |
-| `min_harvest_weight_g` | minimum weight a fish can be harvested at — a **tank is eligible when its MEAN reaches this**, which is why a tank averaging 3,438 g holds ~92,000 fish individually over 3,500 g and still cannot be harvested whole (§4.5, the graded peel exists for exactly that). **No dataclass default** — `ControlParams` declares it without one, so `config/control.yaml` is the only source. **Live value 3,300** since 2026-09-03: measured on the 8.31 PR it takes rest-of-2026 from 2,582 t to 2,715 t and the weekly-contract shortfall from 65,470 fish to 5,686, at the cost of five December-trough weeks shipping at 3.43–3.48 kg live (nothing below 3.4 kg). Beware 3,150 — a 600 t hole sits there | *(none — must be set)* |
+| `min_harvest_weight_g` | minimum weight a fish can be harvested at — a **tank is eligible when its MEAN reaches this**, which is why a tank averaging 3,438 g holds ~92,000 fish individually over 3,500 g and still cannot be harvested whole (§4.5, the graded peel exists for exactly that). **No dataclass default** — `ControlParams` declares it without one, so `config/control.yaml` is the only source. **Committed value 3,300** (since 2026-09-03; measured on the 8.31 PR it takes rest-of-2026 from 2,582 t to 2,715 t and the weekly-contract shortfall from 65,470 fish to 5,686, at the cost of five December-trough weeks shipping at 3.43–3.48 kg live — nothing below 3.4 kg). The operator's live tree currently runs **3,200**, which this row does not measure. Read `config/control.yaml` for the value a run uses. Beware 3,150 — a 600 t hole sits there | *(none — must be set)* |
 | `min_tank_control` | force-empty floor (fish): a harvest/transfer leaving fewer than this empties the tank (INV-5) | 7,000 |
 | `min_transfer_count` | min rebalancer transfer size (fish): the density/load balancer won't split a sub-group **smaller than this OUT** of a tank (the OUT-side mirror of `min_tank_control`). **0 = OFF.** Suppresses tiny partial moves — trades fewer transfers for more *marginal* density over-cap (the small moves were doing fine-grained relief); whole-tank consolidation moves are unaffected | 0 (off) |
 | `min_grade_count` | min GRADED-TAIL size (fish) for the floor-fill peel — a **different rule** from the two 7,000s beside it. `min_tank_control` says how thin a tank may be **left**; `min_transfer_count` says how small a group is worth rigging a **pump** for; this says how small a ripe tail is worth running the **grader** for, on a week that is short of the harvest floor. They shared one number until 2026-09, which made the peel take **nothing** whenever the ripe fish stood as 3-7k tails spread over 8-12 tanks. **Blank = inherit `min_transfer_count`** (the historical behaviour, and the only setting measured to hold every hard gate at both 3,300 g and 3,500 g). A number is the explicit floor; **0 = no floor** (the tail must still be ≥ `min_fraction` = 10% of the tank and must leave a legal remnant). MEASURED 2026-09-03 on the 8.31 PR: at a **3,300 g** harvest gate the value is inert — 0 / 3,000 / 7,000 give the identical plan; at **3,500 g** it bites, and dropping it to 0 buys rest-of-2026 2,582 → 2,700 t with thin tank-weeks 9 → 0, but pushes a 2027-W39 grow-out tank to 115.6 kg/m³ and the weekly move peak to 17. Check the density and handling gates before keeping a low value | blank (inherit) |
@@ -161,7 +169,7 @@ Facility-wide knobs read into `ControlParams`:
 | `sixn_growth` | 6N runs as growout (vs purge) for the whole horizon | false |
 | `sixn_production_start` | date 6N flips purge → production | e.g. 2028-01-01 |
 | `sixn_transition_weeks` | empty/fallow window at the 6N transition (0 = none) | 0 |
-| `sixn_level_drains` | **ON in the dataclass; the committed `config/control.yaml` still ships `false`, but the operator's live tree has run it `true` since 2026-09-08** — read the file, do not assume. 6N PURGE mode only. Caps how full a 6N purge pair may get (at `max_harvest_per_week`) so weekly fills don't **accumulate** into one pair across its rotation residency — the root cause of the 90–113k drain spikes that starve other pairs into sub-`min_harvest_per_week` troughs. Surplus stays in grow-out and becomes the move-in for the next thin pair, lifting its drain toward the floor so every week meets the harvest minimum (the steady-weekly-harvest contract). *Verified ON vs OFF:* 6N drain peak 110k→68k (−38%), CV 0.46→0.32, weeks-below-min 38→27, fish conserved. It is a **safety guard, not a lever** (`methods.py` UNTUNABLE_KNOBS): while it is off, `hybrid_guide.py` **refuses the hybrid's 6N purge lever** outright rather than steer around it — and the shipped config runs `hybrid_follow: full` with `hybrid_purge_lever: false`, so that steering is off twice over today. Set `true` to get the leveled behaviour, joining `rebalance_level` + `harvest_level_load` (which the shipped config *does* leave on); `false` is the old accumulate-then-dump behavior. No effect in 6N production mode. **Re-measured 2026-09-08 on the live 130-week plan (the operator turned it on):** it is the only mechanism that caps a 6N fill by the pair's remaining headroom (`target = min(target, max_h - existing)`, `placement.py:1917`). With it OFF the rotation fill topped up occupied tanks and whole-tank drains breached the weekly processing ceiling on three weeks — **88,155 / 72,309 / 72,279 fish** against a 55,000 ceiling. ON: **0 ceiling breaches, worst week 54,945, over-cap tank-weeks 95 → 37, +85 t.** That is why it is a guard and not a lever: off, the plan is not merely worse, it proposes weeks the plant cannot process | `true` dataclass default; `false` in the committed config; **`true` in the operator's live tree** |
+| `sixn_level_drains` | **ON in the dataclass; the committed `config/control.yaml` still ships `false`, but the operator's live tree has run it `true` since 2026-09-08** — read the file, do not assume. 6N PURGE mode only. Caps how full a 6N purge pair may get (at `max_harvest_per_week`) so weekly fills don't **accumulate** into one pair across its rotation residency — the root cause of the 90–113k drain spikes that starve other pairs into sub-`min_harvest_per_week` troughs. Surplus stays in grow-out and becomes the move-in for the next thin pair, lifting its drain toward the floor so every week meets the harvest minimum (the steady-weekly-harvest contract). *Verified ON vs OFF:* 6N drain peak 110k→68k (−38%), CV 0.46→0.32, weeks-below-min 38→27, fish conserved. It is a **safety guard, not a lever** (`methods.py` UNTUNABLE_KNOBS): while it is off, `hybrid_guide.py` **refuses the hybrid's 6N purge lever** outright rather than steer around it — and the committed config runs `hybrid_follow: full` with `hybrid_purge_lever: true`, so on that config this refusal is the only thing keeping the purge lever off (the operator's live tree runs `sixn_level_drains: true` with `hybrid_follow: 'off'`). Set `true` to get the leveled behaviour, joining `rebalance_level` + `harvest_level_load` (which the shipped config *does* leave on); `false` is the old accumulate-then-dump behavior. No effect in 6N production mode. **Re-measured 2026-09-08 on the live 130-week plan (the operator turned it on):** it is the only mechanism that caps a 6N fill by the pair's remaining headroom (`target = min(target, max_h - existing)`, `placement.py:1917`). With it OFF the rotation fill topped up occupied tanks and whole-tank drains breached the weekly processing ceiling on three weeks — **88,155 / 72,309 / 72,279 fish** against a 55,000 ceiling. ON: **0 ceiling breaches, worst week 54,945, over-cap tank-weeks 95 → 37, +85 t.** That is why it is a guard and not a lever: off, the plan is not merely worse, it proposes weeks the plant cannot process | `true` dataclass default; `false` in the committed config; **`true` in the operator's live tree** |
 | `starvation_period_days` | in-place purge length in 6N production mode | **7** (= one weekly step; clean single-cohort pipeline) |
 | `tran_og_default_tanks` | min tanks a TranOG arrival gets | 2–3 |
 | `density_target_pct` | per-tank density target as a fraction of cap | 0.85–0.99 |
@@ -173,7 +181,7 @@ Facility-wide knobs read into `ControlParams`:
 | `harvest_setpoint_lookahead_weeks` | **VESTIGIAL** — superseded by the dual-limit setpoint (§4.1/§4.3); kept for config back-compat but **not read** by the engine. Use `facility_biomass_deviation_pct` to set how close to the cap to run | 0.75 (ignored) |
 | `harvest_level_load` | **harvest smoother (ON by default)** — enforce `max_harvest_per_week` as a HARD ceiling + pre-harvest earlier so harvest is flat and biomass stays under cap. Paired with `rebalance_level`, which otherwise spikes harvest (see §4.3). Set `false` for old reactive behavior | **true** |
 | `hybrid_follow` | **L1 HARVEST GUIDE — `full` in the shipped config, and STEERING.** Two independent routes turn it on and either alone is enough: `config/control.yaml` ships `hybrid_purge_lever: true` and `hybrid_production_lever: true`, **and** the `controller-hybrid` arm pins both `True` in its own `overrides` (`forecast/methods.py`) — so setting the config values back to `false` would still leave that arm steering. Runs the whole-horizon L1 harvest envelope (`forecast/global_planner_poc.py`, via `forecast/hybrid_guide.py`) first and feeds it to the controller as a per-week target band. The **production** half is live. The **purge** half is refused outright while `sixn_level_drains: false` (`hybrid_guide.py:194` — level drains are the guard against over-filling one 6N pair, and the guide may not remove it). ⚠ **That refusal lifted on 2026-09-08**, when the operator set `sixn_level_drains: true`. Every `full` measurement quoted in this row was taken with the purge half REFUSED — they describe the *production-lever-alone* arm. Setting `hybrid_follow: full` on the live tree now runs **both** levers for the first time, an arm this table does not describe. Measure it before trusting it. (The live tree currently runs `hybrid_follow: 'off'`; the committed config still says `full`. That disagreement is an open operator decision, not a defect.) Note the guide's ceiling half applies only on weeks L1 itself calls production weeks and while the facility is under its hard cap; elsewhere it degrades to floor-only. The ceiling half is the point: it tells the reactive controller to harvest **less** in fat weeks so those fish are still there for lean ones — the one thing it can never decide for itself (all its own levers are `max()`). *Measured, 6 real PRs:* **totally empty harvest weeks 6 → 0**, weeks below floor 22.5 → 9.0, worst week 0 → 16,148 fish; **cost** peak biomass 102.6 → 107.1% of cap, peak density 102 → 124. `off` = old reactive-only behaviour. `floor` is **not** a no-op (that claim was retracted 2026-08-12) but it is **dominated** — measured on the 7.29 PR it produces a genuinely different plan (worst week 23,754 vs `off`'s 20,526) yet **11** weeks below the contract floor, worse than `off`'s 9 and far worse than `full`'s 3. Applying only the guide's floor half raises the lean weeks it can reach while leaving the controller free to over-harvest the fat ones; the **ceiling** half is what actually banks fish for later. Use `full` | `full` (dataclass default `off`) |
-| `hybrid_follow_band` | how tightly the controller tracks the guide (± fraction). Chosen by a 90-cell paired sweep as the most **stable** setting: holds 0–1 empty weeks under neutral perturbation where wider bands drift to 3–4 | **0.05** |
+| `hybrid_follow_band` | how tightly the controller tracks the guide (± fraction). Chosen by a 90-cell paired sweep as the most **stable** setting: holds 0–1 empty weeks under neutral perturbation where wider bands drift to 3–4 | 0.10 (dataclass); **0.05** in the shipped config and pinned by the controller-hybrid method |
 | `harvest_smooth_lookahead_weeks` | level-load window K — weeks of coming-due biomass to spread the pre-harvest over | 6 |
 | `harvest_level_target` | flat fish/week floor when level-loading (unset/null = auto from realized growth) | null |
 | `placement_method` | placement engine: `greedy` (default heuristic + rebalancer) or `lns` (opt-in LP-guided refinement of the realized layout — implemented and audit-gated, see §11; it correctly no-ops on a capacity-bound config, where there is no tank slack to relocate into) | `greedy` |
@@ -183,7 +191,7 @@ Each batch row carries its stocking AND its **growth models**:
 
 | Field | Meaning |
 |---|---|
-| `input_date`, `input_count` | when/how many fry stocked |
+| `input_date`, `input_count` | the day the batch's **eggs** are stocked, and how many eggs — the count the egg stage starts from (biology runs egg → freshwater → seawater). **Configure → Costs** charges the egg price on `input_count` (§15) |
 | `tran_sf_date`, `tran_og_date` | freshwater→smolt, smolt→seawater transition dates |
 | `tran_og_count`, `tran_og_avg_wt_g` | **planned** count + target weight entering seawater |
 | `tran_og_cv` | size-distribution CV (drives the grade split) |
@@ -812,11 +820,12 @@ board are pinned `off` so you can always see them side by side.
 |---|---|---|
 | **HarvestReport** | one row per harvest event (Year/Month/Week/Date/Tank/Batch/Count/Gross/HOG/Avg wt) | the full harvest event log |
 | **HarvestPlan** | single-table harvest plan (Week/Batch/Tank/Count/Gross/HOG…) | the actionable harvest plan |
+| **TransferPlan** | every tank-to-tank move, grade and TranOG row the plan executes (refused transfers omitted; see the RealizationReport note) | the actionable transfer plan |
 | **HarvestPlan Report** | per-year blocks, per-batch Units/AvWt/Biomass by month + **bottom monthly TOTAL row** | **monthly sales planning** (HOG tonnes landed per month) |
 | **YearlySummary** | facility-wide per-year: harvest count/HOG t/gross t/avg wt, feed t, peak+mean biomass, utilization | **year-over-year trends** |
 | **TransferTemplate** | (A) the canonical batch journey through seawater; (B) per-batch summary: SW entry week + weeks-from-start, entry weight/count/density, peak tank footprint, peak density (×cap) + Density_Status flag, harvest window + weight | **the general plan at a glance** — which batches enter when, their footprint, density risk, and harvest timing |
+| **Batch Plan** | per batch: a summary header, then the milestone timeline (each tier entered, week, weight, tanks) with handling moves per batch/fish | one batch's path |
 | **Daily Harvest Schedule** | each week's harvest — **all tanks combined** — split evenly Mon–Fri (blended avg weights), with a per-week **Total** row and a blank line between weeks; Tank/Batch list every contributor | daily ops |
-| **WeeklyReport / MonthlyReport** | per-(batch, week/month) open/close ledger (count, weight, biomass, **Avg_Density**, SGR, feed, FCR, mortality, harvest, transfers, checks) | detailed batch accounting |
 | **FeedForecastWeekly / Monthly** | feed by feed-type × period matrix | feed ordering |
 | **Advisory** | per-week capacity table: biomass/feed vs caps + excess + OK/REDUCE | capacity headroom + over-cap weeks |
 | **FacilityMap** | tank × week grid (cell = "Batch# AvgWt/Density"); **below it**: per-system × week **feed (kg/day)** and **biomass (kg)** blocks, each with a FACILITY total row | occupancy at a glance + per-system load vs caps |
@@ -826,11 +835,12 @@ board are pinned `off` so you can always see them side by side.
 | **TankContinuityAudit** | per-(tank, week) balance + **facility conservation summary** | 0-drift proof |
 | **ReconciliationReport / SystemLimitsAudit** | per-batch open/close balance (count reconciles **exactly** via recorded realized biology; biomass within tolerance) / per-system realized biomass + feed vs cap, flagged `BIOMASS_OVER` / `FEED_OVER` | deeper audits — *TankContinuityAudit is the authoritative 0-drift biomass check* |
 | **RealizationReport** | the **intent** check, for all three event families. **Transfers**: events emitted / applied in full / in part / refused whole, fish planned vs moved, **share of planned movement realized**, a per-week table, and **STUCK RELATIONSHIPS** (one row per batch+source tank+reason, so a refusal repeated many times reads as one fact with a first/last week). **Harvest**: decided vs taken, split into taken-as-decided / INV-5 force-emptied (took *more*) / short / refused. **TranOG**: fish planned to enter vs entered, and **fish that never entered the facility at all**. **Grading**: Grade (size split) and GradedHarvest (the peel), applied vs refused whole | "did the plan actually happen?" — see the note below |
-| **WeeklyReport / MonthlyReport** | the per-(period, batch) production ledger, plus a **TOTAL row per period** and a real **AutoFilter** already applied — filter these | reading one batch, or slicing by batch/period |
+| **WeeklyReport / MonthlyReport** | the per-(period, batch) production ledger — open/close count, weight, biomass, **Avg_Density**, SGR, feed, FCR, mortality, harvest, transfers, checks — plus a **TOTAL row per period** and a real **AutoFilter** already applied — filter these | detailed batch accounting; reading one batch, or slicing by batch/period |
 | **WeeklyReport Grouped / MonthlyReport Grouped** | the SAME rows with a **blank line between periods**, for reading and printing. **Do not filter these** — a blank row ends Excel's contiguous range, so a filter would silently cover only the first period | reading a period end-to-end |
 | **Diagnostics** | FW-calibration: per batch, the target vs projected pre-cull avg weight at TranOG, the residual, and a back-solved `Suggested_FW_Correction` | tuning `fw_correction` (§7 step 2) |
+| **BiologyProjection** | the unharvested per-batch biology projection (growth, feed along the curve, ignoring harvest/caps) | model inputs — NOT the fed plan (see the Overview note) |
 | **RunConfig** | the exact config + scenario embedded in the output | reproducibility |
-| **CostsAndProfit** | only when `config/costs.yaml` exists; always the LAST tab: per month, per year and horizon — feed kg, feed / shipping / oxygen / chemicals / eggs / fixed cost, total cost, HOG, revenue, **profit**, spend per kg HOG sold, unpriced feed kg; then **feed by type** with your item names. Row 2 says when feed had no price (profit then overstated). NOT COMPUTED (with the reason) when the file is invalid | the cash-view P&L — §15 |
+| **CostsAndProfit** | only when `config/costs.yaml` exists; always the LAST tab: per month (with a first row for any days before the report opens), per year and horizon — feed kg, eggs stocked, feed / shipping / oxygen / chemicals / eggs / fixed cost, total cost, HOG, revenue, **profit**, spend per kg HOG sold, unpriced feed kg; then **feed by type** with your item names. Row 2 says when feed had no price (profit then overstated). NOT COMPUTED (with the reason) when the file is invalid or empty | the cash-view P&L — §15 |
 
 > **`PR FW WEIGHT DERIVED`** (console WARN + ValidationLog). A freshwater batch
 > the ProductionReport gives a COUNT but no BIOMASS used to seed the projection
@@ -915,12 +925,14 @@ board are pinned `off` so you can always see them side by side.
 > 2026-09-07, when the operator asked for the average (**reports only — no engine
 > decision reads this column**, the planner's own density tests were untouched).
 >
-> **Monthly harvest attribution:** harvest is a Mon–Fri activity, so the **HarvestPlan
-> Report** and the **MonthlyReport** ledger both attribute each week's harvest to
-> months by **working-day** fraction (a boundary week splits by its Mon–Fri days) —
-> so the two sheets' monthly HOG tie out. Continuous flows (feed, growth, mortality)
-> split by calendar-day. The per-event **HarvestReport** is unprorated detail (each
-> row keeps its event-date month).
+> **Monthly harvest attribution:** a week's harvest belongs, whole and undivided,
+> to the month its ISO **Monday** falls in (the sales contract's convention,
+> operator decision 2026-09-02). A forecast's first week whose Monday falls before
+> the report opens is booked in the first month the report covers. **HarvestPlan
+> Report**, **MonthlyReport** and **CostsAndProfit** all use this rule, so their
+> monthly HOG tie out. Continuous flows (feed, growth, mortality) split by
+> calendar day. The per-event **HarvestReport** is unprorated detail (each row
+> keeps its event-date month).
 >
 > **Total feed is one number:** the **FeedForecast** sheets, the **WeeklyReport/
 > MonthlyReport** Feed column, and the **YearlySummary** Feed total all sum the same
@@ -931,7 +943,6 @@ board are pinned `off` so you can always see them side by side.
 > vs cap, so they intentionally exclude the move-in (a total-accounting item, not a
 > per-day rate).
 
-> **`… (realized plan)` categories — judge the plan, not a pass inside it.**
 #### `INFO - Per-week coverage (weeks on a Control default)`
 
 Shipped 2026-09-03. One line per **facility** metric whose per-week rows in
@@ -964,6 +975,8 @@ falls back exactly as before; the note reaches `invariant_warnings`, a
 report-layer list the planner never reads. Verified on the 8.31 PR: with and
 without the check, 85 harvest weeks compared, **0 differ, 0.0 fish**.
 
+> **`… (realized plan)` categories — judge the plan, not a pass inside it.**
+>
 > Most ValidationLog entries are raised *mid-plan* by whichever pass first
 > noticed a problem. That is useful for tracing, but it is **not** the answer to
 > "which weeks are short?" — the passes that run afterwards (make-room,
@@ -1046,13 +1059,13 @@ without the check, 85 harvest weeks compared, **0 differ, 0.0 fish**.
 > it ever fails you get a plain workbook and a note, never a failed run.
 
 ### Knowing what the app is doing
-Run mode, the Optimize tab, and every result show a collapsible **"Active
-configuration"** panel — plain-language label / value / *effect* for the settings
-that actually shape a run (feed leveling, harvest smoother, TranOG tanks, setpoint,
-density target, rebalancer budget, placement engine, caps). Run mode shows *what this
-run will do*, a result shows *the config it used* (incl. optimizer overrides), and
-Optimize shows *the base the search tunes on top of* — so you can always see what's
-selected and what it does.
+Run mode (the sidebar, in every mode), Decide → Tune knobs, and every result show
+a collapsible **"Active configuration"** panel — plain-language label / value /
+*effect* for the settings that actually shape a run (feed leveling, harvest
+smoother, TranOG tanks, setpoint, density target, rebalancer budget, placement
+engine, caps). Run mode shows *what this run will do*, a result shows *the config
+it used* (incl. optimizer overrides), and Tune knobs shows *the base the search
+tunes on top of* — so you can always see what's selected and what it does.
 
 **While a run is going**, the status box narrates the engine's own progress live —
 loading, hydration, caps, the harvest scheduler, FW calibration, the placement walk,
@@ -1077,8 +1090,10 @@ re-run to get it back.
 - **Per-Batch** — per-batch weight/biomass/density/losses over a period slider
 - **Period Summary** — facility biomass, weekly harvest, active batches, density
 - **Harvest** — totals, per-week stacked harvest, avg harvest weight, **monthly HOG rollup (sales planning)**, and a **Daily harvest schedule** table — each week's harvest with **all tanks combined**, split evenly across its five operating days (Mon–Fri), with a shaded per-week **Total** row and a blank line between weeks (the same as the *Daily Harvest Schedule* Excel sheet)
+- **Feed** — whole-facility feed (kg/day) week by week against that week's own delivery cap: peak feed, weeks over the cap, the worst week as % of cap, and a CSV download.
 - **Yearly** — HOG tonnes / feed / peak biomass / count per year
 - **Plan** — the **production-flow template** (TransferTemplate §A: the canonical seawater journey every batch follows — FW → OG1/2 nursery → 1 kg lock → grow-out fan-out → finishing → harvest drain) at the top, then the **per-batch plan summary** (§B): entry timing, footprint, harvest window, with a **density-risk highlight** + peak-density-per-batch chart (OVER CAP flagged)
+- **Costs & profit** — this run's CostsAndProfit sheet (cash view): revenue, total cost, profit and spend per kg HOG sold; revenue and cost by month; the monthly and yearly tables; feed by type. It says when a result predates costs, when costs are not set or not computed, when costs.yaml or the price bands changed since the run, and withholds Profit when feed is unpriced (§15).
 
 ---
 
@@ -1215,7 +1230,7 @@ can call the growth model wrong — see **§13 Accuracy (forecast vs actuals)**.
    §7.1 — read the *distribution*, not the raw OVER CAP count.
 5. **Check `YearlySummary` / HarvestPlan Report monthly totals** for the production
    and sales plan.
-6. For a **new scenario**, re-run the K sweep (Section 4.2) to re-anchor the tuning
+6. For a **new scenario**, re-run the K sweep (§4.4) to re-anchor the tuning
    table before trusting the recommendation.
 
 ### 7.1 Tuning per-batch density over-cap (the Plan tab)
@@ -1242,8 +1257,8 @@ raw "OVER CAP" count to zero — read the *distribution*:
 **To find the right knobs, sweep — don't guess.** Two ways, both driven by the
 same engine (`forecast/tuning.py`):
 
-- **In the app (recommended):** **Mode → Analyze**, then the *📊 Density quality*
-  expander at the bottom of the board. It shows the peak-density distribution
+- **In the app (recommended):** **Decide → 2 · Search**, then the *📊 Density
+  quality* expander at the bottom of the step. It shows the peak-density distribution
   per candidate, the severe-batch list, and the gate's verdict. (This replaced
   the retired Tune mode — §12.1.) Reading rule: the gate counts batches at
   **≥1.3× cap**; the drill-in table lists everything from **1.2×** so you can
@@ -1286,11 +1301,11 @@ of the controller: **stagger batch entries**, **reduce input counts**, or **add
 grow-out tanks** — see §8. The current config(7) controller tuning is already
 optimal; the residual over-cap is a stocking-vs-capacity fact, not slack.
 
-### 7.2 The multi-objective optimizer (Optimize mode)
+### 7.2 The multi-objective optimizer (Decide → step 3 → Tune knobs)
 
 The tuner (§7.1) reads ONE axis (per-batch density). The **optimizer** ranks knob
 variants on a **selectable, weighted objective** across several goals at once. Run
-it from the app sidebar **Mode → Optimize (multi-objective)**, or the CLI:
+it from **Decide → step 3 → Tune knobs** (formerly the Optimize mode), or the CLI:
 ```
 python -m tools.optimize_sweep --emphasis "Walk the line"
 python -m tools.optimize_sweep --emphasis "Minimize handling" --quick
@@ -1367,7 +1382,7 @@ on the 7.29 PR over a 40-variant search: the worst harvest week ranged
 `corr(worst week, score)` was **−0.03**. Worse, `biomass_util_gap` actively
 *rewards* running with no headroom, and headroom is exactly what fills a lean
 week — so the objective is mildly **anti**-floor. Read the **contract-floor
-gate** (§ Analyze, gate 3) beside the score; do not read the score alone. The
+gate** (§12, gate 3) beside the score; do not read the score alone. The
 tuned tournament now enforces a no-regression rank on the floor so this cannot
 be promoted silently, but a hand-run Optimize sweep is still ranked by score
 alone.
@@ -1388,7 +1403,7 @@ forecast with these knobs** button. Clicking it:
   correct, and
 - **loads the run into all the visualization tabs** — switch **Mode → Run forecast**
   to explore Overview / Per-Batch / Harvest / Yearly / Plan for the optimized forecast,
-  and **⬇ download** the workbook (all 24 report sheets) for Excel.
+  and **⬇ download** the workbook (26 report sheets, 27 with CostsAndProfit) for Excel.
 
 To keep the knobs permanently, paste the snippet into **Configure → Control** (or
 `config/control.yaml`); every later run then uses them. The CLI prints the same
@@ -1423,7 +1438,7 @@ note below).
 **Every auto-optimize run is logged** (app *and* CLI) to `optimize_history.jsonl` —
 timestamp, method, emphasis, the winning knobs, key results (hot spot / feed / weeks
 over 55k / dropped), and whether it was saved to config. The app shows the recent runs
-in a **📜 Recent auto-optimize runs** panel at the top of Optimize mode, so you always
+in a **📜 Recent auto-optimize runs** panel at the top of Decide → step 3 → Tune knobs, so you always
 have a durable record of *what settings were used and what they produced*, kept across
 sessions.
 
@@ -1560,11 +1575,13 @@ handling budget binds first — so 8 is the budget to test with.
 >
 > Practical rule: leave it off. If per-system utilization is genuinely your
 > binding problem, turn it on for **one PR at a time**, and accept it only after
-> Analyze's checklist shows the **contract floor** and **processing limit +
+> Decide's checklist shows the **contract floor** and **processing limit +
 > relief** gates no worse than with it off. Never adopt it on the cap-compliance
 > numbers alone — that is exactly the reading that got it adopted and reverted.
 
-### 7.4 Compare & Choose — run every method, pick the plan (`Mode → Compare & Choose`)
+### 7.4 Compare engines (Decide → step 3) — run every method, pick the plan
+
+*(Formerly the Compare & Choose mode, merged into Decide on 2026-08-31 — §12.4.)*
 
 Instead of committing to one engine up front, this mode runs the planning methods on
 your PR, **grades them on several lenses, and lets *you* pick which plan becomes the
@@ -1591,7 +1608,7 @@ you choose a *whole* plan — never a splice.
   empty harvest week the current scenario had already scripted away). Changing only
   the harvest **targets or prices** re-judges the existing board instantly — those are
   scoring overlays, not run inputs, so nothing re-runs.
-- **Provenance on every result.** Every method card (and every Analyze candidate,
+- **Provenance on every result.** Every method card (and every Decide candidate,
   and the header of any run on the report tabs) carries a small caption saying where
   that result came from: **●&nbsp;fresh run** (the engine ran in *this* browser
   session) vs **⟲&nbsp;cached run of `<date time>`** (replayed from the result cache
@@ -1624,7 +1641,7 @@ you choose a *whole* plan — never a splice.
   more tanks). It shows on the board (a lens + the per-method line), on every **Run**
   (the *Reared density* KPI), and as an **Optimize** objective — pick the *"Product
   quality"* emphasis preset to have the optimizer trade packing for gentler rearing.
-- **Stocking-for-quality frontier** (`Mode → Analyze`, at the bottom of the Analyze board). On a
+- **Stocking-for-quality frontier** (**Decide → 2 · Search**, at the bottom of the step). On a
   tank-full facility the density knobs can't lower density — the real quality lever is
   stocking **fewer fish**. This sweeps a stocking cut across your **future** batches
   (fish already in the facility are fixed) and plots the trade: fewer fish rear gentler
@@ -1666,15 +1683,18 @@ you choose a *whole* plan — never a splice.
 - The harvest spike and the biomass overage are **two symptoms of one cause** — the
   stocking plan vs the facility's combined hold (cap) + process (55k/week) capacity.
   You can trade one for the other; eliminating both needs a stocking change.
-- **The default planning method is the L1-guided hybrid (§4.5), and it steers.**
-  `hybrid_follow: full` builds the L1 harvest envelope, and the two levers that apply
-  it, `hybrid_purge_lever` and `hybrid_production_lever`, both ship `true` — and are
-  pinned `True` by the arm itself. The production path is live; the purge path is
-  refused while `sixn_level_drains: false`. What you lose by that refusal is the 6N
-  staging half, not the envelope: the ceiling still tells the controller to harvest
-  *less* in fat weeks on production weeks under the cap. Set `sixn_level_drains: true`
-  to buy the purge half as well —
-  the purge one also needs `sixn_level_drains`, which ships `false` too. Measured on the
+- **The L1-guided hybrid (§4.5) is the app default, but the promoted plain
+  controller is what ▶ Run forecast runs** on this repo (`config/analysis_defaults.yaml`,
+  method `controller`, hybrid guide off) — the sidebar names the method. When the
+  hybrid runs, it steers: `hybrid_follow: full` builds the L1 harvest envelope, and the
+  two levers that apply it, `hybrid_purge_lever` and `hybrid_production_lever`, both
+  ship `true` — and are pinned `True` by the arm itself. The production path is live;
+  the purge path is refused while `sixn_level_drains: false`. What you lose by that
+  refusal is the 6N staging half, not the envelope: the ceiling still tells the
+  controller to harvest *less* in fat weeks on production weeks under the cap. Set
+  `sixn_level_drains: true` to buy the purge half as well (the committed config ships
+  it `false`; the operator's live tree has run it `true` since 2026-09-08, and its
+  combination with `hybrid_follow: full` has not been measured). Measured on the
   real workbook with the live scenario, that takes weeks under the contract floor from
   20 → 16 with both levers, or 20 → 14 with the production lever alone, with zero empty
   harvest weeks either way. The older "empty week on 5 of 6 PRs" and biomass-peak
@@ -1717,9 +1737,12 @@ streamlit run app.py
 python -m forecast.run --workbook Forecast.xlsm --output out.xlsm `
     --config-dir config --scenario-dir scenario
 
-# NOTE: the command above runs whatever config/control.yaml says, which now means
-# the L1-guided hybrid (§4.5). It has no --method flag; to run a specific method,
-# either set hybrid_follow in the config or use Compare & Choose in the app.
+# NOTE: the command above runs config/control.yaml exactly as written — the
+# L1-guided hybrid only if it says hybrid_follow: full (the committed file does;
+# the operator's live tree says 'off'). It does NOT apply the promoted default
+# from config/analysis_defaults.yaml, so it can differ from the app's
+# ▶ Run forecast. It has no --method flag; to run a specific method, set its
+# knobs in the config or use Decide → Compare engines in the app.
 
 # Tests (the conservation + determinism guardrails)
 python -m pytest tests/ -q          # -v = test names, -s = see the pipeline prints
@@ -1741,7 +1764,8 @@ python -m tools.auto_optimize --emphasis "Minimize loads" --method combined `
 **Precalc** projection + demand (`precalc.py`, the static "canvas") → **Layer-2
 harvest plan** (`harvest_scheduler.py`) → **Phase-D realized engine** (`placement.py`
 `phase_d_emit_events` — the closed-loop controller + level-load) → **Reports**
-(`excel_io.py`, 24 sheets + audits). Read one run top-to-bottom and the function
+(`excel_io.py` and friends: 26 report sheets, 27 with CostsAndProfit, beside the
+input's ProductionReport). Read one run top-to-bottom and the function
 names match the narration. The `config/` + `scenario/` dirs are the working config a
 direct run reads; load a different `config_template (N).xlsx` into them via
 **Configure → upload** in the app.
@@ -1750,7 +1774,9 @@ direct run reads; load a different `config_template (N).xlsx` into them via
 
 ## 10. Data flow — how it all ties together (and why no information is lost)
 
-There is **one pipeline** and **one output workbook (24 sheets)**, and that workbook
+There is **one pipeline** and **one output workbook** (26 report sheets beside the
+input's ProductionReport — 27 tabs, or 28 with CostsAndProfit, which is appended
+last when `config/costs.yaml` exists), and that workbook
 is the **single source of truth**. Every visualization, export, report, and the
 optimizer's "apply" all derive from it — so nothing is lost between stages.
 
@@ -1770,9 +1796,10 @@ optimizer's "apply" all derive from it — so nothing is lost between stages.
             ┌──────────────────────────┼───────────────────────────┐
             ▼                          ▼                           ▼
       App viz tabs              ⬇ Download .xlsm              Optimizer (grid / deep search)
-   (Overview, Per-Batch,       (all 24 sheets — the          picks a CONFIG → re-runs the SAME
-    Period, Harvest, Yearly,    Excel deliverable)           pipeline → SAME workbook → feeds
-    Plan + per-batch plan)                                   every tab + the download again
+   (Overview, Per-Batch,       (all 26-27 sheets — the       picks a CONFIG → re-runs the SAME
+    Period, Harvest, Feed,      Excel deliverable)           pipeline → SAME workbook → feeds
+    Yearly, Plan + per-batch                                 every tab + the download again
+    plan, Costs & profit)
 ```
 
 **Where each batch is, at any point** → `BatchLocations` (per-tank, per-week) and the
@@ -1826,14 +1853,20 @@ given PR's layout can be flattened further. Measure it with `python -m tools.lns
 
 ---
 
-## 12. Analyze mode — find my best plan (one flow)
+## 12. Decide — find my best plan (formerly Analyze)
+
+*(Analyze, Compare & Choose and Optimize were merged into the **Decide** mode on
+2026-08-31 — §12.4. What this section calls Analyze is **Decide → 2 · Search**;
+the monthly lever check is **1 · Check**; Compare engines and Tune knobs are
+**3 · Drill in**.)*
 
 The modes above each answer a PIECE of the real question — *which engine, with
-which knobs, gives the best plan that passes the hard rules?* **Analyze** runs
-that whole composition in one flow and ends in a single recommendation card:
+which knobs, gives the best plan that passes the hard rules?* **Decide → 2 ·
+Search** runs that whole composition in one flow and ends in a single
+recommendation card:
 
 1. **Engine round** — every planning method once on your current config (the
-   same runs as Compare & Choose; finished legs are shared both ways, nothing
+   same runs as Compare engines; finished legs are shared both ways, nothing
    runs twice).
 2. **Knob round** — depends on the **Analysis depth** you pick:
    - **Quick tournament** (default, today's flow): the Grid + Deep search
@@ -1866,21 +1899,25 @@ that whole composition in one flow and ends in a single recommendation card:
      estimated engine runs per method (and how much the variant cache already
      paid for) before you press go; the headless twin is
      `python -m tools.run_tuned_tournament --workbook <PR>`.
-3. **The checklist** — every candidate is judged on **nine gates**, in this
-   order. Only the first two are **hard**; a hard FAIL sinks the plan whatever
-   else it scores. The other seven rank a plan down without disqualifying it:
+3. **The checklist** — every candidate is judged on **twelve gates**, in this
+   order. **Three are hard**: conservation, never an empty week, and 6N
+   one-way (R7). A hard FAIL sinks the plan whatever else it scores; the
+   other nine rank a plan down without disqualifying it:
 
    | # | Gate | Hard? | PASS / WARN / FAIL |
    |---|---|---|---|
    | 1 | Conservation (no fish created or lost) | **HARD** | PASS iff 0 dropped and 0 over-produced |
    | 2 | Never an empty harvest week | **HARD** | PASS iff 0 empty weeks |
    | 3 | Weekly contract floor (min harvest/week) | soft | PASS iff every planner week clears `min_harvest_per_week`, else WARN with the count **and the worst week** |
-   | 4 | Facility biomass cap | soft | PASS ≤100% of cap · WARN ≤110% · FAIL above |
-   | 5 | Weekly processing limit + relief | soft | PASS 0 relief weeks · WARN 1–3 · FAIL >3, or any week past the derived relief ceiling |
-   | 6 | Harvest targets (monthly/yearly) | soft | **never worse than WARN** — targets are penalized, never disqualifying |
-   | 7 | Per-batch density quality | soft | PASS iff no batch peaks ≥1.3× its tank cap, else WARN — **never FAILs** (no knob fixes it; see §7.1) |
-   | 8 | 6N one-way commitment (R7) | soft | PASS iff nothing left a depuration tank except by harvest |
-   | 9 | Weekly handling budget | soft | PASS every week within `max_transfers_per_week` · WARN any week over ~80% · FAIL any week over |
+   | 4 | Facility biomass cap (against each week's own cap) | soft | PASS ≤100% · WARN ≤110% · FAIL above |
+   | 5 | Converges: red → green → stays green | soft | PASS never red / every red week forced / settles with headroom · WARN avoidable relapses, thin headroom, or ends red with no legal move · FAIL ends red with avoidable weeks |
+   | 6 | Per-system feed capacity | soft | PASS none over · WARN worst ≤1.10× and ≤25% of system-weeks · FAIL otherwise |
+   | 7 | Weekly processing limit + relief | soft | PASS 0 relief weeks · WARN 1–3 · FAIL >3 or any week past the derived ceiling |
+   | 8 | Harvest targets (monthly/yearly) | soft | **never worse than WARN** — targets are penalized, never disqualifying |
+   | 9 | Per-batch density quality | soft | PASS iff no batch peaks ≥1.3× its tank cap, else WARN — **never FAILs** (no knob fixes it; see §7.1) |
+   | 10 | 6N one-way commitment (R7) | **HARD** | PASS iff nothing left a depuration tank except by harvest |
+   | 11 | Fish stuck in 6N purge | soft | WARN a spell ≥5 weeks · FAIL ≥8 weeks |
+   | 12 | Weekly handling budget | soft | PASS every week within `max_transfers_per_week` · WARN any week over ~80% · FAIL any week over |
 
    **Gate 3 is the contract; gate 2 is only its degenerate case.** "Never an
    empty week" catches a week that harvests *literally nothing*. The rule the
@@ -1918,13 +1955,17 @@ that whole composition in one flow and ends in a single recommendation card:
    scripted weeks included.
 
    The practical consequence: a plan can be recommended with a red **handling
-   budget** or **R7** gate. That is by design (they are operational quality,
-   not correctness), but it means the checklist on the card is not decoration —
-   read it before pressing Adopt.
+   budget** gate (R7 is now hard). That is by design (it is operational
+   quality, not correctness), but it means the checklist on the card is not
+   decoration — read it before pressing Adopt.
 4. **The card** — one recommended plan (pick order: hard rules → soft rules →
    target shortfall → emphasis score), with **✅ Adopt this plan** (saves the
    knobs, sets the ▶ Run forecast method, loads the run) and **⭐ Promote as
-   Quick-run default**. The card and the *All candidates* table carry the same
+   Quick-run default**, which writes the candidate's method and knobs to
+   `config/analysis_defaults.yaml`: from then on it is **the plan ▶ Run
+   forecast runs**, unless you pick another this session, with its knobs
+   layered over control.yaml for each run (control.yaml itself is not
+   written). The card and the *All candidates* table carry the same
    **provenance caption** as the Compare board (§7.4): fresh vs cached, engine
    run time, grading-rules version, inputs-signature prefix — so a candidate
    replayed from cache or re-graded under newer rules always says so.
@@ -1970,10 +2011,11 @@ against. The `RunConfig` sheet names all three omissions in its own header, so
 the gap is visible in the workbook rather than inferred. `costs.yaml` (§15) is
 never carried in a workbook either, and an import never overwrites it; the
 RunConfig header does not list it, so that sheet stays exactly as it was. Promotion is **manual by design**:
-the tool never changes its own defaults. Once promoted, the **⚡ Quick run**
-card at the top of Analyze re-validates that exact plan (one run + the
-checklist, minutes not hours) — use it as the everyday sanity check and the
-full analysis when the PR or the facility changes materially.
+the tool never changes its own defaults. Once promoted, the plan (method +
+knobs) is what **▶ Run forecast** runs, unless you pick another this session,
+and what the **⚡ Quick run** card at the top of Decide step 2 re-validates (one
+run + the checklist, minutes not hours) — use it as the everyday sanity check
+and the full analysis when the PR or the facility changes materially.
 
 ### 12.1 Tune mode retired (2026-08-06)
 
@@ -1982,11 +2024,11 @@ The old **Tune (density knobs)** mode is retired — nothing it did is gone:
 - Its **per-batch peak-density distribution** and **severe-batch table** are now
   a checklist gate ("Per-batch density quality", soft — PASS/WARN, never
   disqualifying) plus a per-candidate drill-in expander on the **Analyze**
-  board. The reading rule is printed right there: severe (>=1.3x) batches that
+  board (now **Decide → 2 · Search**). The reading rule is printed right there: severe (>=1.3x) batches that
   cluster in time and peak mid-grow-out are a **stocking/capacity** problem —
   no knob fixes them.
 - The **stocking-for-quality frontier** (the remedy for exactly that
-  diagnosis) moved to the bottom of the Analyze board.
+  diagnosis) moved to the bottom of the Analyze board (now Decide → 2 · Search).
 - Its knob *search* was already covered by Optimize's grid and Analyze's knob
   round. The headless density sweep remains available: `python tools/tune_sweep.py`.
 
@@ -2038,7 +2080,7 @@ the 6N drain order). Re-run either with `python -m tools.measure_leveling`.
 
 ### 12.3 The monthly lever check (2026-08-31)
 
-At the top of **Analyze**, before the engine tournament: run your config against
+**Decide → 1 · Check** (formerly the top of Analyze), before the engine tournament: run your config against
 a couple of declared alternatives on **this month's PR**, ranked on the
 constraints. Two minutes.
 
@@ -2199,6 +2241,13 @@ reports the gap → set the band in Limits to move it → re-run.
 >   curve **alone**: one batch across two consecutive reports, no planner, no
 >   placement, no harvest, no alignment. A miss here is the curve's, with
 >   nothing else to blame. Currently **-1.4% median, 4.0% typical**.
+> - *Accuracy mode, 2026-08-15, 14 forecast/PR pairs on the July-2026 PR
+>   chain:* every pair's signed median was positive — the model predicted
+>   heavier fish than reality — with typical batch weight error 1.8–2.8% at
+>   4–8 days and ~4.9% at 30 days; counts were near-exact (median 0.03%). The
+>   whole-corpus `growth_check.py` (2026-08-21) reads -1.4% median on a
+>   different basis (the curve alone, 21 PRs), so the sign depends on the
+>   sample.
 > - `python tools/backtest.py --corpus pr_corpus --out backtest --registries pr_corpus/registries`
 >   — replays the WHOLE pipeline from each historical month and grades it
 >   against what actually happened.
@@ -2388,7 +2437,8 @@ are recalibrated; re-run the mode rather than quote the table.
 
 ### 2 · Reference sheet — the real engine
 
-Enter batch count, input date, growth and FCR model per batch, plus facility
+Enter the batches — eggs stocked (`input_count`) and the day they are stocked
+(`input_date`), transfer dates and counts, growth and FCR model — plus facility
 limits, and run it as a reference sheet. Fill the table from a rhythm (it
 defaults to the quick scan's best, or today's), then edit any row — the columns
 and format are exactly Configure → Batches'. Set the facility limits for this
@@ -2416,10 +2466,15 @@ budget**. Change any cell to try it — only values you change are applied, only
 for that run; your files are never written. 6N's biomass here is its
 production-mode limit; its purge-mode limit is your depuration ruling and is
 not changed. Dated per-week rows in Configure → Limits still win for their
-weeks. A cleared cell keeps the value in your files (the page says so). The
-**quick scan** takes a **Min harvest weight** too, and steps 2–3 follow it
-after a scan; the tank and system limits apply in steps 2–3 only (the quick
-model has no tanks).
+weeks. A density value applies to every tank of that system; the cell is
+blank when a system's tanks have different caps. A system biomass or feed
+week counts as a breach only above the limit plus your `global_buffer_pct`.
+A cleared cell keeps the value in your files (the page says so). The move
+budget box is at least 1: when Control has the budget off (0), the box starts
+at 1 and applies only once you change it. The **quick scan** takes a **Min
+harvest weight** too; a scan copies it into step 2's box (step 3's what-if box
+keeps your Control value). The tank and system limits apply in steps 2–3 only
+(the quick model has no tanks).
 
 Two things are fixed by the method, not chosen: an empty facility cannot hold
 fish that would already be in seawater on day one, so those batches are left
@@ -2531,8 +2586,8 @@ fragile one gets a yellow **Fragile** warning naming the neighbour that
 breaks and what it breaks, then the best stable plan among the top 10 — or
 says none of them is stable, so treat any of them as fragile. **Stable is a
 narrow check:** ±5,000 fish per batch at the same cadence and cap, each run
-once. It is not a test against the growth model's error (a few percent hot,
-§13) or against a different cadence or cap, and the line says so.
+once. It is not a test against the growth model's error (a few percent either
+way, §13) or against a different cadence or cap, and the line says so.
 
 **A rhythm that ran but could not be priced** (Profit only — for example a
 reference read without its cost drivers) is not ranked. The table keeps its
@@ -2561,9 +2616,9 @@ the costs as they were.
 
 What drives the answer is the load, fish per week (batch size × 7 ÷ days
 between stockings). Measured 2026-09-10 at 3,800 t with your promoted
-controller: below about 27,000 fish/week the harvest floor fails, and above
-about 29,000–30,000 tank density and system feed break — so the band that
-meets every limit is narrow.
+controller: below about 28,000 fish/week the harvest floor fails, and above
+about 29,000–30,000 tank density and system feed start to break — so the band
+that meets every limit is narrow.
 
 **Which rhythms meet every limit?** (2026-09-10; your engine, empty-facility
 start, 3,800 t cap, steady year 2029; 54 rhythms, input every 35–70 days ×
@@ -2600,9 +2655,9 @@ Three things to take from this:
 
 **Which of those survive a small change, and what the cap does.** (2026-09-10;
 the same setup; every plan with zero breaches re-run at ±5,000 fish per batch,
-the optimizer's stability check.) At the 3,800 t cap only **one** of the nine
-zero-breach rhythms stays within every limit at ±5,000 fish: 42 d × 168k,
-$82.1M/yr, 3.54 kg fish. The others break something at one neighbour: the
+the optimizer's stability check.) At the 3,800 t cap only **one** zero-breach
+rhythm stays within every limit at ±5,000 fish: 42 d × 168k (28,000
+fish/week), $82.1M/yr, 3.54 kg fish. The others break something at one neighbour: the
 floor on the smaller side, tank density or system feed on the bigger side.
 
 The harvest floor is not what holds the plan back. With the floor lowered to
@@ -2942,8 +2997,9 @@ Why:
 - **The quick scan (step 1) is a carrying-capacity answer.** No tanks, no
   density limits, no 15-move handling budget — which is why it runs 16–25 %
   high. The reference sheet and the transition check use the real engine.
-- **The growth model runs hot** (§13): a few percent optimistic on weight, so
-  tonnage and revenue here are optimistic too.
+- **The growth model's weight error is a few percent** (§13) — hot on the
+  July-2026 chain, slightly cold on the 21-PR corpus — so treat tonnage and
+  revenue differences under ~3–5% as noise.
 - **An unbalanced rhythm's revenue is not real.** It prices fish that are
   stocked but never landed — inventory, not production.
 - **Prices are flat above 8 lb**, so the ranking favours tonnage over size. If
@@ -2951,8 +3007,8 @@ Why:
   rhythm may be the better call. That is your judgement, not the model's.
 - **Hatchery cost is not included** in the quick scan or in the Revenue, HOG
   and Biomass gain objectives — fewer smolt is cheaper than shown there. The
-  **Profit** objective of step 2's optimizer does include it (eggs, feed and
-  fixed cost; §15). Step 3's optimizer shows cost and profit but does not
+  **Profit** objective of step 2's optimizer does include it (eggs, feed, feed
+  shipping, oxygen, chemicals and the fixed monthly cost; §15). Step 3's optimizer shows cost and profit but does not
   rank by profit: over its run window that favours smaller future batches
   (see the transition optimizer above).
 
@@ -3038,9 +3094,11 @@ opening cost for fish already in the water, which the forecast never fed.
   Feed kg ties to the FeedForecastMonthly sheet. Row 2 names the pricing,
   the currency and the first 8 characters of the fingerprints of `costs.yaml`
   and `economics.yaml`. If
-  the file is invalid, the sheet says **NOT COMPUTED** and why, and the run
-  still finishes. With no `costs.yaml`, the workbook is exactly as it was
-  before costs existed.
+  the file is invalid **or empty**, the sheet says **NOT COMPUTED** and why
+  (an empty file reads "the file is empty — costs not set"), and the run
+  still finishes. Only with **no** `costs.yaml` at all is the workbook
+  exactly as it was before costs existed, so delete an empty file rather
+  than leave it.
 - **Run forecast** — one line under the KPI row ("Profit over the horizon …")
   and an eighth tab, **Costs & profit**. The tab shows revenue, total cost,
   profit and spend per kg HOG sold; revenue and cost by month; the monthly and
@@ -3059,7 +3117,9 @@ opening cost for fish already in the water, which the forecast never fed.
   batches stocked late are charged while their fish are sold after the run
   ends, so ranking by profit would favour smaller future batches (your
   ruling, 2026-09-11). The quick scan (step 1) has no Profit, because it has
-  no feed or egg quantities.
+  no feed or egg quantities. The Ideal page shows its money in the same
+  currency as the price bands (`economics.yaml`): `$` only for USD, otherwise
+  the currency code after the amount.
 
 **Two revenue pricings.** Run forecast and the CostsAndProfit sheet price
 revenue the Analyze way: the economics bands with the size-biased lognormal
@@ -3086,8 +3146,9 @@ feed_prices:                     # keyed by the MODEL feed type
   "Grower 9.0": {item: "", price_per_kg: 1.50}
 ```
 
-A missing or empty file means "costs not set": nothing is priced, and Profit
-is unavailable. A file that is present but malformed (a missing or unknown
+A missing or empty file means "costs not set" in Configure: nothing is
+priced and Profit is unavailable (an empty file still adds a NOT COMPUTED
+sheet to the workbook). A file that is present but malformed (a missing or unknown
 key, a word where a number belongs, a negative number, a feed type named
 twice) is refused, and the message names the field. The Costs section then
 shows that message instead of its inputs; fix the file or delete it and enter

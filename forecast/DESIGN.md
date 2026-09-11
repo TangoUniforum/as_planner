@@ -1,8 +1,18 @@
 # AS Production Forecast — Design
 
 Greenfield Python replacement for the legacy VBA tool (v8). Planner mode:
-the tool decides placements + harvest schedule. Reads + writes
-`Forecast.xlsm` in the parent folder.
+the tool decides placements + harvest schedule. It reads only the
+**ProductionReport** sheet from the input workbook, and every model, limit
+and knob from `config/` + `scenario/` YAML. The app always writes a NEW
+output workbook and never modifies the upload; the CLI (`forecast/run.py`)
+writes back to the input workbook unless `--output` is given (legacy
+behaviour). Operating costs (`config/costs.yaml`, kept out of git) only price
+a finished run.
+
+*(This is the greenfield design of record, 2026-05/06. For current behaviour
+read the app's How it works page and docs/USER_GUIDE.md — §14 Ideal, §15
+Costs. 'Control Rnn' cell references below are now `config/control.yaml`
+keys.)*
 
 ---
 
@@ -10,15 +20,22 @@ the tool decides placements + harvest schedule. Reads + writes
 
 ```
 INPUTS
-  Control            (defaults, scenario params, buffers)
-  BatchRegistry      (incoming batches: dates, models, targets)
-  Tables             (SGR, FCR, mortality, feed types, culling DSI)
-  FacilityConfig     (tanks: system, volume, density cap, feed/day cap)
-  FacilityLimits     (per-week facility overrides; blank = use Control)
-  SystemLimits       (per-week per-system caps; blank = no cap)
-  ProductionReport   (per-(batch, tank) state at forecast_start - 1 day)
-  HarvestPlan        (operator-pinned harvests, if any; dual-use sheet)
-  TransferPlan       (operator-pinned transfers, if any; dual-use sheet)
+  config/control.yaml        (knobs, caps defaults, buffers, 6N dates)
+  config/biology.yaml        (SGR, FCR, mortality, feed types, culling)
+  config/facility.yaml       (tanks: system, volume, density cap, feed/day cap)
+  config/economics.yaml, targets.yaml   (price bands, harvest targets — the
+                             yardstick for grading and pricing, not engine inputs)
+  config/analysis_defaults.yaml         (the promoted method + knobs ▶ Run uses)
+  config/costs.yaml          (optional, out of git — prices a finished run;
+                             never an engine input)
+  scenario/batches.yaml      (incoming batches: dates, models, targets)
+  scenario/limits.yaml       (per-week facility + per-system limits)
+  scenario/manual_events/<PR closing>.yaml  (optional scripted manual-window
+                             weeks, one file per PR)
+  ProductionReport           (from the input workbook — per-(batch, tank)
+                             state at forecast_start - 1 day)
+  (HarvestPlan / TransferPlan are OUTPUTS only; operator pins are no longer
+  read.)
 
       v
 [1] Biology engine
@@ -33,14 +50,12 @@ INPUTS
       Determine kg/week per batch to keep facility biomass + feed under
       cap (with R24 / R29 buffers). Respect min harvest weight,
       max/min harvest count.
-      Seed from operator-pinned HarvestPlan rows; extend as needed.
       Output: HarvestPlan rows, Daily Harvest Schedule (Mon-Fri split).
 
       v
 [3] Placement / system allocator
       For each (batch, tank, week) of remaining biomass, allocate tanks
       and emit transfer / split / grade events.
-      Seed from operator-pinned TransferPlan rows; extend as needed.
       Hard caps: tank density (Control + FacilityConfig), system Feed/Day
       and Biomass (SystemLimits).
       Continuity: every count change in a tank is one of 5 logged events.
@@ -56,11 +71,16 @@ INPUTS
 
       v
 [4] Reporting + Diagnostics
-      Workbook writes: WeeklyReport, MonthlyReport, FeedForecastWeekly,
-      FeedForecastMonthly, HarvestReport, Daily Harvest Schedule,
-      FacilityMap, BatchLocations, HarvestPlan, TransferPlan,
-      BiologyProjection, Diagnostics (FW calibration),
-      ReconciliationReport, TankContinuityAudit.
+      Workbook writes: WeeklyReport, MonthlyReport, YearlySummary,
+      FeedForecastWeekly, FeedForecastMonthly, HarvestReport,
+      HarvestPlan Report, Daily Harvest Schedule, FacilityMap,
+      BatchLocations, Batch Plan, HarvestPlan, TransferPlan,
+      TransferTemplate, RealizationReport, BiologyProjection,
+      Diagnostics (FW calibration), ReconciliationReport,
+      InputConservationAudit, TankContinuityAudit, SystemLimitsAudit,
+      RunConfig — and, only when config/costs.yaml exists,
+      CostsAndProfit (cash view), appended LAST so every other sheet is
+      byte-identical with or without costs.
       Advisory consolidates flagged issues by category (FW calibration
       residuals, bottlenecks, scheduler/placement warnings, density
       violations, invariant violations, PR concentration).
@@ -222,8 +242,8 @@ Governed by Control R26 `6N Production Start Date`.
   Biomass).
 - Harvest flow: 3/4/5/6 (any tank) → starvation in-place →
   harvest direct. No 6N transfer required.
-- Starvation period: Control R30 `Starvation period (days)` (default
-  10). During starvation: zero feed, zero growth, mortality + biomass
+- Starvation period: `starvation_period_days` in config/control.yaml
+  (default 7 — one weekly step). During starvation: zero feed, zero growth, mortality + biomass
   retention as normal.
 - Operator-pinned `HarvestPlan` rows past the transition date carry
   implicit pinned starvation windows backward (the planner reserves
@@ -520,7 +540,7 @@ and forces consolidation toward fully utilized facility.
 
 ## 9. Module breakdown
 
-Current modules (`forecast/`):
+Core engine modules (2026-06; see `forecast/` for the full list):
 
 | Module | Role |
 |---|---|
@@ -535,13 +555,23 @@ Current modules (`forecast/`):
 | `placement.py` | Phases A-D execution. Plan-driven Phase B (no greedy fallback), sticky Phase C, Phase D event emission + per-batch even-out + density-trigger Grade + purge cascade + `_try_graded_move_in` |
 | `sixn.py` | 6N purge round-robin sequencing + pair queue initialization |
 | `production_report.py` | PR sheet reader + OG hydration into `FacilityState` |
-| `excel_io.py` | All readers + all writers (folded the planned `advisory.py`/`reports.py` here for simpler module layout). Outputs: BatchLocations, HarvestPlan, TransferPlan, HarvestReport, WeeklyReport, MonthlyReport, FeedForecastWeekly/Monthly, Daily Harvest Schedule, FacilityMap, BiologyProjection, Diagnostics, ReconciliationReport, TankContinuityAudit, **Advisory**, **ValidationLog**, **Control status block**. `Pinned` column on HarvestPlan + TransferPlan distinguishes operator pins from planner-emitted rows (no IO bleed across runs). |
+| `excel_io.py` | The report writers (the ProductionReport reader is production_report.py; CostsAndProfit: costs_report.py; RunConfig: config_snapshot.py) (folded the planned `advisory.py`/`reports.py` here for simpler module layout). Outputs: BatchLocations, HarvestPlan, TransferPlan, HarvestReport, WeeklyReport, MonthlyReport, FeedForecastWeekly/Monthly, Daily Harvest Schedule, FacilityMap, BiologyProjection, Diagnostics, ReconciliationReport, TankContinuityAudit, **Advisory**, **ValidationLog**, **Control status block**. `Pinned` column on HarvestPlan + TransferPlan distinguishes operator pins from planner-emitted rows (no IO bleed across runs). |
 | `run.py` | Pipeline orchestrator + PR_CORRECTION 2-pass evaluator + density-violation counting + Control status writeback |
+| `config_io.py` / `scenario_io.py` | YAML config + scenario loaders (the engine's inputs) |
+| `tiers.py` | The R1-R8 movement rules and the R8 density exemption |
+| `methods.py` | Method registry (Controller family: controller, -hybrid, -lns, -feasible; Global removed 2026-09-10) |
+| `hybrid_guide.py` + `global_planner_poc.py` | The L1 tankless envelope (hybrid harvest guide, Ideal step 1) |
+| `analysis.py` / `optimize.py` / `tournament.py` | Decide's gates (the 12-gate checklist), knob search and ranking |
+| `ideal.py`, `ideal_engine.py`, `ideal_optimize.py`, `transition.py`, `transition_optimize.py` | Ideal mode (quick scan, real-engine reference + hard-limit optimizer, transition + two-window rule) |
+| `costs.py` / `costs_report.py` | `config/costs.yaml` and the CostsAndProfit sheet |
+| `config_snapshot.py` | The RunConfig sheet |
 
-`scripts/` holds standalone diagnostics: `best_way_out.py` (theoretical
-density-violation floor), `compare_plans.py` (assignment vs migration
-plan diff), `verify_biology.py` (per-batch lifecycle dump),
-`experiment_pr_deconcentrate.py` (PR concentration ablation study).
+`scripts/` holds `dump_resolved_system_caps.py`. Measurement and diagnostic
+tools live in `tools/` (e.g. `backtest.py` + `error_model.py` for forecast
+accuracy, `lns_measure.py`, `measure_leveling.py`, `run_compare.py`,
+`run_tuned_tournament.py`). The 2026-06 scripts named here and in §7.6
+(`best_way_out.py`, `compare_plans.py`, `verify_biology.py`,
+`experiment_pr_deconcentrate.py`) no longer exist.
 
 ---
 

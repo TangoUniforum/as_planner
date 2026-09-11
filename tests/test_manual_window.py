@@ -569,16 +569,17 @@ class TestAutoCalibrateFw:
         assert c2.auto_calibrate_fw_min == 0.6
         assert c2.auto_calibrate_fw_max == 1.4
 
-    def test_full_pipeline_drives_residuals_to_zero(self, tmp_path):
+    def test_full_pipeline_drives_residuals_to_zero(self, tmp_path,
+                                                    copy_config):
         # With the toggle ON, every FW calibration residual in the output must be
         # ~0 (each batch lands on its transfer target), and the run must still
-        # conserve fish.
+        # conserve fish. The config copy leaves the operator's costs.yaml out.
         import re
         import shutil
         from openpyxl import load_workbook as _lw
         import forecast.run as run_mod
         cdir = tmp_path / "config"
-        shutil.copytree(CONFIG_DIR, cdir)
+        copy_config(CONFIG_DIR, cdir)
         sdir = tmp_path / "scenario"
         shutil.copytree(SCENARIO_DIR, sdir)
         cy = cdir / "control.yaml"

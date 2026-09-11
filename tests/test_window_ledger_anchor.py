@@ -50,9 +50,10 @@ pytestmark = pytest.mark.skipif(
 
 
 @pytest.fixture(scope="module")
-def windowed_run(tmp_path_factory):
+def windowed_run(tmp_path_factory, copy_config):
     """Run the real pipeline with a manual override window, in an isolated
-    copy of config/scenario so nothing touches the caller's dirs."""
+    copy of config/scenario so nothing touches the caller's dirs (the config
+    copy leaves the operator's costs.yaml out — tests/conftest.py)."""
     import contextlib
     import io
 
@@ -61,7 +62,7 @@ def windowed_run(tmp_path_factory):
     work = tmp_path_factory.mktemp("window_ledger")
     cdir = work / "config"
     sdir = work / "scenario"
-    shutil.copytree(CONFIG_DIR, cdir)
+    copy_config(CONFIG_DIR, cdir)
     # No scripted events: the window is pure biology, so this test pins the
     # ANCHOR and nothing else. The per-PR `manual_events/` dir is left out of
     # the copy entirely (deleting it afterwards trips OneDrive on Windows).

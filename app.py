@@ -43,7 +43,13 @@ _METHODS = _methods.REGISTRY
 # the controller turned out to leave an empty week on 5 of 6 real PRs, which
 # breaks the hard steady-harvest contract rule. See forecast/methods.py.
 _DEFAULT_METHOD = "controller-hybrid"
-# Operator-facing runtime hints. Measured 2026-09-09 on the 8.31.26 PR.
+# Operator-facing runtime hints: the "typically ~N s" text in the ▶ Run
+# forecast spinner, the Compare engines caption and progress bar, and the
+# Analyze phase-1 progress bar. Display strings, not a measurement record.
+# Separate note, measured 2026-09-11: the four arms at stock on the 8.31.26 PR
+# at the live 85-week horizon took 13-16 s per run, one after another with no
+# other forecast or test run alongside (docs/FULL_SWEEP_DESIGN.md). The hints were not
+# changed to match.
 _TYPICAL = {"controller": "~30 s", "controller-hybrid": "~40 s",
             "controller-lns": "~30 s", "controller-feasible": "~30 s"}
 # Pseudo-method: run the controller pipeline on the given config EXACTLY as-is,
@@ -105,6 +111,94 @@ def _effective_method():
                 f"promoted {promoted.get('promoted_ts', '?')}")
     return _DEFAULT_METHOD, {}, "app default"
 
+
+def _run_pins(key):
+    """The control.yaml pins _run_with_workbook_bytes layers on for method
+    `key`, found with the SAME lookup it uses (as-configured pins nothing; an
+    unknown key runs the plain controller's pins). Read-only."""
+    m = (_AS_CONFIGURED if key == _AS_CONFIGURED.key
+         else _METHODS.get(key) or _METHODS["controller"])
+    return dict(m.overrides)
+
+
+def _promote_message(label, method, overrides, session_pick, *, config_dir):
+    """(level, text) for the ⭐ Promote confirmation — true about what
+    ▶ Run forecast will run next.
+
+    Promote writes the durable default and leaves a session pick alone, and
+    _effective_method puts a session pick FIRST. So the message compares what
+    each would ACTUALLY run, built the way ▶ Run forecast builds it from the
+    saved `config_dir`/control.yaml:
+      this session  = the pick's method; control.yaml, then the pick's pins
+      promoted plan = `method`; control.yaml, then `overrides`, then its pins
+    The same method with the same Control value for every promoted knob is
+    the same plan, so "now use this plan" is true. Anything else is a warning
+    that names what differs and what a reload does (it drops the pick, so the
+    promoted plan runs from then).
+
+    Until 2026-09-11 this compared the pick with the promoted knobs directly
+    and warned whenever the promoted plan had knobs. In the ✅ Adopt then
+    ⭐ Promote flow that warning was FALSE: Adopt merges the same knobs into
+    control.yaml (optimize.save_overrides_to_config) and picks the same
+    method, so the pick already runs the promoted plan and a reload switched
+    nothing. If control.yaml cannot be read, the message says so instead of
+    guessing either way."""
+    overrides = dict(overrides or {})
+    now_use = (f"Promoted **{label}** — ▶ Run forecast and the ⚡ Quick run "
+               f"card now use this plan.")
+    if not session_pick:
+        return "success", now_use
+    pick_label = _method_obj(session_pick).label
+    diffs = []
+    if session_pick != method:
+        diffs.append(f"the method (your pick is {pick_label}, the promoted "
+                     f"plan is {_method_obj(method).label})")
+    unread = None
+    if overrides:
+        missing = object()
+        try:
+            from forecast.config_io import (CONTROL_FILE, _load_yaml,
+                                            control_from_dict)
+            saved = _load_yaml(Path(config_dir) / CONTROL_FILE)
+            here_raw = {**saved, **_run_pins(session_pick)}
+            prom_raw = {**saved, **overrides, **_run_pins(method)}
+            here = control_from_dict(here_raw)
+            prom = control_from_dict(prom_raw)
+        except Exception as e:                               # noqa: BLE001
+            unread = f"{type(e).__name__}: {e}"
+        else:
+            fields = type(here).__dataclass_fields__
+            for k in overrides:
+                # A knob the Control loader drops is compared as written.
+                a, b = ((getattr(here, k), getattr(prom, k)) if k in fields
+                        else (here_raw.get(k, missing), prom_raw.get(k, missing)))
+                if a != b:
+                    fa, fb = ("not set" if v is missing else f"`{v!r}`"
+                              for v in (a, b))
+                    diffs.append(f"`{k}` is {fa} in this session's run and "
+                                 f"{fb} in the promoted plan")
+    if not diffs and unread is None:
+        return "success", (
+            now_use + f" Your pick this session, {pick_label}, runs the same "
+            f"method" + (" with the same value for every promoted knob on the "
+                         "saved config/control.yaml" if overrides else "")
+            + ", so it is the same plan.")
+    reload_ = ("Reload the page to start a new session: that drops the pick, "
+               "and from then ▶ Run forecast runs the promoted plan.")
+    head = (f"Promoted **{label}** — the ⚡ Quick run card now replays it. "
+            f"**This session's ▶ Run forecast still runs your pick, "
+            f"{pick_label}** (picked this session, which wins over a promoted "
+            f"default)")
+    unread_txt = (f"config/control.yaml could not be read ({unread}), so "
+                  f"whether this session's run holds the promoted knob values "
+                  f"({', '.join(f'`{k}`' for k in overrides)}) was not "
+                  f"checked. ") if unread else ""
+    if diffs:
+        return "warning", (head + ", and it differs from the promoted plan: "
+                           + "; ".join(diffs) + ". " + unread_txt + reload_)
+    return "warning", (head + " — the same method, but " + unread_txt
+                       + reload_)
+
 # App-managed config (Phase 1) + scenario (Phase 2) live here. In PR-only
 # mode the app reads these instead of pulling everything from the upload;
 # the uploaded workbook then supplies only the ProductionReport.
@@ -157,8 +251,8 @@ def _read_or_explain(loader, what: str, hint: str = _READ_FIX_HINT):
 def _cpu_workers() -> int:
     """Parallel-work budget from the sidebar's "Computer power" percent: that
     share of this machine's logical CPUs, at least 1. One number feeds the
-    parallel heavy work — Optimize sweep processes and the Ideal rhythm grid.
-    (It also set CP-SAT search threads until the Global method was removed on
+    parallel heavy work — Optimize sweep processes, the Ideal rhythm grid,
+    both Ideal optimizers and step 3's two-schedule check. (It also set CP-SAT search threads until the Global method was removed on
     2026-09-10.)"""
     pct = int(st.session_state.get("cpu_pct", 40))
     return max(1, round((os.cpu_count() or 2) * pct / 100.0))
@@ -863,10 +957,9 @@ _CONTROL_HELP = {
         "for the same reason as above — a tank packed to its cap re-breaches "
         "within a week of growth. Unit: fraction 0-1.",
     "global_assume_primed_6n":
-        "Applies to the GLOBAL methods AND to the Controller's long-horizon "
-        "harvest guide (any 'Harvest guide (hybrid)' setting other than off), "
-        "which runs the same L1 planner as a pre-pass and reads this flag "
-        "there. OFF (default) models the REAL 6N handover: the "
+        "Applies to the Controller's long-horizon harvest guide (any "
+        "'Harvest guide (hybrid)' setting other than off), which runs the L1 "
+        "planner as a pre-pass and reads this flag there. OFF (default) models the REAL 6N handover: the "
         "planner starts its depuration pipeline from the fish actually in 6N "
         "on the ProductionReport, so the first couple of weeks harvest less "
         "while the pipeline fills — a real startup ramp. ON assumes 6N is "
@@ -1293,9 +1386,11 @@ _FACILITY_HELP = {
 }
 _BATCH_HELP = {
     "batch_id": "Unique batch (cohort) label, e.g. B53. Must not repeat.",
-    "input_date": "The day the fry are stocked into freshwater. Format: "
-        "YYYY-MM-DD.",
-    "input_count": "How many fry are stocked on the input date. Unit: fish.",
+    "input_date": "The day the batch's eggs are stocked — its egg stage "
+        "starts. Format: YYYY-MM-DD.",
+    "input_count": "How many eggs are stocked on the input date — the count "
+        "the egg stage starts from. Configure → Costs charges the egg price "
+        "on this number. Unit: eggs.",
     "tran_sf_date": "The day the batch moves from first-feeding to the "
         "smolt stage within freshwater. Format: YYYY-MM-DD.",
     "tran_og_date": "The day the batch enters seawater (the TranOG transfer). "
@@ -3320,13 +3415,13 @@ def _mw_copilot(uploaded, events, forecast_start=None, bad=None):
     if _flash:
         st.success(_flash)
     st.caption(
-        "Runs the controller + global optimiser forward from your window — your "
-        "transfers stay fixed — and recommends the **next** week plus a few weeks "
-        "of **look-ahead**. Harvest + 6N staging come from the validated "
-        "controller (pre-ticked); the OG↔OG transfer plan comes from the global "
-        "optimiser (ranked, opt-in). Tick what you want on the **next** week, "
-        "approve, and it's added as that week's ops — then run again for the week "
-        "after. Look-ahead weeks are view-only projections. **~20-30 s per run.**")
+        "Runs the controller forward from your window — your transfers stay "
+        "fixed — and recommends the **next** week plus a few weeks of "
+        "**look-ahead**: harvest and 6N staging, pre-ticked. It no longer "
+        "proposes OG↔OG transfers (they came from the Global method, which was "
+        "removed). Tick what you want on the **next** week, approve, and it's "
+        "added as that week's ops — then run again for the week after. "
+        "Look-ahead weeks are view-only projections. **~20-30 s per run.**")
     if events:
         from forecast.manual_events import is_staged_graded as _isg
         _tr = sum(1 for e in events if e.type == "og_transfer")
@@ -3338,8 +3433,8 @@ def _mw_copilot(uploaded, events, forecast_start=None, bad=None):
         st.caption(
             f"✓ Building on your **{len(events)} scripted operation(s)** through "
             f"{_mw_iso_week(_n, forecast_start)}: {_tr} transfer · {_hv} harvest · "
-            f"{_s6} into 6N · {_fw} FW→OG. Both engines run your full manual window "
-            f"first, so every recommendation is computed on top of these.")
+            f"{_s6} into 6N · {_fw} FW→OG. The controller runs your full manual "
+            f"window first, so every recommendation is computed on top of these.")
     _next_iso = _mw_iso_week(_n + 1, forecast_start)
     if st.button(f"🤖 Recommend from {_next_iso}", key="mw_cp_run", type="primary",
                  disabled=_blocked,
@@ -3354,7 +3449,7 @@ def _mw_copilot(uploaded, events, forecast_start=None, bad=None):
         _wd = tempfile.mkdtemp(prefix="as_copilot_")   # per-run dir: no cross-session clobber
         tmp = Path(_wd) / "copilot_pr.xlsm"
         tmp.write_bytes(uploaded.getvalue())
-        with st.spinner(f"Running the controller + global optimiser from "
+        with st.spinner(f"Running the controller from "
                         f"{_next_iso}… (~20-30 s)"):
             try:
                 st.session_state["mw_cp_props"] = propose_upcoming(
@@ -5388,22 +5483,53 @@ def _ideal_limits_table(ctx, prefix):
         st.session_state[prefix + "_base"], hide_index=True, width="stretch",
         key=ed_key, disabled=["System", "Tanks"],
         column_config={
+            "System": st.column_config.Column(
+                help="The OG system these limits apply to (read-only)."),
+            "Tanks": st.column_config.Column(
+                help="How many OG tanks this system has, from Configure → "
+                     "Facility (read-only)."),
             "Tank density cap (kg/m³)": st.column_config.NumberColumn(
-                help="The most fish weight per m³ each tank in this system may "
-                     "hold. The limit that binds today."),
+                help="The most fish weight per m³ (kg/m³) a tank in this "
+                     "system may hold. A value here applies to every tank of "
+                     "the system, only in this page's runs (step 2: the "
+                     "reference sheet and its optimizer; step 3: the proposal "
+                     "only). Blank when the system's tanks have different "
+                     "caps; clearing a cell keeps the value in your files."),
             "System biomass limit (t)": st.column_config.NumberColumn(
-                help="The most standing fish this system may hold. For 6N this "
-                     "is its production-mode limit (its purge-mode limit is "
-                     "not changed here)."),
+                help="The most standing fish this system may hold, in tonnes, "
+                     "only in this page's runs (step 2: the reference sheet "
+                     "and its optimizer; step 3: the proposal only). A week "
+                     "counts as a breach only above this limit plus the "
+                     "system-cap buffer (global_buffer_pct). For 6N this is "
+                     "its production-mode limit (its purge-mode limit is not "
+                     "changed here)."),
             "System feed limit (kg/day)": st.column_config.NumberColumn(
-                help="The most feed this system can deliver per day.")})
+                help="The most feed this system can deliver, in kg per day, "
+                     "only in this page's runs (step 2: the reference sheet "
+                     "and its optimizer; step 3: the proposal only). A week "
+                     "counts as a breach only above this limit plus the "
+                     "system-cap buffer (global_buffer_pct).")})
     st.session_state["_keep_" + prefix + "_edited"] = (nonce, edited)
     if mv_key not in st.session_state and ("_keep_" + mv_key) in st.session_state:
         st.session_state[mv_key] = st.session_state["_keep_" + mv_key]
+    # Control's 0 means "budget off", but this box needs at least 1 (the
+    # engine's override must be a positive whole number) and Streamlit raises
+    # on a value under min_value. So the box starts at 1 then, and — as for
+    # every box here — only a value MOVED from its seed becomes an override:
+    # an untouched box keeps Control's budget-off run.
+    box_moves = max(1, seed_moves)
     moves = st.number_input(
         "Weekly move budget (moves)", min_value=1, step=1, key=mv_key,
-        help="How many tank moves the crew can do in a week (Control: "
-             f"{seed_moves}).", **_ideal_default(mv_key, seed_moves))
+        help="How many tank moves the crew can do in a week, only in this "
+             "page's runs (step 2: the reference sheet and its optimizer; "
+             "step 3: the proposal only — today's plan keeps your Control "
+             f"value). Control: {seed_moves}. At least 1 — Control's 0 "
+             "('budget off') is not offered here.",
+        **_ideal_default(mv_key, box_moves))
+    if seed_moves < 1:
+        st.caption("Your Control has no weekly move budget (0 = off), so this "
+                   "box starts at 1 and applies only once you change it — "
+                   "left at 1, the run keeps the budget off.")
     st.session_state["_keep_" + mv_key] = moves
     dens_ov, sys_ov, cleared = {}, {}, []
     for r in edited.to_dict("records"):
@@ -5429,7 +5555,7 @@ def _ideal_limits_table(ctx, prefix):
         st.warning("A cleared cell keeps the value in your files: "
                    + ", ".join(cleared) + ".")
     ctl_ov = ({"max_transfers_per_week": int(moves)}
-              if int(moves) != seed_moves else {})
+              if int(moves) != box_moves else {})
     return dens_ov, sys_ov, ctl_ov
 
 
@@ -5509,28 +5635,48 @@ def _ideal():
         cap_t = st.slider(
             "Biomass cap (t)", min_value=3000, max_value=6500,
             step=100, key="ideal_cap_t",
-            help="The most standing fish the facility may carry. A variable, "
-                 "not a permit — try values. Above roughly 5,000 t there is no "
-                 "balanced rhythm: harvest is limited to about one tank per "
-                 "week, so a bigger cap only lets fish pile up.")
+            help="The most standing fish the facility may carry, in tonnes "
+                 "(3,000–6,500). A variable, not a permit — try values. Above "
+                 "roughly 5,000 t there is no balanced rhythm: harvest is "
+                 "limited to about one tank per week, so a bigger cap only "
+                 "lets fish pile up. It is also the ceiling for both "
+                 "optimizers: their Caps to try start from it and may never "
+                 "go above it. Pressing Find the ideal rhythm copies it into "
+                 "step 2's Biomass cap box.")
     with c2:
-        st.metric("Cap in your config", f"{cap_now_t:,.0f} t")
+        st.metric("Cap in your config", f"{cap_now_t:,.0f} t",
+                  help="Your Control biomass cap (Configure → Control) — the "
+                       "default cap wherever no dated per-week row sets one. "
+                       "The slider starts here, rounded to 100 t and kept "
+                       "within 3,000–6,500 t.")
     with st.expander("Grid — which rhythms to try"):
         cads = st.multiselect(
             "Cadence (days between stockings)", [35, 42, 49, 56, 63, 70],
             **_ideal_default("ideal_cads", list(_im.CADENCES), "default"),
-            key="ideal_cads")
+            key="ideal_cads",
+            help="Days between one stocking and the next to try. Every "
+                 "cadence is run with every batch size below (tankless "
+                 "model, ~2–5 s each). Today's rhythm is always measured "
+                 "too.")
         sizes_k = st.multiselect(
             "Batch size (thousand fish to OG)",
             [220, 250, 280, 310, 340, 370, 400, 440],
             **_ideal_default("ideal_sizes", [s // 1000 for s in _im.SIZES],
                              "default"),
-            key="ideal_sizes")
+            key="ideal_sizes",
+            help="Fish moved to seawater (OG) per stocking, in thousands "
+                 "(250 = 250,000 fish). Every size is run with every cadence "
+                 "above.")
         min_wt = st.number_input(
             "Min harvest weight (g)", min_value=0, step=50, key="ideal_min_wt",
-            help="No fish lighter than this is harvested. Steps 2 and 3 follow "
-                 "it after a scan. Tank and system limits apply in steps 2–3 "
-                 "only — this quick model has no tanks.",
+            help="The sales gate for this scan, in grams. In this quick model "
+                 "no fish lighter than this is harvested; the real engine "
+                 "(steps 2–3) instead makes a whole tank harvestable once its "
+                 "mean live weight reaches it. Pressing Find the ideal rhythm "
+                 "copies it into step 2's Min harvest weight box; step 3's "
+                 "what-if box keeps your Control value. Tank and system "
+                 "limits apply in steps 2–3 only — this quick model has no "
+                 "tanks.",
             **_ideal_default("ideal_min_wt",
                              int(ctx["control"].min_harvest_weight_g)))
         st.caption(
@@ -5548,11 +5694,18 @@ def _ideal():
     if st.button("🎯 Find the ideal rhythm", type="primary",
                  disabled=not (cads and sizes_k),
                  help="Measures every rhythm in the grid with the quick "
-                      "tankless model and ranks them by revenue on the "
-                      "economics bands. There is no Profit here: this model "
-                      "has no feed or egg quantities to price. Profit is in "
-                      "step 2's and step 3's optimizers, from the costs in "
-                      "Configure → Targets & prices → Costs."):
+                      "tankless model and ranks them by revenue on your price "
+                      "bands (economics.yaml); the best is the highest-revenue "
+                      "balanced one. No profit here: this model has no feed "
+                      "or egg quantities to price. Step 2's optimizer can "
+                      "rank by Profit; step 3's shows cost and profit for "
+                      "every plan but does not rank by them. Pressing this "
+                      "also sets step 2's Biomass cap to this slider and its "
+                      "Min harvest weight to this scan's value. When a "
+                      "balanced rhythm exists, it also loads the best one "
+                      "into step 2's cadence and batch size (the batch table "
+                      "is rebuilt, replacing any edits) and its batch size "
+                      "into step 3's size box."):
         cap_kg = float(cap_t) * 1000.0
         grid = dict(cadences=sorted(cads), sizes=[k * 1000 for k in sorted(sizes_k)])
         with st.spinner(f"Measuring {len(cads) * len(sizes_k)} rhythms at "
@@ -5620,15 +5773,31 @@ def _ideal_quick_results(_im, res, key):
         m = st.columns(5)
         m[0].metric("Smolt to OG / yr", f"{b.smolt_per_yr / 1e6:.2f} M",
                     delta=(f"{(b.smolt_per_yr - cur.smolt_per_yr) / 1e6:+.2f} M "
-                           f"vs today" if vs else None), delta_color="off")
+                           f"vs today" if vs else None), delta_color="off",
+                    help="Fish moved to seawater per year by this rhythm "
+                         "(batch size × 365 ÷ days between stockings). 'vs "
+                         "today' shows only when today's rhythm is balanced "
+                         "at this cap.")
         m[1].metric("HOG / yr", f"{b.hog_t_per_yr:,.0f} t",
                     delta=(f"{b.hog_t_per_yr - cur.hog_t_per_yr:+,.0f} t vs today"
-                           if vs else None))
-        m[2].metric("Revenue / yr", f"${b.revenue_per_yr / 1e6:,.1f}M",
+                           if vs else None),
+                    help="Head-on-gutted tonnes harvested per year in the "
+                         "steady third year, by the quick tankless model — it "
+                         "reads about 16% high against the real engine.")
+        m[2].metric("Revenue / yr", _ideal_money(b.revenue_per_yr),
                     delta=(f"{(b.revenue_per_yr - cur.revenue_per_yr) / 1e6:+,.1f}M"
-                           f" vs today" if vs else None))
-        m[3].metric("Fish ≥ 8 lb", f"{b.share_over_8lb:.0%}")
-        m[4].metric("Peak vs cap", f"{b.peak_pct_of_cap:.0%}")
+                           f" vs today" if vs else None),
+                    help="That harvest priced on your price bands "
+                         "(economics.yaml). Quick model, no costs — not "
+                         "profit.")
+        m[3].metric("Fish ≥ 8 lb", f"{b.share_over_8lb:.0%}",
+                    help="Share of harvested fish at or above 8 lb "
+                         "head-on-gutted (the price step).")
+        m[4].metric("Peak vs cap", f"{b.peak_pct_of_cap:.0%}",
+                    help="Highest standing biomass in the steady year as a "
+                         "share of the cap. Up to 102% still counts as "
+                         "balanced (with at least 95% of the stocked fish "
+                         "landed) — this model harvests one week late.")
 
     if cur.balanced:
         st.markdown(f"**Today's scenario stocks {cur.label}** "
@@ -5644,10 +5813,11 @@ def _ideal_quick_results(_im, res, key):
 
     tbl = sorted(rows + ([cur] if cur not in rows else []),
                  key=lambda r: (-r.revenue_per_yr, r.cadence_days, r.batch_size))
+    mu = _ideal_money_unit()
     st.dataframe(_pd.DataFrame([{
         "Rhythm": r.label + ("  (today)" if r == cur else ""),
         "Balanced": "✓" if r.balanced else "✗",
-        "Revenue $M/yr": round(r.revenue_per_yr / 1e6, 1),
+        f"Revenue {mu}/yr": round(r.revenue_per_yr / 1e6, 1),
         "HOG t/yr": round(r.hog_t_per_yr),
         "Smolt M/yr": round(r.smolt_per_yr / 1e6, 2),
         "Landed %": round(100 * r.balance),
@@ -5671,8 +5841,9 @@ def _ideal_quick_results(_im, res, key):
   bands say, a slower, bigger-fish rhythm may be the better call — that is
   your judgement, not the model's.
 - **Hatchery cost is not included** — fewer smolt is cheaper than shown.
-  The **Profit** objective of step 2's optimizer does include it (eggs, feed
-  and fixed cost, from Configure → Targets & prices → Costs). Step 3's
+  The **Profit** objective of step 2's optimizer does include it (eggs, feed,
+  feed shipping, oxygen, chemicals and the fixed monthly cost, from
+  Configure → Targets & prices → Costs). Step 3's
   optimizer shows cost and profit for every plan but does not rank by
   profit: over its run window, batches stocked late are charged their eggs
   and feed while their fish are sold after the run ends, which would favour
@@ -5706,8 +5877,9 @@ def _ideal_reference(ctx, today, cap_t):
     growth model and FCR model per batch, and run it "just as a reference
     sheet". The table is generated from a rhythm, then editable per batch
     with the same columns and serialisation as Configure → Batches. It runs
-    through the unchanged controller-hybrid engine from an EMPTY facility
-    (forecast.ideal_engine) — the page headline is the engine's numbers
+    through the unchanged engine ▶ Run forecast uses (_effective_method: the
+    session pick, else the promoted default, else controller-hybrid) from an
+    EMPTY facility (forecast.ideal_engine) — the page headline is the engine's numbers
     (operator ruling); the quick scan above only ranks rhythms. Nothing is
     written to config/ or scenario/: the run lives in a temp copy."""
     import datetime as _dt
@@ -5741,12 +5913,25 @@ def _ideal_reference(ctx, today, cap_t):
     g1, g2, g3 = st.columns([2, 2, 2])
     cad = g1.number_input("Cadence (days between stockings)", min_value=7,
                           max_value=140, step=7, key="ideal_ref_cad",
+                          help="Days between stockings for the generated "
+                               "batch table (7–140). Press ↻ Fill the table "
+                               "from this rhythm to apply it; a scan or an "
+                               "optimizer Use button fills it for you.",
                           **_ideal_default("ideal_ref_cad", int(d_cad)))
     size = g2.number_input("Fish to OG per batch", min_value=50_000,
                            max_value=600_000, step=10_000, key="ideal_ref_size",
+                           help="Fish moved to seawater per stocking for the "
+                                "generated table (50,000–600,000). Egg counts "
+                                "are scaled from the template batch's "
+                                "freshwater survival.",
                            **_ideal_default("ideal_ref_size", int(d_size)))
     g3.write("")
-    regen = g3.button("↻ Fill the table from this rhythm", key="ideal_ref_gen")
+    regen = g3.button("↻ Fill the table from this rhythm", key="ideal_ref_gen",
+                      help="Rebuilds the batch table below from this cadence "
+                           "and batch size, on the template batch, for an "
+                           "empty facility (batches already in seawater on "
+                           "day one are left out). Replaces any edits you "
+                           "made to the table.")
     if (regen or st.session_state.pop("_ideal_ref_regen", False)
             or "ideal_ref_base" not in st.session_state):
         stream = [b for b in _im.synthetic_stream(
@@ -5797,18 +5982,39 @@ def _ideal_reference(ctx, today, cap_t):
     l1, l2, l3, l4, l5 = st.columns(5)
     cap_in = l1.number_input("Biomass cap (t)", min_value=500, max_value=10_000,
                              step=100, key="ideal_ref_cap",
+                             help="The facility biomass cap for the reference "
+                                  "sheet, in tonnes (500–10,000). Starts at "
+                                  "your step-1 slider; a scan sets it to the "
+                                  "slider, an optimizer Use button to the "
+                                  "plan's cap. Control is not changed.",
                              **_ideal_default("ideal_ref_cap", int(cap_t)))
     hmax = l2.number_input("Max harvest / wk (fish)", min_value=0, step=1_000,
-                           key="ideal_ref_hmax", **_ideal_default(
+                           key="ideal_ref_hmax",
+                           help="Most fish harvested in a week, for step 2 "
+                                "only (the reference sheet and its "
+                                "optimizer). Starts at your Control value.",
+                           **_ideal_default(
                                "ideal_ref_hmax", int(ctrl.max_harvest_per_week)))
     hmin = l3.number_input("Min harvest / wk (fish)", min_value=0, step=1_000,
-                           key="ideal_ref_hmin", **_ideal_default(
+                           key="ideal_ref_hmin",
+                           help="The weekly harvest floor in fish, for step 2 "
+                                "only; a week under it is a breach. Starts at "
+                                "your Control value.",
+                           **_ideal_default(
                                "ideal_ref_hmin", int(ctrl.min_harvest_per_week)))
     wmin = l4.number_input("Min harvest weight (g)", min_value=0, step=50,
-                           key="ideal_ref_wmin", **_ideal_default(
+                           key="ideal_ref_wmin",
+                           help="A tank becomes harvestable when its mean live "
+                                "weight reaches this, in grams, for step 2 "
+                                "only. Starts at your Control value; a step-1 "
+                                "scan sets it to the scan's value.",
+                           **_ideal_default(
                                "ideal_ref_wmin", int(ctrl.min_harvest_weight_g)))
     feed = l5.number_input("Max feed / day (kg)", min_value=0, step=500,
-                           key="ideal_ref_feed", **_ideal_default(
+                           key="ideal_ref_feed",
+                           help="The facility feed cap in kg per day, for step "
+                                "2 only. Starts at your Control value.",
+                           **_ideal_default(
                                "ideal_ref_feed", int(ctrl.max_feed_per_day_kg)))
     _opt_cap_t = st.session_state.get("_ideal_ref_cap_by_opt")
     if _opt_cap_t is not None and int(cap_in) == int(_opt_cap_t):
@@ -5841,7 +6047,12 @@ def _ideal_reference(ctx, today, cap_t):
     _ideal_optimizer(ctx, ov, r_dens, r_sys, m_key, m_ov, cap_t)
 
     if st.button("▶ Run the reference sheet in the real engine (~30 s)",
-                 type="primary", key="ideal_ref_run"):
+                 type="primary", key="ideal_ref_run",
+                 help="Runs this batch table and these limits through the "
+                      "real engine (the one ▶ Run forecast uses) from an empty "
+                      "facility for 3 years and reads the steady third year, "
+                      "with 6N in production mode. Nothing is saved to your "
+                      "config or scenario."):
         try:
             batches = batches_from_list(_clean_rows(rows_now, "batch_id", "batch"))
         except Exception as e:  # noqa: BLE001 — named, not hidden
@@ -5900,11 +6111,24 @@ def _ideal_reference(ctx, today, cap_t):
                 + ("within every limit ✅" if ok
                    else "**breaks the limits** ❌ — see the checks"))
     m = st.columns(6)
-    m[0].metric("HOG / yr", f"{y.hog_t:,.0f} t")
-    m[1].metric("Revenue / yr", f"${y.revenue / 1e6:,.1f}M")
-    m[2].metric("Avg harvest (gross)", f"{y.avg_gross_kg:.2f} kg")
-    m[3].metric("Fish ≥ 8 lb", f"{y.share_over_8lb:.0%}")
-    m[4].metric("Peak vs cap", f"{y.peak_pct_of_cap:.0%}")
+    m[0].metric("HOG / yr", f"{y.hog_t:,.0f} t",
+                help="Head-on-gutted tonnes harvested in the steady third "
+                     "year, from the real engine.")
+    m[1].metric("Revenue / yr", _ideal_money(y.revenue),
+                help="That year's harvest priced the Ideal way (your price "
+                     "bands on a normal size spread, always HOG, no monthly "
+                     "overrides) — it can differ from the Run page on the "
+                     "same harvest.")
+    m[2].metric("Avg harvest (gross)", f"{y.avg_gross_kg:.2f} kg",
+                help="Mean live weight of the fish harvested that year, in "
+                     "kg.")
+    m[3].metric("Fish ≥ 8 lb", f"{y.share_over_8lb:.0%}",
+                help="Share of the year's harvested fish at or above 8 lb "
+                     "head-on-gutted (the price step).")
+    m[4].metric("Peak vs cap", f"{y.peak_pct_of_cap:.0%}",
+                help="The highest weekly standing biomass that year as a "
+                     "share of this run's biomass cap; any week over the cap "
+                     "is a breach.")
     m[5].metric("OG tanks used", f"{y.og_tanks_mean:.0f} / {y.og_tanks_total}",
                 help=f"Mean over the year; the busiest week used {y.og_tanks_max}.")
     _ideal_ref_cost_metrics(y, _ideal_pricing(), r.get("econ_sig"))
@@ -5921,7 +6145,7 @@ def _ideal_reference(ctx, today, cap_t):
         if q is not None and q.hog_t_per_yr > 0:
             st.caption(
                 f"The quick model priced this same rhythm and cap at "
-                f"{q.hog_t_per_yr:,.0f} t / ${q.revenue_per_yr / 1e6:,.1f}M; the "
+                f"{q.hog_t_per_yr:,.0f} t / {_ideal_money(q.revenue_per_yr)}; the "
                 f"engine lands {1 - y.hog_t / q.hog_t_per_yr:.0%} less tonnage — "
                 f"tanks, density and handling are real here.")
     st.dataframe(_pd.DataFrame(_ideal_gate_rows(r["gates"])), hide_index=True,
@@ -5963,7 +6187,11 @@ def _ideal_reference(ctx, today, cap_t):
     st.download_button("⬇ Download the reference workbook", data=r["wb"],
                        file_name=f"Ideal_reference_{r['year']}.xlsm",
                        mime="application/vnd.ms-excel.sheet.macroEnabled.12",
-                       key="ideal_ref_dl")
+                       key="ideal_ref_dl",
+                       help="The workbook the engine wrote for this reference "
+                            "run — every report sheet, for the whole 3-year "
+                            "run from an empty facility. A reference only: it "
+                            "is not your forecast and changes nothing.")
 
 
 # Step 2's optimizer: objective keys (forecast.ideal_optimize.OBJECTIVES) in
@@ -6039,9 +6267,41 @@ def _ideal_pricing():
     return out
 
 
-def _ideal_money(v):
-    """'$12.3M' / '−$0.4M' — a dollar amount in millions."""
-    return f"{'−' if v < 0 else ''}${abs(v) / 1e6:,.1f}M"
+def _ideal_currency():
+    """economics.yaml's currency for the Ideal page's money — a label only,
+    as on Configure → Costs and the Run page's Costs & profit tab, read from
+    the same config the page prices with (_ideal_pricing: `_ROOT/config`).
+    None when economics.yaml sets no price bands or cannot be read: amounts
+    then carry no currency mark, never a '$' the files do not state. The
+    path is resolved outside the try, so a missing name is loud."""
+    from forecast import analysis as _ana
+    cfg = _ROOT / "config"
+    try:
+        e = _ana.load_economics(cfg)
+    except Exception:  # noqa: BLE001 — a label only; the pricing notes name it
+        return None
+    return (e or {}).get("currency") or None
+
+
+def _ideal_money(v, per_kg=False):
+    """'$12.3M' / '−$0.4M' in USD, '12.3M EUR' in another currency, '12.3M'
+    when economics.yaml sets none (the Run page's _run_money convention).
+    `per_kg`: an amount per kg, two decimals and no 'M' — '$3.21' /
+    '3.21 EUR' — the caller adds '/kg HOG'."""
+    cur = _ideal_currency()
+    s = "−" if v < 0 else ""
+    a = abs(float(v))
+    num = f"{a:,.2f}" if per_kg else f"{a / 1e6:,.1f}M"
+    if cur == "USD":
+        return f"{s}${num}"
+    return f"{s}{num} {cur}" if cur else f"{s}{num}"
+
+
+def _ideal_money_unit():
+    """A money column's unit, in millions: '$M' in USD, 'M EUR' in another
+    currency, 'M' when economics.yaml sets none."""
+    cur = _ideal_currency()
+    return "$M" if cur == "USD" else (f"M {cur}" if cur else "M")
 
 
 def _ideal_cost_line(cell, per="/yr", per_kg=True, withhold_unpriced=False):
@@ -6064,7 +6324,7 @@ def _ideal_cost_line(cell, per="/yr", per_kg=True, withhold_unpriced=False):
     kg_txt = ""
     if per_kg:
         v = _costs.cost_per_kg_hog(cell.cost, cell.hog_t * 1000.0)
-        kg_txt = (f" · ${v:,.2f}/kg HOG" if v is not None
+        kg_txt = (f" · {_ideal_money(v, per_kg=True)}/kg HOG" if v is not None
                   else " · no harvest, so no cost per kg HOG")
     prof_txt = ("profit not shown (the cost leaves out feed with no price, "
                 "so it would be overstated)"
@@ -6170,7 +6430,7 @@ def _ideal_ref_cost_metrics(y, pricing, econ_sig=None):
                      "now from your saved costs. Cash view: the year's spend "
                      "against the year's sales.")
     m[2].metric("Cost per kg HOG",
-                f"${per_kg:,.2f}" if per_kg is not None else "—",
+                _ideal_money(per_kg, per_kg=True) if per_kg is not None else "—",
                 help="Cost / yr ÷ the HOG kg harvested that year. In a "
                      "steady year stocking and harvest balance, so this is "
                      "close to the cost of producing a kg; — when nothing "
@@ -6322,9 +6582,8 @@ def _ideal_opt_value_text(cell, objective):
         # Never a profit of 0 for a cell nothing was priced on.
         if not getattr(cell, "costs_applied", False):
             return "profit — (not priced)"
-        p = cell.profit
-        return f"profit {'−' if p < 0 else ''}${abs(p) / 1e6:,.1f}M"
-    return f"revenue ${cell.revenue / 1e6:,.1f}M"
+        return f"profit {_ideal_money(cell.profit)}"
+    return f"revenue {_ideal_money(cell.revenue)}"
 
 
 def _ideal_breach_text(cell):
@@ -6358,7 +6617,7 @@ def _ideal_opt_diff_text(cell, ref, objective):
     d = (_io.objective_value(cell, objective)
          - _io.objective_value(ref, objective))
     if objective in ("revenue", "profit"):
-        return f"{'+' if d >= 0 else '−'}${abs(d) / 1e6:,.1f}M"
+        return ("+" if d >= 0 else "−") + _ideal_money(abs(d))
     return f"{d:+,.0f} t"
 
 
@@ -6443,8 +6702,11 @@ def _ideal_opt_stability(res, stale, tr_seeds=None):
                     "stable — treat it as fragile.")
         st.warning(msg)
     why = ("Recompute first — the inputs changed since this run."
-           if stale else "Loads the rhythm into step 2, and its cap into "
-                         "step 2's biomass cap and step 3's what-if cap.")
+           if stale else "Loads this rhythm into step 2 (cadence and batch "
+                         "size — the batch table is rebuilt, replacing any "
+                         "edits) and its cap into step 2's Biomass cap and "
+                         "step 3's what-if cap. Its batch size also goes into "
+                         "step 3's future batch size box.")
     if ok is False and bs is not None:
         c1, c2 = st.columns(2)
         c1.button(f"Use the best stable plan ({bs.label})",
@@ -6490,6 +6752,7 @@ def _ideal_opt_rows(cells, objective):
     from forecast import ideal_optimize as _io
     errs = any(c.error and not _io.is_cost_error(c) for c in cells)
     unpriced_any = any(_io.is_cost_error(c) for c in cells)
+    mu = _ideal_money_unit()
     rows = []
     for c in _io.table_order(cells, objective):
         # A cell Profit could not price RAN: its numbers and its limits
@@ -6502,9 +6765,9 @@ def _ideal_opt_rows(cells, objective):
                "Fish / week": round(c.fish_per_week),
                "Within every limit": (("✓" if _io.ran_within_limits(c)
                                        else "✗") if ran else "engine error"),
-               "Revenue $M/yr": round(c.revenue / 1e6, 1) if ran else None,
-               "Cost $M/yr": round(c.cost / 1e6, 1) if priced else None,
-               "Profit $M/yr": round(c.profit / 1e6, 1) if priced else None,
+               f"Revenue {mu}/yr": round(c.revenue / 1e6, 1) if ran else None,
+               f"Cost {mu}/yr": round(c.cost / 1e6, 1) if priced else None,
+               f"Profit {mu}/yr": round(c.profit / 1e6, 1) if priced else None,
                "HOG t/yr": round(c.hog_t) if ran else None,
                "Biomass gain t/yr": round(c.gain_t) if ran else None,
                "Avg kg (gross)": round(c.avg_gross_kg, 2) if ran else None,
@@ -6617,7 +6880,10 @@ def _ideal_optimizer(ctx, ov, r_dens, r_sys, m_key, m_ov, cap_slider_t):
                                max_value=600_000, step=10_000,
                                key="ideal_opt_smax",
                                help="The largest batch to try, in fish to OG "
-                                    "per stocking (at least the smallest).",
+                                    "per stocking (at least the smallest). "
+                                    "Tried only when the steps land on it: "
+                                    "180,000 to 290,000 in steps of 20,000 "
+                                    "stops at 280,000.",
                                **_ideal_default("ideal_opt_smax", 300_000))
         sstep = c4.number_input("in steps of (fish)", min_value=1_000,
                                 step=5_000, key="ideal_opt_sstep",
@@ -6635,11 +6901,12 @@ def _ideal_optimizer(ctx, ov, r_dens, r_sys, m_key, m_ov, cap_slider_t):
             st.session_state["_ideal_opt_caps_seed"] = slider_t
         caps_txt = st.text_input(
             "Caps to try (t)", key="ideal_opt_caps",
-            help="Biomass caps to run every rhythm at, a comma list in whole "
-                 "tonnes. Never above your cap slider in step 1: a lower "
-                 "cap can keep tanks under their density cap while bigger "
-                 "batches keep the tonnage. Re-filled from the slider when "
-                 "it moves.",
+            help="Biomass caps to run every rhythm at: whole tonnes, at "
+                 "least 500, separated by commas — write 3800, not 3,800. "
+                 "Never above your cap slider in step 1: a lower cap can "
+                 "keep tanks under their density cap while bigger batches "
+                 "keep the tonnage. Re-filled from the slider when it moves. "
+                 "Frequencies × sizes × caps may be at most 150 runs.",
             **_ideal_default("ideal_opt_caps", caps_seed))
         grid, caps_t = None, []
         try:
@@ -6761,7 +7028,7 @@ def _ideal_optimizer(ctx, ov, r_dens, r_sys, m_key, m_ov, cap_slider_t):
                 f"({b.fish_per_week:,.0f} fish/week at a biomass cap of "
                 f"{b.cap_t:,.0f} t; caps tried: {caps_ran}) — "
                 f"{_ideal_opt_value_text(b, res.objective)}; revenue "
-                f"${b.revenue / 1e6:,.1f}M, HOG {b.hog_t:,.0f} t, avg fish "
+                f"{_ideal_money(b.revenue)}, HOG {b.hog_t:,.0f} t, avg fish "
                 f"{b.avg_gross_kg:.2f} kg (steady year {b.year}).")
             _line = _ideal_cost_line(b)
             if _line:
@@ -6803,7 +7070,8 @@ def _ideal_optimizer(ctx, ov, r_dens, r_sys, m_key, m_ov, cap_slider_t):
             "at. Breach columns count weeks (tank-weeks, system-weeks) over "
             "each limit that year; ✓ needs every one at zero and clean audits. "
             "Fish / week = batch size × 7 ÷ days between stockings — the load "
-            "the limits respond to. **Cost / Profit $M/yr** — that year's "
+            "the limits respond to. "
+            f"**Cost / Profit {_ideal_money_unit()}/yr** — that year's "
             "cash-view spend (Configure → Targets & prices → Costs: feed by "
             "model feed type, shipping, oxygen and chemicals per kg of all "
             "feed, eggs stocked, the fixed monthly cost) and revenue minus "
@@ -7168,6 +7436,7 @@ def _ideal_tr_opt_rows(res):
     be overstated — the Run page withholds it the same way)."""
     from forecast import ideal_optimize as _io
     errs = any(c.error for c in res.cells)
+    mu = _ideal_money_unit()
     rows = []
     for c in _io.table_order(res.cells, res.objective):
         ran = c.error is None
@@ -7178,9 +7447,9 @@ def _ideal_tr_opt_rows(res):
                "Effect year": c.effect if ran else None,
                "Within the limits": (("✓" if _io.ran_within_limits(c)
                                       else "✗") if ran else "engine error"),
-               "Revenue $M": round(c.revenue / 1e6, 1) if ran else None,
-               "Cost $M": round(c.cost / 1e6, 1) if priced else None,
-               "Profit $M": round(c.profit / 1e6, 1) if profit_ok else None,
+               f"Revenue {mu}": round(c.revenue / 1e6, 1) if ran else None,
+               f"Cost {mu}": round(c.cost / 1e6, 1) if priced else None,
+               f"Profit {mu}": round(c.profit / 1e6, 1) if profit_ok else None,
                "HOG t": round(c.hog_t) if ran else None,
                "Biomass gain t": round(c.gain_t) if ran else None,
                "vs today's plan": (_ideal_opt_diff_text(c, res.today,
@@ -7300,7 +7569,9 @@ def _ideal_tr_optimizer(ctx, live, fs, cutoff, pr_file, tr_ov, tr_dens,
                                key="ideal_tr_opt_smax",
                                help="The largest future batch to try, in fish "
                                     "to OG per stocking (at least the "
-                                    "smallest).")
+                                    "smallest). Tried only when the steps "
+                                    "land on it: 240,000 to 350,000 in steps "
+                                    "of 20,000 stops at 340,000.")
         sstep = c3.number_input("in steps of (fish)", min_value=1_000,
                                 step=5_000, key="ideal_tr_opt_sstep",
                                 help="The gap between batch sizes tried, in "
@@ -7317,10 +7588,12 @@ def _ideal_tr_optimizer(ctx, live, fs, cutoff, pr_file, tr_ov, tr_dens,
             ss["ideal_tr_opt_caps"] = caps_seed
         caps_txt = st.text_input(
             "Caps to try (t)", key="ideal_tr_opt_caps",
-            help="Biomass caps to run every size at, a comma list in whole "
-                 "tonnes. Never above your cap slider in step 1; re-filled "
-                 "from it when it moves. They replace the what-if cap box "
-                 "above for this search.")
+            help="Biomass caps to run every size at: whole tonnes, at least "
+                 "500, separated by commas — write 3800, not 3,800. Never "
+                 "above your cap slider in step 1; re-filled from it when it "
+                 "moves. They replace the what-if cap box above for this "
+                 "search. Sizes × caps may be at most 60 runs (about 90 s "
+                 "each, plus one for today's plan).")
         grid = None
         try:
             if int(smax) < int(smin):
@@ -7432,7 +7705,7 @@ def _ideal_tr_optimizer(ctx, live, fs, cutoff, pr_file, tr_ov, tr_dens,
             st.markdown(eff)
         _end_t = _ideal_tr_end_stock_t(t.reads)
         st.caption(f"Today's plan (your current limits, {t.cap_t:,.0f} t) "
-                   f"over {span}: revenue ${t.revenue / 1e6:,.1f}M, HOG "
+                   f"over {span}: revenue {_ideal_money(t.revenue)}, HOG "
                    f"{t.hog_t:,.0f} t, biomass gain {t.gain_t:,.0f} t"
                    + ((f"; cost {_ideal_money(t.cost)}, profit not shown "
                        f"(the cost leaves out feed with no price) (cash view)"
@@ -7451,7 +7724,7 @@ def _ideal_tr_optimizer(ctx, live, fs, cutoff, pr_file, tr_ov, tr_dens,
                    f"t** (caps tried: {caps_ran}) — "
                    f"{_ideal_opt_value_text(b, res.objective)} over {span} "
                    f"({_ideal_opt_diff_text(b, t, res.objective)} vs today's "
-                   f"plan); revenue ${b.revenue / 1e6:,.1f}M, HOG "
+                   f"plan); revenue {_ideal_money(b.revenue)}, HOG "
                    f"{b.hog_t:,.0f} t; {b.n_changed} future batch(es) "
                    f"re-sized, effect year {b.effect}."
                    + (f" Judged at the what-if limits it ran with "
@@ -7499,8 +7772,9 @@ def _ideal_tr_optimizer(ctx, live, fs, cutoff, pr_file, tr_ov, tr_dens,
             "plan's effect year, where each limit's count must be no higher "
             "than today's plan's that year. **Judged years: breaches** — "
             "from the effect year on, where every count must be zero. "
-            "Batches re-sized 0 = only the cap changes. **Cost $M / Profit "
-            "$M** — the cash-view spend over the same years (Configure → "
+            "Batches re-sized 0 = only the cap changes. "
+            f"**Cost {_ideal_money_unit()} / Profit {_ideal_money_unit()}** "
+            "— the cash-view spend over the same years (Configure → "
             "Targets & prices → Costs) and revenue minus it, shown for "
             "information: this search does not rank by profit (the note "
             "under the objective says why). Blank when costs are not set; "
@@ -7555,13 +7829,24 @@ def _ideal_transition(ctx, today, cap_slider_t=None):
         st.session_state["ideal_tr_cutoff"] = fs_d
     cutoff = c1.date_input("Change stockings after", min_value=fs_d,
                            key="ideal_tr_cutoff",
+                           help="Every future batch with a seawater (OG) "
+                                "count whose stocking (input) date is after "
+                                "this date gets the size(s) you enter, in "
+                                "stocking order; all dates are kept. It cannot "
+                                "be before the PR's forecast start — a batch "
+                                "stocked by then is already in the water.",
                            **_ideal_default("ideal_tr_cutoff", fs_d))
     sizes_txt = c2.text_input(
         "Fish to OG per future batch — one size, or a ramp (comma-separated; "
         "the last repeats)", key="ideal_tr_sizes",
         **_ideal_default("ideal_tr_sizes", str(int(d_size))),
-        help="Examples: 280000 — or 240000, 240000, 240000, 280000 (three "
-             "smaller batches first, then 280k). '280k' also works.")
+        help="Fish to seawater (OG) per future batch. One size, e.g. 280000, "
+             "or a ramp in stocking order, e.g. 240000, 240000, 240000, "
+             "280000 (three smaller batches, then 280k for the rest). '280k' "
+             "also works. No thousands separators — commas separate the "
+             "steps. Each re-sized batch's egg count is scaled with it (by "
+             "that batch's own freshwater survival), so its egg cost changes "
+             "too.")
     try:
         sizes = _ideal_parse_sizes(sizes_txt)
         proposed, changes = _tr.propose(live, fs, cutoff, sizes)
@@ -7571,13 +7856,19 @@ def _ideal_transition(ctx, today, cap_slider_t=None):
         st.error(f"Can't build that proposal — {e}")
         return
     m = st.columns(3)
-    m[0].metric("Future batches re-sized", f"{summ['n_changed']}")
+    m[0].metric("Future batches re-sized", f"{summ['n_changed']}",
+                help="How many future batches get a new size (a batch "
+                     "already at the size you entered is not counted).")
     m[1].metric("Change in smolt to OG", f"{-summ['smolt_removed']:+,}",
                 help="Fish to seawater across the re-sized batches, proposal "
                      "minus today. Negative = fewer smolt.")
     m[2].metric("First seawater date affected",
                 (summ["first_changed_tran_og_date"].strftime("%Y-%m-%d")
-                 if summ["first_changed_tran_og_date"] else "—"))
+                 if summ["first_changed_tran_og_date"] else "—"),
+                help="The earliest date a re-sized batch enters seawater "
+                     "(TranOG). The effect year — from which the proposal "
+                     "must have zero breaches — is the first calendar year "
+                     "starting on or after this date.")
     st.caption(summ["note"])
     if no_og:
         st.warning(f"{len(no_og)} future batch(es) have no seawater (TranOG) "
@@ -7661,24 +7952,42 @@ def _ideal_transition(ctx, today, cap_slider_t=None):
         t1, t2, t3, t4, t5 = st.columns(5)
         tr_cap = t1.number_input(
             "Biomass cap (t)", min_value=500, max_value=10_000, step=100,
-            key="ideal_tr_cap", **_ideal_default("ideal_tr_cap",
-                                                 seeds["ideal_tr_cap"]))
+            key="ideal_tr_cap",
+            help="The proposal's biomass cap, in tonnes (500–10,000). Today's "
+                 "plan always runs at your current limits. Only a box you "
+                 "move becomes a what-if; dated per-week rows in Configure → "
+                 "Limits still win for their weeks. The transition "
+                 "optimizer's Use button sets it to the plan's cap.",
+            **_ideal_default("ideal_tr_cap", seeds["ideal_tr_cap"]))
         tr_hmax = t2.number_input(
             "Max harvest / wk (fish)", min_value=0, step=1_000,
-            key="ideal_tr_hmax", **_ideal_default(
-                "ideal_tr_hmax", seeds["ideal_tr_hmax"]))
+            key="ideal_tr_hmax",
+            help="The proposal's most fish harvested in a week. Today's plan "
+                 "keeps your Control value. Only a box you move becomes a "
+                 "what-if; dated per-week rows still win for their weeks.",
+            **_ideal_default("ideal_tr_hmax", seeds["ideal_tr_hmax"]))
         tr_hmin = t3.number_input(
             "Min harvest / wk (fish)", min_value=0, step=1_000,
-            key="ideal_tr_hmin", **_ideal_default(
-                "ideal_tr_hmin", seeds["ideal_tr_hmin"]))
+            key="ideal_tr_hmin",
+            help="The proposal's weekly harvest floor, in fish. Today's plan "
+                 "keeps your Control value. Only a box you move becomes a "
+                 "what-if; dated per-week rows still win for their weeks.",
+            **_ideal_default("ideal_tr_hmin", seeds["ideal_tr_hmin"]))
         tr_wmin = t4.number_input(
             "Min harvest weight (g)", min_value=0, step=50,
-            key="ideal_tr_wmin", **_ideal_default(
-                "ideal_tr_wmin", seeds["ideal_tr_wmin"]))
+            key="ideal_tr_wmin",
+            help="The proposal's sales gate: a tank becomes harvestable when "
+                 "its mean live weight reaches this, in grams. Today's plan "
+                 "keeps your Control value. Only a box you move becomes a "
+                 "what-if (a step-1 scan does not change it).",
+            **_ideal_default("ideal_tr_wmin", seeds["ideal_tr_wmin"]))
         tr_feed = t5.number_input(
             "Max feed / day (kg)", min_value=0, step=500,
-            key="ideal_tr_feed", **_ideal_default(
-                "ideal_tr_feed", seeds["ideal_tr_feed"]))
+            key="ideal_tr_feed",
+            help="The proposal's facility feed cap, in kg per day. Today's "
+                 "plan keeps your Control value. Only a box you move becomes "
+                 "a what-if; dated per-week rows still win for their weeks.",
+            **_ideal_default("ideal_tr_feed", seeds["ideal_tr_feed"]))
         _cap_t0 = float(ctrl0.max_biomass_kg) / 1000.0
         if not 500 <= _cap_t0 <= 10_000:
             st.caption(
@@ -7712,7 +8021,13 @@ def _ideal_transition(ctx, today, cap_slider_t=None):
                   + _ideal_limit_text(tr_ov, ctrl0) if tr_ov else ""))
     if st.button("▶ Check both schedules in the real engine (~1–2 min)",
                  key="ideal_tr_run",
-                 disabled=not (changes or tr_ov or tr_dens or tr_sys)):
+                 disabled=not (changes or tr_ov or tr_dens or tr_sys),
+                 help="Runs today's schedule (your current limits) and the "
+                      "proposal (its sizes and what-if limits) on your PR in "
+                      "the real engine for 208 weeks, side by side, and judges "
+                      "the proposal by the two-window rule. Greyed out until "
+                      "a batch is re-sized or a limit is changed. Nothing is "
+                      "saved."):
         with st.spinner("Running today's schedule and the proposal on your PR…"):
             try:
                 a, b, note = _ideal_transition_runs(live, proposed,
@@ -7883,8 +8198,9 @@ def _ideal_transition(ctx, today, cap_slider_t=None):
                f"proposal is worse than today's plan on that limit. Judged "
                f"years ({judged_s}): totals, and ✗ names each year with a "
                f"breach. First and last years partial. Revenue over "
-               f"{both[0]}–{both[-1]}: today's plan ${rev_a:,.1f}M, proposal "
-               f"${rev_b:,.1f}M."
+               f"{both[0]}–{both[-1]}: today's plan "
+               f"{_ideal_money(rev_a * 1e6)}, proposal "
+               f"{_ideal_money(rev_b * 1e6)}."
                + _ideal_tr_check_cost_text(t["a"].years, t["b"].years, both))
 
 
@@ -8015,6 +8331,15 @@ def _how_it_works():
     known limits. Static text (no runs); the numbers are read live from the
     current Control config so the page tracks retuning."""
     k = _hiw_knobs()
+    from forecast import ideal as _im
+    from forecast import ideal_optimize as _io
+    # The method ▶ Run forecast runs, named on layer 8. Never raises: the page
+    # also renders headlessly (tests), with no session state to read.
+    try:
+        _m_now = _method_obj(_effective_method()[0]).label
+    except Exception:  # noqa: BLE001 — static page must render regardless
+        _m_now = None
+    _m_now_txt = f" — currently **{_m_now}**" if _m_now else ""
     st.header("📖 How it works — the rules, layer by layer")
     st.caption(
         "What the forecast actually does, in plain language. Each layer below "
@@ -8029,9 +8354,12 @@ You upload a **ProductionReport** (the facility's true state today). The tool
 grows every cohort forward week by week — freshwater, seawater grow-out, then
 the **6N depuration station** — and decides each week's **transfers** and
 **harvests** so that: every week ships at least **{k['min_hv']:,.0f} fish**
-(the contract floor — never an empty week), the facility never exceeds
-**{k['bio_cap']:,.0f} kg** of standing fish or **{k['feed_cap']:,.0f} kg/day**
-of feed, fish move only along the physically legal routes (the tier rules
+(the contract floor — never an empty week), the harvest controller steers
+standing fish to ride at or just under **{k['bio_cap']:,.0f} kg** and feed
+under **{k['feed_cap']:,.0f} kg/day** (targets it steers to, not walls: a plan
+can run over them, and the checklist grades by how much — layer 6 and gates
+4–6; only the Ideal's optimizers make the biomass cap and the per-system
+limits hard), fish move only along the physically legal routes (the tier rules
 R1-R8 below), and every fish is accounted for from stocking to harvest. Layers
 that *decide* are separated from checks that *audit* — a plan is never trusted
 because the planner says so, only because the independent audits reconcile it.""")
@@ -8216,15 +8544,17 @@ and the failure message says what to do about it: **ramp harvests up
 earlier**. A plan that pins to relief every week isn't using a buffer, it's
 hiding a restructuring problem.
 
-When the **harvest guide** is on (Configure → Control, `hybrid_follow` — on by
-default), a whole-horizon harvest envelope (L1, the tankless long view) is
-computed first and fed to the weekly controller as a **target band**
-(±{k['guide_band'] * 100:.0f}%): it tells the controller to harvest *less* in
-fat weeks so those fish still exist for lean ones — the one thing a week-by-week
-planner cannot see. Switch the guide off and this paragraph does not apply:
-that is the plain reactive controller, which leaves empty harvest weeks. The
-smoother additionally spreads harvest early so weeks are flat, not
-dump-then-nothing.
+When your method is **Controller — hybrid**, a whole-horizon harvest envelope
+(L1, the tankless long view) is computed first and fed to the weekly
+controller as a **target band** (±{k['guide_band'] * 100:.0f}%). It tells the
+controller to harvest *less* in fat weeks so those fish still exist for lean
+ones, which a week-by-week planner cannot see. The method decides this, not
+the Control knob. The hybrid pins `hybrid_follow: full`; the other three
+controllers pin it off (so does the plain controller when it is your promoted
+default), and under them this paragraph does not apply — the weekly
+controller plans reactively. The `hybrid_follow` value in Configure → Control
+matters only for an as-configured run. The smoother additionally spreads
+harvest early so weeks are flat, not dump-then-nothing.
 
 **What it may never do.** Harvest a fish under **{k['min_wt']:,.0f} g** (the
 sales gate); harvest from entry-tier tanks (R5); harvest a production tank
@@ -8299,14 +8629,23 @@ reads the same inputs, enforces the same tier rules while planning, and goes
 through the same audits — they differ only in *how* they choose each week's
 harvests and tank moves.
 
-**The Controller family — runnable operating plans.**
+**The Controller family — runnable operating plans.** ▶ Run forecast, and the
+Ideal's steps 2 and 3, run ONE of these: the method named on the Run page.
+That is your **promoted default** (Decide → 2 · Search → ⭐ Promote, saved
+with its own knobs in `config/analysis_defaults.yaml`){_m_now_txt}. A pick
+made this session (Adopt, or *Use this plan* on Decide → Compare engines)
+replaces it until the app restarts. The hybrid is used only when nothing has
+been promoted.
 
-* **Controller — hybrid (L1-guided harvest)** — *the default.* The validated
-  week-by-week controller, guided by a whole-horizon harvest envelope. It is
-  the only method measured to harvest something every single week.
-* **Controller — reactive greedy** — the same controller with the guide
-  switched off. Simpler to reason about; it leaves empty harvest weeks on 5 of
-  6 real ProductionReports.
+* **Controller — reactive greedy** — the week-by-week controller with the
+  harvest guide pinned off. Simpler to reason about. Measured 2026-08-03 on 6
+  real July-2026 PRs (before the 2026-08-20/21 engine changes), it left empty
+  harvest weeks on 5 of them, so read the never-an-empty-week gate on your own
+  run.
+* **Controller — hybrid (L1-guided harvest)** — the same controller, guided by
+  a whole-horizon harvest envelope; the app's fallback when nothing is
+  promoted. On the real workbook it was measured with zero empty harvest
+  weeks.
 * **Controller — greedy + LNS** — adds an audited relocation pass. It only
   changes anything when there are free tanks to relocate into, so on a
   capacity-bound facility it usually matches the plain controller exactly.
@@ -8336,12 +8675,13 @@ about it first).
 **What binds them.** Conservation and tank continuity bind every method
 equally. The rest is graded, not enforced: Compare engines shows four
 hard-rule badges (conserves · fully placed · no empty week · under cap), and
-Analyze's checklist adds the density and handling-budget gates, which are
-**flagged, never disqualifying**, plus the **6N one-way rule (R7), which is
-hard** — any outbound depuration transfer FAILs it and drops the plan to the
-bottom of the ranking. A plan can still top a lens and be unrunnable for a
-SOFT reason; the badges and the
-ValidationLog are how you tell.""")
+Decide's checklist (step 2 · Search) adds the density and handling-budget
+gates, which are **flagged, never disqualifying**, plus the **6N one-way rule
+(R7), which is hard** — any outbound depuration transfer FAILs it and drops
+the plan to the bottom of the ranking. A plan can still top a lens and be
+unrunnable for a SOFT reason; the badges and the
+ValidationLog are how you tell. These gradings are Decide's. The Ideal's
+optimizers treat the facility limits as hard (layer 10).""")
 
     with st.expander("9 · The checks that bind everything (the audit net)"):
         st.markdown("""
@@ -8360,10 +8700,10 @@ Independent invariants, each catching a *different* failure (the hard lesson:
 6. **Closed freshwater mass-balance** — the FW phase can't leak fish either.
 7. **Steady-harvest contract** — no near-empty week past the startup handoff.
 
-**On top of the audits, Analyze grades every plan on twelve gates, in this
-order.** **Three** are hard — conservation, never-an-empty-week, and the 6N
-one-way rule (R7) — and a hard FAIL sinks a plan no matter how well it scores on
-everything else. The other eight are flagged and penalised, never
+**On top of the audits, Decide (step 2 · Search) grades every plan on twelve
+gates, in this order.** **Three** are hard — conservation, never-an-empty-week,
+and the 6N one-way rule (R7) — and a hard FAIL sinks a plan no matter how well
+it scores on everything else. The other nine are flagged and penalised, never
 disqualifying:
 
 | # | Gate | Hard? | Reads |
@@ -8378,8 +8718,8 @@ disqualifying:
 | 8 | Harvest targets (monthly/yearly) | soft | never worse than WARN — targets are penalised, never disqualifying |
 | 9 | Per-batch density quality | soft | PASS if no batch peaks ≥1.3× its tank cap, else WARN |
 | 10 | 6N one-way commitment (R7) | **HARD** | PASS if nothing left a depuration tank except by harvest · **FAIL** on any outbound transfer, which disqualifies the plan |
-| 11 | Weekly handling budget | soft | PASS every week within budget · WARN any week over ~80% · FAIL any week over |
-| 12 | Fish stuck in 6N purge | soft | PASS if every 6N tank drains within its rotation · WARN past 5 weeks in purge · **FAIL** past 8 — those fish are never harvested and would not survive. Conservation cannot see it: nothing is lost, they simply stand at horizon end |
+| 11 | Fish stuck in 6N purge | soft | PASS if every 6N tank drains within its rotation · WARN past 5 weeks in purge · **FAIL** past 8 — those fish are never harvested and would not survive. Conservation cannot see it: nothing is lost, they simply stand at horizon end |
+| 12 | Weekly handling budget | soft | PASS every week within budget · WARN any week over ~80% · FAIL any week over |
 
 **Gate 5 judges the plan; gate 4 judges what you inherited.** Peak biomass is
 mostly a property of the *starting state* — hand every engine a Production
@@ -8445,9 +8785,10 @@ The ceiling goes first because it is the harder rule: a week over the ceiling
 cannot be executed at all, while a lean week is a shortfall. Neither guard ever
 empties the field — if nothing clears one it **stands down**, and the tool says
 which one did, so the trade is yours to judge rather than the tool's to hide.
-The same two rules guard **Adopt** and **Promote** on this page, which are the
-other two ways a plan reaches your config: there they do not exclude, they
-require you to acknowledge the finding by name, and it is saved alongside.
+The same two rules guard **Adopt** and **Promote** on **Decide → 2 · Search**,
+which are the other two ways a plan reaches your config: there they do not
+exclude, they require you to acknowledge the finding by name, and it is saved
+alongside.
 
 **Which weeks each gate judges.** Gates 2, 3 and 5 judge the **planner's**
 weeks only: weeks you scripted yourself in the manual override window are
@@ -8456,11 +8797,58 @@ scripted weeks are policed instead by the `MANUAL WINDOW` lints in the
 ValidationLog. Every other gate — including conservation — judges the **whole
 horizon**, scripted weeks included.
 
-Ranking order when Analyze picks a winner: hard FAILs → soft FAILs → total
+Ranking order when Decide picks a winner: hard FAILs → soft FAILs → total
 warnings → target shortfall → the emphasis score. No emphasis or weighting can
 lift a plan above one that beats it on an earlier tier.""")
 
-    with st.expander("⚠ 10 · Known limits — the honest list"):
+    with st.expander("10 · Ideal — what should we stock? (hard limits)"):
+        st.markdown(f"""
+**What it decides.** Nothing in your live plan. It answers the question
+underneath it: how many smolt, how often, at what biomass cap. Nothing is
+written to `config/` or `scenario/`; every run lives in a temp copy.
+
+**1 · Quick scan** — a grid of rhythms (cadence × batch size) through L1, the
+tankless envelope, in seconds, read on a steady third year. *Balanced* = lands
+at least {_im.MIN_BALANCE:.0%} of what it stocks and peaks no more than
+{_im.PEAK_TOLERANCE:.0%} over the cap. It has no tanks, density or handling
+budget, and it runs ~16% high on tonnage against the real engine: use it to
+rule rhythms out, not to settle close calls.
+
+**2 · Reference sheet** — your batch table run by the real engine (the same
+method and promoted knobs as ▶ Run forecast) from an EMPTY facility for
+{_REF_HORIZON_WEEKS} weeks, reading the steady third year with 6N in
+production mode. Its optimizer searches input frequency × batch size ×
+biomass cap (never above your cap slider); each cell is one real-engine run.
+
+**3 · Transition** — from today's ProductionReport ({_TR_HORIZON_WEEKS}
+weeks), the only levers are the size of FUTURE stockings (dates and cadence
+unchanged) and the cap. The result is a `batches.yaml` download you adopt
+yourself (Configure → Batches).
+
+**The hard-limits rule (Ideal only).** A plan is *within the limits* only if
+no gate FAILs — zero breaches: every week harvests, the harvest floor, the
+biomass cap (no tolerance), tank density (R8), per-system biomass and feed,
+and the weekly move budget — and the run itself finished and conserved fish.
+This is stricter than Decide, where density, handling and the biomass cap are
+soft. The best plan *ignoring* the limits is shown only as the cost of the
+limits, never as an answer. The top plans are re-run at
+±{_io.NEIGHBOUR_STEP:,} fish per batch, because the planner is
+mode-discontinuous.
+
+**The two-window rule (step 3).** Fish already stocked break some limits in
+the near years, and no re-size can change that. So from the effect year — the
+first calendar year starting on or after the first re-sized batch's TranOG
+(for a cap-only change, the first year with no dated cap row in the limits) —
+a proposal must have zero breaches and no FAIL. Before it, the proposal must
+be no worse than today's plan, year by year and limit by limit, and fail none
+of the run's own checks.
+
+**Costs.** With `config/costs.yaml` set, step 2 can rank by **Profit**. Step 3
+shows cost and profit for every plan but never ranks by profit: over its
+window, late batches are charged their eggs and feed while their fish sell
+after the run ends.""")
+
+    with st.expander("⚠ 11 · Known limits — the honest list"):
         st.markdown(f"""
 * **"0 drift" proves bookkeeping, not biology.** The audits reconcile the
   plan against the *same* growth/feed curves that produced it — an internally
@@ -8486,16 +8874,18 @@ lift a plan above one that beats it on an earlier tier.""")
   ones. THREE more can never even reach FAIL by design — the weekly
   contract floor, harvest targets and per-batch density stop at WARN.
   (The floor still binds, just not here: a tuned tournament will not
-  promote a variant that starves its lean weeks.) The remaining five
-  (biomass cap, convergence, per-system feed, processing limit, handling
-  budget) *can* read FAIL but are soft: they rank a plan down, they do
-  not disqualify it.
+  promote a variant that starves its lean weeks.) The remaining six
+  (biomass cap, convergence, per-system feed, processing limit, fish stuck
+  in 6N purge, handling budget) *can* read FAIL but are soft here: they
+  rank a plan down, they do not disqualify it. (The Ideal's optimizers are
+  stricter: there the facility limits are HARD — zero breaches; see
+  layer 10.)
   So a plan can be recommended with a red handling gate — the checklist
   shows it, and it is your call, not the tool's.
 * **Severe per-batch density clusters are a stocking problem.** When a
   cohort's tanks collide mid-grow-out, no planner knob fixes it — the remedy
-  is stocking fewer fish (the stocking frontier in Analyze quantifies the
-  trade).
+  is stocking fewer fish (the stocking frontier in Decide → 2 · Search
+  quantifies the trade).
 * **Fish in 6N depuration take no mortality, and the two ledgers say so
   differently.** The engine deliberately exempts off-feed (`STARVE`) fish from
   the growth-and-mortality expectation — they are there for about two weeks and
@@ -8921,9 +9311,10 @@ with st.sidebar:
         "Computer power", min_value=10, max_value=100, value=40, step=10,
         format="%d%%", key="cpu_pct",
         help="How much of this computer the heavy runs may use — the Optimize "
-             "sweeps and the Ideal rhythm grid. Higher = faster runs, but other applications "
-             "may feel slower (and Optimize sweeps use more memory) while a "
-             "run is going. A plain controller Run forecast is "
+             "sweeps and, on the Ideal page, the step-1 rhythm grid, both "
+             "optimizers and step 3's two-schedule check. Higher = faster "
+             "runs, but other applications may feel slower (and sweeps use "
+             "more memory) while a run is going. A plain Run forecast is "
              "sequential and unaffected.",
     )
     st.caption(f"Heavy runs may use up to **{_cpu_workers()}** of "
@@ -8966,13 +9357,15 @@ with st.sidebar:
          "Accuracy (forecast vs actuals)", "How it works (the rules)"],
         captions=[
             "Set up once — biology curves, tanks, batches, per-week limits, "
-            "control knobs, harvest targets and prices.",
+            "control knobs, harvest targets, prices and operating costs.",
             "The everyday step — run your chosen plan on today's "
             "ProductionReport and download the workbook.",
             "“Which plan should I run?” — the monthly lever check, the "
             "engine board, and knob tuning, in one place.",
             "“What should we stock?” — the steady rhythm (smolt × cadence) "
-            "the facility can sustain at a biomass cap you choose.",
+            "at a biomass cap you choose, checked in the real engine against "
+            "every limit, and how to get there from today's fish (with cost "
+            "and profit).",
             "“How much should I trust this?” — grades a past forecast against "
             "the PR that followed it.",
             "The rulebook — what each layer decides, what it may never do, "
@@ -8981,8 +9374,11 @@ with st.sidebar:
         help="Listed in the order you normally work: Configure once, then Run "
              "forecast every day. Decide answers 'which plan?' — the monthly "
              "lever check, the engine board and knob tuning, worked top to "
-             "bottom in one place. How it works is the plain-language rulebook "
-             "— read it once before trusting or challenging a plan.",
+             "bottom in one place. Ideal answers 'what should we stock?' — a "
+             "steady rhythm and the transition to it. Accuracy grades a past "
+             "forecast against the PR that followed. How it works is the "
+             "plain-language rulebook — read it once before trusting or "
+             "challenging a plan.",
         key="app_mode",
     )
     with st.expander("ℹ️ Which mode? — the order of operations"):
@@ -8994,9 +9390,11 @@ with st.sidebar:
             "you go straight to Run forecast.\n\n"
             "- **Configure (models & control)** — hand-edit the biology "
             "curves, the tank list, the batch schedule, the per-week limits, "
-            "every control knob, and your harvest targets + price bands. "
-            "Saved to `config/` + `scenario/` YAML, the source of truth for "
-            "every run. Knobs are grouped by what you own, hardest commitment "
+            "every control knob, your harvest targets + price bands, and your "
+            "operating costs (Targets & prices → Costs). Saved to `config/` + "
+            "`scenario/` YAML, the source of truth for every run (the costs "
+            "file, `config/costs.yaml`, is kept out of git because it is "
+            "commercially sensitive). Knobs are grouped by what you own, hardest commitment "
             "first, and every field has a tooltip with its unit and "
             "trade-off.\n"
             "- **Run forecast** — runs the pipeline with your **current** "
@@ -9018,8 +9416,12 @@ with st.sidebar:
             "under every plan: how many smolt, how often, can this facility "
             "carry forever? Pick a biomass cap; it measures a grid of "
             "rhythms from a clean start in seconds (tankless), runs your "
-            "batch table through the real engine for tonnage, tank layout "
-            "and checks, and plans the transition from today's fish.\n"
+            "batch table through the real engine (your Run method) for "
+            "tonnage, tank layout and checks; an optimizer searches cadence "
+            "× batch size × cap and accepts only plans within every hard "
+            "limit (zero breaches); and it plans the transition from today's "
+            "fish under the two-window rule (a batches.yaml download — "
+            "nothing is written).\n"
             "- **Accuracy (forecast vs actuals)** — the only mode that grades "
             "the *biology* rather than the plan. Upload a forecast workbook "
             "you produced earlier plus the ProductionReport that came after "
@@ -9030,7 +9432,8 @@ with st.sidebar:
             "own limits list.\n"
             "- **How it works (the rules)** — the plain-language rulebook: "
             "every pipeline layer (inputs → manual window → freshwater → "
-            "entry → placement → harvest → depuration → audits), what each "
+            "entry → placement → harvest → depuration → audits → the Ideal's "
+            "hard limits), what each "
             "decides, what it may never do, which checks bind it, and the "
             "honest known-limits list.\n\n"
             "*(Retired modes: **Tune** (2026-08-06) — its density readout is "
@@ -9039,7 +9442,7 @@ with st.sidebar:
             "**Compare & Choose** and **Optimize** (2026-08-31) — merged into "
             "Decide as the three steps above; nothing was lost, and "
             "tests/test_decide_mode.py pins each capability. See USER_GUIDE "
-            "13.1 and 13.4.)*"
+            "§12.1 and §12.4.)*"
         )
     st.divider()
 
@@ -9084,10 +9487,18 @@ with st.sidebar:
                    + ", ".join(f"`{k}={v}`" for k, v in _chosen_ov.items())
                    + " — layered over config/control.yaml, which is not "
                      "modified.")
+    # Every caption opens with where the method came from (_chosen_src):
+    # "picked this session", "promoted <ts>" or "app default". The hybrid is
+    # the default only when nothing is promoted (_effective_method).
+    _src_lead = ("The app's fallback — nothing has been promoted yet."
+                 if _chosen_src == "app default"
+                 else "Picked this session." if _chosen_src == "picked this session"
+                 else "Your promoted default.")
     if _chosen == _DEFAULT_METHOD:
-        # The hybrid is the default because its L1 guide harvests LESS in fat
-        # weeks so fish still exist for lean ones — the fix for empty harvest
-        # weeks (the plain Controller left one on 5 of 6 real PRs).
+        # The hybrid is the app's fallback because its L1 guide harvests LESS
+        # in fat weeks so fish still exist for lean ones — the fix for empty
+        # harvest weeks (measured 2026-08-03: the plain Controller left one on
+        # 5 of 6 real July-2026 PRs).
         #
         # But its purge lever REFUSES ITSELF when sixn_level_drains is off
         # (hybrid_guide.py: that knob is the guard against over-filling one 6N
@@ -9106,14 +9517,15 @@ with st.sidebar:
                 _lev_on = False
         if _lev_on:
             st.caption(
-                "The default. Its long-horizon guide harvests LESS in fat weeks "
-                "so fish still exist for lean ones — the fix for empty harvest "
-                "weeks (the plain Controller leaves one on 5 of 6 real PRs). "
+                _src_lead + " Its long-horizon guide harvests LESS in fat "
+                "weeks so fish still exist for lean ones — the fix for empty "
+                "harvest weeks (measured 2026-08-03: the plain Controller left "
+                "one on 5 of 6 real July-2026 PRs). "
                 "**Decide → Compare engines** runs every method and lets you "
                 "pick a different one.")
         else:
             st.caption(
-                "The default — but note its **purge lever is currently "
+                _src_lead + " Note its **purge lever is currently "
                 "refused**, because *Level 6N purge drains* is off (that knob "
                 "guards against over-filling one 6N pair, and the hybrid may "
                 "not be what removes it). With the lever refused this arm "
@@ -9122,10 +9534,16 @@ with st.sidebar:
                 "*Level 6N purge drains* on in Configure to get the hybrid "
                 "behaviour, or read this as the plain controller. "
                 "**Decide → Compare engines** runs every method.")
+    elif _chosen_src == "picked this session":
+        st.caption("Picked this session (Adopt on **Decide → 2 · Search**, or "
+                   "*Use this plan* on **Decide → Compare engines**). It lasts "
+                   "until the app restarts, then your promoted default (or "
+                   "the app's fallback) applies again.")
     else:
-        st.caption("Picked on the **Decide → Compare engines** board. Pick "
-                   "another there, or re-select the hybrid to go back to the "
-                   "default.")
+        st.caption("Your promoted default (**Decide → 2 · Search → ⭐ "
+                   "Promote**, saved in config/analysis_defaults.yaml). "
+                   "Promote another there, or pick one for this session on "
+                   "**Decide → Compare engines**.")
     if _cfg_ok:
         # Guarded because this runs in EVERY mode, before the mode dispatch: an
         # unreadable control.yaml here used to blank the whole app, including
@@ -9847,9 +10265,9 @@ def _run_costs_tab(r, config_dir):
     m = st.columns(4)
     m[0].metric("Revenue", _run_money(t.get("revenue"), cur),
                 help="Sales over the horizon: every harvest priced on the "
-                     "economics.yaml price bands (the Analyze pricing), in "
-                     "the month of its harvest week. — when economics.yaml "
-                     "sets no price bands.")
+                     "economics.yaml price bands (the Analyze pricing). Each "
+                     "week's harvest counts, whole, in the month its Monday "
+                     "falls in. — when economics.yaml sets no price bands.")
     m[1].metric("Total cost", _run_money(t.get("total"), cur),
                 help="Feed (each model feed type at its price) + feed "
                      "shipping, oxygen and chemicals (per kg of ALL feed) + "
@@ -12503,20 +12921,30 @@ def _analyze(skip_lever_check=False):
                           "breaches": _br,
                           "accepted_with_breach": bool(_br)})
             _log_adoption(cand, "promote", _m, "Promoted")
-            st.success(f"Promoted **{cand['label']}** — the ⚡ Quick run card "
-                       "at the top now uses this plan.")
+            # Promote does not clear a session pick, and a pick wins in
+            # _effective_method — the message compares what each runs on the
+            # saved config ▶ Run forecast reads, and says which one runs.
+            _lvl, _txt = _promote_message(
+                cand["label"], _m, cand["overrides"],
+                st.session_state.get("_chosen_method"),
+                config_dir=CONFIG_DIR)
+            getattr(st, _lvl)(_txt)
 
         if a2.button("⭐ Promote as Quick-run default", key="ana_promote",
                      help="Stores method + knobs in "
                           "config/analysis_defaults.yaml, next to the rest of "
                           "your config. It is NOT written into an output "
-                          "workbook, so it cannot be lost to a run — but note "
-                          "that also means importing config from a workbook "
-                          "will not restore it. Promoting changes nothing "
-                          "about the current run; it only sets what the ⚡ "
-                          "Quick run card at the top of this page will "
-                          "re-run. Manual by design: the tool never changes "
-                          "its own defaults."):
+                          "workbook, so it cannot be lost to a run — but that "
+                          "also means importing config from a workbook will "
+                          "not restore it. Promoting makes this plan (method "
+                          "+ knobs) what ▶ Run forecast runs from now on — "
+                          "unless a plan is picked this session (✅ Adopt or "
+                          "Use this plan), which wins until the session ends "
+                          "— and what "
+                          "the ⚡ Quick run card at the top of this step "
+                          "re-validates. config/control.yaml is not written: "
+                          "the knobs are layered in for each run. Manual by "
+                          "design: the tool never changes its own defaults."):
             _refusal = _adoption_refusal(winner, _card_ok)
             if _refusal:
                 st.error(_refusal)

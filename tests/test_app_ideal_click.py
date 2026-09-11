@@ -245,8 +245,11 @@ from forecast import ideal_engine as ie
 tree = ast.parse(open(ROOT + "/app.py", encoding="utf-8").read())
 want = {"_ideal_breach_text", "_ideal_opt_diff_text", "_ideal_opt_cost",
         "_ideal_opt_stability", "_ideal_opt_value_text", "_ideal_opt_use",
-        "_ideal_tr_refill_seeds", "_IDEAL_TR_LIMITS"}
-ns = {"st": st}
+        "_ideal_tr_refill_seeds", "_IDEAL_TR_LIMITS", "_ideal_money",
+        "_ideal_currency"}
+# The money texts carry economics.yaml's currency (read from _ROOT/config).
+from pathlib import Path
+ns = {"st": st, "_ROOT": Path(ROOT)}
 exec(compile(ast.Module(body=[
     n for n in tree.body
     if (isinstance(n, ast.FunctionDef) and n.name in want)
