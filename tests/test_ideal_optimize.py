@@ -13,12 +13,19 @@ the stability check, whose decision (`judge_stability`) is tested on
 synthetic cells and whose extra wave is tested with an injected runner (a grid
 cell is reused, never re-run). The pool cancels, and does not wait, when the
 progress callback raises (a Streamlit rerun is a BaseException).
+
+The cap dimension: caps=None is the one cap it always was; every (cadence,
+size, cap) runs once AT its own cap and is judged at it; a cap above the
+operator's is refused before anything runs; ties go to the higher cap; a
+candidate's neighbours keep its cap; the wave is at most 2 x 10 runs.
 """
 import dataclasses
 import hashlib
+import math
 from concurrent.futures import Future
 from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -44,10 +51,13 @@ def _repo_hashes() -> dict:
     return {d: _tree_hash(ROOT / d) for d in ("config", "scenario")}
 
 
+CAP = 3_800_000.0
+
+
 def _cell(cad, size, *, ok=True, revenue=0.0, hog=0.0, gain=0.0, total=0,
-          error=None):
+          error=None, cap=CAP):
     return io.Cell(cadence_days=cad, batch_size=size,
-                   fish_per_week=size * 7.0 / cad, year=2029,
+                   fish_per_week=size * 7.0 / cad, cap_kg=float(cap), year=2029,
                    revenue=revenue, hog_t=hog, gain_t=gain,
                    breaches={k: 0 for k in io.BREACH_KEYS}, total=total,
                    within_limits=ok and error is None, error=error)
@@ -70,6 +80,34 @@ def test_ties_break_to_the_smaller_batch_then_the_longer_cadence():
     c = _cell(63, 220_000, revenue=100e6)
     for order in ([a, b, c], [c, b, a], [b, a, c]):
         assert io.best(order, "revenue") == c               # never grid order
+
+
+def test_after_every_other_term_the_higher_cap_wins():
+    """Same objective, batch and cadence: the cap closest to the operator's
+    setting (the higher one) wins in best / ignoring_limits / closest /
+    table_order, whatever the input order."""
+    lo, mid, hi = (_cell(49, 210_000, revenue=100e6, cap=c)
+                   for c in (3_000_000, 3_200_000, 3_800_000))
+    bad = [dataclasses.replace(c, within_limits=False, total=3)
+           for c in (lo, mid, hi)]
+    for order in ([lo, mid, hi], [hi, lo, mid], [mid, hi, lo]):
+        assert io.best(order, "revenue") == hi
+        assert io.ignoring_limits(order, "revenue") == hi
+        assert io.stability_candidates(order, "revenue") == [hi, mid, lo]
+        assert io.table_order(order, "revenue") == [hi, mid, lo]
+    for order in (bad, bad[::-1]):
+        assert io.closest(order, "revenue") == bad[2]
+        assert io.table_order(order, "revenue") == bad[::-1]
+    # The cap is the LAST term: more revenue at a lower cap still wins.
+    rich = _cell(49, 210_000, revenue=101e6, cap=3_000_000)
+    assert io.best([hi, rich], "revenue") == rich
+
+
+def test_the_label_names_the_cap():
+    c = _cell(49, 210_000, cap=3_200_000)
+    assert c.label == "49 d × 210,000 @ 3,200 t"
+    assert c.rhythm == "49 d × 210,000" and c.cap_t == 3_200.0
+    assert c.key == (49, 210_000, 3_200_000.0)
 
 
 def test_closest_is_the_fewest_breaches_then_the_objective():
@@ -160,10 +198,10 @@ def test_an_errored_cell_never_counts_for_ignoring_limits():
 # --- the stability decision, on synthetic cells (no engine) -------------------
 
 def _ran(*cells):
-    return {(c.cadence_days, c.batch_size): c for c in cells}
+    return {c.key: c for c in cells}
 
 
-def test_the_candidates_are_the_top_three_within_the_limits_best_first():
+def test_the_candidates_are_the_within_cells_best_first():
     cells = [_cell(49, 200_000, revenue=89e6),
              _cell(49, 280_000, ok=False, revenue=137e6, total=115),
              _cell(49, 210_000, revenue=103e6),
@@ -171,9 +209,17 @@ def test_the_candidates_are_the_top_three_within_the_limits_best_first():
              _cell(56, 232_000, revenue=91.4e6),
              _cell(70, 300_000, revenue=200e6, error="RuntimeError: boom")]
     got = io.stability_candidates(cells, "revenue")
-    assert [c.batch_size for c in got] == [210_000, 180_000, 232_000]
+    assert [c.batch_size for c in got] == [210_000, 180_000, 232_000, 200_000]
     assert got[0] == io.best(cells, "revenue")
     assert io.stability_candidates(cells[1:2], "revenue") == []
+
+
+def test_at_most_ten_candidates():
+    assert io.MAX_STABILITY_CANDIDATES == 10
+    cells = [_cell(49, 100_000 + 10_000 * i, revenue=float(i))
+             for i in range(12)]
+    got = io.stability_candidates(cells, "revenue")
+    assert [c.revenue for c in got] == [float(i) for i in range(11, 1, -1)]
 
 
 def test_a_stable_winner():
@@ -202,14 +248,29 @@ def test_none_of_three_is_stable():
                  for c in cands for d in (-5_000, 5_000)))
     stab, first = io.judge_stability(cands, ran)
     assert [ok for *_x, ok in stab] == [False, False, False]
-    assert first is None and len(stab) == io.MAX_STABILITY_CANDIDATES
+    assert first is None and len(stab) == 3
+
+
+def test_a_neighbour_keeps_its_candidates_cap():
+    c = _cell(49, 210_000, cap=3_200_000)
+    assert io.neighbour_rhythms(c) == [(49, 205_000, 3_200_000.0),
+                                       (49, 215_000, 3_200_000.0)]
+    # The same rhythm at ANOTHER cap is not a neighbour: judged on the cap
+    # the candidate ran at, a missing one raises.
+    other = _ran(_cell(49, 205_000), _cell(49, 215_000))       # at 3,800 t
+    with pytest.raises(KeyError):
+        io.judge_stability([c], other)
+    stab, first = io.judge_stability([c], _ran(
+        _cell(49, 205_000, cap=3_200_000), _cell(49, 215_000, cap=3_200_000)))
+    assert stab[0][2] and first == c
+    assert {n.cap_kg for n in stab[0][1]} == {3_200_000.0}
 
 
 def test_a_neighbour_below_the_smallest_batch_is_dropped():
     small = _cell(49, io.MIN_SIZE + 2_000)
-    assert io.neighbour_rhythms(small) == [(49, io.MIN_SIZE + 7_000)]
+    assert io.neighbour_rhythms(small) == [(49, io.MIN_SIZE + 7_000, CAP)]
     assert io.neighbour_rhythms(_cell(49, io.MIN_SIZE + 5_000)) == [
-        (49, io.MIN_SIZE), (49, io.MIN_SIZE + 10_000)]
+        (49, io.MIN_SIZE, CAP), (49, io.MIN_SIZE + 10_000, CAP)]
     stab, first = io.judge_stability([small],
                                      _ran(_cell(49, io.MIN_SIZE + 7_000)))
     assert len(stab[0][1]) == 1 and stab[0][2] and first == small
@@ -227,14 +288,15 @@ def test_an_errored_neighbour_is_not_stable_and_a_missing_one_raises():
 
 # --- the stability wave, with an injected runner ------------------------------
 
-def _fake_runner(calls, within=lambda size: True, args=None):
+def _fake_runner(calls, within=lambda size: True, args=None, with_cap=False):
     def fake(rhythm, cap_kg, project_dir, **kw):
         cad, size = rhythm
-        calls.append((cad, size))
+        calls.append((cad, size, cap_kg) if with_cap else (cad, size))
         if args is not None:
             args.append((cap_kg, project_dir, kw))
         ok = within(size)
-        return _cell(cad, size, ok=ok, revenue=float(size), total=0 if ok else 1)
+        return _cell(cad, size, ok=ok, revenue=float(size), total=0 if ok else 1,
+                     cap=cap_kg)
     return fake
 
 
@@ -276,6 +338,166 @@ def test_the_stability_wave_reuses_grid_cells_and_runs_the_rest_once(
     assert res.best_stable == res.cells[1]
     assert res.unconstrained == res.best             # the top earner is within
     assert res.note is None
+
+
+def test_caps_none_is_the_one_cap_it_always_was(monkeypatch):
+    """caps=None runs at cap_kg alone: the same calls, cells and ranking as
+    caps=[cap_kg], every cell at that cap, one run per rhythm."""
+    calls, args = [], []
+    monkeypatch.setattr(io, "run_cell",
+                        _fake_runner(calls, lambda s: s <= 210_000, args))
+    a = io.optimize([49], [200_000, 205_000, 210_000], 3_800_000, ROOT,
+                    workers=1, control=object())
+    first = list(calls)
+    calls.clear()
+    b = io.optimize([49], [200_000, 205_000, 210_000], 3_800_000, ROOT,
+                    caps=[3_800_000], workers=1, control=object())
+    assert first == calls == [(49, 200_000), (49, 205_000), (49, 210_000),
+                              (49, 215_000), (49, 195_000)]
+    assert a == b
+    assert {c.cap_kg for c in a.cells} == {3_800_000.0}
+    assert {x[0] for x in args} == {3_800_000.0}
+    assert [c.batch_size for c in io.table_order(a.cells, "revenue")] == [
+        210_000, 205_000, 200_000]
+    assert a.best.label == "49 d × 210,000 @ 3,800 t"
+
+
+def _fake_engine(log, within=lambda cad, size, cap: True):
+    """ie.ideal_run / ie.gates stand-ins: the REAL run_cell path, no engine.
+    Revenue rises as the cap falls, so a lower cap can win."""
+    def ideal_run(cad, size, cap, root, **kw):
+        log.append(("run", cad, size, cap, dict(kw["overrides"])))
+        y = SimpleNamespace(
+            r8_over_tank_weeks=0, sys_bio_over_weeks=0, sys_feed_over_weeks=0,
+            weeks_over_move_budget=0, under_floor_weeks=0, zero_weeks=0,
+            over_cap_weeks=0, revenue=float(size) + (4e6 - cap),
+            hog_t=4_000.0, gain_t=4_000.0, avg_gross_kg=4.2,
+            peak_pct_of_cap=0.8)
+        return SimpleNamespace(years={2029: y}, key=(cad, size, cap))
+
+    def gates(run, year, control):
+        log.append(("judge",) + run.key + (control.max_biomass_kg,))
+        ok = within(*run.key)
+        return [ie.Gate("Biomass cap", "PASS" if ok else "FAIL", "x")]
+    return ideal_run, gates
+
+
+def test_a_three_cap_grid_runs_and_judges_every_cell_at_its_own_cap(
+        monkeypatch):
+    log = []
+    run, judge = _fake_engine(log)
+    monkeypatch.setattr(ie, "ideal_run", run)
+    monkeypatch.setattr(ie, "gates", judge)
+    ctl = load_config(str(ROOT / "config"))[0]
+    caps = [3_000_000, 3_800_000, 3_200_000]           # any order in
+    res = io.optimize([49], [200_000, 210_000], 3_800_000, ROOT, caps=caps,
+                      workers=1, control=ctl,
+                      overrides={"min_harvest_per_week": 26_000.0})
+    grid = [(49, s, float(p)) for s in (200_000, 210_000)
+            for p in (3_800_000, 3_200_000, 3_000_000)]  # cap high -> low
+    assert [c.key for c in res.cells] == grid
+    runs = [x[1:4] for x in log if x[0] == "run"]
+    judged = [x for x in log if x[0] == "judge"]
+    assert runs[:6] == grid                            # the grid, in order
+    assert len(runs) == len(set(runs))                 # nothing runs twice
+    # Every run is judged at the cap it ran at; the engine takes the cap on
+    # its own (never also in `overrides`, where ideal_run would refuse it).
+    assert [j[1:4] for j in judged] == runs
+    assert all(j[3] == j[4] for j in judged)
+    assert all("max_biomass_kg" not in x[4] for x in log if x[0] == "run")
+    assert ctl.max_biomass_kg == 3_800_000.0           # the input untouched
+    # The wave: each candidate's neighbours at ITS cap (205k is shared).
+    assert sorted(runs[6:]) == sorted(
+        (49, s, float(p)) for s in (195_000, 205_000, 215_000)
+        for p in (3_800_000, 3_200_000, 3_000_000))
+    assert res.best.key == (49, 210_000, 3_000_000.0)  # the lower cap earns more
+    assert all(n.cap_kg == cand.cap_kg for cand, ns, _ok in res.stability
+               for n in ns)
+
+
+def test_a_cap_above_the_operators_is_refused_before_anything_runs(
+        monkeypatch):
+    ran = []
+    monkeypatch.setattr(io, "run_cell", lambda *a, **k: ran.append(a))
+    with pytest.raises(ValueError, match="never searches above"):
+        io.optimize([49], [200_000], 3_800_000, ROOT, workers=1,
+                    control=object(), caps=[3_800_000, 3_900_000])
+    assert not ran
+
+
+def test_a_cap_in_overrides_that_differs_from_a_cap_to_try_is_refused(
+        monkeypatch):
+    """The cap goes in cap_kg / caps. ideal_run refuses a cap given twice, so
+    an overrides max_biomass_kg that differs from a cap to try would fail
+    every such cell: the grid is refused before anything runs. The same
+    value as the one cap still runs, exactly as before."""
+    ran = []
+    monkeypatch.setattr(io, "run_cell", lambda *a, **k: ran.append(a))
+    monkeypatch.setattr(ie, "ideal_run", lambda *a, **k: ran.append(a))
+    for caps, ov_cap in (([3_800_000, 3_200_000], 3_800_000.0),
+                         (None, 3_200_000)):
+        with pytest.raises(ValueError, match="cap_kg / caps"):
+            io.optimize([49], [200_000], 3_800_000, ROOT, workers=1,
+                        control=object(), caps=caps,
+                        overrides={"max_biomass_kg": ov_cap})
+    assert not ran
+    monkeypatch.undo()
+    log = []
+    run, judge = _fake_engine(log)
+    monkeypatch.setattr(ie, "ideal_run", run)
+    monkeypatch.setattr(ie, "gates", judge)
+    ctl = load_config(str(ROOT / "config"))[0]
+    res = io.optimize([49], [200_000], 3_800_000, ROOT, workers=1, control=ctl,
+                      overrides={"max_biomass_kg": 3_800_000.0})
+    assert [c.key for c in res.cells] == [(49, 200_000, 3_800_000.0)]
+    assert all(c.error is None for c in res.cells) and res.best is not None
+
+
+def test_neighbours_keep_their_cap_and_reuse_grid_cells(monkeypatch):
+    calls, args = [], []
+    monkeypatch.setattr(io, "run_cell",
+                        _fake_runner(calls, args=args, with_cap=True))
+    ctl, tmpl = object(), object()
+    run = dict(template=tmpl, overrides={"min_harvest_weight_g": 3_600.0},
+               method="controller",
+               method_overrides={"chronic_pressure_weeks": 6},
+               density_overrides={"OG3N": 95.0},
+               system_overrides={"OG3N": {"biomass": 450_000.0}},
+               horizon_weeks=120)
+    res = io.optimize([49], [200_000, 205_000, 210_000], 3_800_000, ROOT,
+                      caps=[3_200_000, 3_800_000], workers=1, control=ctl,
+                      **run)
+    hi, lo = 3_800_000.0, 3_200_000.0
+    assert calls[:6] == [(49, s, p) for s in (200_000, 205_000, 210_000)
+                         for p in (hi, lo)]
+    # Only the neighbours the grid lacks, at the candidate's cap, each once.
+    assert calls[6:] == [(49, 215_000, hi), (49, 215_000, lo),
+                         (49, 195_000, hi), (49, 195_000, lo)]
+    # The wave runs with EXACTLY the grid's arguments — its cap included.
+    assert all(a[1:] == (str(ROOT), dict(run, control=ctl)) for a in args)
+    assert [a[0] for a in args] == [c[2] for c in calls]
+    by_key = {c.key: c for c in res.cells}
+    for cand, ns, _ok in res.stability:
+        assert [n.key for n in ns] == io.neighbour_rhythms(cand)
+        for n in ns:
+            if n.key in by_key:
+                assert n is by_key[n.key]                  # reused, not re-run
+    assert res.best.key == (49, 210_000, hi)           # the tie -> higher cap
+
+
+def test_ten_candidates_make_a_wave_of_at_most_twenty(monkeypatch):
+    calls = []
+    monkeypatch.setattr(io, "run_cell", _fake_runner(calls, with_cap=True))
+    cads = [42, 49, 56, 63, 70, 77]
+    res = io.optimize(cads, [200_000, 300_000], 3_800_000, ROOT, workers=1,
+                      control=object())
+    assert len(res.cells) == 12
+    wave = calls[12:]
+    assert len(res.stability) == io.MAX_STABILITY_CANDIDATES == 10
+    assert len(wave) == 2 * io.MAX_STABILITY_CANDIDATES == 20
+    assert len(set(wave)) == 20
+    assert set(wave) == {r for cand, _ns, _ok in res.stability
+                         for r in io.neighbour_rhythms(cand)}
 
 
 def test_no_stability_runs_without_a_winner(monkeypatch):
@@ -357,8 +579,8 @@ def test_an_unknown_objective_is_refused():
     ([49.0], [200_000]),                             # a float is not whole days
     ([True], [200_000]),
     ([49], [200_000.5]),
-    (list(range(7, 7 + 61)), [200_000]),             # 61 cells
-    (list(range(7, 13)), list(range(100_000, 211_000, 10_000))),   # 6 x 12 = 72
+    (list(range(7, 7 + 151)), [200_000]),            # 151 cells
+    (list(range(7, 13)), list(range(100_000, 351_000, 10_000))),   # 6 x 26 = 156
 ])
 def test_bad_grids_are_refused_before_anything_runs(monkeypatch, cads, sizes):
     ran = []
@@ -369,10 +591,41 @@ def test_bad_grids_are_refused_before_anything_runs(monkeypatch, cads, sizes):
     assert not ran
 
 
-def test_the_grid_is_cadence_major_and_duplicates_collapse():
-    assert io.check_grid([56, 49, 49], [220_000, 200_000]) == [
-        (49, 200_000), (49, 220_000), (56, 200_000), (56, 220_000)]
-    assert len(io.check_grid(range(7, 13), range(100_000, 200_000, 10_000))) == 60
+@pytest.mark.parametrize("cap_kg, caps", [
+    (3_800_000, []),                                 # no cap to try
+    (3_800_000, [0]),
+    (3_800_000, [-3_200_000]),
+    (3_800_000, [math.nan]),
+    (3_800_000, [math.inf]),
+    (3_800_000, [True]),
+    (3_800_000, ["3200000"]),
+    (3_800_000, [3_200_000, None]),
+    (3_800_000, [3_800_000 - 100_000 * i for i in range(6)]),   # 30 x 6 = 180
+    (3_800_000, [3_900_000]),                        # above the operator's cap
+    (math.nan, None),                                # the ceiling itself
+    (0, None),
+])
+def test_bad_caps_are_refused_before_anything_runs(monkeypatch, cap_kg, caps):
+    ran = []
+    monkeypatch.setattr(io, "run_cell", lambda *a, **k: ran.append(a))
+    monkeypatch.setattr(ie, "ideal_run", lambda *a, **k: ran.append(a))
+    with pytest.raises(ValueError):
+        io.optimize([49], list(range(100_000, 400_000, 10_000)), cap_kg, ROOT,
+                    caps=caps, workers=1, control=object())
+    assert not ran
+
+
+def test_the_grid_is_cadence_then_size_then_cap_high_first_duplicates_collapse():
+    assert io.check_grid([56, 49, 49], [220_000, 200_000],
+                         [3_200_000, 3_800_000, 3_200_000.0]) == [
+        (49, 200_000, 3_800_000.0), (49, 200_000, 3_200_000.0),
+        (49, 220_000, 3_800_000.0), (49, 220_000, 3_200_000.0),
+        (56, 200_000, 3_800_000.0), (56, 200_000, 3_200_000.0),
+        (56, 220_000, 3_800_000.0), (56, 220_000, 3_200_000.0)]
+    assert len(io.check_grid(range(7, 12), range(100_000, 200_000, 10_000),
+                             [3e6, 3.2e6, 3.4e6])) == 150    # the most allowed
+    with pytest.raises(ValueError, match="one cap"):
+        io.check_grid([49], [200_000], [])
 
 
 # --- an engine error is recorded, never feasible ------------------------------
@@ -420,6 +673,8 @@ def test_run_cell_passes_every_limit_to_the_engine(monkeypatch):
     assert got["system_overrides"] == {"OG3N": {"biomass": 450_000.0}}
     assert cell.error and not cell.within_limits
     assert cell.fish_per_week == pytest.approx(240_000 * 7 / 56)
+    assert cell.cap_kg == 4_200_000.0                # an errored cell keeps its cap
+    assert cell.label == "56 d × 240,000 @ 4,200 t"
 
 
 def test_the_judging_control_carries_the_knobs_then_the_runs_limits():
@@ -455,11 +710,11 @@ def real_grid():
 def test_a_real_grid_judges_every_cell_as_plausible_gates(real_grid):
     res = real_grid["res"]
     assert real_grid["after"] == real_grid["before"]    # config/ scenario/ only read
-    assert [(c.cadence_days, c.batch_size) for c in res.cells] == [
-        (56, 200_000), (56, 240_000)]
+    assert [c.key for c in res.cells] == [(56, 200_000, 3_800_000.0),
+                                          (56, 240_000, 3_800_000.0)]
     # The stability wave: every neighbour of every candidate, grid cells
     # reused, the rest run once through the same pool path.
-    grid = {(c.cadence_days, c.batch_size) for c in res.cells}
+    grid = {c.key for c in res.cells}
     extra = {r for cand, _ns, _ok in res.stability
              for r in io.neighbour_rhythms(cand)} - grid
     assert sorted(real_grid["seen"]) == list(range(1, 2 + len(extra) + 1))
@@ -467,8 +722,7 @@ def test_a_real_grid_judges_every_cell_as_plausible_gates(real_grid):
     if res.best is not None:
         assert res.stability[0][0] == res.best
         for cand, ns, ok in res.stability:
-            assert [(n.cadence_days, n.batch_size) for n in ns] == \
-                io.neighbour_rhythms(cand)
+            assert [n.key for n in ns] == io.neighbour_rhythms(cand)
             for n in ns:
                 assert n.error is None, n.error
                 assert n.within_limits == ie.plausible(n.gates)

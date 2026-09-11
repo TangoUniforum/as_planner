@@ -5033,7 +5033,7 @@ _IDEAL_KEEP = ("ideal_cap_t", "ideal_cads", "ideal_sizes", "ideal_ref_cad",
                "ideal_tr_feed", "ideal_min_wt",
                # step 2's optimizer
                "ideal_opt_obj", "ideal_opt_cads", "ideal_opt_smin",
-               "ideal_opt_smax", "ideal_opt_sstep")
+               "ideal_opt_smax", "ideal_opt_sstep", "ideal_opt_caps")
 
 
 def _ideal_restore():
@@ -5265,11 +5265,16 @@ def _ideal():
                "(step 2 and its optimizer).")
     cap_now_t = float(ctx["control"].max_biomass_kg) / 1000.0
     c1, c2 = st.columns([3, 2])
+    # Seeded through session state, never `value=`: Streamlit 1.50 counts a
+    # slider's `value` in its widget id, so drawing it with value= once and
+    # without it afterwards made a NEW widget on the first rerun, which
+    # snapped to its minimum (3,000 t). The slider is the optimizer's ceiling.
+    if "ideal_cap_t" not in st.session_state:
+        st.session_state["ideal_cap_t"] = int(min(
+            6500, max(3000, round(cap_now_t / 100.0) * 100)))
     with c1:
         cap_t = st.slider(
             "Biomass cap (t)", min_value=3000, max_value=6500,
-            **_ideal_default("ideal_cap_t", int(min(
-                6500, max(3000, round(cap_now_t / 100.0) * 100)))),
             step=100, key="ideal_cap_t",
             help="The most standing fish the facility may carry. A variable, "
                  "not a permit — try values. Above roughly 5,000 t there is no "
@@ -5334,6 +5339,7 @@ def _ideal():
             st.session_state["ideal_tr_sizes"] = str(int(b_new.batch_size))
             st.session_state["_ideal_ref_regen"] = True
         st.session_state["ideal_ref_cap"] = int(cap_t)
+        st.session_state.pop("_ideal_ref_cap_by_opt", None)   # the scan set it
         st.session_state["ideal_ref_wmin"] = int(min_wt)
 
     res = st.session_state.get("_ideal_result")
@@ -5559,6 +5565,10 @@ def _ideal_reference(ctx, today, cap_t):
     feed = l5.number_input("Max feed / day (kg)", min_value=0, step=500,
                            key="ideal_ref_feed", **_ideal_default(
                                "ideal_ref_feed", int(ctrl.max_feed_per_day_kg)))
+    _opt_cap_t = st.session_state.get("_ideal_ref_cap_by_opt")
+    if _opt_cap_t is not None and int(cap_in) == int(_opt_cap_t):
+        st.caption(f"Cap set to {int(_opt_cap_t):,} t by the optimizer — your "
+                   f"Control cap is {float(ctrl.max_biomass_kg) / 1000:,.0f} t.")
     with st.expander("Tank & system limits for this run (optional)"):
         st.caption("Tank density caps and each system's biomass and feed "
                    "limits, plus the weekly move budget — as your files state "
@@ -5581,8 +5591,9 @@ def _ideal_reference(ctx, today, cap_t):
                                r_dens, r_sys],
                               sort_keys=True, default=str).encode()).hexdigest()
     year = _im.STEADY_START.year + _REF_HORIZON_WEEKS // 52 - 1
-    # The optimizer runs on exactly these limits, engine and knobs.
-    _ideal_optimizer(ctx, ov, r_dens, r_sys, m_key, m_ov)
+    # The optimizer runs on exactly these limits, engine and knobs — at the
+    # caps it is given, never above step 1's cap slider (`cap_t`).
+    _ideal_optimizer(ctx, ov, r_dens, r_sys, m_key, m_ov, cap_t)
 
     if st.button("▶ Run the reference sheet in the real engine (~30 s)",
                  type="primary", key="ideal_ref_run"):
@@ -5733,15 +5744,72 @@ def _ideal_parse_cadences(txt):
     return out
 
 
-def _ideal_opt_use(cad, size):
-    """on_click of "Use this rhythm": hand the rhythm to step 2 the way step 1
-    does (ideal_ref_cad / ideal_ref_size / ideal_tr_sizes + a table refill).
-    Step 2's inputs are already drawn when the button shows, and only a
-    callback — it runs before the next rerun — may set a drawn widget's key."""
-    st.session_state["ideal_ref_cad"] = int(cad)
-    st.session_state["ideal_ref_size"] = int(size)
-    st.session_state["ideal_tr_sizes"] = str(int(size))
-    st.session_state["_ideal_ref_regen"] = True
+def _ideal_parse_caps(txt, ceiling_t):
+    """'3800, 3600, 3400' -> [3800, 3600, 3400]: whole tonnes. Refuses an
+    entry that is not a whole number, a cap under 500 t, and any cap above
+    step 1's cap slider (`ceiling_t`) — the optimizer never searches above
+    it (operator, 2026-09-10)."""
+    out = []
+    for part in str(txt).split(","):
+        p = part.strip().replace("_", "")
+        if not p:
+            continue
+        try:
+            out.append(int(p))
+        except ValueError:
+            raise ValueError(f"{p!r} is not a whole number of tonnes") from None
+    low = [c for c in out if c < 500]
+    if low:
+        raise ValueError(
+            f"{', '.join(f'{c:,}' for c in low)} t — a cap is at least 500 t "
+            f"(write caps without thousands separators: 3800, not 3,800; "
+            f"commas separate the caps)")
+    high = [c for c in out if c > int(ceiling_t)]
+    if high:
+        raise ValueError(
+            f"{', '.join(f'{c:,}' for c in high)} t is above your cap slider "
+            f"({int(ceiling_t):,} t) — the optimizer never searches above "
+            f"your cap slider")
+    return out
+
+
+def _ideal_opt_use(cad, size, cap_kg=None, tr_seeds=None):
+    """on_click of the Use buttons: hand the rhythm to step 2 the way step 1
+    does (ideal_ref_cad / ideal_ref_size / ideal_tr_sizes + a table refill),
+    and the cap the plan ran at (`cap_kg`) to step 2's cap box and step 3's
+    what-if cap (whole tonnes). Step 2's inputs are already drawn when the
+    button shows, and only a callback — it runs before the next rerun — may
+    set a drawn widget's key. Each key's _keep_ shadow is set with it, so a
+    rerun and a mode round trip keep the values.
+
+    `tr_seeds` (_ideal_tr_seeds of today's Control): step 3 re-fills its
+    what-if boxes from Control whenever its stored seeds differ — on its
+    first draw too — which would drop this cap. So that re-fill is done here
+    first, and the cap is set on the fresh boxes. When step 3 would have said
+    so (boxes it had filled, from an older Control), the callback leaves it
+    `_ideal_tr_reset_note`, and step 3 shows its usual notice once."""
+    ss = st.session_state
+    ss["ideal_ref_cad"] = int(cad)
+    ss["ideal_ref_size"] = int(size)
+    ss["ideal_tr_sizes"] = str(int(size))
+    ss["_ideal_ref_regen"] = True
+    if cap_kg is not None:
+        cap_t = int(round(float(cap_kg) / 1000.0))
+        if tr_seeds is not None and ss.get("_ideal_tr_seeds") != tr_seeds:
+            if "_ideal_tr_seeds" in ss and any(
+                    ("_keep_" + k) in ss for k, *_ in _IDEAL_TR_LIMITS):
+                ss["_ideal_tr_reset_note"] = True
+            for k, *_ in _IDEAL_TR_LIMITS:
+                ss.pop(k, None)
+                ss.pop("_keep_" + k, None)
+            ss["_ideal_tr_seeds"] = tr_seeds
+        ss["ideal_ref_cap"] = cap_t
+        ss["ideal_tr_cap"] = cap_t
+        ss["_ideal_ref_cap_by_opt"] = cap_t
+    for k in ("ideal_ref_cad", "ideal_ref_size", "ideal_tr_sizes",
+              "ideal_ref_cap", "ideal_tr_cap"):
+        if k in ss:
+            ss["_keep_" + k] = ss[k]
 
 
 def _ideal_opt_value_text(cell, objective):
@@ -5792,10 +5860,9 @@ def _ideal_opt_cost(res):
     u, b = res.unconstrained, res.best
     if u is None:                           # no rhythm ran at all
         return
-    if b is not None and (u.cadence_days, u.batch_size) == (b.cadence_days,
-                                                            b.batch_size):
+    if b is not None and u.key == b.key:
         st.info("The limits cost nothing in this grid: the best-earning "
-                "rhythm is within every limit.")
+                "rhythm and cap are within every limit.")
         return
     diff = (f" ({_ideal_opt_diff_text(u, b, res.objective)} vs the plan "
             f"within every limit)" if b is not None else "")
@@ -5818,14 +5885,16 @@ def _ideal_opt_cost(res):
             f"answer.")
 
 
-def _ideal_opt_stability(res, stale):
+def _ideal_opt_stability(res, stale, tr_seeds=None):
     """The winner's stability line and the Use button(s).
 
     Stable = its neighbours at +/- NEIGHBOUR_STEP fish per batch (same
-    cadence) are also within every limit (forecast.ideal_optimize). A fragile
-    winner is said LOUDLY; when a lower candidate is stable, the primary
-    button loads that one and a secondary still loads the winner. Every Use
-    button is disabled while the result is stale (the inputs changed)."""
+    cadence, same cap) are also within every limit
+    (forecast.ideal_optimize). A fragile winner is said LOUDLY; when a lower
+    candidate is stable, the primary button loads that one and a secondary
+    still loads the winner. Each Use button hands over the rhythm AND the cap
+    it ran at (`_ideal_opt_use`, with step 3's `tr_seeds`). Every Use button
+    is disabled while the result is stale (the inputs changed)."""
     from forecast import ideal_optimize as _io
     b, bs = res.best, res.best_stable
     ok = res.stability[0][2] if res.stability else None
@@ -5833,12 +5902,14 @@ def _ideal_opt_stability(res, stale):
         ns = res.stability[0][1]
         st.success(f"**Stable:** {b.cadence_days} d × "
                    + " and × ".join(f"{n.batch_size:,}" for n in ns)
+                   + f" at {b.cap_t:,.0f} t"
                    + (" are" if len(ns) > 1 else " is")
                    + " also within every limit.")
     elif ok is False:
         bad = [n for n in res.stability[0][1]
                if not (n.error is None and n.within_limits)]
-        msg = (f"**Fragile:** at ±{_io.NEIGHBOUR_STEP:,} fish per batch, "
+        msg = (f"**Fragile:** at ±{_io.NEIGHBOUR_STEP:,} fish per batch "
+               f"(same cap), "
                + "; ".join(
                    f"{n.label} could not run ({n.error})" if n.error else
                    f"{n.label} breaks the limits ({_ideal_breach_text(n)})"
@@ -5856,23 +5927,25 @@ def _ideal_opt_stability(res, stale):
                     "stable — treat it as fragile.")
         st.warning(msg)
     why = ("Recompute first — the inputs changed since this run."
-           if stale else None)
+           if stale else "Loads the rhythm into step 2, and its cap into "
+                         "step 2's biomass cap and step 3's what-if cap.")
     if ok is False and bs is not None:
         c1, c2 = st.columns(2)
         c1.button(f"Use the best stable plan ({bs.label})",
                   key="ideal_opt_use_stable", type="primary",
                   on_click=_ideal_opt_use,
-                  args=(bs.cadence_days, bs.batch_size), disabled=stale,
-                  help=why)
+                  args=(bs.cadence_days, bs.batch_size, bs.cap_kg, tr_seeds),
+                  disabled=stale, help=why)
         c2.button(f"Use the top plan anyway ({b.label})", key="ideal_opt_use",
                   on_click=_ideal_opt_use,
-                  args=(b.cadence_days, b.batch_size), disabled=stale,
-                  help=why)
+                  args=(b.cadence_days, b.batch_size, b.cap_kg, tr_seeds),
+                  disabled=stale, help=why)
     else:
-        st.button("Use this rhythm in the reference sheet",
+        st.button(f"Use this rhythm and cap in the reference sheet "
+                  f"({b.label})",
                   key="ideal_opt_use", on_click=_ideal_opt_use,
-                  args=(b.cadence_days, b.batch_size), disabled=stale,
-                  help=why)
+                  args=(b.cadence_days, b.batch_size, b.cap_kg, tr_seeds),
+                  disabled=stale, help=why)
 
 
 def _ideal_opt_progress(done, total, n_grid):
@@ -5900,7 +5973,8 @@ def _ideal_opt_rows(cells, objective):
     rows = []
     for c in _io.table_order(cells, objective):
         ran = c.error is None
-        row = {"Rhythm": c.label, "Fish / week": round(c.fish_per_week),
+        row = {"Rhythm": c.rhythm, "Cap (t)": round(c.cap_t),
+               "Fish / week": round(c.fish_per_week),
                "Within every limit": ("✓" if c.within_limits else
                                       "✗" if ran else "engine error"),
                "Revenue $M/yr": round(c.revenue / 1e6, 1) if ran else None,
@@ -5922,16 +5996,19 @@ def _ideal_opt_rows(cells, objective):
     return rows
 
 
-def _ideal_optimizer(ctx, ov, r_dens, r_sys, m_key, m_ov):
-    """Step 2's optimizer: the best (cadence, batch size) within EVERY limit.
+def _ideal_optimizer(ctx, ov, r_dens, r_sys, m_key, m_ov, cap_slider_t):
+    """Step 2's optimizer: the best (cadence, batch size, biomass cap) within
+    EVERY limit.
 
     The operator's spec (2026-09-10): the optimizer works to the system,
     facility and density limits for count and frequency, and meets the target
     variable — hard limits, zero breaches. Each cell is one real-engine run
-    (forecast.ideal_optimize), on exactly the step-2 cap, facility limits (min
+    (forecast.ideal_optimize) at one of the **Caps to try** — only at or
+    below step 1's cap slider (`cap_slider_t`, the operator's ceiling), never
+    above (operator, 2026-09-10) — on exactly the facility limits (min
     harvest weight included), tank & system limits, engine and promoted
-    knobs the reference sheet runs with (`ov`, `r_dens`, `r_sys`, `m_key`,
-    `m_ov`). Nothing is written to config/ or scenario/."""
+    knobs the reference sheet runs with (`ov` minus its cap, `r_dens`,
+    `r_sys`, `m_key`, `m_ov`). Nothing is written to config/ or scenario/."""
     import hashlib as _hl
     import json as _json
     import math as _math
@@ -5939,17 +6016,18 @@ def _ideal_optimizer(ctx, ov, r_dens, r_sys, m_key, m_ov):
     from forecast import ideal_optimize as _io
 
     with st.expander("Optimizer — best rhythm within every limit"):
-        cap_kg = float(ov["max_biomass_kg"])
-        # The run's limits minus the cap, which ideal_run takes on its own.
+        slider_t = int(cap_slider_t)
+        # The run's limits minus the cap: each cell runs at its own cap.
         run_ov = {k: ov[k] for k in _io.JUDGED_KEYS
                   if k in ov and k != "max_biomass_kg"}
         tank_txt = _ideal_tank_limit_text(r_dens, r_sys, {})
         budget = int(_io.judging_control(ctx["control"], m_ov,
                                          ov).max_transfers_per_week)
         st.caption(
-            "Runs the real engine once per rhythm, from an empty facility, "
-            "with this step's biomass cap "
-            f"(**{cap_kg / 1000:,.0f} t**), min harvest weight "
+            "Runs the real engine once per rhythm and biomass cap, from an "
+            "empty facility, at each of the **caps to try** — never above "
+            f"your cap slider in step 1 (**{slider_t:,} t**) — with this "
+            "step's min harvest weight "
             f"(**{float(ov['min_harvest_weight_g']):,.0f} g**) and the other "
             "facility limits above, the tank & system limits table"
             + (f" ({tank_txt})" if tank_txt else "")
@@ -5987,7 +6065,23 @@ def _ideal_optimizer(ctx, ov, r_dens, r_sys, m_key, m_ov):
         sstep = c4.number_input("in steps of (fish)", min_value=1_000,
                                 step=5_000, key="ideal_opt_sstep",
                                 **_ideal_default("ideal_opt_sstep", 20_000))
-        grid = None
+        # The caps start from step 1's slider (the operator's ceiling) and
+        # its next three 200 t steps down; when the slider moves they are
+        # re-seeded from it (the page's seeds pattern).
+        caps_seed = ", ".join(str(slider_t - d) for d in (0, 200, 400, 600))
+        if st.session_state.get("_ideal_opt_caps_seed") != slider_t:
+            st.session_state.pop("ideal_opt_caps", None)
+            st.session_state.pop("_keep_ideal_opt_caps", None)
+            st.session_state["_ideal_opt_caps_seed"] = slider_t
+        caps_txt = st.text_input(
+            "Caps to try (t)", key="ideal_opt_caps",
+            help="Biomass caps to run every rhythm at, a comma list in whole "
+                 "tonnes. Never above your cap slider in step 1: a lower "
+                 "cap can keep tanks under their density cap while bigger "
+                 "batches keep the tonnage. Re-filled from the slider when "
+                 "it moves.",
+            **_ideal_default("ideal_opt_caps", caps_seed))
+        grid, caps_t = None, []
         try:
             if int(smax) < int(smin):
                 raise ValueError("the largest batch size is below the smallest")
@@ -5996,11 +6090,16 @@ def _ideal_optimizer(ctx, ov, r_dens, r_sys, m_key, m_ov):
             if long_:
                 raise ValueError(f"{', '.join(map(str, long_))} days — at most "
                                  f"140 days between stockings (step 2's range)")
+            caps_t = _ideal_parse_caps(caps_txt, slider_t)
             grid = _io.check_grid(
-                cads, list(range(int(smin), int(smax) + 1, int(sstep))))
+                cads, list(range(int(smin), int(smax) + 1, int(sstep))),
+                [c * 1000.0 for c in caps_t])
         except ValueError as e:
             st.error(f"Can't build that grid — {e}")
         workers = _cpu_workers()
+        g_cads = sorted({c for c, _s, _p in grid or ()})
+        g_sizes = sorted({s for _c, s, _p in grid or ()})
+        g_caps = sorted({p for _c, _s, p in grid or ()}, reverse=True)
         if grid:
             n_w = max(1, min(workers, len(grid)))
             n_stab = 2 * _io.MAX_STABILITY_CANDIDATES   # the extra wave, at most
@@ -6009,18 +6108,21 @@ def _ideal_optimizer(ctx, ov, r_dens, r_sys, m_key, m_ov):
                       * _IDEAL_OPT_SECS_PER_RUN / 60.0)
             st.caption(
                 f"**{len(grid)} rhythm(s)** "
-                f"({len({c for c, _ in grid})} frequencies × "
-                f"{len({s for _, s in grid})} sizes) + one wave of up to "
-                f"{n_stab} stability runs, over {n_w} worker(s) (sidebar "
-                f"**Computer power**) — about {mins:,.1f} min, plus up to "
-                f"{mins_s:,.1f} min for the stability wave, at "
+                f"({len(g_cads)} frequencies × {len(g_sizes)} sizes × "
+                f"{len(g_caps)} caps: "
+                f"{', '.join(f'{p / 1000:,.0f}' for p in g_caps)} t) + one "
+                f"wave of up to {n_stab} stability runs, over {n_w} worker(s) "
+                f"(sidebar **Computer power**) — about {mins:,.1f} min, plus "
+                f"up to {mins_s:,.1f} min for the stability wave, at "
                 f"~{_IDEAL_OPT_SECS_PER_RUN} s per engine run.")
+        # The caps searched are the parsed list, never step 2's cap box: a
+        # winner loaded into that box must not make this result stale.
         sig = _hl.md5(_json.dumps(
-            [grid, obj, cap_kg, run_ov, r_dens, r_sys, m_key, m_ov,
+            [grid, obj, g_caps, run_ov, r_dens, r_sys, m_key, m_ov,
              _config_fingerprint(), ctx["template"].batch_id],
             sort_keys=True, default=str).encode()).hexdigest()
         if st.button("Find the best rhythm", key="ideal_opt_run",
-                     type="primary", disabled=not grid):
+                     type="primary", disabled=not grid) and grid:
             bar = st.progress(0.0, text=f"0 / {len(grid)} rhythms")
 
             def _tick(done, total, cell):
@@ -6028,8 +6130,8 @@ def _ideal_optimizer(ctx, ov, r_dens, r_sys, m_key, m_ov):
                 bar.progress(frac, text=f"{txt} — last: {cell.label}")
             try:
                 res = _io.optimize(
-                    sorted({c for c, _ in grid}), sorted({s for _, s in grid}),
-                    cap_kg, str(_ROOT), objective=obj, workers=workers,
+                    g_cads, g_sizes, float(slider_t) * 1000.0, str(_ROOT),
+                    caps=g_caps, objective=obj, workers=workers,
                     progress=_tick, template=ctx["template"], overrides=run_ov,
                     method=m_key, method_overrides=m_ov,
                     density_overrides=r_dens or None,
@@ -6040,20 +6142,24 @@ def _ideal_optimizer(ctx, ov, r_dens, r_sys, m_key, m_ov):
             bar.empty()
             if res is not None:
                 st.session_state["_ideal_opt"] = dict(sig=sig, res=res,
-                                                      cap_kg=cap_kg)
+                                                      caps_kg=tuple(g_caps))
         o = st.session_state.get("_ideal_opt")
         if not o:
             return
-        if not hasattr(o["res"], "best_stable"):
-            # A result kept from before the stability check was added.
-            st.info("The last optimizer run predates the stability check — "
-                    "press **Find the best rhythm** to run it again.")
+        if not (hasattr(o["res"], "best_stable")
+                and all(hasattr(c, "cap_kg") for c in o["res"].cells)):
+            # A result kept from before the stability check / cap search.
+            st.info("The last optimizer run predates the stability check or "
+                    "the cap search — press **Find the best rhythm** to run "
+                    "it again.")
             return
         stale = o["sig"] != sig
         if stale:
-            st.warning("Showing the last optimizer run — the grid, objective, "
-                       "limits, engine or config have changed since. Press "
-                       "**Find the best rhythm** to recompute.")
+            st.warning("Showing the last optimizer run — the grid, caps, "
+                       "objective, limits, engine or config have changed "
+                       "since. Press **Find the best rhythm** to recompute.")
+        caps_ran = ", ".join(f"{p / 1000:,.0f}"
+                             for p in o.get("caps_kg", ())) + " t"
         res = o["res"]
         if res.note:
             st.warning(res.note)
@@ -6065,31 +6171,33 @@ def _ideal_optimizer(ctx, ov, r_dens, r_sys, m_key, m_ov):
         b = res.best
         if b is not None:
             st.success(
-                f"**Best within every limit at {o['cap_kg'] / 1000:,.0f} t: "
-                f"{b.label}** ({b.fish_per_week:,.0f} fish/week) — "
+                f"**Best within every limit: {b.label}** "
+                f"({b.fish_per_week:,.0f} fish/week at a biomass cap of "
+                f"{b.cap_t:,.0f} t; caps tried: {caps_ran}) — "
                 f"{_ideal_opt_value_text(b, res.objective)}; revenue "
                 f"${b.revenue / 1e6:,.1f}M, HOG {b.hog_t:,.0f} t, avg fish "
                 f"{b.avg_gross_kg:.2f} kg (steady year {b.year}).")
             _ideal_opt_cost(res)
-            _ideal_opt_stability(res, stale)
+            _ideal_opt_stability(res, stale, _ideal_tr_seeds(ctx["control"]))
         else:
             c = res.closest
             st.error(
-                f"**No rhythm in this grid is within every limit at "
-                f"{o['cap_kg'] / 1000:,.0f} t.** "
+                f"**No rhythm in this grid is within every limit at any cap "
+                f"tried ({caps_ran}).** "
                 + (f"Closest: {c.label} ({c.fish_per_week:,.0f} fish/week) "
                    f"with {c.total:,} breaches — {_ideal_breach_text(c)}. "
                    if c is not None else "No rhythm ran at all. ")
                 + "A plan that breaks a limit is not an answer: try smaller "
-                  "batches or longer gaps between stockings, or test higher "
-                  "limits in the tables above.")
+                  "batches, longer gaps between stockings or lower caps, or "
+                  "test higher limits in the tables above.")
             _ideal_opt_cost(res)
         st.dataframe(_pd.DataFrame(_ideal_opt_rows(res.cells, res.objective)),
                      hide_index=True, width="stretch")
         st.caption(
-            "One real-engine run per rhythm, read in the steady third year. "
-            "Breach columns count weeks (tank-weeks, system-weeks) over each "
-            "limit that year; ✓ needs every one at zero and clean audits. "
+            "One real-engine run per rhythm and cap, read in the steady third "
+            "year. Cap (t) is the biomass cap the rhythm ran at and was judged "
+            "at. Breach columns count weeks (tank-weeks, system-weeks) over "
+            "each limit that year; ✓ needs every one at zero and clean audits. "
             "Fish / week = batch size × 7 ÷ days between stockings — the load "
             "the limits respond to.")
 
@@ -6297,6 +6405,9 @@ def _ideal_transition(ctx, today):
     # per-week row in limits.yaml still wins for its week.
     ctrl0 = ctx["control"]
     seeds = _ideal_tr_seeds(ctrl0)
+    # The optimizer's Use button may have done this re-fill already
+    # (_ideal_opt_use); it leaves the notice for here.
+    _reset_note = st.session_state.pop("_ideal_tr_reset_note", False)
     if st.session_state.get("_ideal_tr_seeds") != seeds:
         # Control changed since these boxes were filled (or this is the first
         # visit): re-fill them from the NEW Control. A remembered old value
@@ -6307,9 +6418,11 @@ def _ideal_transition(ctx, today):
             st.session_state.pop(k, None)
             st.session_state.pop("_keep_" + k, None)
         if _had and "_ideal_tr_seeds" in st.session_state:
-            st.info("Your Control limits changed, so the what-if limit boxes "
-                    "below were reset to the new values.")
+            _reset_note = True
         st.session_state["_ideal_tr_seeds"] = seeds
+    if _reset_note:
+        st.info("Your Control limits changed, so the what-if limit boxes "
+                "below were reset to the new values.")
     # Which limits have dated per-week rows (they win for their weeks), read
     # from the limits file itself rather than stated from memory.
     try:

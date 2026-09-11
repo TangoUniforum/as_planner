@@ -2430,10 +2430,11 @@ its limits.
 ### Optimizer — the best rhythm within every limit
 
 Inside step 2, the **Optimizer — best rhythm within every limit** expander
-searches stocking rhythms for you. It runs on exactly what the reference sheet
-runs on: step 2's biomass cap, its facility limits (the min harvest weight
+searches stocking rhythms **and biomass caps** for you. It runs on what the
+reference sheet runs on — its facility limits (the min harvest weight
 included — step 2's box follows step 1's after a scan), the **Tank & system
-limits** table and move budget, and the method and knobs ▶ Run forecast uses.
+limits** table and move budget, and the method and knobs ▶ Run forecast uses
+— at each of the **caps to try** (below) instead of step 2's cap box.
 
 - **Objective** — Revenue, Harvest tonnage (HOG), or Biomass gain: live weight
   harvested plus the change in standing fish over the year (dead fish are not
@@ -2444,23 +2445,36 @@ limits** table and move budget, and the method and knobs ▶ Run forecast uses.
   42, 49, 56, 63).
 - **Batch sizes** — fish to OG per batch: from / to / in steps of (default
   180,000 to 300,000 in steps of 20,000).
+- **Caps to try (t)** — biomass caps in whole tonnes, a comma list. The
+  default is your **cap slider in step 1** and three 200 t steps below it
+  (3,800, 3,600, 3,400, 3,200 at a 3,800 t slider); move the slider and the
+  list is re-filled from it. **The optimizer never searches above your cap
+  slider:** a cap above it, a cap under 500 t or an entry that is not a whole
+  number is refused in red, and nothing runs. Every rhythm runs, and is
+  judged, at each cap — a lower cap can keep tanks under their density cap
+  while bigger batches keep the tonnage (see the table above).
 
-Before you press **Find the best rhythm** the page states the grid size and
-the estimated time. Each rhythm is one real-engine run from an empty facility
-(~20 s), spread over the sidebar's **Computer power** workers; the default
-4 × 7 grid is 28 runs, plus one wave of up to 6 stability runs (below). It
-takes gaps of 7–140 days and batches of 50,000–600,000 fish (step 2's own
-ranges, so a winner always loads there), and refuses a grid with no frequency
-or size, or more than 60 rhythms.
+Before you press **Find the best rhythm** the page states the grid size —
+frequencies × sizes × caps — and the estimated time. Each rhythm at each cap
+is one real-engine run from an empty facility (~20 s), spread over the
+sidebar's **Computer power** workers; the default 4 frequencies × 7 sizes ×
+4 caps is 112 runs, plus one wave of up to 20 stability runs (below), and the
+estimate gives the grid's minutes and the wave's separately. It takes gaps of
+7–140 days and batches of 50,000–600,000 fish (step 2's own ranges, so a
+winner always loads there), and refuses a grid with no frequency, size or cap,
+or more than 150 runs.
 
-**What it accepts:** a rhythm counts only if it breaks **no** limit — the same
-checks as the reference sheet, zero breaches. Among those it picks the highest
-objective (a tie goes to the smaller batch, then the longer gap). If none
-qualifies it says so in red and names the closest rhythm — the fewest breaches
-— and what it breaks. A rhythm that fails a check which is not a limit (the
+**What it accepts:** a rhythm counts only if it breaks **no** limit at the cap
+it ran at — the same checks as the reference sheet, zero breaches. Among those
+it picks the highest objective (a tie goes to the smaller batch, then the
+longer gap, then the higher cap — the closest to your setting). The answer
+names the cap, for example **49 d × 220,000 @ 3,200 t**. If none qualifies it says so in
+red and names the closest rhythm and cap — the fewest breaches — and what it
+breaks. A rhythm that fails a check which is not a limit (the
 engine not finishing, the conservation audits, input conservation) is never
 the closest while another only breaks limits: it is further from a plan. The
-table lists every rhythm, the ones within the limits first by the objective,
+table lists every rhythm at every cap (a **Cap (t)** column), the ones within
+the limits first by the objective,
 then the ones that only break limits by total breaches, then those that fail
 another check, with one column per limit and an **Other failed checks**
 column naming those checks. A rhythm the engine failed on shows its error and
@@ -2480,23 +2494,30 @@ limit is not an answer.
 **Stability check.** The planner switches between modes under small changes,
 so a rhythm with zero breaches can sit next to one that breaks a limit (49 d
 × 203k did, between two zero-breach sizes). After the grid, the optimizer
-takes the top 3 rhythms within every limit and runs each one's neighbours —
-the same gap, 5,000 fish per batch fewer and more — in one extra wave of at
-most 6 runs (a neighbour already in the grid is reused, not re-run). A rhythm
-is **stable** when both neighbours are within every limit. A stable winner
-gets a green **Stable** line. A fragile one gets a yellow **Fragile** warning
-naming the neighbour that breaks and what it breaks, then the best stable
-plan among the top 3 — or says none of them is stable, so treat any of them
-as fragile.
+takes the top 10 rhythms within every limit and runs each one's neighbours —
+the same gap and the same cap, 5,000 fish per batch fewer and more — in one
+extra wave of at most 20 runs (a neighbour already in the grid at that cap is
+reused, not re-run). A rhythm is **stable** when both neighbours are within
+every limit. A stable winner gets a green **Stable** line naming its cap. A
+fragile one gets a yellow **Fragile** warning naming the neighbour that
+breaks and what it breaks, then the best stable plan among the top 10 — or
+says none of them is stable, so treat any of them as fragile.
 
-**Using the answer.** When the winner is stable, **Use this rhythm in the
-reference sheet** loads it into step 2 (and step 3's size), the way the quick
-scan does. When the winner is fragile but another of the top 3 is stable, the
-main button is **Use the best stable plan** and a second button, **Use the top
-plan anyway**, loads the winner. When none is stable there is one button, for
-the winner. Then run the reference sheet to see its tanks and checks. Change
-any input afterwards and the result is marked stale, and the Use buttons are
-greyed out until you press **Find the best rhythm** again.
+**Using the answer.** When the winner is stable, **Use this rhythm and cap in
+the reference sheet** loads the rhythm into step 2 (and step 3's size), the
+way the quick scan does, **and the cap it ran at** into step 2's biomass cap
+and step 3's what-if biomass cap. Step 2 then says so — for example "Cap set
+to 3,200 t by the optimizer — your Control cap is 3,800 t" — and step 3's
+proposal runs at that cap through its what-if limits (today's plan still runs
+at your current limits). Your Control cap is not changed. When the winner is
+fragile but another of the top 10 is stable, the main button is **Use the
+best stable plan** and a second button, **Use the top plan anyway**, loads
+the winner; both hand over their own cap. When none is stable there is one
+button, for the winner. Then run the reference sheet to see its tanks and
+checks. Loading a plan does not make the optimizer's answer stale. Change any
+of its inputs afterwards — the frequencies, sizes, caps, objective or limits
+— and the result is marked stale, and the Use buttons are greyed out until you
+press **Find the best rhythm** again.
 
 What drives the answer is the load, fish per week (batch size × 7 ÷ days
 between stockings). Measured 2026-09-10 at 3,800 t with your promoted
@@ -2536,6 +2557,40 @@ Three things to take from this:
    breaches and still has one system-week over its feed limit: the planner
    switches between modes under small changes (see §4). Before adopting a
    rhythm, check that its neighbours are within the limits too.
+
+**Which of those survive a small change, and what the cap does.** (2026-09-10;
+the same setup; every plan with zero breaches re-run at ±5,000 fish per batch,
+the optimizer's stability check.) At the 3,800 t cap only **one** of the nine
+zero-breach rhythms stays within every limit at ±5,000 fish: 42 d × 168k,
+$82.1M/yr, 3.54 kg fish. The others break something at one neighbour: the
+floor on the smaller side, tank density or system feed on the bigger side.
+
+The harvest floor is not what holds the plan back. With the floor lowered to
+22,000 fish/week, 42 d × 168k earns $117.8M with 4.96 kg fish, but it breaks the
+limits 38 times (36 tank-weeks over density). With less harvest forced, the
+engine keeps fish longer, and standing biomass climbs to about 90 % of the cap.
+With today's engine, tanks start going over their density cap at about 85 % of
+3,800 t, so the floor is what keeps density in check.
+
+**The biomass cap is the lever.** A lower cap holds standing biomass below the
+point where tanks go over density, while bigger batches keep the tonnage up
+(your floor of 26,000 fish/week, zero breaches and stable at ±5,000 fish):
+
+| Cap | Best stable rhythm | Revenue / yr | HOG / yr | Avg fish |
+|---|---|---|---|---|
+| 3,800 t | 42 d × 168k | $82.1M | 4,094 t | 3.54 kg |
+| **3,200 t** | **49 d × 220k** | **$108.8M** | **5,209 t** | **4.10 kg** |
+
+The 3,200 t row comes from the optimizer's own run: input every 42, 49 or
+56 days, 200k–256k fish per batch, caps 3,000–3,800 t. 49 d × 210k is stable
+there too, at $104.0M.
+
+Higher earners within every limit exist but are fragile. At 3,200 t,
+56 d × 256k earns $117.1M, but 5,000 fish fewer per batch puts 7 tank-weeks over
+density. Some combinations go badly wrong and the checks reject them. One
+example: 42 d × 192k at a 26,000 floor let standing biomass run to 130–143 % of
+3,000–3,400 t caps. That is why the optimizer searches the cap as well as batch
+size and frequency, and keeps only plans that stay within every limit.
 
 ### 3 · Transition — from today's fish
 

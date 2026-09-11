@@ -6,22 +6,29 @@ we need the system to work to those, both for the individual run and
 optimizer for count and frequency to meet those limits and meet the target
 variable". Strictness: HARD LIMITS, zero breaches.
 
-So this is a plain grid, not a solver: every (cadence, batch size) cell is ONE
-unchanged run of the real engine from an empty facility
-(`ideal_engine.ideal_run`, the same call as the Ideal's reference sheet), with
-the SAME method, promoted knobs and limits the caller passes. A cell is
-within the limits iff `ideal_engine.plausible(gates)`: no gate FAILs, judged
-with a control carrying the knobs and limits the run used
-(`judging_control`). Among those cells the best is the highest objective:
-revenue, harvested tonnage (HOG) or biomass gain. When none is within the
-limits, the closest is the cell with the fewest breaches.
+So this is a plain grid, not a solver: every (cadence, batch size, biomass
+cap) cell is ONE unchanged run of the real engine from an empty facility
+(`ideal_engine.ideal_run`, the same call as the Ideal's reference sheet), at
+that cell's cap, with the SAME method, promoted knobs and limits the caller
+passes. A cell is within the limits iff `ideal_engine.plausible(gates)`: no
+gate FAILs, judged with a control carrying the knobs and limits the run used,
+its own cap included (`judging_control`). Among those cells the best is the
+highest objective: revenue, harvested tonnage (HOG) or biomass gain. When
+none is within the limits, the closest is the cell with the fewest breaches.
+
+The cap is searched only AT OR BELOW the caller's `cap_kg` (the operator's
+cap slider), never above (operator, 2026-09-10): a lower cap keeps standing
+biomass below the point where tanks go over density while bigger batches
+keep the tonnage (3,800 t: best stable 42 d x 168k, $82.1M; 3,200 t: 49 d x
+220k, $108.8M in the optimizer's own 60-cell run). `caps=None` runs at
+`cap_kg` alone, exactly as before.
 
 Two DISPLAY-ONLY reads ride along (operator, 2026-09-10); neither is ever an
 accepted plan. `ignoring_limits` is the best cell whatever it breaks — the
 cost of the limits. The stability check re-runs the top within-limits cells'
-neighbours (the same cadence, +/- NEIGHBOUR_STEP fish per batch) in one extra
-wave: the planner is mode-discontinuous, so a zero between two zeros can still
-break a limit (49 d x 203k did, between 200k and 210k).
+neighbours (the same cadence and cap, +/- NEIGHBOUR_STEP fish per batch) in
+one extra wave: the planner is mode-discontinuous, so a zero between two
+zeros can still break a limit (49 d x 203k did, between 200k and 210k).
 
 Pure orchestration: no Streamlit, no planning logic, and nothing is written to
 config/ or scenario/ (each run lives in its own temp copy, see ideal_engine).
@@ -31,6 +38,7 @@ and never counted as feasible.
 from __future__ import annotations
 
 import copy
+import math
 import numbers
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -47,7 +55,7 @@ from forecast import ideal_engine as ie
 OBJECTIVES = {"revenue": ("revenue", "Revenue"),
               "hog": ("hog_t", "Harvest tonnage (HOG)"),
               "gain": ("gain_t", "Biomass gain")}
-MAX_CELLS = 60
+MAX_CELLS = 150                 # cadences x sizes x caps
 MIN_SIZE = 1000                 # fish: no real batch is smaller
 MIN_CADENCE = 7                 # days: one stocking a week at most
 # Per-limit breach counts, in the order the page shows them.
@@ -75,18 +83,20 @@ BREACH_WORDS = {
     "zero": ("week with no harvest", "weeks with no harvest"),
     "over_cap": ("week over the biomass cap", "weeks over the biomass cap")}
 # The stability check: the top MAX_STABILITY_CANDIDATES within-limits cells,
-# each re-judged at its batch size +/- NEIGHBOUR_STEP fish (same cadence) — at
-# most 2 x 3 = 6 extra runs, in one wave after the grid.
+# each re-judged at its batch size +/- NEIGHBOUR_STEP fish (same cadence, same
+# cap) — at most 2 x 10 = 20 extra runs, in one wave after the grid.
 NEIGHBOUR_STEP = 5_000
-MAX_STABILITY_CANDIDATES = 3
+MAX_STABILITY_CANDIDATES = 10
 
 
 @dataclass(frozen=True)
 class Cell:
-    """One rhythm, run once. Totals are for the one steady year read."""
+    """One rhythm at one biomass cap, run once. Totals are for the one steady
+    year read."""
     cadence_days: int
     batch_size: int
     fish_per_week: float            # batch_size x 7 / cadence_days
+    cap_kg: float                   # the biomass cap this cell ran AT
     year: Optional[int] = None
     revenue: float = 0.0
     hog_t: float = 0.0
@@ -101,13 +111,28 @@ class Cell:
     elapsed_s: float = 0.0
 
     @property
-    def label(self) -> str:
+    def rhythm(self) -> str:
+        """'49 d × 210,000' — the rhythm without its cap."""
         return f"{self.cadence_days} d × {self.batch_size:,}"
+
+    @property
+    def cap_t(self) -> float:
+        return self.cap_kg / 1000.0
+
+    @property
+    def label(self) -> str:
+        """'49 d × 210,000 @ 3,200 t'."""
+        return f"{self.rhythm} @ {self.cap_t:,.0f} t"
+
+    @property
+    def key(self) -> tuple:
+        """(cadence_days, batch_size, cap_kg): what makes a cell unique."""
+        return (self.cadence_days, self.batch_size, float(self.cap_kg))
 
 
 @dataclass(frozen=True)
 class Result:
-    cells: tuple                    # grid order: cadence-major, then size
+    cells: tuple                    # grid order: cadence, size, cap (high first)
     objective: str
     best: Optional[Cell]            # highest objective within every limit
     closest: Optional[Cell]         # only when best is None
@@ -149,23 +174,35 @@ def _whole(v, what: str, least: int) -> int:
     return int(v)
 
 
-def check_grid(cadences: Sequence[int], sizes: Sequence[int]) -> list:
-    """The (cadence, size) cells to run, cadence-major, duplicates removed.
+def _cap(v) -> float:
+    if (isinstance(v, bool) or not isinstance(v, numbers.Real)
+            or not math.isfinite(v) or not v > 0):
+        raise ValueError(f"caps (kg) must be positive finite numbers, got "
+                         f"{v!r}")
+    return float(v)
+
+
+def check_grid(cadences: Sequence[int], sizes: Sequence[int],
+               caps: Sequence[float]) -> list:
+    """The (cadence, size, cap_kg) cells to run, duplicates removed, ordered
+    cadence, then size, then cap DESCENDING (the operator's own cap first).
     Refuses an empty grid, a cadence under MIN_CADENCE days, a batch under
-    MIN_SIZE fish and more than MAX_CELLS cells — before anything runs."""
+    MIN_SIZE fish, a cap that is not a positive finite number and more than
+    MAX_CELLS cells — before anything runs."""
     cads = sorted({_whole(c, "cadences (days)", MIN_CADENCE)
                    for c in (cadences or ())})
     szs = sorted({_whole(s, "batch sizes (fish)", MIN_SIZE)
                   for s in (sizes or ())})
-    if not cads or not szs:
-        raise ValueError("the grid is empty: give at least one cadence and "
-                         "one batch size")
-    n = len(cads) * len(szs)
+    cps = sorted({_cap(c) for c in (caps or ())}, reverse=True)
+    if not cads or not szs or not cps:
+        raise ValueError("the grid is empty: give at least one cadence, one "
+                         "batch size and one cap")
+    n = len(cads) * len(szs) * len(cps)
     if n > MAX_CELLS:
-        raise ValueError(f"{len(cads)} cadences x {len(szs)} sizes = {n} "
-                         f"cells; at most {MAX_CELLS} (each is one ~20 s "
-                         f"engine run)")
-    return [(c, s) for c in cads for s in szs]
+        raise ValueError(f"{len(cads)} cadences x {len(szs)} sizes x "
+                         f"{len(cps)} caps = {n} cells; at most {MAX_CELLS} "
+                         f"(each is one ~20 s engine run)")
+    return [(c, s, p) for c in cads for s in szs for p in cps]
 
 
 def run_cell(rhythm, cap_kg: float, project_dir, *, template=None,
@@ -179,10 +216,12 @@ def run_cell(rhythm, cap_kg: float, project_dir, *, template=None,
     """One (cadence_days, batch_size) through `ideal_engine.ideal_run`, read
     and judged. Top level and picklable, so a process pool can run it.
 
-    `overrides` are the run's facility limits (incl. min_harvest_weight_g and
-    max_transfers_per_week); `control` is the live Control to judge from
-    (loaded from `project_dir` when None). An exception from the engine is
-    recorded on the cell as `error` and the cell is never within the limits.
+    `cap_kg` is the biomass cap this cell runs AT, and is judged at (the
+    judging control's max_biomass_kg); `overrides` are the run's other
+    facility limits (incl. min_harvest_weight_g and max_transfers_per_week);
+    `control` is the live Control to judge from (loaded from `project_dir`
+    when None). An exception from the engine is recorded on the cell as
+    `error` and the cell is never within the limits.
     """
     cad, size = int(rhythm[0]), int(rhythm[1])
     fpw = size * 7.0 / cad
@@ -199,16 +238,18 @@ def run_cell(rhythm, cap_kg: float, project_dir, *, template=None,
                            system_overrides=system_overrides)
         (year, y), = run.years.items()
         g = tuple(ie.gates(run, year, judging_control(
-            control, method_overrides, overrides)))
+            control, method_overrides,
+            dict(overrides or {}, max_biomass_kg=float(cap_kg)))))
     except Exception as e:  # noqa: BLE001 — recorded on the cell, not hidden
         return Cell(cadence_days=cad, batch_size=size, fish_per_week=fpw,
-                    error=f"{type(e).__name__}: {e}",
+                    cap_kg=float(cap_kg), error=f"{type(e).__name__}: {e}",
                     elapsed_s=time.perf_counter() - t0)
     b = dict(density=y.r8_over_tank_weeks, sys_biomass=y.sys_bio_over_weeks,
              sys_feed=y.sys_feed_over_weeks, moves=y.weeks_over_move_budget,
              floor=y.under_floor_weeks, zero=y.zero_weeks,
              over_cap=y.over_cap_weeks)
     return Cell(cadence_days=cad, batch_size=size, fish_per_week=fpw,
+                cap_kg=float(cap_kg),
                 year=year, revenue=y.revenue, hog_t=y.hog_t, gain_t=y.gain_t,
                 avg_gross_kg=y.avg_gross_kg, peak_pct_of_cap=y.peak_pct_of_cap,
                 breaches=b, total=int(sum(b.values())), gates=g,
@@ -238,16 +279,18 @@ def breach_words(cell: Cell) -> list:
 
 
 def _rank(c: Cell, objective: str) -> tuple:
-    """The objective, then the smaller batch, then the longer cadence: a
-    unique final sort term, so no pick depends on grid or finishing order."""
+    """The objective, then the smaller batch, then the longer cadence, then
+    the HIGHER cap (the closest to the operator's setting): a unique final
+    sort term, so no pick depends on grid or finishing order."""
     return (round(objective_value(c, objective), 6), -c.batch_size,
-            c.cadence_days)
+            c.cadence_days, float(c.cap_kg))
 
 
 def best(cells: Sequence[Cell], objective: str) -> Optional[Cell]:
     """Highest objective among cells within every limit (no error), or None.
-    Ties break toward the smaller batch, then the longer cadence: a unique
-    final sort term, so the pick never depends on grid or finishing order."""
+    Ties break toward the smaller batch, then the longer cadence, then the
+    higher cap: a unique final sort term, so the pick never depends on grid
+    or finishing order."""
     ok = [c for c in cells if c.within_limits and c.error is None]
     if not ok:
         return None
@@ -274,30 +317,33 @@ def closest(cells: Sequence[Cell], objective: str) -> Optional[Cell]:
         return None
     return min(ran, key=lambda c: (bool(other_failed_checks(c)), c.total,
                                    -round(objective_value(c, objective), 6),
-                                   c.batch_size, -c.cadence_days))
+                                   c.batch_size, -c.cadence_days,
+                                   -float(c.cap_kg)))
 
 
 def table_order(cells: Sequence[Cell], objective: str) -> list:
     """Within-limits cells first by the objective, then the cells that only
     break limits by total breaches (then the objective), then the cells that
-    fail a non-limit check, the same way; errored cells last. Deterministic."""
+    fail a non-limit check, the same way; errored cells last (grid order).
+    Deterministic: every key ends on the cap, higher first."""
     def key(c):
         v = round(objective_value(c, objective), 6)
+        cap = -float(c.cap_kg)
         if c.error is not None:
-            return (3, 0, 0.0, c.cadence_days, c.batch_size)
+            return (3, 0, 0.0, c.cadence_days, c.batch_size, cap)
         if c.within_limits:
-            return (0, 0, -v, c.batch_size, -c.cadence_days)
+            return (0, 0, -v, c.batch_size, -c.cadence_days, cap)
         if other_failed_checks(c):
-            return (2, c.total, -v, c.batch_size, -c.cadence_days)
-        return (1, c.total, -v, c.batch_size, -c.cadence_days)
+            return (2, c.total, -v, c.batch_size, -c.cadence_days, cap)
+        return (1, c.total, -v, c.batch_size, -c.cadence_days, cap)
     return sorted(cells, key=key)
 
 
 def neighbour_rhythms(cell: Cell) -> list:
-    """The rhythms a candidate is re-judged at: the same cadence with the
-    batch NEIGHBOUR_STEP fish smaller and larger, dropping one below
-    MIN_SIZE."""
-    return [(cell.cadence_days, s)
+    """The (cadence, size, cap_kg) cells a candidate is re-judged at: the
+    same cadence AND the same cap, with the batch NEIGHBOUR_STEP fish smaller
+    and larger, dropping one below MIN_SIZE."""
+    return [(cell.cadence_days, s, float(cell.cap_kg))
             for s in (cell.batch_size - NEIGHBOUR_STEP,
                       cell.batch_size + NEIGHBOUR_STEP) if s >= MIN_SIZE]
 
@@ -313,8 +359,9 @@ def stability_candidates(cells: Sequence[Cell], objective: str) -> list:
 def judge_stability(candidates: Sequence[Cell], ran: dict) -> tuple:
     """The stability decision, on neighbours already run (no engine here).
 
-    `ran` maps (cadence_days, batch_size) -> the Cell that ran that rhythm;
-    every neighbour of every candidate must be in it (a missing one raises
+    `ran` maps (cadence_days, batch_size, cap_kg) -> the Cell that ran it
+    (`Cell.key`); every neighbour of every candidate must be in it (a
+    missing one raises
     KeyError — detect, don't coerce). A candidate is stable iff every
     neighbour ran without error and is within the limits.
     -> (stability, best_stable): stability is a tuple of (candidate, tuple of
@@ -328,9 +375,11 @@ def judge_stability(candidates: Sequence[Cell], ran: dict) -> tuple:
     return tuple(out), next((c for c, _ns, ok in out if ok), None)
 
 
-def _run_wave(jobs: list, cap_kg: float, project_dir, kw: dict, workers: int,
+def _run_wave(jobs: list, project_dir, kw: dict, workers: int,
               record: Callable, what: str) -> Optional[str]:
-    """Run each (cadence, size) in `jobs`; `record(i, cell)` as each finishes.
+    """Run each (cadence, size, cap_kg) in `jobs` — each at its OWN cap,
+    through `run_cell` with the same `kw` — and `record(i, cell)` as each
+    finishes.
 
     A process pool of `workers` when that is 2+ and there is more than one
     job. ONLY a pool that cannot start or dies falls back to one-at-a-time
@@ -354,7 +403,8 @@ def _run_wave(jobs: list, cap_kg: float, project_dir, kw: dict, workers: int,
                     f"ran {what} one at a time instead.")
         else:
             try:
-                futs = {ex.submit(run_cell, j, cap_kg, str(project_dir), **kw): i
+                futs = {ex.submit(run_cell, (j[0], j[1]), j[2],
+                                  str(project_dir), **kw): i
                         for i, j in enumerate(jobs)}
                 for f in as_completed(futs):
                     _rec(futs[f], f.result())
@@ -370,12 +420,13 @@ def _run_wave(jobs: list, cap_kg: float, project_dir, kw: dict, workers: int,
                 ex.shutdown(wait=True)
     for i, j in enumerate(jobs):
         if i not in done:
-            _rec(i, run_cell(j, cap_kg, str(project_dir), **kw))
+            _rec(i, run_cell((j[0], j[1]), j[2], str(project_dir), **kw))
     return note
 
 
 def optimize(cadences: Sequence[int], sizes: Sequence[int], cap_kg: float,
-             project_dir, *, objective: str = "revenue", workers: int = 1,
+             project_dir, *, caps: Optional[Sequence[float]] = None,
+             objective: str = "revenue", workers: int = 1,
              progress: Optional[Callable] = None, template=None,
              overrides: Optional[dict] = None,
              method: str = ie.DEFAULT_METHOD,
@@ -384,11 +435,19 @@ def optimize(cadences: Sequence[int], sizes: Sequence[int], cap_kg: float,
              system_overrides: Optional[dict] = None,
              control=None,
              horizon_weeks: int = ideal.HORIZON_WEEKS) -> Result:
-    """Run every (cadence, size) cell and pick the best within every limit.
+    """Run every (cadence, size, cap) cell and pick the best within every
+    limit.
 
-    Bad grids (empty, a cadence < MIN_CADENCE, a size < MIN_SIZE, more than
-    MAX_CELLS cells) and an unknown objective are refused with ValueError
-    before anything runs. Cells run in a process pool of `workers` when it
+    `caps` (kg) are the biomass caps to try; None runs at `cap_kg` alone
+    (exactly as before the cap was searched). `cap_kg` is the operator's
+    ceiling: a cap above it is refused — the optimizer never searches above
+    the operator's cap. Each cell runs and is judged at its own cap.
+
+    Bad grids (empty, a cadence < MIN_CADENCE, a size < MIN_SIZE, a cap that
+    is not a positive finite number or is above `cap_kg`, more than MAX_CELLS
+    cells), an `overrides` max_biomass_kg that differs from a cap to try (the
+    cap goes in `cap_kg` / `caps`) and an unknown objective are refused with
+    ValueError before anything runs. Cells run in a process pool of `workers` when it
     is 2+ and there is more than one cell; ONLY a pool that cannot start or
     that dies falls back to one-at-a-time, and `Result.note` says so (an
     engine error is recorded on its cell, not re-run). Any other exception,
@@ -399,16 +458,33 @@ def optimize(cadences: Sequence[int], sizes: Sequence[int], cap_kg: float,
 
     Display only, never an accepted plan: `Result.unconstrained` is
     `ignoring_limits(cells)`. When there is a best, the stability check runs
-    the neighbours of `stability_candidates` that are not grid cells (a grid
-    cell with exactly that rhythm is reused, not re-run) in ONE extra wave of
-    at most 2 x MAX_STABILITY_CANDIDATES runs, through the same pool path
-    with the same arguments; `progress` keeps counting (its total grows by
-    the wave). `Result.stability` / `best_stable` come from `judge_stability`.
+    the neighbours of `stability_candidates` (same cadence, same cap) that
+    are not grid cells (a grid cell with exactly that cadence, size and cap
+    is reused, not re-run) in ONE extra wave of at most 2 x
+    MAX_STABILITY_CANDIDATES runs, through the same pool path with the same
+    arguments; `progress` keeps counting (its total grows by the wave).
+    `Result.stability` / `best_stable` come from `judge_stability`.
     """
     if objective not in OBJECTIVES:
         raise ValueError(f"objective must be one of {sorted(OBJECTIVES)}, "
                          f"got {objective!r}")
-    jobs = check_grid(cadences, sizes)
+    ceiling = _cap(cap_kg)
+    jobs = check_grid(cadences, sizes, [ceiling] if caps is None else caps)
+    above = sorted({j[2] for j in jobs if j[2] > ceiling}, reverse=True)
+    if above:
+        raise ValueError(
+            f"cap(s) {', '.join(f'{c / 1000:,.0f} t' for c in above)} above "
+            f"the operator's cap of {ceiling / 1000:,.0f} t: the optimizer "
+            f"never searches above it")
+    ov = dict(overrides or {})
+    if "max_biomass_kg" in ov and any(ov["max_biomass_kg"] != j[2]
+                                      for j in jobs):
+        # ideal_run refuses a cap given twice, so every such cell would fail:
+        # refuse the grid instead of running it down to one usable cap.
+        raise ValueError(
+            f"overrides carry max_biomass_kg={ov['max_biomass_kg']!r}, which "
+            f"differs from a cap to try: the cap goes in cap_kg / caps, never "
+            f"in overrides (each cell runs at its own cap)")
     if (isinstance(workers, bool) or not isinstance(workers, numbers.Integral)
             or workers < 1):
         raise ValueError(f"workers must be a positive whole number, got "
@@ -434,15 +510,14 @@ def optimize(cadences: Sequence[int], sizes: Sequence[int], cap_kg: float,
         done[i] = cell
         _tick(cell)
 
-    note = _run_wave(jobs, cap_kg, project_dir, kw, workers, _record,
-                     "the grid")
+    note = _run_wave(jobs, project_dir, kw, workers, _record, "the grid")
     cells = tuple(done[i] for i in range(len(jobs)))
     b = best(cells, objective)
 
     stability, best_stable = (), None
     if b is not None:
         cands = stability_candidates(cells, objective)
-        ran = {(c.cadence_days, c.batch_size): c for c in cells}
+        ran = {c.key: c for c in cells}
         extra = []                          # candidate order, then -/+ step
         for c in cands:
             for r in neighbour_rhythms(c):
@@ -456,7 +531,7 @@ def optimize(cadences: Sequence[int], sizes: Sequence[int], cap_kg: float,
                 more[i] = cell
                 _tick(cell)
 
-            note2 = _run_wave(extra, cap_kg, project_dir, kw, workers,
+            note2 = _run_wave(extra, project_dir, kw, workers,
                               _record_more, "the stability runs")
             ran.update({r: more[i] for i, r in enumerate(extra)})
             note = " ".join(x for x in (note, note2) if x) or None
