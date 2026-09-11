@@ -5030,7 +5030,7 @@ _IDEAL_KEEP = ("ideal_cap_t", "ideal_cads", "ideal_sizes", "ideal_ref_cad",
                "ideal_ref_hmin", "ideal_ref_wmin", "ideal_ref_feed",
                "ideal_tr_cutoff", "ideal_tr_sizes", "ideal_tr_cap",
                "ideal_tr_hmax", "ideal_tr_hmin", "ideal_tr_wmin",
-               "ideal_tr_feed")
+               "ideal_tr_feed", "ideal_min_wt")
 
 
 def _ideal_restore():
@@ -5084,6 +5084,131 @@ def _ideal_tr_overrides(seeds: dict, values: dict) -> dict:
         if v is not None and int(v) != int(seeds[key]):
             out[ck] = float(v) * scale
     return out
+
+
+def _ideal_limit_seeds(ctx) -> dict:
+    """Per OG system, the limits the live files state — the limits table's
+    starting values: the tanks' density cap (None when a system's tanks
+    differ), and limits.yaml's system_defaults biomass (t) and feed (kg/day).
+    6N's biomass is its PRODUCTION-mode value; the purge-mode value is an
+    operator ruling about depuration and is not offered here."""
+    import yaml as _yaml
+    dens, ntank = {}, {}
+    for t in ctx["facility"].tanks:
+        if t.type != "OG":
+            continue
+        dens.setdefault(t.system_id, set()).add(float(t.max_density_kg_m3))
+        ntank[t.system_id] = ntank.get(t.system_id, 0) + 1
+    with open(os.path.join(str(_ROOT), "scenario", "limits.yaml"),
+              encoding="utf-8") as f:
+        sd = (_yaml.safe_load(f) or {}).get("system_defaults") or {}
+    out = {}
+    for s in sorted(dens):
+        d = sd.get(s) or {}
+        bio = d.get("biomass")
+        if bio is None:
+            bio = ((d.get("modes") or {}).get("production") or {}).get("biomass")
+        out[s] = dict(tanks=ntank[s],
+                      density=(next(iter(dens[s])) if len(dens[s]) == 1 else None),
+                      biomass_t=(float(bio) / 1000.0 if bio is not None else None),
+                      feed=(float(d["feed_per_day"])
+                            if d.get("feed_per_day") is not None else None))
+    return out
+
+
+def _ideal_limits_table(ctx, prefix):
+    """Tank & system limits for ONE run: a table pre-filled from the live
+    facility + limits files (never written) and the weekly move budget.
+
+    -> (density_overrides {system: kg/m3}, system_overrides {system:
+    {"biomass": kg, "feed_per_day": kg/day}}, control_overrides) holding only
+    what the operator CHANGED against the seeded values. The table survives a
+    mode switch; it starts again from the files when they change."""
+    import pandas as _pd
+    seeds = _ideal_limit_seeds(ctx)
+    seed_moves = int(ctx["control"].max_transfers_per_week)
+    sig = (tuple((s, tuple(sorted(v.items()))) for s, v in sorted(seeds.items())),
+           seed_moves)
+    mv_key = prefix + "_moves"
+    if st.session_state.get(prefix + "_seedsig") != sig:
+        for k in (prefix + "_base", mv_key, "_keep_" + mv_key,
+                  "_keep_" + prefix + "_edited"):
+            st.session_state.pop(k, None)
+        st.session_state[prefix + "_nonce"] = (
+            st.session_state.get(prefix + "_nonce", 0) + 1)
+        st.session_state[prefix + "_seedsig"] = sig
+    if prefix + "_base" not in st.session_state:
+        st.session_state[prefix + "_base"] = _pd.DataFrame([{
+            "System": s, "Tanks": v["tanks"],
+            "Tank density cap (kg/m³)": v["density"],
+            "System biomass limit (t)": v["biomass_t"],
+            "System feed limit (kg/day)": v["feed"]} for s, v in seeds.items()])
+    nonce = st.session_state.get(prefix + "_nonce", 0)
+    ed_key = f"{prefix}_w_{nonce}"
+    kept = st.session_state.get("_keep_" + prefix + "_edited")
+    if ed_key not in st.session_state and kept is not None and kept[0] == nonce:
+        st.session_state[prefix + "_base"] = kept[1]   # back from another mode
+    edited = st.data_editor(
+        st.session_state[prefix + "_base"], hide_index=True, width="stretch",
+        key=ed_key, disabled=["System", "Tanks"],
+        column_config={
+            "Tank density cap (kg/m³)": st.column_config.NumberColumn(
+                help="The most fish weight per m³ each tank in this system may "
+                     "hold. The limit that binds today."),
+            "System biomass limit (t)": st.column_config.NumberColumn(
+                help="The most standing fish this system may hold. For 6N this "
+                     "is its production-mode limit (its purge-mode limit is "
+                     "not changed here)."),
+            "System feed limit (kg/day)": st.column_config.NumberColumn(
+                help="The most feed this system can deliver per day.")})
+    st.session_state["_keep_" + prefix + "_edited"] = (nonce, edited)
+    if mv_key not in st.session_state and ("_keep_" + mv_key) in st.session_state:
+        st.session_state[mv_key] = st.session_state["_keep_" + mv_key]
+    moves = st.number_input(
+        "Weekly move budget (moves)", min_value=1, step=1, key=mv_key,
+        help="How many tank moves the crew can do in a week (Control: "
+             f"{seed_moves}).", **_ideal_default(mv_key, seed_moves))
+    st.session_state["_keep_" + mv_key] = moves
+    dens_ov, sys_ov, cleared = {}, {}, []
+    for r in edited.to_dict("records"):
+        s = r["System"]
+        sd = seeds.get(s)
+        if sd is None:
+            continue
+        for col, seed, apply in (
+                ("Tank density cap (kg/m³)", sd["density"],
+                 lambda v: dens_ov.__setitem__(s, v)),
+                ("System biomass limit (t)", sd["biomass_t"],
+                 lambda v: sys_ov.setdefault(s, {}).__setitem__("biomass", v * 1000.0)),
+                ("System feed limit (kg/day)", sd["feed"],
+                 lambda v: sys_ov.setdefault(s, {}).__setitem__("feed_per_day", v))):
+            v = r.get(col)
+            if v is None or _pd.isna(v):
+                if seed is not None:
+                    cleared.append(f"{s} {col}")
+                continue
+            if seed is None or float(v) != float(seed):
+                apply(float(v))
+    if cleared:
+        st.warning("A cleared cell keeps the value in your files: "
+                   + ", ".join(cleared) + ".")
+    ctl_ov = ({"max_transfers_per_week": int(moves)}
+              if int(moves) != seed_moves else {})
+    return dens_ov, sys_ov, ctl_ov
+
+
+def _ideal_tank_limit_text(dens: dict, sys_ov: dict, ctl_ov: dict) -> str:
+    """'OG3N density 95 kg/m³; OG3N biomass 450 t; move budget 20' — the tank
+    and system limits a run changed, in plain units."""
+    parts = [f"{s} density {v:,.0f} kg/m³" for s, v in sorted(dens.items())]
+    for s, d in sorted(sys_ov.items()):
+        if "biomass" in d:
+            parts.append(f"{s} biomass {d['biomass'] / 1000:,.0f} t")
+        if "feed_per_day" in d:
+            parts.append(f"{s} feed {d['feed_per_day']:,.0f} kg/day")
+    if "max_transfers_per_week" in ctl_ov:
+        parts.append(f"move budget {ctl_ov['max_transfers_per_week']}/week")
+    return "; ".join(parts)
 
 
 def _ideal_limit_text(ov: dict, ctrl) -> str:
@@ -5156,6 +5281,13 @@ def _ideal():
             **_ideal_default("ideal_sizes", [s // 1000 for s in _im.SIZES],
                              "default"),
             key="ideal_sizes")
+        min_wt = st.number_input(
+            "Min harvest weight (g)", min_value=0, step=50, key="ideal_min_wt",
+            help="No fish lighter than this is harvested. Steps 2 and 3 follow "
+                 "it after a scan. Tank and system limits apply in steps 2–3 "
+                 "only — this quick model has no tanks.",
+            **_ideal_default("ideal_min_wt",
+                             int(ctx["control"].min_harvest_weight_g)))
         st.caption(
             f"{len(cads) * len(sizes_k)} runs of ~2–5 s each, spread over "
             f"{_cpu_workers()} worker(s) (sidebar **Computer power**). "
@@ -5163,7 +5295,11 @@ def _ideal():
             f"({today[0]}d × {today[1] // 1000}k) is always measured too.")
 
     key = (int(cap_t), tuple(sorted(cads)), tuple(sorted(sizes_k)),
-           ctx["template"].batch_id, today)
+           ctx["template"].batch_id, today, int(min_wt))
+    import copy as _cpy
+    _ctl_q = _cpy.deepcopy(ctx["control"])
+    _ctl_q.min_harvest_weight_g = float(min_wt)
+    ctx_q = dict(ctx, control=_ctl_q)          # the scan's own min weight
     if st.button("🎯 Find the ideal rhythm", type="primary",
                  disabled=not (cads and sizes_k)):
         cap_kg = float(cap_t) * 1000.0
@@ -5171,15 +5307,15 @@ def _ideal():
         with st.spinner(f"Measuring {len(cads) * len(sizes_k)} rhythms at "
                         f"{cap_t:,} t…"):
             try:
-                rows = _im.frontier(cap_kg, ctx, workers=_cpu_workers(), **grid)
+                rows = _im.frontier(cap_kg, ctx_q, workers=_cpu_workers(), **grid)
             except (BrokenProcessPool, PicklingError, OSError) as e:
                 st.warning(f"Parallel run unavailable ({type(e).__name__}: {e})"
                            f" — ran one at a time instead.")
-                rows = _im.frontier(cap_kg, ctx, workers=1, **grid)
+                rows = _im.frontier(cap_kg, ctx_q, workers=1, **grid)
             cur = next((r for r in rows
                         if (r.cadence_days, r.batch_size) == today), None)
             if cur is None:
-                cur = _im.evaluate(today[0], today[1], cap_kg, **ctx)
+                cur = _im.evaluate(today[0], today[1], cap_kg, **ctx_q)
         st.session_state["_ideal_result"] = dict(key=key, rows=rows, today=cur)
         # Steps 2 and 3 follow the scan: their inputs render later in THIS
         # run, so writing their state here is allowed, and the reference
@@ -5191,6 +5327,7 @@ def _ideal():
             st.session_state["ideal_tr_sizes"] = str(int(b_new.batch_size))
             st.session_state["_ideal_ref_regen"] = True
         st.session_state["ideal_ref_cap"] = int(cap_t)
+        st.session_state["ideal_ref_wmin"] = int(min_wt)
 
     res = st.session_state.get("_ideal_result")
     if not res:
@@ -5416,6 +5553,12 @@ def _ideal_reference(ctx, today, cap_t):
     feed = l5.number_input("Max feed / day (kg)", min_value=0, step=500,
                            key="ideal_ref_feed", **_ideal_default(
                                "ideal_ref_feed", int(ctrl.max_feed_per_day_kg)))
+    with st.expander("Tank & system limits for this run (optional)"):
+        st.caption("Tank density caps and each system's biomass and feed "
+                   "limits, plus the weekly move budget — as your files state "
+                   "them. Change any to try it; only this run uses it, your "
+                   "files are not changed.")
+        r_dens, r_sys, r_ctl = _ideal_limits_table(ctx, "ideal_ref_lim")
     ov = dict(max_biomass_kg=float(cap_in) * 1000.0,
               max_harvest_per_week=float(hmax),
               min_harvest_per_week=float(hmin),
@@ -5424,10 +5567,12 @@ def _ideal_reference(ctx, today, cap_t):
               sixn_production_start=_dt.date(
                   _im.STEADY_START.year - 1, 1, 1).isoformat(),
               scenario_name="Ideal reference sheet")
+    ov.update(r_ctl)                       # the move budget, if changed
     rows_now = _records(edited)
     # The run also reads config/ and scenario/ (biology, tanks, limits): a
     # change there must mark the shown answer stale too.
-    sig = _hl.md5(_json.dumps([rows_now, ov, _config_fingerprint(), m_key, m_ov],
+    sig = _hl.md5(_json.dumps([rows_now, ov, _config_fingerprint(), m_key, m_ov,
+                               r_dens, r_sys],
                               sort_keys=True, default=str).encode()).hexdigest()
     year = _im.STEADY_START.year + _REF_HORIZON_WEEKS // 52 - 1
 
@@ -5445,7 +5590,10 @@ def _ideal_reference(ctx, today, cap_t):
                     batches, _ROOT, start=_im.STEADY_START,
                     horizon_weeks=_REF_HORIZON_WEEKS, overrides=ov,
                     years=[year], keep_dir=keep,
-                    method=m_key, method_overrides=m_ov)
+                    method=m_key, method_overrides=m_ov,
+                    # Only when changed: an untouched table sends nothing.
+                    **({"density_overrides": r_dens} if r_dens else {}),
+                    **({"system_overrides": r_sys} if r_sys else {}))
             wb_bytes = open(run.out_path, "rb").read()
             wb_name = os.path.basename(run.out_path)
         except (ValueError, RuntimeError) as e:
@@ -5462,6 +5610,8 @@ def _ideal_reference(ctx, today, cap_t):
                   "min_harvest_per_week", "min_harvest_weight_g",
                   "max_feed_per_day_kg"):
             setattr(gctrl, k, ov[k])
+        if "max_transfers_per_week" in ov:
+            gctrl.max_transfers_per_week = ov["max_transfers_per_week"]
         st.session_state["_ideal_ref"] = dict(
             sig=sig, run=run, year=year, gates=_ie.gates(run, year, gctrl),
             wb=wb_bytes, wb_name=wb_name, cap_kg=ov["max_biomass_kg"],
@@ -5471,7 +5621,9 @@ def _ideal_reference(ctx, today, cap_t):
             limits_match=all(
                 float(ov[k]) == float(getattr(ctrl, k))
                 for k in ("max_harvest_per_week", "min_harvest_per_week",
-                          "min_harvest_weight_g", "max_feed_per_day_kg")),
+                          "min_harvest_weight_g", "max_feed_per_day_kg"))
+                and not (r_dens or r_sys or r_ctl),
+            tank_limits=_ideal_tank_limit_text(r_dens, r_sys, r_ctl),
             rhythm=st.session_state["ideal_ref_from"])
 
     r = st.session_state.get("_ideal_ref")
@@ -5529,6 +5681,8 @@ def _ideal_reference(ctx, today, cap_t):
                                     for k, v in run.tank_sequence.items()]),
                      hide_index=True, width="stretch")
     notes = []
+    if r.get("tank_limits"):
+        notes.append("ran with changed tank/system limits: " + r["tank_limits"])
     if run.dropped_batches:
         notes.append(f"left out (already in seawater on day one): "
                      f"{', '.join(run.dropped_batches)}")
@@ -5569,7 +5723,8 @@ def _ideal_parse_sizes(txt):
 
 
 def _ideal_transition_runs(live, proposed, pr_bytes, pr_name, method,
-                           method_overrides, overrides=None):
+                           method_overrides, overrides=None,
+                           density_overrides=None, system_overrides=None):
     """Both schedules through the real engine on today's PR, in parallel
     when the machine allows, one at a time (and said so) when it does not.
 
@@ -5591,6 +5746,11 @@ def _ideal_transition_runs(live, proposed, pr_bytes, pr_name, method,
                   include_manual_events=True, method=method,
                   method_overrides=method_overrides)
         kw_b = dict(kw, overrides=dict(overrides or {}))
+        # Tank/system limits reach the PROPOSAL only, and only when changed.
+        if density_overrides:
+            kw_b["density_overrides"] = dict(density_overrides)
+        if system_overrides:
+            kw_b["system_overrides"] = dict(system_overrides)
         note = None
         if _cpu_workers() >= 2:
             # Only a pool that cannot START, or that DIES, falls back. An
@@ -5781,33 +5941,39 @@ def _ideal_transition(ctx, today):
                 + (" (0 = no cap)" if _cap_t0 <= 0 else "")
                 + " — outside this box's 500–10,000 t range, so the box "
                   "starts at the nearest end and applies only if you move it.")
+        st.markdown("**Tank & system limits for the proposal**")
+        tr_dens, tr_sys, tr_ctl = _ideal_limits_table(ctx, "ideal_tr_lim")
     tr_ov = _ideal_tr_overrides(seeds, {
         "ideal_tr_cap": tr_cap, "ideal_tr_hmax": tr_hmax,
         "ideal_tr_hmin": tr_hmin, "ideal_tr_wmin": tr_wmin,
         "ideal_tr_feed": tr_feed})
+    tr_ov.update(tr_ctl)                   # the move budget, if changed
 
     # PR, proposal, engine, limits AND config/scenario (batches.yaml = today).
     key = (st.session_state.get("_pr_key"), str(cutoff), tuple(sizes),
            _config_fingerprint(), m_key, str(sorted(m_ov.items())),
-           str(sorted(tr_ov.items())))
+           str(sorted(tr_ov.items())), str(sorted(tr_dens.items())),
+           str(sorted((k, sorted(v.items())) for k, v in tr_sys.items())))
+    tank_txt = _ideal_tank_limit_text(tr_dens, tr_sys, tr_ctl)
     st.caption(f"Both schedules run with **{_method_obj(m_key).label}** — the "
                f"method and settings ▶ Run forecast uses ({m_src})."
                + (" **The proposal runs with changed limits:** "
                   + _ideal_limit_text(tr_ov, ctrl0) if tr_ov else ""))
     if st.button("▶ Check both schedules in the real engine (~1–2 min)",
-                 key="ideal_tr_run", disabled=not (changes or tr_ov)):
+                 key="ideal_tr_run",
+                 disabled=not (changes or tr_ov or tr_dens or tr_sys)):
         with st.spinner("Running today's schedule and the proposal on your PR…"):
             try:
                 a, b, note = _ideal_transition_runs(live, proposed,
                                                     uploaded.getvalue(),
                                                     uploaded.name, m_key, m_ov,
-                                                    tr_ov)
+                                                    tr_ov, tr_dens, tr_sys)
             except (ValueError, RuntimeError, OSError) as e:
                 st.error(f"The engine could not run the transition — "
                          f"{type(e).__name__}: {e}")
                 return
         st.session_state["_ideal_tr"] = dict(key=key, a=a, b=b, note=note,
-                                             ov=dict(tr_ov))
+                                             ov=dict(tr_ov), tank_txt=tank_txt)
     t = st.session_state.get("_ideal_tr")
     if not t:
         return
@@ -5816,10 +5982,11 @@ def _ideal_transition(ctx, today):
                    "PR, cutoff, sizes, limits, config or engine). Press "
                    "**Check both schedules** to recompute.")
     # What the SHOWN result ran with — not what the boxes say now.
-    st.caption(("The proposal ran with: "
-                + _ideal_limit_text(t["ov"], ctx["control"]) + ".")
-               if t.get("ov") else
-               "Both schedules ran with your current Control limits.")
+    _ran = "; ".join(x for x in (
+        _ideal_limit_text(t.get("ov", {}), ctx["control"]), t.get("tank_txt", ""))
+        if x)
+    st.caption(("The proposal ran with: " + _ran + ".") if _ran else
+               "Both schedules ran with your current limits.")
     if t["note"]:
         st.warning(t["note"])
     ev = t["a"].audits.get("manual_events_file")
@@ -5876,6 +6043,38 @@ def _ideal_transition(ctx, today):
         " buffer, exactly as the SystemLimitsAudit sheet flags them), are "
         "warnings, counted in their own columns: compare them between the two "
         "plans — that is what extra tonnage costs.")
+
+    # Your rule (2026-09-10): a plan is acceptable only if it is NO WORSE than
+    # today's plan on EVERY constraint. Totals over the years both runs cover;
+    # each plan is judged against the limits it RAN with.
+    both = sorted(set(t["a"].years) & set(t["b"].years))
+    cons = (("Tank-weeks over density", "r8_over_tank_weeks"),
+            ("System-weeks over biomass limit", "sys_bio_over_weeks"),
+            ("System-weeks over feed limit", "sys_feed_over_weeks"),
+            ("Weeks over the move budget", "weeks_over_move_budget"),
+            ("Weeks under the harvest floor", "under_floor_weeks"),
+            ("Weeks with no harvest", "zero_weeks"))
+    vrows, worse = [], []
+    for label, attr in cons:
+        va = sum(getattr(t["a"].years[y], attr) for y in both)
+        vb = sum(getattr(t["b"].years[y], attr) for y in both)
+        if vb > va:
+            worse.append(label.lower())
+        vrows.append({"Constraint": label, "Today's plan": va, "Proposal": vb,
+                      "No worse than today?": "✓" if vb <= va else "✗"})
+    rev_a = sum(t["a"].years[y].revenue for y in both) / 1e6
+    rev_b = sum(t["b"].years[y].revenue for y in both) / 1e6
+    st.markdown("**No worse than today?** — your rule for the system constraints")
+    if worse:
+        st.warning("Outside your rule: the proposal is worse than today's plan "
+                   "on " + ", ".join(worse) + ".")
+    else:
+        st.success("Within your rule: the proposal is no worse than today's "
+                   "plan on every constraint.")
+    st.dataframe(_pd.DataFrame(vrows), hide_index=True, width="stretch")
+    st.caption(f"Totals over {both[0]}–{both[-1]} (first and last years "
+               f"partial). Revenue over the same years: today's plan "
+               f"${rev_a:,.1f}M, proposal ${rev_b:,.1f}M.")
 
 
 # ============================================================

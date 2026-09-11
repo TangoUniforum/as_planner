@@ -2390,6 +2390,19 @@ the share over 8 lb, peak biomass against the cap, tanks in use per system, one
 week's full tank layout, each tank's batch sequence, and the checks. Download
 the workbook to keep it.
 
+**Tank & system limits for this run** (optional expander, also in step 3 for
+the proposal): one row per seawater system with its tanks, **tank density cap**
+(kg/m³), **system biomass limit** (t) and **system feed limit** (kg/day), filled
+from `config/facility.yaml` and `scenario/limits.yaml`, plus the **weekly move
+budget**. Change any cell to try it — only values you change are applied, only
+for that run; your files are never written. 6N's biomass here is its
+production-mode limit; its purge-mode limit is your depuration ruling and is
+not changed. Dated per-week rows in Configure → Limits still win for their
+weeks. A cleared cell keeps the value in your files (the page says so). The
+**quick scan** takes a **Min harvest weight** too, and steps 2–3 follow it
+after a scan; the tank and system limits apply in steps 2–3 only (the quick
+model has no tanks).
+
 Two things are fixed by the method, not chosen: an empty facility cannot hold
 fish that would already be in seawater on day one, so those batches are left
 out (and listed); and 6N runs in **production** mode, as it will after 2028,
@@ -2424,6 +2437,14 @@ each year passes the checks. To adopt a proposal: keep a copy of
 `scenario/batches.yaml`, then replace it (or edit the same rows in Configure →
 Batches). Run forecast then runs it unchanged — its 85-week horizon shows only
 the start of the effect.
+
+**No worse than today?** Under the results, a table compares the two plans on
+every system constraint — tank-weeks over density, system-weeks over the
+biomass limit and over the feed limit, weeks over the move budget, weeks under
+the harvest floor and weeks with no harvest — totalled over the years both
+runs cover, each plan judged against the limits it ran with. Your rule
+(2026-09-10) is that a proposal must be no worse than today's plan on EVERY
+one; the page says in one line whether it is, and which constraints fail.
 
 **Facility limits for this check** (optional expander): try a different biomass
 cap or harvest limits for the **proposal** — for example "what if the cap were
@@ -2465,6 +2486,26 @@ stay at 3,800 t: today's schedule, 320k (−$2.7M, slightly fewer breaches), or
 feed breaches for −$11.7M (−3 %). Using a higher cap would need more room per
 tank (higher density limits or more volume) or a planning engine that keeps
 density in bounds at higher biomass; none of the stocking sizes tested does.
+
+**What if the limits themselves go up?** (2026-09-10; the same runs, today's
+batches, a 4,200 t cap, with the tank & system limits raised on the 11
+seawater systems now at 85 kg/m³ — not 6N):
+
+| Limits raised | Revenue 2027–29 | Tank-weeks over density | System-weeks over biomass / feed | No worse than today? |
+|---|---|---|---|---|
+| none (today at 3,800 t) | $435.8M | 195 | 3 / 137 | the baseline |
+| density 95 kg/m³ | $464.7M | 196 | 43 / 304 | ❌ |
+| density 95 + system biomass 450 t | $455.0M | 160 | 0 / 256 | ❌ feed |
+| density 95 + biomass 450 t + feed 3,500 kg/day | $449.4M | 66 | 0 / 30 | ✅ |
+| density 95 + biomass 450 t + feed 4,000 kg/day | $457.2M | 82 | 0 / 4 | ✅ |
+
+The limits bind in a chain: tank density first, then each system's biomass,
+then each system's feed. **Raise all four together and a 4,200 t plan is no
+worse than today on every constraint — cleaner, in fact — for $13.6–21.4M
+more over three years.** Raise only some and it breaks. Whether the tanks,
+oxygen and feed systems can really carry those values is an engineering call,
+not a software one; the limits table in steps 2 and 3 lets you test any
+values you think are real.
 
 What your engine said on the 8/31 PR (2026-09-10; the promoted plain
 controller, 208 weeks, your manual events, every future batch re-sized from

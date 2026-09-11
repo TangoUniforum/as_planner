@@ -68,3 +68,30 @@ def test_today_runs_at_current_limits_and_the_proposal_at_the_what_if(monkeypatc
     assert ka["method_overrides"] == kb["method_overrides"] == {
         "chronic_pressure_weeks": 6}                    # same engine both sides
     assert note is None
+    # No tank/system limits given -> none sent (the run stays Run forecast's).
+    assert "density_overrides" not in ka and "density_overrides" not in kb
+    assert "system_overrides" not in ka and "system_overrides" not in kb
+
+
+def test_tank_and_system_limits_reach_the_proposal_only(monkeypatch):
+    from forecast import ideal_engine
+    calls = []
+    monkeypatch.setattr(ideal_engine, "run_schedule",
+                        lambda b, root, **kw: calls.append(kw) or kw)
+    monkeypatch.setattr(app, "_cpu_workers", lambda: 1)
+    app._ideal_transition_runs(
+        ["today"], ["proposal"], b"pr", "pr.xlsm", "controller", {}, {},
+        {"OG3N": 95.0}, {"OG3N": {"biomass": 450_000.0}})
+    ka, kb = calls
+    assert "density_overrides" not in ka and "system_overrides" not in ka
+    assert kb["density_overrides"] == {"OG3N": 95.0}
+    assert kb["system_overrides"] == {"OG3N": {"biomass": 450_000.0}}
+
+
+def test_the_tank_limit_text_is_plain_units():
+    txt = app._ideal_tank_limit_text(
+        {"OG3N": 95.0}, {"OG3N": {"biomass": 450_000.0, "feed_per_day": 3500.0}},
+        {"max_transfers_per_week": 20})
+    assert "OG3N density 95 kg/m³" in txt and "OG3N biomass 450 t" in txt
+    assert "OG3N feed 3,500 kg/day" in txt and "move budget 20/week" in txt
+    assert app._ideal_tank_limit_text({}, {}, {}) == ""

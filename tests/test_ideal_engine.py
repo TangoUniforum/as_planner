@@ -144,7 +144,7 @@ def test_unknown_override_is_refused_before_anything_is_written(tmp_path, stream
     work = tmp_path / "work"
     with pytest.raises(ValueError, match="not allowed"):
         ie.prepare(work, stream, ROOT, start=START, horizon_weeks=60,
-                   overrides={**PROD, "max_transfers_per_week": 99})
+                   overrides={**PROD, "density_target_pct": 0.99})
     assert not work.exists()
 
 
@@ -162,6 +162,240 @@ def test_overrides_land_in_the_temp_control_and_nowhere_else(tmp_path, stream):
     assert temp["horizon_weeks"] == 60
     assert (ROOT / "config" / "control.yaml").read_bytes() == live_bytes
     assert b"1234567" not in (Path(prep["scenario_dir"]) / "limits.yaml").read_bytes()
+
+
+# --- prepare: system-constraint what-ifs (density, system limits, moves) -----
+
+def _yaml(path):
+    with open(path, encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+
+def _og_systems_at(cap):
+    tanks = _yaml(ROOT / "config" / "facility.yaml")["tanks"]
+    return sorted({t["system_id"] for t in tanks
+                   if t["type"] == "OG" and t["max_density_kg_m3"] == cap})
+
+
+def test_density_overrides_land_on_exactly_that_systems_tanks(tmp_path, stream):
+    live_path = ROOT / "config" / "facility.yaml"
+    live_bytes = live_path.read_bytes()
+    before = _repo_hashes()
+    live = yaml.safe_load(live_bytes)["tanks"]
+    systems = sorted({t["system_id"] for t in live})
+    a, b = systems[0], systems[-1]
+    want = {a: 95, b: 101.5}
+    prep = ie.prepare(tmp_path / "w", stream, ROOT, start=START,
+                      horizon_weeks=60, overrides=PROD, density_overrides=want)
+    temp = _yaml(Path(prep["config_dir"]) / "facility.yaml")["tanks"]
+    assert len(temp) == len(live)
+    hit = 0
+    for lt, tt in zip(live, temp):
+        assert {k: v for k, v in tt.items() if k != "max_density_kg_m3"} == \
+               {k: v for k, v in lt.items() if k != "max_density_kg_m3"}
+        if lt["system_id"] in want:
+            assert tt["max_density_kg_m3"] == want[lt["system_id"]]
+            hit += 1
+        else:
+            assert tt["max_density_kg_m3"] == lt["max_density_kg_m3"]
+    assert hit == sum(1 for t in live if t["system_id"] in want) > 0
+    # The engine's own reader sees the same thing.
+    fac = load_config(prep["config_dir"])[2]
+    for t in fac.tanks:
+        if t.system_id in want:
+            assert t.max_density_kg_m3 == want[t.system_id]
+    assert prep["density_overrides"] == {a: 95.0, b: 101.5}
+    assert prep["system_overrides"] == {}
+    # No system override -> limits.yaml verbatim; the live files untouched.
+    assert ((Path(prep["scenario_dir"]) / "limits.yaml").read_bytes()
+            == (ROOT / "scenario" / "limits.yaml").read_bytes())
+    assert live_path.read_bytes() == live_bytes
+    assert _repo_hashes() == before
+
+
+def test_system_overrides_land_in_system_defaults_and_6n_purge_stays(
+        tmp_path, stream, control):
+    live_path = ROOT / "scenario" / "limits.yaml"
+    live_bytes = live_path.read_bytes()
+    live = yaml.safe_load(live_bytes)
+    plain = sorted(s for s, blk in live["system_defaults"].items()
+                   if "modes" not in blk)
+    moded = sorted(s for s, blk in live["system_defaults"].items()
+                   if "modes" in blk)
+    assert "OG6N" in moded and len(plain) >= 2
+    s1, s2 = plain[0], plain[1]
+    want = {s1: {"biomass": 450_000}, s2: {"feed_per_day": 3_300},
+            "OG6N": {"biomass": 460_000, "feed_per_day": 3_200}}
+    prep = ie.prepare(tmp_path / "w", stream, ROOT, start=START,
+                      horizon_weeks=60, overrides=PROD, system_overrides=want)
+    temp = _yaml(Path(prep["scenario_dir"]) / "limits.yaml")
+    sd, ld = temp["system_defaults"], live["system_defaults"]
+    assert set(sd) == set(ld)
+    assert sd[s1] == {**ld[s1], "biomass": 450_000}
+    assert sd[s2] == {**ld[s2], "feed_per_day": 3_300}
+    six = sd["OG6N"]
+    assert six["modes"]["production"]["biomass"] == 460_000
+    assert six["modes"]["purge"] == ld["OG6N"]["modes"]["purge"]  # ruling stays
+    assert six["feed_per_day"] == 3_200
+    assert set(six) == set(ld["OG6N"])            # no system-level biomass added
+    for s in set(ld) - {s1, s2, "OG6N"}:
+        assert sd[s] == ld[s]
+    # Per-week rows (system and facility) are data the engine resolves first.
+    assert temp["system"] == live["system"]
+    assert temp["facility"] == live["facility"]
+    # Resolved by the engine's own loader, against a control whose 6N is in
+    # purge before sixn_production_start and in production after it.
+    _fl, sl = sio.load_limits(prep["scenario_dir"], control)
+    prod_from = control.sixn_production_start
+    purge_wk = ie._week_label(prod_from - dt.timedelta(weeks=10))
+    prod_wk = ie._week_label(prod_from + dt.timedelta(weeks=10))
+    assert sl.resolve(prod_wk, "OG6N", "biomass") == 460_000
+    assert sl.resolve(purge_wk, "OG6N", "biomass") == \
+        ld["OG6N"]["modes"]["purge"]["biomass"]
+    assert sl.resolve(prod_wk, s1, "biomass") == 450_000
+    assert sl.resolve(prod_wk, s2, "feed_per_day") == 3_300
+    assert prep["system_overrides"] == {
+        s1: {"biomass": 450_000.0}, s2: {"feed_per_day": 3_300.0},
+        "OG6N": {"biomass": 460_000.0, "feed_per_day": 3_200.0}}
+    # No density override -> facility.yaml verbatim; the live file untouched.
+    assert ((Path(prep["config_dir"]) / "facility.yaml").read_bytes()
+            == (ROOT / "config" / "facility.yaml").read_bytes())
+    assert live_path.read_bytes() == live_bytes
+
+
+def test_per_week_system_rows_survive_an_override_and_still_win(
+        tmp_path, stream, control):
+    """A dated per-week `system` row outranks the system default in the
+    engine's own resolver, so an override must never touch those rows. The
+    live file has none (`system: []`), which made the comparison above
+    vacuous; so rows are injected into a PRIVATE copy of the project. They
+    must come through unchanged, win in their week, and the override must
+    apply in every other week — for a plain system and for OG6N."""
+    proj = tmp_path / "proj"
+    ie._copy_tree(ROOT / "config", proj / "config")
+    ie._copy_tree(ROOT / "scenario", proj / "scenario")
+    lp = proj / "scenario" / "limits.yaml"
+    doc = _yaml(lp)
+    prod_from = control.sixn_production_start
+    wk = [ie._week_label(prod_from + dt.timedelta(weeks=n)) for n in (10, 11, 12)]
+    other = ie._week_label(prod_from + dt.timedelta(weeks=20))
+    plain = sorted(s for s, b in doc["system_defaults"].items() if "modes" not in b)
+    s1, s2 = plain[0], plain[1]
+    rows = [{"week": wk[0], "system": s1, "metric": "biomass", "value": 111_111.0},
+            {"week": wk[1], "system": "OG6N", "metric": "biomass", "value": 222_222.0},
+            {"week": wk[2], "system": s2, "metric": "feed_per_day", "value": 1_234.0}]
+    doc["system"] = rows
+    with open(lp, "w", encoding="utf-8") as f:
+        yaml.safe_dump(doc, f, sort_keys=False)
+    want = {s1: {"biomass": 450_000}, "OG6N": {"biomass": 460_000},
+            s2: {"feed_per_day": 3_300}}
+    prep = ie.prepare(tmp_path / "w", stream, proj, start=START,
+                      horizon_weeks=60, overrides=PROD, system_overrides=want)
+    assert _yaml(Path(prep["scenario_dir"]) / "limits.yaml")["system"] == rows
+    _fl, sl = sio.load_limits(prep["scenario_dir"], control)
+    assert sl.resolve(wk[0], s1, "biomass") == 111_111          # the row wins
+    assert sl.resolve(other, s1, "biomass") == 450_000          # the override
+    assert sl.resolve(wk[1], "OG6N", "biomass") == 222_222
+    assert sl.resolve(other, "OG6N", "biomass") == 460_000
+    assert sl.resolve(wk[2], s2, "feed_per_day") == 1_234
+    assert sl.resolve(other, s2, "feed_per_day") == 3_300
+
+
+def test_overrides_never_leak_through_shared_yaml_blocks():
+    """A YAML anchor makes two systems ONE dict object; writing one must not
+    move the other, and the parsed input must stay untouched. A moded system
+    with no production entry still takes biomass into modes.production, so
+    its purge weeks can never move."""
+    shared = {"biomass": 400_000.0, "feed_per_day": 3000.0}
+    doc = {"system_defaults": {
+        "A": shared, "B": shared,
+        "M": {"feed_per_day": 3000.0, "modes": {"purge": {"biomass": 700_000.0}}}},
+        "system": [], "facility": []}
+    out = ie._apply_system(doc, {"A": {"biomass": 450_000.0},
+                                 "M": {"biomass": 460_000.0}})
+    assert out["system_defaults"]["A"]["biomass"] == 450_000.0
+    assert out["system_defaults"]["B"]["biomass"] == 400_000.0   # not dragged
+    assert shared["biomass"] == 400_000.0                          # input intact
+    m = out["system_defaults"]["M"]
+    assert m["modes"]["production"]["biomass"] == 460_000.0
+    assert m["modes"]["purge"]["biomass"] == 700_000.0 and "biomass" not in m
+    assert "production" not in doc["system_defaults"]["M"]["modes"]
+    tank = {"system_id": "A", "max_density_kg_m3": 85}
+    fac = ie._apply_density({"tanks": [tank]}, {"A": 95.0})
+    assert fac["tanks"][0]["max_density_kg_m3"] == 95.0
+    assert tank["max_density_kg_m3"] == 85                         # input intact
+
+
+def test_the_move_budget_is_a_control_override_and_a_whole_number(tmp_path,
+                                                                  stream):
+    prep = ie.prepare(tmp_path / "w", stream, ROOT, start=START,
+                      horizon_weeks=60,
+                      overrides={**PROD, "max_transfers_per_week": 18})
+    doc = _yaml(Path(prep["config_dir"]) / "control.yaml")
+    assert doc["max_transfers_per_week"] == 18
+    assert isinstance(doc["max_transfers_per_week"], int)
+    assert load_config(prep["config_dir"])[0].max_transfers_per_week == 18
+    assert prep["overrides"]["max_transfers_per_week"] == 18
+
+
+_NAN = float("nan")
+
+
+@pytest.mark.parametrize("kw", [
+    dict(density_overrides={"NO_SUCH_SYSTEM": 95}),
+    dict(density_overrides={"OG1N": 0}),
+    dict(density_overrides={"OG1N": -85}),
+    dict(density_overrides={"OG1N": _NAN}),
+    dict(density_overrides={"OG1N": float("inf")}),
+    dict(density_overrides={"OG1N": True}),
+    dict(density_overrides={"OG1N": "95"}),
+    dict(density_overrides=[("OG1N", 95)]),
+    dict(system_overrides={"NO_SUCH_SYSTEM": {"biomass": 450_000}}),
+    dict(system_overrides={"OG1N": {"density": 95}}),
+    dict(system_overrides={"OG1N": {"biomass": 0}}),
+    dict(system_overrides={"OG1N": {"biomass": -1}}),
+    dict(system_overrides={"OG1N": {"feed_per_day": _NAN}}),
+    dict(system_overrides={"OG1N": {}}),
+    dict(system_overrides={"OG1N": 450_000}),
+    # a good one next to a bad one: nothing at all is applied
+    dict(density_overrides={"OG1N": 95},
+         system_overrides={"OG1N": {"biomass": 450_000, "feed": 1}}),
+    dict(overrides={**PROD, "max_transfers_per_week": 15.5}),
+    dict(overrides={**PROD, "max_transfers_per_week": 16.0}),
+    dict(overrides={**PROD, "max_transfers_per_week": 0}),
+    dict(overrides={**PROD, "max_transfers_per_week": -3}),
+    dict(overrides={**PROD, "max_transfers_per_week": True}),
+])
+def test_bad_system_constraints_are_refused_before_anything_is_written(
+        tmp_path, stream, kw):
+    before = _repo_hashes()
+    work = tmp_path / "w"
+    kw = {"overrides": PROD, **kw}
+    with pytest.raises(ValueError):
+        ie.prepare(work, stream, ROOT, start=START, horizon_weeks=60, **kw)
+    assert not work.exists()
+    assert _repo_hashes() == before
+
+
+def test_an_unknown_system_is_named_with_the_known_ones(tmp_path, stream):
+    with pytest.raises(ValueError, match="OG1N"):
+        ie.prepare(tmp_path / "w", stream, ROOT, start=START, horizon_weeks=60,
+                   overrides=PROD, density_overrides={"OG9Z": 95})
+    with pytest.raises(ValueError, match="OG1N"):
+        ie.prepare(tmp_path / "w", stream, ROOT, start=START, horizon_weeks=60,
+                   overrides=PROD, system_overrides={"OG9Z": {"biomass": 1.0}})
+
+
+def test_the_what_if_arguments_are_keyword_only_and_default_to_none():
+    for fn in (ie.prepare, ie.run_schedule, ie.ideal_run):
+        ps = inspect.signature(fn).parameters
+        for name in ("density_overrides", "system_overrides"):
+            assert ps[name].kind is inspect.Parameter.KEYWORD_ONLY, (fn, name)
+            assert ps[name].default is None, (fn, name)
+    fields = [f.name for f in dataclasses.fields(ie.EngineRun)]
+    assert fields[-2:] == ["density_overrides", "system_overrides"]
+    assert all(f.default is None for f in dataclasses.fields(ie.EngineRun)
+               if f.name in ("density_overrides", "system_overrides"))
 
 
 # --- prepare: nothing dropped silently, bad inputs refused -------------------
@@ -303,6 +537,82 @@ def test_a_real_ideal_run_is_clean_plausible_and_isolated(engine, control):
     assert engine["after"] == engine["before"]    # project only read
     assert not engine["leaked"]                   # temp dir removed
     assert run.out_path and Path(run.out_path).is_file()
+
+
+def test_a_what_if_run_is_judged_against_the_limits_it_ran_with(
+        tmp_path, stream, private_tempdir):
+    """ONE short real run (60 weeks, ~10 s) with raised OG density caps, a
+    raised system limit and a different move budget. The engine must RUN on
+    them (its own SystemLimitsAudit quotes the new caps) and the Ideal's
+    verdict must be JUDGED on them: the run's YearRead is the read with the
+    run's kept config, and the same workbook read against the live density
+    caps can only find as many or more tank-weeks over their cap."""
+    raised = _og_systems_at(85)
+    assert raised and "OG6N" not in raised
+    before = _repo_hashes()
+    sys1 = raised[0]
+    keep = tmp_path / "k"
+    run = ie.run_schedule(
+        stream, ROOT, start=START, horizon_weeks=60,
+        overrides={**PROD, "max_transfers_per_week": 16},
+        density_overrides={s: 95 for s in raised},
+        system_overrides={sys1: {"biomass": 450_000, "feed_per_day": 3_300},
+                          "OG6N": {"biomass": 450_000}},
+        keep_dir=keep)
+    assert run.rc == 0
+    assert run.density_overrides == {s: 95.0 for s in raised}
+    assert run.system_overrides[sys1] == {"biomass": 450_000.0,
+                                          "feed_per_day": 3_300.0}
+    assert _repo_hashes() == before
+    assert not list(private_tempdir.glob("ideal_engine_*"))
+
+    # The kept run's own inputs carry the what-ifs.
+    kc, _t, kf = load_config(str(keep / "config"))
+    lc, _t2, lf = load_config(str(ROOT / "config"))
+    assert kc.max_transfers_per_week == 16 != lc.max_transfers_per_week
+    for t in kf.tanks:
+        live = next(x for x in lf.tanks if (x.system_id, x.tank_id)
+                    == (t.system_id, t.tank_id))
+        assert t.max_density_kg_m3 == (95 if t.system_id in raised
+                                       else live.max_density_kg_m3)
+
+    # The ENGINE ran on the new system limits: its own audit quotes them.
+    sla = _sheet(run.out_path, "SystemLimitsAudit", "Week")
+    live_sd = _yaml(ROOT / "scenario" / "limits.yaml")["system_defaults"]
+    rows = defaultdict(list)
+    for r in sla:
+        rows[r["System"]].append(r)
+    assert rows[sys1] and rows["OG6N"] and rows[raised[1]]
+    assert all(r["Biomass_cap"] == 450_000 and r["Feed_cap"] == 3_300
+               for r in rows[sys1])
+    assert all(r["Biomass_cap"] == 450_000 for r in rows["OG6N"])  # production
+    assert all(r["Biomass_cap"] == live_sd[raised[1]]["biomass"]
+               for r in rows[raised[1]])
+
+    # The verdict: the run's read IS the read on its kept config ...
+    econ = _yaml(keep / "config" / "economics.yaml")
+    fl, _s = sio.load_limits(str(keep / "scenario"), kc)
+    years = sorted(run.years)
+    rest = (ideal.price_bands(econ), float(econ.get("model_cv_pct", 18.0)),
+            kc.default_hog_yield, years)
+    mine = ie.read_workbook(run.out_path, kc, kf, *rest, facility_limits=fl)
+    assert mine["years"] == run.years
+    # ... and the live density caps (same control, so only the cap differs)
+    # never count fewer tank-weeks over.
+    livecap = ie.read_workbook(run.out_path, kc, lf, *rest, facility_limits=fl)
+    for y in years:
+        k, l = run.years[y], livecap["years"][y]
+        assert l.r8_over_tank_weeks >= k.r8_over_tank_weeks, y
+        w = k.r8_worst
+        if w is not None and w["system"] in raised and w["stage"] == "SW":
+            assert w["cap"] == 95
+        # the move budget the verdict and its gate use is the run's own
+        assert k.weeks_over_move_budget == sum(
+            1 for wk, d in mine["weekly"].items()
+            if wk.startswith(f"{y}-") and d["moves"] > 16)
+        g = next(x for x in ie.gates(run, y, lc) if x.name == "Handling budget")
+        assert "budget 16)" in g.detail or "over 16 moves" in g.detail, g.detail
+        assert run.audits["move_budget"] == 16
 
 
 def test_gates_keep_their_order_and_only_fail_rows_decide(engine, control):

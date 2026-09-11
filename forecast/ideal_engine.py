@@ -58,6 +58,27 @@ L1 Ideal uses, so the two answers are comparable cell for cell.
 Per-week limits in scenario/limits.yaml are ISO-week-labelled (all 2026
 today), so a 2027+ start resolves every week to the Control defaults.
 `limit_rows_in_horizon` says how many dated rows actually reach a run.
+
+SYSTEM CONSTRAINTS as a what-if (operator, 2026-09-10): "what if the tanks
+could hold more?" is answered by running the engine on different limits, not
+by guessing. Three levers, each written ONLY into the run's temp copy:
+  * `max_transfers_per_week` (an `overrides` key): the weekly move budget, a
+    positive whole number (a float is refused, never truncated).
+  * `density_overrides={system_id: kg/m3}`: every tank of that system gets
+    that max_density_kg_m3 in the temp config/facility.yaml.
+  * `system_overrides={system_id: {"biomass": kg, "feed_per_day": kg/day}}`:
+    the system's standing limits in the temp scenario/limits.yaml
+    system_defaults. The value lands where the system's PRODUCTION-mode
+    weeks resolve it from: for OG6N, whose default has a `modes:` block,
+    "biomass" replaces modes.production.biomass and the purge-mode biomass
+    STAYS (it is an operator ruling about depuration, not a tank limit);
+    "feed_per_day" replaces the system-level feed. Dated per-week `system`
+    rows still win for their weeks (the engine's own precedence) and are
+    not touched.
+The engine reads facility.yaml and limits.yaml from the temp copy, and
+`read_workbook` is handed the run's own copy, so R8 and the per-system
+verdicts are judged against the OVERRIDDEN limits. Unknown systems / keys and
+non-positive or non-finite values are refused before anything is written.
 """
 from __future__ import annotations
 
@@ -85,9 +106,9 @@ import yaml
 
 from forecast import ideal
 from forecast import scenario_io as sio
-from forecast.caps import (METRIC_BIOMASS, METRIC_MIN_HARVEST, FacilityLimits,
-                           resolve_facility_cap)
-from forecast.config_io import control_from_dict, load_config
+from forecast.caps import (METRIC_BIOMASS, METRIC_MIN_HARVEST, MODE_PRODUCTION,
+                           FacilityLimits, resolve_facility_cap)
+from forecast.config_io import FACILITY_FILE, control_from_dict, load_config
 from forecast.methods import REGISTRY, run_method
 from forecast.models import BatchInput
 from forecast.production_report import find_pr_sheet, parse_pr_worksheet
@@ -104,7 +125,12 @@ ALLOWED_OVERRIDES = frozenset({
     "horizon_weeks", "max_biomass_kg", "max_harvest_per_week",
     "min_harvest_per_week", "min_harvest_weight_g", "max_feed_per_day_kg",
     "sixn_production_start", "scenario_name",
+    # The weekly handling budget (moves/week). A positive whole number.
+    "max_transfers_per_week",
 })
+# The per-system limits a what-if may set (scenario/limits.yaml
+# system_defaults metrics; caps.METRIC_* names).
+SYSTEM_OVERRIDE_KEYS = frozenset({"biomass", "feed_per_day"})
 # The labels production_report._resolve_pr_columns looks for, in the columns
 # (F-K) a real report puts them.
 _PR_HEADER = ((6, "Opening Count"), (7, "Closing Count"),
@@ -189,6 +215,10 @@ class EngineRun:
     limit_rows_in_horizon: int
     out_path: Optional[str] = None
     method_overrides: Optional[dict] = None
+    # The validated system-constraint what-ifs the run was made with ({} when
+    # none): {system: kg/m3} and {system: {"biomass"|"feed_per_day": value}}.
+    density_overrides: Optional[dict] = None
+    system_overrides: Optional[dict] = None
 
 
 def _method(key: str):
@@ -308,6 +338,15 @@ def _check_overrides(overrides, horizon_weeks) -> dict:
                 raise ValueError(f"scenario_name must be a non-empty string, "
                                  f"got {v!r}")
             out[key] = v
+        elif key == "max_transfers_per_week":
+            # The engine coerces with int(float(x)), so 15.5 would silently
+            # become 15; a whole number is required instead.
+            if (isinstance(v, bool) or not isinstance(v, numbers.Integral)
+                    or v < 1):
+                raise ValueError(f"max_transfers_per_week (the weekly move "
+                                 f"budget) must be a positive whole number, "
+                                 f"got {v!r}")
+            out[key] = int(v)
         else:
             if (isinstance(v, bool) or not isinstance(v, numbers.Real)
                     or not math.isfinite(v) or v < 0):
@@ -315,6 +354,121 @@ def _check_overrides(overrides, horizon_weeks) -> dict:
                                  f"non-negative number, got {v!r}")
             out[key] = float(v)
     return out
+
+
+def _positive(v, what: str) -> float:
+    if (isinstance(v, bool) or not isinstance(v, numbers.Real)
+            or not math.isfinite(v) or not v > 0):
+        raise ValueError(f"{what} must be a finite number above 0, got {v!r}")
+    return float(v)
+
+
+def _read_yaml(path: Path) -> dict:
+    with open(path, encoding="utf-8") as f:
+        doc = yaml.safe_load(f)
+    if doc is None:
+        return {}
+    if not isinstance(doc, dict):
+        raise ValueError(f"{path} does not hold a YAML mapping")
+    return doc
+
+
+def _check_density_overrides(given, facility_doc: dict) -> dict:
+    """{system_id: max_density_kg_m3} -> validated floats, keys sorted."""
+    if given is None:
+        return {}
+    if not isinstance(given, dict):
+        raise ValueError(f"density_overrides must be a dict {{system_id: "
+                         f"kg/m3}}, got {type(given).__name__}")
+    tanks = facility_doc.get("tanks")
+    if not isinstance(tanks, list):
+        raise ValueError("config/facility.yaml has no `tanks:` list")
+    known = sorted({str(t.get("system_id")) for t in tanks
+                    if isinstance(t, dict) and t.get("system_id") is not None})
+    unknown = sorted(str(s) for s in given
+                     if not isinstance(s, str) or s not in known)
+    if unknown:
+        raise ValueError(f"density_overrides: unknown system id(s) {unknown}; "
+                         f"config/facility.yaml has {known}")
+    return {s: _positive(given[s], f"density_overrides[{s!r}] "
+                                   f"(max_density_kg_m3)")
+            for s in sorted(given)}
+
+
+def _check_system_overrides(given, limits_doc: dict) -> dict:
+    """{system_id: {"biomass"|"feed_per_day": value}} -> validated floats."""
+    if given is None:
+        return {}
+    if not isinstance(given, dict):
+        raise ValueError(f"system_overrides must be a dict {{system_id: "
+                         f"{{'biomass': kg, 'feed_per_day': kg/day}}}}, got "
+                         f"{type(given).__name__}")
+    defaults = limits_doc.get("system_defaults") or {}
+    if not isinstance(defaults, dict):
+        raise ValueError("scenario/limits.yaml system_defaults is not a mapping")
+    known = sorted(str(s) for s in defaults)
+    unknown = sorted(str(s) for s in given
+                     if not isinstance(s, str) or s not in known)
+    if unknown:
+        raise ValueError(f"system_overrides: unknown system id(s) {unknown}; "
+                         f"scenario/limits.yaml system_defaults has {known}")
+    out = {}
+    for s in sorted(given):
+        limits = given[s]
+        if not isinstance(limits, dict) or not limits:
+            raise ValueError(f"system_overrides[{s!r}] must be a non-empty "
+                             f"dict with 'biomass' and/or 'feed_per_day', got "
+                             f"{limits!r}")
+        bad = sorted(str(k) for k in limits
+                     if not isinstance(k, str) or k not in SYSTEM_OVERRIDE_KEYS)
+        if bad:
+            raise ValueError(f"system_overrides[{s!r}]: unknown key(s) {bad}; "
+                             f"allowed: {sorted(SYSTEM_OVERRIDE_KEYS)}")
+        out[s] = {k: _positive(limits[k], f"system_overrides[{s!r}][{k!r}]")
+                  for k in sorted(limits)}
+    return out
+
+
+def _apply_density(facility_doc: dict, dens: dict) -> dict:
+    """The facility with each overridden system's new max_density_kg_m3.
+    Every tank is COPIED before it is written and the input is never changed:
+    with a YAML anchor two entries can be ONE dict object (a deep copy keeps
+    that sharing), and writing one would silently move the other."""
+    doc = dict(facility_doc)
+    doc["tanks"] = [dict(t) if isinstance(t, dict) else t
+                    for t in facility_doc["tanks"]]
+    for t in doc["tanks"]:
+        if isinstance(t, dict) and t.get("system_id") in dens:
+            t["max_density_kg_m3"] = dens[t["system_id"]]
+    return doc
+
+
+def _apply_system(limits_doc: dict, sys_ov: dict) -> dict:
+    """Write each value where the system's PRODUCTION-mode weeks resolve it
+    from (caps.SystemLimits.resolve: mode default > system default). For a
+    system with a `modes:` block, "biomass" ALWAYS goes to modes.production
+    (created if missing), so its purge weeks can never move; any other metric
+    goes to modes.production when that entry names it, else to the system
+    level. Each touched block is copied first and the input is never changed
+    — a YAML anchor can make two systems share ONE dict (see _apply_density)."""
+    doc = dict(limits_doc)
+    defaults = doc["system_defaults"] = dict(limits_doc["system_defaults"])
+    for s, limits in sys_ov.items():
+        old = defaults.get(s)
+        block = defaults[s] = dict(old) if isinstance(old, dict) else {}
+        modes = block.get(sio.MODES_KEY)
+        prod = None
+        if isinstance(modes, dict):
+            modes = block[sio.MODES_KEY] = dict(modes)
+            prev = modes.get(MODE_PRODUCTION)
+            prod = dict(prev) if isinstance(prev, dict) else {}
+        for k, v in limits.items():
+            if prod is not None and (k == "biomass" or prod.get(k) is not None):
+                prod[k] = v
+                modes[MODE_PRODUCTION] = prod
+            else:
+                block[k] = v
+    return doc
 
 
 def write_empty_pr(path, closing_date):
@@ -352,7 +506,9 @@ def _pr_closing(pr_path) -> dt.date:
 def prepare(work_dir, batches: Sequence[BatchInput], project_dir, *,
             start=None, horizon_weeks: int, overrides: Optional[dict] = None,
             pr_path=None, include_manual_events: bool = False,
-            method_overrides: Optional[dict] = None) -> dict:
+            method_overrides: Optional[dict] = None,
+            density_overrides: Optional[dict] = None,
+            system_overrides: Optional[dict] = None) -> dict:
     """Lay out one engine run under `work_dir`; nothing is written elsewhere.
 
     Empty start when `pr_path` is None: `start` is required, the PR closes the
@@ -368,10 +524,17 @@ def prepare(work_dir, batches: Sequence[BatchInput], project_dir, *,
     unknown one is refused — a knob that silently did nothing would make the
     run look like the promoted plan when it is not.
 
+    `density_overrides` ({system_id: max_density_kg_m3}) and
+    `system_overrides` ({system_id: {"biomass": kg, "feed_per_day": kg/day}})
+    are the system-constraint what-ifs (module docstring): written into the
+    temp facility.yaml / limits.yaml only, the rest of both files kept as
+    data. Without them both files are copied verbatim.
+
     Every check runs BEFORE the first file is written, so a refused call
     leaves `work_dir` untouched.
     -> dict(pr_path, config_dir, scenario_dir, dropped, start, overrides,
-            manual_events_file, method_overrides)
+            manual_events_file, method_overrides, density_overrides,
+            system_overrides)
     """
     ov = _check_overrides(overrides, horizon_weeks)
     root = Path(project_dir)
@@ -382,6 +545,14 @@ def prepare(work_dir, batches: Sequence[BatchInput], project_dir, *,
     limits_src = root / "scenario" / sio.LIMITS_FILE
     if not limits_src.is_file():
         raise ValueError(f"{limits_src} is missing")
+    facility_src = root / "config" / FACILITY_FILE
+    facility_doc = limits_doc = None
+    if density_overrides is not None:
+        facility_doc = _read_yaml(facility_src)
+    dens = _check_density_overrides(density_overrides, facility_doc or {})
+    if system_overrides is not None:
+        limits_doc = _read_yaml(limits_src)
+    sys_ov = _check_system_overrides(system_overrides, limits_doc or {})
     batches = list(batches)
     if not batches:
         raise ValueError("no batches to run")
@@ -452,11 +623,24 @@ def prepare(work_dir, batches: Sequence[BatchInput], project_dir, *,
     _copy_tree(root / "config", cfg)
     with open(cfg / "control.yaml", "w", encoding="utf-8") as f:
         yaml.safe_dump(control_doc, f, sort_keys=False)
+    if dens:
+        with open(cfg / FACILITY_FILE, "w", encoding="utf-8") as f:
+            f.write(f"# What-if copy written by forecast.ideal_engine: "
+                    f"max_density_kg_m3 overridden {dens}\n")
+            yaml.safe_dump(_apply_density(facility_doc, dens), f,
+                           sort_keys=False)
     scn.mkdir()
     with open(scn / sio.BATCHES_FILE, "w", encoding="utf-8") as f:
         yaml.safe_dump({"batches": sio.batches_to_list(kept)}, f,
                        sort_keys=False)
-    shutil.copyfile(limits_src, scn / sio.LIMITS_FILE)
+    if sys_ov:
+        with open(scn / sio.LIMITS_FILE, "w", encoding="utf-8") as f:
+            f.write(f"# What-if copy written by forecast.ideal_engine: "
+                    f"system_defaults overridden {sys_ov}\n")
+            yaml.safe_dump(_apply_system(limits_doc, sys_ov), f,
+                           sort_keys=False)
+    else:
+        shutil.copyfile(limits_src, scn / sio.LIMITS_FILE)
     events_file = None
     if include_manual_events:
         src = root / "scenario" / "manual_events"
@@ -471,7 +655,9 @@ def prepare(work_dir, batches: Sequence[BatchInput], project_dir, *,
         pr = Path(pr_path).resolve()
     return dict(pr_path=str(pr), config_dir=str(cfg), scenario_dir=str(scn),
                 dropped=dropped, start=start_dt.date(), overrides=ov,
-                manual_events_file=events_file, method_overrides=knobs)
+                manual_events_file=events_file, method_overrides=knobs,
+                density_overrides=dict(dens),
+                system_overrides={s: dict(v) for s, v in sys_ov.items()})
 
 
 # --------------------------------------------------------------------------- #
@@ -841,7 +1027,9 @@ def run_schedule(batches: Sequence[BatchInput], project_dir, *, pr_path=None,
                  include_manual_events: bool = False,
                  years: Optional[Sequence[int]] = None,
                  keep_dir=None,
-                 method_overrides: Optional[dict] = None) -> EngineRun:
+                 method_overrides: Optional[dict] = None,
+                 density_overrides: Optional[dict] = None,
+                 system_overrides: Optional[dict] = None) -> EngineRun:
     """Run the real engine on `batches` and read what it wrote.
 
     `years` defaults to the last complete year of the horizon on an empty
@@ -852,6 +1040,9 @@ def run_schedule(batches: Sequence[BatchInput], project_dir, *, pr_path=None,
     file the run used (None when there was none). `method` is a registry key
     or AS_CONFIGURED; `method_overrides` carries a promoted plan's knobs (see
     `prepare`), so the run is the same one ▶ Run forecast would make.
+    `density_overrides` / `system_overrides` are the system-constraint
+    what-ifs (see `prepare`); the read is judged against them, because it
+    loads the run's own config/ and scenario/ copy.
     """
     m = _method(method)
     kd = Path(keep_dir) if keep_dir is not None else None
@@ -864,7 +1055,9 @@ def run_schedule(batches: Sequence[BatchInput], project_dir, *, pr_path=None,
                        horizon_weeks=horizon_weeks, overrides=overrides,
                        pr_path=pr_path,
                        include_manual_events=include_manual_events,
-                       method_overrides=method_overrides)
+                       method_overrides=method_overrides,
+                       density_overrides=density_overrides,
+                       system_overrides=system_overrides)
         start_d = prep["start"]
         horizon = _horizon_labels(start_d, horizon_weeks)
         span = sorted({_label_year(w) for w in horizon})
@@ -906,7 +1099,10 @@ def run_schedule(batches: Sequence[BatchInput], project_dir, *, pr_path=None,
                             facility_limits=flimits)
         audits = dict(got["audits"],
                       manual_events_included=bool(include_manual_events),
-                      manual_events_file=prep["manual_events_file"])
+                      manual_events_file=prep["manual_events_file"],
+                      # the budget weeks_over_move_budget was COUNTED against:
+                      # the run's own kept control, promoted knobs included
+                      move_budget=int(control.max_transfers_per_week))
 
         out_path = None
         if kd is not None:
@@ -925,7 +1121,10 @@ def run_schedule(batches: Sequence[BatchInput], project_dir, *, pr_path=None,
             tank_sequence=got["tank_sequence"], audits=audits,
             validation_top=got["validation_top"],
             limit_rows_in_horizon=limit_rows, out_path=out_path,
-            method_overrides=dict(prep["method_overrides"]))
+            method_overrides=dict(prep["method_overrides"]),
+            density_overrides=dict(prep["density_overrides"]),
+            system_overrides={s: dict(v) for s, v
+                              in prep["system_overrides"].items()})
     finally:
         _remove_tree(work)
 
@@ -935,7 +1134,9 @@ def ideal_run(cadence_days: int, batch_size: int, cap_kg: float, project_dir,
               overrides: Optional[dict] = None, method: str = DEFAULT_METHOD,
               keep_dir=None,
               years: Optional[Sequence[int]] = None,
-              method_overrides: Optional[dict] = None) -> EngineRun:
+              method_overrides: Optional[dict] = None,
+              density_overrides: Optional[dict] = None,
+              system_overrides: Optional[dict] = None) -> EngineRun:
     """One Ideal cell through the real engine, from an empty facility.
 
     Same synthetic stream as `ideal.evaluate`, 6N in production from Jan 1 of
@@ -980,7 +1181,9 @@ def ideal_run(cadence_days: int, batch_size: int, cap_kg: float, project_dir,
     return run_schedule(stream, project_dir, start=start,
                         horizon_weeks=horizon_weeks, overrides=ov,
                         method=method, years=years, keep_dir=keep_dir,
-                        method_overrides=method_overrides)
+                        method_overrides=method_overrides,
+                        density_overrides=density_overrides,
+                        system_overrides=system_overrides)
 
 
 # --------------------------------------------------------------------------- #
@@ -1018,6 +1221,12 @@ def gates(run: EngineRun, year: int, control) -> list[Gate]:
                    f"{y.floor_max:,.0f} fish/week")
     sw = y.sys_worst
     sys_buf = float(getattr(control, "global_buffer_pct", 0.0) or 0.0)
+    # The budget weeks_over_move_budget was COUNTED against (recorded by
+    # run_schedule from the run's own control); a run without that record
+    # falls back to its what-if override, then to the caller's control.
+    budget = (run.audits or {}).get(
+        "move_budget", (run.overrides or {}).get(
+            "max_transfers_per_week", control.max_transfers_per_week))
     no_cap = y.capped_weeks == 0
     cap_ok = (f"no biomass cap applies in any of the {y.weeks} weeks (peak "
               f"standing {y.standing_peak_kg / 1000:,.0f} t)" if no_cap else
@@ -1055,9 +1264,8 @@ def gates(run: EngineRun, year: int, control) -> list[Gate]:
               f"above the limit +{sys_buf:.0%})"),
         _gate("Handling budget", y.weeks_over_move_budget > 0, "WARN",
               f"{y.weeks_over_move_budget} weeks over "
-              f"{control.max_transfers_per_week} moves (max {y.moves_max})",
-              f"at most {y.moves_max} moves a week (budget "
-              f"{control.max_transfers_per_week})"),
+              f"{budget} moves (max {y.moves_max})",
+              f"at most {y.moves_max} moves a week (budget {budget})"),
         _gate("Conservation audits", rec > 0 or cont > 0, "FAIL",
               f"ReconciliationReport {rec} flag(s), TankContinuityAudit "
               f"{cont} flag(s)", "0 reconciliation, 0 tank-continuity flags"),
