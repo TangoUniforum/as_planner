@@ -34,6 +34,9 @@ from forecast.run import main as run_pipeline  # noqa: E402
 from forecast import optimize  # noqa: E402
 from forecast import methods as _methods  # noqa: E402
 from forecast import levers as _levers  # noqa: E402
+# ONE batch order for every list and picker (B9 < B10 < B100), shared with
+# the workbook writers.
+from forecast.batch_order import batch_sort_key, sorted_batches  # noqa: E402
 
 # The ONE method list. Board roster, run-mode label and the engine dispatch all
 # read this, so adding a method is a single register() call in forecast/methods.
@@ -692,6 +695,131 @@ def _reset_keys(*keys):
     for k in keys:
         st.session_state.pop(k, None)
         st.session_state.pop(k + "_w", None)
+        _forget_editor(k + "_w")
+
+
+def _resend_widget(key, keep=False, options=None):
+    """Re-send a keyed widget's value to the browser — call it BEFORE the
+    widget draws, for a widget drawn without value= / index= / default=.
+
+    Every mode except Run forecast ends in st.stop(). After a stopped run the
+    SERVER keeps the state of the widgets it did not draw, but the BROWSER
+    drops its copy. Back on the page, a keyed widget drawn without value=
+    tells the browser only its default (min_value, the first option, False,
+    empty) — the browser shows that, and the next click sends it back as the
+    widget's value (2026-09-11: the Ideal page's step-2 boxes came back at
+    500 t / 0 fish / 1 move, and the next click ran on them). A value written
+    through the Session State API is sent WITH the widget (set_value), so
+    writing the key to itself makes the browser show the server's value.
+
+    `options=`: the widget's own options, for a selectbox / radio /
+    multiselect whose options can change between runs. A pick no longer
+    among them is NOT re-sent: Streamlit 1.50 puts a select's options in its
+    widget id, so new options make a new widget, and pushing a stale pick
+    into it raises — int options TypeError ("bad argument type for built-in
+    operation"), radio ValueError — where not re-sending let the new widget
+    start from its default (2026-09-12: the Run page's FW→OG intake crashed
+    on one ordinary click, a tank picked for SMALLER then added to BIGGER,
+    and again on every rerun). A select or radio then starts from its
+    default; a multiselect keeps only the picks still offered. Without
+    `options=` a string pick would even survive into the new widget.
+    `keep=True`: a key the server no longer has is restored from its
+    `_keep_<key>` shadow."""
+    ss = st.session_state
+    if key in ss:
+        value = ss[key]
+    elif keep and ("_keep_" + key) in ss:
+        value = ss["_keep_" + key]
+    else:
+        return
+    if options is not None:
+        offered = list(options)
+        if isinstance(value, list):                 # a multiselect
+            value = [v for v in value if v in offered]
+        elif value not in offered:
+            ss.pop(key, None)
+            return
+    ss[key] = value
+
+
+def _editor_has_edits(state):
+    """True when a data_editor's widget state holds an edited cell, an added
+    row or a deleted row."""
+    return isinstance(state, dict) and any(
+        state.get(k) for k in ("edited_rows", "added_rows", "deleted_rows"))
+
+
+def _same_table(a, b):
+    try:
+        return a is b or (a.shape == b.shape
+                          and list(a.columns) == list(b.columns)
+                          and bool(a.equals(b)))
+    except Exception:  # noqa: BLE001 — not comparable = not the same table
+        return False
+
+
+def _data_editor(data, key, **kwargs):
+    """st.data_editor that never SHOWS one table while it RETURNS another.
+
+    Every mode except Run forecast ends in st.stop(). After such a run the
+    server keeps the edits of an editor it did not draw, but the browser
+    drops its copy: back on the page the editor showed the table WITHOUT
+    them while it returned them — and Configure's Save wrote them (measured
+    in a real browser, 2026-09-12: Facility row 0 volume_m3 edited 5.5 ->
+    999, shown 5.5 after Configure -> How it works -> Configure, saved 999).
+
+    So when the editor was not drawn in the previous run (`_run_n` counts
+    runs) and still holds edits, the table it returned at its last draw —
+    the table as the operator left it — is drawn as a NEW editor (`key~1`,
+    `key~2`, ...), which shows exactly what it returns: the rule of the
+    Ideal page's _ideal_editor_key. That table stands in for `data` until
+    `data` itself changes (the file changed on disk, or was saved), or
+    _forget_editor drops it (_reset_keys: Save / Reload). Nothing changes
+    without a round trip: a rerun on the page keeps its editor and key."""
+    ss = st.session_state
+    run = ss.get("_run_n", 0)
+    gen = ss.get("_ed_gen_" + key, 0)
+    wkey = f"{key}~{gen}" if gen else key
+
+    def _new_editor():
+        nonlocal gen, wkey
+        ss.pop(wkey, None)
+        gen += 1
+        ss["_ed_gen_" + key] = gen
+        wkey = f"{key}~{gen}"
+
+    fold = ss.get("_ed_fold_" + key)            # (editor key, data, table)
+    if fold is not None and (fold[0] != wkey or not _same_table(fold[1], data)):
+        # The table underneath changed since the fold: it wins, in a new
+        # editor, so no edit made on top of the folded table lands on it.
+        if fold[0] == wkey:
+            _new_editor()
+        ss.pop("_ed_fold_" + key, None)
+        fold = None
+    last = ss.get("_ed_last_" + key)            # (editor key, table returned)
+    if (last is not None and last[0] == wkey
+            and ss.get("_ed_run_" + key) != run - 1
+            and _editor_has_edits(ss[wkey] if wkey in ss else None)):
+        _new_editor()
+        fold = (wkey, data, last[1])
+        ss["_ed_fold_" + key] = fold
+    ss["_ed_run_" + key] = run
+    edited = st.data_editor(fold[2] if fold is not None else data, key=wkey,
+                            **kwargs)
+    ss["_ed_last_" + key] = (wkey, edited)
+    return edited
+
+
+def _forget_editor(key):
+    """Drop what _data_editor holds for `key` — the folded table and the
+    state of the editor it drew last — so the next draw starts from `data`
+    under the plain key, as it always has after a Save or a Reload."""
+    ss = st.session_state
+    gen = ss.pop("_ed_gen_" + key, 0)
+    if gen:
+        ss.pop(f"{key}~{gen}", None)
+    for k in ("_ed_fold_", "_ed_last_", "_ed_run_"):
+        ss.pop(k + key, None)
 
 
 def _clear_all_editor_state():
@@ -1649,25 +1777,25 @@ def _edit_biology():
             help=f"Feed-conversion curve '{_m}': kg of feed per kg of growth "
                  f"at this fish size. A batch uses the one curve its "
                  f"'fcr_model' names on the Batches tab.")
-    g2 = st.data_editor(st.session_state["bio_growth"], num_rows="dynamic",
-                        hide_index=True, use_container_width=True,
-                        key="bio_growth_w", column_config=_g_cfg)
+    g2 = _data_editor(st.session_state["bio_growth"], num_rows="dynamic",
+                      hide_index=True, use_container_width=True,
+                      key="bio_growth_w", column_config=_g_cfg)
     cols = st.columns(3)
     with cols[0]:
         st.markdown("**Mortality** (% / wk)")
-        m2 = st.data_editor(st.session_state["bio_mort"], num_rows="dynamic",
+        m2 = _data_editor(st.session_state["bio_mort"], num_rows="dynamic",
                             hide_index=True, key="bio_mort_w",
                             column_config={c: st.column_config.Column(help=h)
                                            for c, h in _BIO_MORT_HELP.items()})
     with cols[1]:
         st.markdown("**Feed types**")
-        f2 = st.data_editor(st.session_state["bio_feed"], num_rows="dynamic",
+        f2 = _data_editor(st.session_state["bio_feed"], num_rows="dynamic",
                             hide_index=True, key="bio_feed_w",
                             column_config={c: st.column_config.Column(help=h)
                                            for c, h in _BIO_FEED_HELP.items()})
     with cols[2]:
         st.markdown("**Culling**")
-        c2 = st.data_editor(st.session_state["bio_cull"], num_rows="dynamic",
+        c2 = _data_editor(st.session_state["bio_cull"], num_rows="dynamic",
                             hide_index=True, key="bio_cull_w",
                             column_config={c: st.column_config.Column(help=h)
                                            for c, h in _BIO_CULL_HELP.items()})
@@ -1701,7 +1829,7 @@ def _edit_facility():
     if not _ok:
         return
     base = _persist("fac_df", lambda: pd.DataFrame(_tanks))
-    edited = st.data_editor(base, num_rows="dynamic", hide_index=True,
+    edited = _data_editor(base, num_rows="dynamic", hide_index=True,
                             use_container_width=True, key="fac_df_w",
                             column_config={c: st.column_config.Column(help=h)
                                            for c, h in _FACILITY_HELP.items()})
@@ -1736,7 +1864,7 @@ def _edit_batches():
     if not _ok:
         return
     base = _persist("batch_df", lambda: pd.DataFrame(_rows))
-    edited = st.data_editor(base, num_rows="dynamic", hide_index=True,
+    edited = _data_editor(base, num_rows="dynamic", hide_index=True,
                             use_container_width=True, key="batch_df_w",
                             column_config={c: st.column_config.Column(help=h)
                                            for c, h in _BATCH_HELP.items()})
@@ -2000,7 +2128,9 @@ def _mw_events():
 def _mw_bump_grid():
     """Bump the raw-grid remount nonce so it re-seeds from the working set after
     the visual editor changes it (a data_editor keeps widget state by key)."""
-    st.session_state["mw_grid_nonce"] = st.session_state.get("mw_grid_nonce", 0) + 1
+    _old = st.session_state.get("mw_grid_nonce", 0)
+    _forget_editor(f"mw_grid_{_old}")        # the old grid is never drawn again
+    st.session_state["mw_grid_nonce"] = _old + 1
 
 
 def _mw_set(events):
@@ -2346,7 +2476,7 @@ def _mw_grid(state, rows, labels, color_by, batch_filter=None, moves=None):
                 keep.add(m["src"])
                 keep.update(m["dests"])
         tanks = [t for t in tanks if t.tank_id in keep]
-    ubatches = sorted({r.batch_id for r in rows if r.count > 0})
+    ubatches = sorted_batches({r.batch_id for r in rows if r.count > 0})
     _pal = px.colors.qualitative.Light24
     bcolor = {b: _pal[i % len(_pal)] for i, b in enumerate(ubatches)}
     # Per-batch BOLD FONT colour so a cohort is trackable across tanks even in Fill
@@ -2829,6 +2959,7 @@ def _mw_action_panel(state, ctx, rows, labels, sel, date_for):
     # staging is possible at all; its projected avg weight gates entry moves.
     _src_sys = state.tanks_by_id[tid].system_id
     _entry_src = is_entry(_src_sys)
+    _resend_widget("mw_act")
     act = st.radio("What do you want to do here?",
                    ["Harvest", "Graded → 6N", "Move (OG→OG)",
                     "Send to 6N depuration"],
@@ -2862,6 +2993,7 @@ def _mw_action_panel(state, ctx, rows, labels, sel, date_for):
                    "moves to an OG tank** to keep growing. Conserves count + "
                    "biomass exactly.")
         from forecast.manual_events import MODE_HARVEST, MODE_STAGE
+        _resend_widget(f"mw_g6_timing_{sfx}")
         _timing = st.radio(
             "When are the graded fish harvested?",
             ["Purge first — stage in 6N off-feed, harvested after the "
@@ -2909,6 +3041,7 @@ def _mw_action_panel(state, ctx, rows, labels, sel, date_for):
             st.caption(f"↳ biggest **{n_big:,.0f} ≈ {_big / 1000:.2f} kg** → 6N · "
                        f"smaller {r.count - n_big:,.0f} ≈ "
                        f"{_small / 1000:.2f} kg → OG")
+        _resend_widget(f"mw_g6_dest_{sfx}", options=dest_6n)
         dest6n = st.selectbox(
             "6N depuration tank — biggest fish (· batch · density)",
             options=dest_6n, format_func=dfmt, key=f"mw_g6_dest_{sfx}",
@@ -2918,6 +3051,7 @@ def _mw_action_panel(state, ctx, rows, labels, sel, date_for):
         ) if dest_6n else None
         # Grading empties the source, so the smaller remainder is graded OUT too and
         # moves to an OG tank (empty, or one already holding this batch). Required.
+        _resend_widget(f"mw_g6_ret_{sfx}", options=dest_og)
         ret_tank = st.selectbox(
             "Send the smaller fish to — OG tank (· batch · density)",
             options=dest_og, format_func=dfmt, key=f"mw_g6_ret_{sfx}",
@@ -2956,6 +3090,7 @@ def _mw_action_panel(state, ctx, rows, labels, sel, date_for):
                        "(rule R3 — the intra-OG1/2 equipment limit).")
         elif not _entry_src:
             st.caption("↳ Grow-out fish never move back into OG1/2 (rule R4).")
+        _resend_widget(f"mw_m_dest_{sfx}", options=move_dests)
         picks = st.multiselect(
             "Destination grow-out tank(s) — empty or same batch (· batch · density)",
             options=move_dests, format_func=dfmt, key=f"mw_m_dest_{sfx}")
@@ -2979,6 +3114,7 @@ def _mw_action_panel(state, ctx, rows, labels, sel, date_for):
                        f"OG1/2 is the entry tier (rule R5): move them forward "
                        f"to OG3-6 first.")
             return
+        _resend_widget(f"mw_6_dest_{sfx}", options=sorted(SIXN_ALL_TANKS))
         picks = st.multiselect(
             "6N depuration tank(s) — mains + sisters (· batch · density)",
             options=sorted(SIXN_ALL_TANKS), format_func=dfmt, key=f"mw_6_dest_{sfx}")
@@ -3144,11 +3280,13 @@ def _mw_fw_intake(state, ctx, rows, labels, date_for):
                    f"with its own cohort is not mixing. The arriving fish blend "
                    f"in at a count-weighted average weight.")
     dfmt = _mw_dest_fmt(state, _mw_occ_at(rows, wlabel))
+    _resend_widget(f"mw_fw_big_{sfx}", options=open_og)
     big_picks = st.multiselect(
         "Tank(s) for the BIGGER grade", options=open_og,
         format_func=dfmt, key=f"mw_fw_big_{sfx}")
     # A tank can't hold both grades — drop the big picks from the small options.
     small_opts = [t for t in open_og if t not in big_picks]
+    _resend_widget(f"mw_fw_small_{sfx}", options=small_opts)
     small_picks = st.multiselect(
         "Tank(s) for the SMALLER grade", options=small_opts,
         format_func=dfmt, key=f"mw_fw_small_{sfx}")
@@ -3289,7 +3427,7 @@ def _mw_raw_grid(state):
         "(combinable: `45:1000@small`).")
     nonce = st.session_state.get("mw_grid_nonce", 0)
     base = pd.DataFrame(_manual_events_to_df_rows(_mw_events()), columns=_MANUAL_COLS)
-    edited = st.data_editor(
+    edited = _data_editor(
         base, num_rows="dynamic", hide_index=True, use_container_width=True,
         key=f"mw_grid_{nonce}",
         column_config={
@@ -3477,6 +3615,7 @@ def _mw_copilot(uploaded, events, forecast_start=None, bad=None):
         p = props[i]
         return (f"{p.week_label}  ·  week {p.window_week}  ·  "
                 f"{'next — approvable' if i == 0 else 'look-ahead (view only)'}")
+    _resend_widget("mw_cp_week_sel", options=range(len(props)))
     sel = st.selectbox("Show recommendations for week", range(len(props)),
                        format_func=_wk_label, key="mw_cp_week_sel")
     prop = props[sel]
@@ -3588,11 +3727,11 @@ def _manual_window_editor(uploaded):
     # state of any keyed widget it didn't render, snapping the toggles back to
     # off (their content vanishes while the switch still looks on). Re-touching
     # the keys here, at the top (which always runs), keeps their state across
-    # such a rerun. (Verified against a headless Streamlit repro.)
+    # such a rerun. (Verified against a headless Streamlit repro.) The same
+    # re-send keeps them across a round trip through another mode.
     for _tk in ("mw_rollup_toggle", "mw_fw_toggle", "mw_adv_toggle",
                 "mw_copilot_toggle"):
-        if _tk in st.session_state:
-            st.session_state[_tk] = st.session_state[_tk]
+        _resend_widget(_tk)
     with st.expander("🗓 Starting setup — manual override window (optional)",
                      expanded=False):
         st.caption(
@@ -3659,6 +3798,7 @@ def _manual_window_editor(uploaded):
                          "The saved window length stays implicit — it runs through "
                          "your last scripted operation, then the planner takes over.")
             n_weeks = max(view, max_ev, 1)
+            _resend_widget("mw_view_at")
             _vmode = st.radio(
                 "Show tank state at", ["Week open", "Week close"],
                 horizontal=True, key="mw_view_at",
@@ -3674,6 +3814,7 @@ def _manual_window_editor(uploaded):
             date_for = {lbl: _week_start(i, ctx["forecast_start"])
                         for i, lbl in enumerate(labels)}
 
+            _resend_widget("mw_color_by")
             _cmode = st.radio(
                 "Colour cells by", ["Fill (density)", "Batch"], horizontal=True,
                 key="mw_color_by",
@@ -3705,10 +3846,14 @@ def _manual_window_editor(uploaded):
 
             # Optional batch filter — show only the tanks holding the selected
             # cohort(s) instead of the whole facility (empty = show all).
-            _all_batches = sorted({r.batch_id for r in rows if r.count > 0})
+            _all_batches = sorted_batches({r.batch_id for r in rows if r.count > 0})
+            # No default=[] (it is the default anyway): an explicit default
+            # plus the re-send makes Streamlit warn "also set via the Session
+            # State API".
+            _resend_widget("mw_batch_filter", options=_all_batches)
             _sel_batches = st.multiselect(
                 "Filter to batches (empty = whole facility)", options=_all_batches,
-                default=[], key="mw_batch_filter",
+                key="mw_batch_filter",
                 help="Show only the tanks that hold the selected batch(es) in some "
                      "displayed week. Batch colours stay the same as the full view.")
             _bf = set(_sel_batches) or None
@@ -3790,6 +3935,7 @@ def _manual_window_editor(uploaded):
                         _opts = ["All weeks (worst first)", *_breach_weeks]
                         if st.session_state.get("mw_rec_week") not in _opts:
                             st.session_state["mw_rec_week"] = _opts[0]
+                        _resend_widget("mw_rec_week", options=_opts)
                         _sel = st.selectbox(
                             "Show recommendations for week", _opts, key="mw_rec_week",
                             help="'All weeks' lists each distinct breach at its worst "
@@ -4013,9 +4159,9 @@ def _edit_limits():
                  "per day — the physical limit of its feed line. Binds "
                  "before biomass does on the grow-out systems. Unit: kg/day."),
     }
-    sysdef_df = st.data_editor(st.session_state["sysdef_grid"], hide_index=True,
-                               column_config=sysdef_cfg, key="sysdef_grid_w",
-                               use_container_width=True)
+    sysdef_df = _data_editor(st.session_state["sysdef_grid"], hide_index=True,
+                             column_config=sysdef_cfg, key="sysdef_grid_w",
+                             use_container_width=True)
 
     # ---------------- Mode-specific capacities ----------------
     _psd = _sixn_prod_start_str()
@@ -4049,10 +4195,10 @@ def _edit_limits():
                  "follows the metric: kg for biomass, kg/day for "
                  "feed_per_day."),
     }
-    modedef_df = st.data_editor(st.session_state["modedef_grid"],
-                                hide_index=True, num_rows="dynamic",
-                                column_config=modedef_cfg, key="modedef_grid_w",
-                                use_container_width=True)
+    modedef_df = _data_editor(st.session_state["modedef_grid"],
+                              hide_index=True, num_rows="dynamic",
+                              column_config=modedef_cfg, key="modedef_grid_w",
+                              use_container_width=True)
 
     # ---------------- Facility limits ----------------
     # Metric names must be the TOKENS the `metric` column actually shows
@@ -4095,7 +4241,7 @@ def _edit_limits():
             "ALL for that week — not to the Control default, and not to 'no "
             "harvest'. Leave a cell blank to mean 'use the default'.")
         if weeks:
-            fdf = st.data_editor(
+            fdf = _data_editor(
                 st.session_state["flim_wide"], hide_index=True,
                 key="flim_wide_w",
                 column_config={"metric": st.column_config.Column(
@@ -4115,7 +4261,7 @@ def _edit_limits():
             "capacity applies. Weeks run across the top; the label columns "
             "stay frozen as you scroll.")
         if weeks:
-            sdf = st.data_editor(
+            sdf = _data_editor(
                 st.session_state["slim_wide"], hide_index=True, height=400,
                 key="slim_wide_w",
                 column_config={
@@ -4941,7 +5087,7 @@ def _edit_targets_prices():
     for _c in ("Target (t)", "Plan (t)"):
         if _c in _mdf_in.columns:
             _mdf_in[_c] = pd.to_numeric(_mdf_in[_c], errors="coerce").astype(float)
-    mdf = st.data_editor(
+    mdf = _data_editor(
         _mdf_in,
         num_rows="dynamic", hide_index=True, use_container_width=True,
         key="tgt_monthly_%d" % st.session_state.get("_tgt_nonce", 0),
@@ -4959,7 +5105,7 @@ def _edit_targets_prices():
                      "kg in config/targets.yaml. Targets GRADE the plan; to "
                      "MOVE tonnage set the per-week band in Limits."),
         })
-    ydf = st.data_editor(
+    ydf = _data_editor(
         pd.DataFrame([{"Year": k, "Target (t)": round(float(v) / 1000.0, 1)}
                       for k, v in sorted(t["yearly"].items())]
                      or [{"Year": "", "Target (t)": None}]),
@@ -5005,7 +5151,7 @@ def _edit_targets_prices():
              "average weight (your Excel LOGNORM method). Re-tune against "
              "historical harvest results. Per-month price overrides live "
              "in config/economics.yaml under each band's `monthly:` key.")
-    bdf = st.data_editor(
+    bdf = _data_editor(
         pd.DataFrame(e["price_bands"]
                      or [{"min_kg": None, "max_kg": None, "price_per_kg": None}]),
         num_rows="dynamic", hide_index=True, use_container_width=True,
@@ -5220,7 +5366,7 @@ def _edit_costs():
                                       errors="coerce").astype(float)
     # A new editor whenever Biology's feed types change, so a price never
     # lands on the wrong row, and whenever costs.yaml changes on disk.
-    fdf = st.data_editor(
+    fdf = _data_editor(
         _fd, num_rows="fixed", hide_index=True, width="stretch",
         key="cost_feed_" + _hl.md5(_json.dumps([ftypes, _ks]).encode()
                                    ).hexdigest()[:12],
@@ -5347,9 +5493,10 @@ def _config_editor():
 # Ideal-page widget state. Streamlit (1.50) DROPS a keyed widget's value when
 # the widget is not rendered (another mode is showing), and a keyed widget
 # IGNORES `value=` after its first render. So each value is remembered under a
-# shadow key and restored before the widget draws again, and `value=` is
-# passed only while the key is empty (passing both makes Streamlit warn that
-# the value was "also set via the Session State API").
+# shadow key and restored before the widget draws again — or re-sent, when the
+# server still holds it but the browser dropped it (_resend_widget) — and
+# `value=` is passed only while the key is empty (passing both makes
+# Streamlit warn that the value was "also set via the Session State API").
 _IDEAL_KEEP = ("ideal_cap_t", "ideal_cads", "ideal_sizes", "ideal_ref_cad",
                "ideal_ref_size", "ideal_ref_cap", "ideal_ref_hmax",
                "ideal_ref_hmin", "ideal_ref_wmin", "ideal_ref_feed",
@@ -5365,9 +5512,13 @@ _IDEAL_KEEP = ("ideal_cap_t", "ideal_cads", "ideal_sizes", "ideal_ref_cad",
 
 
 def _ideal_restore():
+    # A key the server still holds is RE-SENT, not only a missing one
+    # restored: after a round trip through a mode that ends in st.stop() the
+    # server keeps these values but the browser has dropped its copy, and a
+    # widget drawn without value= would come back at its minimum (500 t, 0
+    # fish, 1 move) and the next click would run on it (_resend_widget).
     for k in _IDEAL_KEEP:
-        if k not in st.session_state and ("_keep_" + k) in st.session_state:
-            st.session_state[k] = st.session_state["_keep_" + k]
+        _resend_widget(k, keep=True)
 
 
 def _ideal_save():
@@ -5379,6 +5530,40 @@ def _ideal_save():
 def _ideal_default(key, value, param="value"):
     """`value=` (or `default=`) for a keyed widget only while its key is empty."""
     return {} if key in st.session_state else {param: value}
+
+
+def _ideal_editor_key(base_key, nonce_key, key_fmt, keep_key):
+    """-> (nonce, key) for one of this page's data editors this run, with its
+    table (`base_key`) set to what the operator left.
+
+    `keep_key` holds (nonce, the edited table) from the editor's last draw.
+    Back from a mode that finishes normally (Run forecast), Streamlit has
+    dropped the editor's state: the table starts from the kept one. Back from
+    a mode that ends in st.stop() it is worse: the SERVER keeps the edits but
+    the browser drops its copy, so the page showed the table without them
+    while every run used them (measured in a real browser, 2026-09-11: a
+    density cap shown at 85, run at 77). Then the kept table is drawn as a
+    NEW editor (the next nonce), which shows exactly what runs. "Dropped" =
+    the editor was not drawn in the previous run (`_run_n` counts runs), so
+    a rerun on the page keeps its editor."""
+    ss = st.session_state
+    nonce = ss.get(nonce_key, 0)
+    key = key_fmt.format(nonce)
+    kept = ss.get(keep_key)
+    run = ss.get("_run_n", 0)
+    if kept is not None and kept[0] == nonce:
+        state = ss[key] if key in ss else None
+        if state is None:
+            ss[base_key] = kept[1]
+        elif (ss.get("_drawn_run_" + key) != run - 1 and isinstance(state, dict)
+              and any(state.get(k) for k in ("edited_rows", "added_rows",
+                                             "deleted_rows"))):
+            ss[base_key] = kept[1]
+            nonce += 1
+            ss[nonce_key] = nonce
+            key = key_fmt.format(nonce)
+    ss["_drawn_run_" + key] = run
+    return nonce, key
 
 
 # Step 3's what-if limits: (widget key, Control key, box unit per Control
@@ -5474,11 +5659,11 @@ def _ideal_limits_table(ctx, prefix):
             "Tank density cap (kg/m³)": v["density"],
             "System biomass limit (t)": v["biomass_t"],
             "System feed limit (kg/day)": v["feed"]} for s, v in seeds.items()])
-    nonce = st.session_state.get(prefix + "_nonce", 0)
-    ed_key = f"{prefix}_w_{nonce}"
-    kept = st.session_state.get("_keep_" + prefix + "_edited")
-    if ed_key not in st.session_state and kept is not None and kept[0] == nonce:
-        st.session_state[prefix + "_base"] = kept[1]   # back from another mode
+    # Back from another mode: the table as the operator left it, in an editor
+    # that shows it (_ideal_editor_key).
+    nonce, ed_key = _ideal_editor_key(prefix + "_base", prefix + "_nonce",
+                                      prefix + "_w_{}",
+                                      "_keep_" + prefix + "_edited")
     edited = st.data_editor(
         st.session_state[prefix + "_base"], hide_index=True, width="stretch",
         key=ed_key, disabled=["System", "Tanks"],
@@ -5510,8 +5695,7 @@ def _ideal_limits_table(ctx, prefix):
                      "counts as a breach only above this limit plus the "
                      "system-cap buffer (global_buffer_pct).")})
     st.session_state["_keep_" + prefix + "_edited"] = (nonce, edited)
-    if mv_key not in st.session_state and ("_keep_" + mv_key) in st.session_state:
-        st.session_state[mv_key] = st.session_state["_keep_" + mv_key]
+    _resend_widget(mv_key, keep=True)               # see _ideal_restore
     # Control's 0 means "budget off", but this box needs at least 1 (the
     # engine's override must be a positive whole number) and Streamlit raises
     # on a value under min_value. So the box starts at 1 then, and — as for
@@ -5945,13 +6129,11 @@ def _ideal_reference(ctx, today, cap_t):
         # edits per element, so the same key + same data kept them.
         st.session_state["ideal_ref_nonce"] = (
             st.session_state.get("ideal_ref_nonce", 0) + 1)
-    nonce = st.session_state.get("ideal_ref_nonce", 0)
-    ed_key = f"ideal_ref_df_w_{nonce}"
-    kept = st.session_state.get("_keep_ideal_ref_edited")
-    if ed_key not in st.session_state and kept is not None and kept[0] == nonce:
-        # Back from another mode: Streamlit dropped the editor's state, so
-        # start from the table exactly as the operator left it.
-        st.session_state["ideal_ref_base"] = kept[1]
+    # Back from another mode: start from the table exactly as the operator
+    # left it, in an editor that shows it (_ideal_editor_key).
+    nonce, ed_key = _ideal_editor_key("ideal_ref_base", "ideal_ref_nonce",
+                                      "ideal_ref_df_w_{}",
+                                      "_keep_ideal_ref_edited")
     base = st.session_state["ideal_ref_base"]
     st.caption(
         f"One row per batch — edit counts, dates, growth and FCR model, or add "
@@ -8895,8 +9077,12 @@ after the run ends.""")
   whole-fish rounding. **No fish are lost.** But `WeeklyReport` still reports
   mortality on those weeks — about **1,000 fish over an 85-week horizon**, up
   to 28 on a single batch-week — that the population never lost, so the two
-  sheets disagree in their Mortality column alone (Open, Cull, Harvest, Input
-  and Close match exactly). A second, smaller effect sits on ordinary grow-out
+  sheets disagree in their Mortality column alone (Harvest and Close match
+  exactly; Open, Cull and Input match on every week except a batch's
+  freshwater-to-seawater week, where `WeeklyReport` opens on the freshwater
+  fish and shows the move in Xfer_In/Xfer_Out, while the seawater-only
+  `ReconciliationReport` opens without them and lists them as `TranOG_In`).
+  A second, smaller effect sits on ordinary grow-out
   weeks: 77 of them differ by ~4 fish (314 in total, 0.007% of a batch), which
   is whole-fish rounding applied per tank per day and summed. Measured
   2026-09-04: the two do **not** cancel — +325 on grow-out weeks against −1,147
@@ -10377,6 +10563,7 @@ def _stocking_frontier_section():
         "are fixed) and shows the trade: fewer fish rear **gentler** (lower "
         "experienced density) but yield **less harvest**. Each point runs the full "
         "forecast (~20s); your config/scenario/PR are never touched.")
+    _resend_widget("frontier_depth")
     _fd = st.radio("Frontier depth", ["Quick (0, 10%)",
                                       "Full (0, 5, 10, 15, 20%)"],
                    horizontal=True, key="frontier_depth")
@@ -10573,7 +10760,10 @@ def _derive_batch_plans(bl_df, he_df):
                       "Harvest_window": (f"{h['first']}–{h['last']}" if h else "—"),
                       "HOG_t": round(h["hog_t"], 0) if h else 0.0,
                       "milestones": milestones})
-    plans.sort(key=lambda p: p["SW_entry"])
+    # Batch order, the same key as the workbook's Batch Plan sheet. Sorting on
+    # SW_entry tied every batch in flight at the forecast start, so the two
+    # views disagreed about the in-flight block (sheet reversed, app ascending).
+    plans.sort(key=lambda p: batch_sort_key(p["Batch"]))
     return plans
 
 
@@ -10724,7 +10914,7 @@ def _daily_harvest_table(he_df):
         tanks = (", ".join(str(int(t)) if float(t).is_integer() else str(t)
                            for t in sorted(sub["Tank"].dropna().unique()))
                  if "Tank" in sub else "")
-        bats = (", ".join(sorted(sub["Batch"].dropna().astype(str).unique()))
+        bats = (", ".join(sorted_batches(sub["Batch"].dropna().astype(str).unique()))
                 if "Batch" in sub else "")
         n = len(days)
         for d in days:
@@ -10956,6 +11146,7 @@ def _optimizer():
                 custom[comp] = st.number_input(comp, min_value=0.0, max_value=10.0,
                                                value=float(base.get(comp, 0.0)), step=0.5,
                                                key=f"w_{comp}")
+        _resend_widget("use_custom_w")
         if st.checkbox("Use custom weights", key="use_custom_w"):
             pass
         else:
@@ -12086,6 +12277,7 @@ def _adoption_gate(cand, sig: str, slot: str, box=None) -> bool:
           "You can still adopt or promote it on your own judgement; what you "
           "accepted is then recorded with what you save.")
     _k = _hl.md5(f"{sig}|{slot}|{cand['label']}".encode()).hexdigest()[:10]
+    _resend_widget(f"ana_ack_{_k}")
     return bool(box.checkbox(
         f"I have read the {len(br)} finding(s) above and accept them for "
         f"**{cand['label']}**", key=f"ana_ack_{_k}"))
@@ -12364,11 +12556,13 @@ def _analyze(skip_lever_check=False):
 
     # ---- Full analysis ----
     st.subheader("Full analysis")
+    _resend_widget("ana_emph", options=list(optimize.EMPHASIS_PRESETS.keys()))
     emphasis = st.selectbox(
         "What should 'best' mean? (the emphasis for the knob search + final score)",
         list(optimize.EMPHASIS_PRESETS.keys()), key="ana_emph",
         help="Hard rules always come first regardless of emphasis; this weights "
              "the soft objectives (flat biomass, feed, handling, density).")
+    _resend_widget("ana_depth")
     depth = st.radio(
         "Analysis depth",
         ["Quick tournament — engines at stock + knob search on the live config",
@@ -13043,9 +13237,11 @@ def _analyze(skip_lever_check=False):
     # analysis promoted the runner-up (the tuned winner was refuted cross-PR),
     # which needed a by-hand YAML write. Now it's a picker.
     _pc1, _pc2 = st.columns([3, 1])
+    _pick_opts = [c["label"] for c in ranked]
+    _resend_widget("ana_promote_pick", options=_pick_opts)
     _pick_lbl = _pc1.selectbox(
         "Promote a different candidate as the Quick-run default",
-        [c["label"] for c in ranked], key="ana_promote_pick",
+        _pick_opts, key="ana_promote_pick",
         help="The card's ⭐ promotes the winner; this promotes whichever "
              "candidate YOUR judgment picks (e.g. after cross-PR evidence).")
     # This picker reaches EVERY row, including the ones ranked last precisely
@@ -13108,6 +13304,10 @@ def _analyze(skip_lever_check=False):
     # here from the retired Tune mode; runs on demand with its own button.
     _stocking_frontier_section()
 
+
+# Every run is counted, so a data editor can tell a rerun on its page from a
+# return to it (_ideal_editor_key on the Ideal page, _data_editor elsewhere).
+st.session_state["_run_n"] = st.session_state.get("_run_n", 0) + 1
 
 if app_mode.startswith("Decide"):
     _decide()
@@ -13582,7 +13782,7 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
                 return agg
 
             agg = _rv_memo("pb_agg", _rid, _build_batch_agg)
-            batches = sorted(agg["Batch"].dropna().unique())
+            batches = sorted_batches(agg["Batch"].dropna().unique())
             default = ["B46", "B47"] if all(b in batches for b in ("B46", "B47")) else batches[:2]
             all_weeks = sorted(agg["Week"].dropna().unique())
             # Keyed so the selection survives reruns triggered elsewhere in the
@@ -13623,7 +13823,11 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
                     (agg["Batch"].isin(picked))
                     & (agg["Week"] >= wk_lo)
                     & (agg["Week"] <= wk_hi)
-                ].sort_values(["Batch", "Week"])
+                ].sort_values(
+                    ["Batch", "Week"],
+                    # Batch by NUMBER (B9 < B10), via its rank in the shared order.
+                    key=lambda s: (s.map({b: i for i, b in enumerate(
+                        sorted_batches(s.unique()))}) if s.name == "Batch" else s))
                 c1, c2 = st.columns(2)
                 with c1:
                     fig = px.line(
@@ -14053,6 +14257,7 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
             _bp_opts = [p["Batch"] for p in bplans]
             if st.session_state.get("batchplan_pick") not in _bp_opts:
                 st.session_state.pop("batchplan_pick", None)
+            _resend_widget("batchplan_pick", options=_bp_opts)
             pick = st.selectbox("Batch", _bp_opts, key="batchplan_pick")
             bp = next((p for p in bplans if p["Batch"] == pick), bplans[0])
             m1, m2, m3, m4 = st.columns(4)
@@ -14118,7 +14323,7 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
             _bat_col = next((c for c in tp_df.columns
                              if str(c).startswith("Batch")), None)
             _bats = (f3.multiselect("Batch(es)",
-                                    sorted(tp_df[_bat_col].astype(str).unique()),
+                                    sorted_batches(tp_df[_bat_col].astype(str).unique()),
                                     default=[], key="tp_batches")
                      if _bat_col else [])
             view = tp_df

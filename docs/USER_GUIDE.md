@@ -824,20 +824,20 @@ board are pinned `off` so you can always see them side by side.
 | **HarvestPlan Report** | per-year blocks, per-batch Units/AvWt/Biomass by month + **bottom monthly TOTAL row** | **monthly sales planning** (HOG tonnes landed per month) |
 | **YearlySummary** | facility-wide per-year: harvest count/HOG t/gross t/avg wt, feed t, peak+mean biomass, utilization | **year-over-year trends** |
 | **TransferTemplate** | (A) the canonical batch journey through seawater; (B) per-batch summary: SW entry week + weeks-from-start, entry weight/count/density, peak tank footprint, peak density (×cap) + Density_Status flag, harvest window + weight | **the general plan at a glance** — which batches enter when, their footprint, density risk, and harvest timing |
-| **Batch Plan** | per batch: a summary header, then the milestone timeline (each tier entered, week, weight, tanks) with handling moves per batch/fish | one batch's path |
+| **Batch Plan** | per batch, **in batch order** (B41, B42, …): a summary header, then the milestone timeline (each tier entered, week, weight, tanks) with handling moves per batch/fish | one batch's path |
 | **Daily Harvest Schedule** | each week's harvest — **all tanks combined** — split evenly Mon–Fri (blended avg weights), with a per-week **Total** row and a blank line between weeks; Tank/Batch list every contributor | daily ops |
 | **FeedForecastWeekly / Monthly** | feed by feed-type × period matrix | feed ordering |
 | **Advisory** | per-week capacity table: biomass/feed vs caps + excess + OK/REDUCE | capacity headroom + over-cap weeks |
 | **FacilityMap** | tank × week grid (cell = "Batch# AvgWt/Density"); **below it**: per-system × week **feed (kg/day)** and **biomass (kg)** blocks, each with a FACILITY total row | occupancy at a glance + per-system load vs caps |
 | **BatchLocations** | per-(week, batch, tank) occupancy | raw realized placement |
 | **ValidationLog** | numbered warnings (# / Category / Detail), incl. FW-calibration + bottleneck (annotated with resolution), **`INFO - Per-week coverage`** (below) and the **realized-plan** categories below | diagnostics — **read the `(realized plan)` categories first** |
-| **InputConservationAudit** | per batch: placed/dropped, harvested, standing, **FW reconciliation** (planned vs realized seawater entry) + **closed FW mass-balance** (`first_FW_count` vs `realized_TranOG + FW_mort + FW_cull`; §6 #6) | conservation + FW calibration gaps |
+| **InputConservationAudit** | per batch: placed/dropped, harvested, standing, **FW reconciliation** (planned vs realized seawater entry) + **closed FW mass-balance** (`first_FW_count` vs `realized_TranOG + FW_mort + FW_cull`; §6 #6). A batch whose freshwater part at the PR close nothing models reads **`*** FW PART NOT MODELLED ***`**, never `PLACED`, with those fish in `Fish_At_Risk` (see the split-batch warning below) | conservation + FW calibration gaps |
 | **TankContinuityAudit** | per-(tank, week) balance + **facility conservation summary** | 0-drift proof |
-| **ReconciliationReport / SystemLimitsAudit** | per-batch open/close balance (count reconciles **exactly** via recorded realized biology; biomass within tolerance) / per-system realized biomass + feed vs cap, flagged `BIOMASS_OVER` / `FEED_OVER` | deeper audits — *TankContinuityAudit is the authoritative 0-drift biomass check* |
+| **ReconciliationReport / SystemLimitsAudit** | per-batch **seawater-only** open/close balance, `open − mortality − harvest + TranOG_In = expected close` — `TranOG_In` / `TranOG_In_kg` are the fish arriving from freshwater (a move, not an input; the columns were called `Input_Count` / `Input_kg` before 2026-09-11, values unchanged), and `Cull_Count` is informational (it happens in freshwater, before arrival). Count reconciles **exactly** via recorded realized biology; biomass within tolerance / per-system realized biomass + feed vs cap, flagged `BIOMASS_OVER` / `FEED_OVER` | deeper audits — *TankContinuityAudit is the authoritative 0-drift biomass check* |
 | **RealizationReport** | the **intent** check, for all three event families. **Transfers**: events emitted / applied in full / in part / refused whole, fish planned vs moved, **share of planned movement realized**, a per-week table, and **STUCK RELATIONSHIPS** (one row per batch+source tank+reason, so a refusal repeated many times reads as one fact with a first/last week). **Harvest**: decided vs taken, split into taken-as-decided / INV-5 force-emptied (took *more*) / short / refused. **TranOG**: fish planned to enter vs entered, and **fish that never entered the facility at all**. **Grading**: Grade (size split) and GradedHarvest (the peel), applied vs refused whole | "did the plan actually happen?" — see the note below |
-| **WeeklyReport / MonthlyReport** | the per-(period, batch) production ledger — open/close count, weight, biomass, **Avg_Density**, SGR, feed, FCR, mortality, harvest, transfers, checks — plus a **TOTAL row per period** and a real **AutoFilter** already applied — filter these | detailed batch accounting; reading one batch, or slicing by batch/period |
+| **WeeklyReport / MonthlyReport** | the per-(period, batch) production ledger — open/close count, weight, biomass, **Avg_Density**, SGR, feed, FCR, mortality, harvest, transfers, checks — plus a **TOTAL row per period** and a real **AutoFilter** already applied — filter these. **`Input_Count` is eggs stocked, nothing else**; the move from freshwater to seawater shows in `Xfer_In`/`Xfer_Out` (see *Reading the ledger* below) | detailed batch accounting; reading one batch, or slicing by batch/period |
 | **WeeklyReport Grouped / MonthlyReport Grouped** | the SAME rows with a **blank line between periods**, for reading and printing. **Do not filter these** — a blank row ends Excel's contiguous range, so a filter would silently cover only the first period | reading a period end-to-end |
-| **Diagnostics** | FW-calibration: per batch, the target vs projected pre-cull avg weight at TranOG, the residual, and a back-solved `Suggested_FW_Correction` | tuning `fw_correction` (§7 step 2) |
+| **Diagnostics** | FW-calibration: per batch (in batch order), the target vs projected pre-cull avg weight at TranOG, the residual, and a back-solved `Suggested_FW_Correction` | tuning `fw_correction` (§7 step 2) |
 | **BiologyProjection** | the unharvested per-batch biology projection (growth, feed along the curve, ignoring harvest/caps) | model inputs — NOT the fed plan (see the Overview note) |
 | **RunConfig** | the exact config + scenario embedded in the output | reproducibility |
 | **CostsAndProfit** | only when `config/costs.yaml` exists; always the LAST tab: per month (with a first row for any days before the report opens), per year and horizon — feed kg, eggs stocked, feed / shipping / oxygen / chemicals / eggs / fixed cost, total cost, HOG, revenue, **profit**, spend per kg HOG sold, unpriced feed kg; then **feed by type** with your item names. Row 2 says when feed had no price (profit then overstated). NOT COMPUTED (with the reason) when the file is invalid or empty | the cash-view P&L — §15 |
@@ -933,6 +933,24 @@ board are pinned `off` so you can always see them side by side.
 > monthly HOG tie out. Continuous flows (feed, growth, mortality) split by
 > calendar day. The per-event **HarvestReport** is unprorated detail (each row
 > keeps its event-date month).
+>
+> **Eggs** are booked whole in the month of the batch's **input date** — the
+> month **CostsAndProfit** charges them in — never split across a month end. A
+> stocking week that straddles two months used to split them by calendar day
+> (B63 read 488,571 + 81,429 on the 9.10 PR). Like harvest, the egg input moves
+> that week's month-boundary Open/Close by its own share, so each month's row
+> still adds up. An input date before the report opens is booked in its first
+> month.
+>
+> **Batch order.** Every sheet and every app list orders batches **by number**
+> — B9, B10, … B41, B42, … B100 — which is also chronological order (input and
+> TranOG dates rise with the number; a test fails loudly if a future id breaks
+> that). The event sheets **HarvestPlan**, **HarvestReport** and
+> **TransferPlan** stay in **date** order, and rows on the same date are listed
+> by batch number (they used to follow the tank number: 2028-W14 listed B56
+> above B55). Only the row order changed — every value is what it was.
+> **BatchLocations** stays in tank order: it is the plan's raw per-tank data,
+> not a period report.
 >
 > **Total feed is one number:** the **FeedForecast** sheets, the **WeeklyReport/
 > MonthlyReport** Feed column, and the **YearlySummary** Feed total all sum the same
@@ -1038,15 +1056,79 @@ without the check, 85 harvest weeks compared, **0 differ, 0.0 fish**.
 > matching Aug 1–13. That is what makes the merge a clean addition rather than
 > an overlap; a *since-last-report* period would instead straddle two months.
 
-> **`Count_Check` in the ledgers is not always zero, and that is expected.**
-> The column carries the ledger's own residual, and two real movements land
-> outside the Mort/Cull columns: a manual-window week whose 6N purge tanks are
-> frozen (STARVE — the mortality *rate* is 0 by design while the count still
-> falls), and the week a batch enters seawater (the FW cull at TranOG is booked
-> to the freshwater phase). Neither is a lost fish; `Bio_Check` is 0 by
-> construction, and conservation is proven separately by
-> **InputConservationAudit** and **ReconciliationReport**. The sheet states this
-> in its own header so nobody has to remember it.
+> **Reading the ledger (WeeklyReport / MonthlyReport).** Operator rule,
+> 2026-09-11: *input is only egg inputs; moving fish from freshwater to
+> seawater is not an input.* Every row satisfies, from its own printed columns,
+>
+> `Open − Mort − Harv − Cull + Input + Xfer_In − Xfer_Out − Close = Count_Check`
+>
+> * **`Open`** holds every fish of the batch at the start of the period,
+>   freshwater **and** seawater. The first week's TOTAL `Open` equals the
+>   ProductionReport's own fish count (4,967,628 on the 8/31 PR — including
+>   B49's 250,225 freshwater fish, which the ledger used to leave out). Each
+>   week opens where the previous one closed.
+> * **`Input_Count`** is **eggs stocked, and nothing else**. Over the horizon it
+>   adds up to the eggs stocked in it (6,840,000 on the 8/31 PR; it used to read
+>   10.8 M because every smolt was counted again when it entered seawater).
+> * **`Xfer_In` / `Xfer_Out`** carry every move inside the batch — tank to tank,
+>   and now the **freshwater→seawater move (TranOG)** too. In and Out are equal,
+>   so they cancel. On that week the batch opens on the freshwater fish about to
+>   cross, so its SGR and FCR now print (the same fish, growing).
+> * **`Cull_Count` / `Mort_Count`** on the freshwater→seawater week include the
+>   cull at TranOG when TranOG_Date falls on a week start, and — for a scripted
+>   `fw_to_og` — the transfer's cull and the freshwater fish lost between the PR
+>   close and the transfer (the window's own `fw_count_at_transfer`).
+>
+> **`Count_Check` is not always zero, and that is expected.** It is the row's
+> own residual. A few fish per batch-week are normal: seawater `Mort_Count` is
+> the opening count × the week's mortality rate, while the plan applies
+> mortality day by day, per tank, in whole fish, to the fish actually present —
+> so the two differ by a few fish, most visibly on a harvest week (about 1,800
+> fish over 85 weeks on the 8/31 PR). A manual-window week whose 6N purge tanks
+> are frozen (STARVE — the mortality *rate* is 0 by design while the count still
+> falls) carries a small one too. Neither is a lost fish. On MonthlyReport, a
+> month that merges a mid-month ProductionReport carries the PR's own
+> *Deviation count in period* (also on a batch the PR harvested out before the
+> forecast starts — that row used to read 0). `Bio_Check` is 0 by construction
+> except on the split-batch row described below, and conservation is proven
+> separately by **InputConservationAudit** and **ReconciliationReport**. The
+> sheet states this in its own header so nobody has to remember it.
+>
+> **Blank SGR / SFR / FCR on a split batch's first weeks.** The freshwater part
+> of a batch split at the PR close has no freshwater biology or feed in the
+> plan: it sits in the ledger at the PR's count and weight until its `fw_to_og`
+> moves it, and on that week its whole freshwater growth lands at once with no
+> feed behind it (B49 on the 8/31 PR would read Bio_FCR 0.52 for 2026-W36).
+> So the rates are left **blank** on every row that carries such a part (a
+> week, or the batch's month containing one). Blank means "cannot be measured
+> here", never zero. The period's **TOTAL** row still prints the facility's
+> rates; on the week that part crosses to seawater, its freshwater growth —
+> with no feed behind it — is inside that TOTAL.
+>
+> **`WARNING - Split batch at PR close (FW part not modelled)`** (ValidationLog,
+> and a console WARN). A batch the PR holds partly in freshwater and partly in
+> seawater is planned from its seawater tanks only; its freshwater part is
+> moved only by a scripted `fw_to_og` event. If none is scripted, those fish
+> are **in the opening but never reach seawater or harvest** — the warning
+> names the batch and the count, the batch's first ledger week shows them in
+> `Count_Check` (+ that count) and their biomass in `Bio_Check` (not as negative
+> growth), and InputConservationAudit marks it `FW PART NOT MODELLED` instead
+> of `PLACED` (a batch already marked `DROPPED` keeps that verdict). Nothing is
+> forced to balance. **Script an `fw_to_og` for the batch** (Manual starting
+> events) to move them; the warning then goes quiet. When a later planning
+> change models the freshwater part itself, that batch stops being held from
+> the PR figures, so the warning also goes quiet and the fish are never counted
+> twice. (A wholly-freshwater batch that no freshwater projection ran for —
+> e.g. one missing from the Batches sheet — gets the sibling
+> `WARNING - FW batch at PR close (not modelled)`. A batch whose freshwater
+> projection *did* run is never held, even when its TranOG date is already
+> past and its projection starts in seawater.)
+>
+> On a scripted `fw_to_og`, the freshwater fish lost between the PR close and
+> the transfer are booked as `Mort_Count` on the transfer week only when the
+> window's transfer balance describes **one** applied `fw_to_og` for the batch.
+> With two `fw_to_og` events for one batch (one refused, or both applied), no
+> such loss is booked and the difference stays visible in `Count_Check`.
 
 > **The workbook is formatted on the way out.** Headers are frozen and
 > filterable, numbers carry thousands separators and sensible precision, tabs

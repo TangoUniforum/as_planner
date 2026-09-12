@@ -579,6 +579,11 @@ def main(
     # FW-in-flight projection (anchored to PR FW physical-unit state).
     fw_in_flight_residuals: list = []
     fw_in_flight_splits: list = []
+    # The batches the freshwater projector actually RAN for -- recorded, not
+    # re-derived, for the report layer (held_fw_openings): their PR FW fish are
+    # carried by a projection, even one that starts in seawater because the
+    # batch's tran_og_date is already past. Read by nothing in the planner.
+    fw_projected_ids: set = set()
     for batch_id in sorted(fw_in_flight_ids):
         b_meta = batch_by_id.get(batch_id)
         if b_meta is None:
@@ -599,6 +604,7 @@ def main(
         fw_states, fw_resids, fw_splits = project_in_flight_fw_batch(
             b_meta, tables, _fw_control, agg["count"], avg_wt_g, pr_closing
         )
+        fw_projected_ids.add(batch_id)
         in_flight_states.extend(fw_states)
         fw_in_flight_residuals.extend(fw_resids)
         fw_in_flight_splits.extend(fw_splits)
@@ -1157,6 +1163,27 @@ def main(
         for _m in _coverage_notes:
             print(f"    {_m}")
 
+    # THE PR's FRESHWATER FISH THAT NO PROJECTION CARRIES (report layer,
+    # 2026-09-11). Operator rule: the ledger opening holds every fish the PR
+    # holds, FW and SW. A batch split across FW and SW at the close is hydrated
+    # as seawater only and kept out of the FW projection (above), and a
+    # wholly-FW batch moved by a manual fw_to_og is the same -- so their FW
+    # part is HELD for the ledgers (excel_io.held_fw_openings). A held part a
+    # scripted fw_to_og moves is modelled; one nothing moves never reaches
+    # seawater, and is named here, loudly, rather than absorbed. Pure
+    # measurement: nothing below feeds the planner.
+    # The projected set is the projector's OWN list (fw_projected_ids), not
+    # "batches with an FW row": a batch whose tran_og_date is already past is
+    # projected from the PR's FW count starting in SEAWATER, has no FW row, and
+    # was held as well -- the same fish twice in the opening.
+    from .excel_io import held_fw_openings, unmodelled_fw_warnings
+    fw_openings = held_fw_openings(fw_in_flight_aggregates, fw_projected_ids)
+    split_warns, unmodelled_fw = unmodelled_fw_warnings(
+        fw_openings, placement.tranog_events,
+        {t.batch_id for t in audit_initial_state.tanks_by_id.values()
+         if t.batch_id and t.count > 0})
+    for _m in split_warns:
+        print(f"  WARN: {_m}")
     write_validation_log(
         wb,
         residuals=residuals,
@@ -1167,7 +1194,7 @@ def main(
         invariant_warnings=(list(hydration_warns) + list(inv_warns)
                             + list(manual_warns) + list(fw_calib_warns)
                             + _guide_notes + _realized_warns
-                            + _coverage_notes),
+                            + _coverage_notes + split_warns),
         placed_batches={r.batch_id for r in placement.batch_locations},
     )
     write_daily_harvest_schedule(
@@ -1206,13 +1233,21 @@ def main(
         realized_biology=getattr(placement, "realized_biology", None),
         tranog_events=getattr(placement, "tranog_events", None),
         window_openings=prefix_openings,
-        # NO window_culls here, deliberately -- the mirror of the tranog_events
-        # decision below. A manual fw_to_og culls in FRESHWATER, before the fish
-        # enter OG, and the TranOG inflow this ledger credits is already NET of
-        # it (290,000 placed out of 299,809). Booking the cull on the OG row
-        # removes it twice: measured, weekly sum|Count_Check| 1,253 -> 10,912.
-        # The MONTHLY report is facility-scope -- its PR opening counts those
-        # fish while they were still in freshwater -- so the cull belongs there.
+        # INPUT = EGGS ONLY (operator, 2026-09-11): the FW->SW move is a move
+        # inside the batch, shown in Xfer_In/Xfer_Out, and the ledger opens on
+        # EVERY fish the PR holds -- the freshwater part of a split batch
+        # included (fw_openings). So the fish a manual fw_to_og culls in
+        # freshwater WERE in the opening, and the cull is a real removal:
+        # booked once, on the transfer week (window_culls). The FW fish lost
+        # between the PR close and the transfer are booked as mortality there
+        # (fw_transfer_basis = the window's fw_count_at_transfer).
+        # This reverses a deliberate omission: while the opening held
+        # seawater only and the TranOG was credited as input NET of the cull,
+        # booking the cull removed it twice.
+        window_culls=prefix_fw_cull,
+        fw_openings=fw_openings,
+        fw_transfer_basis=manual_fw_balance,
+        fw_projected=fw_projected_ids,
         sixn_move_in_feed=getattr(placement, "sixn_move_in_feed", None))
     write_monthly_report(
         wb, placement.batch_locations, placement.harvest_events, all_states,
@@ -1221,47 +1256,29 @@ def main(
         hog_overrides=facility_hog_overrides, forecast_start=control.forecast_start,
         report_start=report_start,
         realized_biology=getattr(placement, "realized_biology", None),
-        # OPENINGS, ARRIVALS AND CULLS ARE ONE DECISION -- all three or none.
+        # THE SAME CHOICES AS THE WEEKLY CALL ABOVE, AT THE SAME SCOPE -- the
+        # month is a roll-up of those very weekly rows.
         #
-        # `window_openings` was previously omitted here (the WEEKLY ledger has
-        # always taken it), so a batch whose scripted harvest lands in a manual
-        # window opened the month at 0 and the harvest was subtracted from
-        # nothing: 2026-08 closed at -4,562 fish / -17,309 kg for B41 on the
-        # 2026-08-31 PR, and 2026-09 opened there. Negative fish on an
-        # operator-facing ledger.
+        # `window_openings`: without them a batch whose scripted harvest lands
+        # in a manual window opened the month at 0 and the harvest came out of
+        # nothing (2026-08 closed at -4,562 fish for B41 on the 2026-08-31 PR).
         #
-        # `tranog_events` was omitted DELIBERATELY, and correctly at the time:
-        # without openings the month opened at the PR's facility-wide figure,
-        # which already counts the arriving fish while they sat in freshwater,
-        # so crediting the arrival double-booked it -- measured then, 2026-08's
-        # Count_Check went 2,998 -> 292,998, exactly B49's 290,000 transfer.
-        #
-        # With openings supplied that no longer holds: a split batch now opens
-        # at its true SEAWATER state (B49: 47,743, not 287,599), so its
-        # freshwater arrival is NOT already counted and must be credited or the
-        # 250,225 fish that entered simply vanish. Measured on the same PR,
-        # 2026-08-31:
-        #     shipped (neither)   4 negative rows, worst Count_Check -18,221
-        #     openings only       0 negative,      worst        -250,118
-        #     BOTH                0 negative,      worst         -10,118
-        # Both is strictly better than either: the old double-book does not
-        # recur, B43's -18,221 and B41's -4,562 are gone, and every remaining
-        # row outside B49 is within 82 fish.
-        # ... and NO window_culls, for the reason stated on the weekly call
-        # above, which now applies here too. That comment ends "the MONTHLY
-        # report is facility-scope -- its PR opening counts those fish while
-        # they were still in freshwater -- so the cull belongs there". Passing
-        # window_openings RETIRED that premise: the month no longer opens at the
-        # PR's facility-wide figure, it opens at the batch's true SEAWATER state
-        # (B49: 47,743). Fish culled in freshwater were therefore never in the
-        # opening, and the TranOG credited above is already NET of them, so
-        # booking the cull removes them a second time.
-        # Measured on the 2026-08-31 PR, monthly sum|Count_Check|:
-        #     openings + tranog + culls   11,710   (B49 alone -10,118)
-        #     openings + tranog           1,592    (worst row -82)
-        # Both ledgers now make the same three choices at the same scope.
+        # `tranog_events` and `window_culls`: since 2026-09-11 INPUT = EGGS ONLY
+        # and the ledger opens on every fish the PR holds, freshwater included
+        # (fw_openings -- B49 opens at 47,743 SW + 250,225 FW = 297,968, the
+        # PR's own figure). The TranOG is therefore a move (Xfer_In/Xfer_Out,
+        # used to find the FW->SW week), never an input, and the freshwater
+        # cull of a manual fw_to_og removes fish that WERE in the opening, so
+        # it is booked. The earlier trade-offs measured here (crediting the
+        # arrival, omitting the cull) existed only because the month opened on
+        # seawater alone; with the freshwater part in the opening neither
+        # double-books.
         window_openings=prefix_openings,
         tranog_events=placement.tranog_events,
+        window_culls=prefix_fw_cull,
+        fw_openings=fw_openings,
+        fw_transfer_basis=manual_fw_balance,
+        fw_projected=fw_projected_ids,
         sixn_move_in_feed=getattr(placement, "sixn_move_in_feed", None),
         pr_period=_pr_period)
     write_reconciliation_report(
@@ -1287,6 +1304,8 @@ def main(
         tranog_events=placement.tranog_events,
         biology_states_by_batch=states_by_batch,
         manual_fw_balance=manual_fw_balance,
+        # Fish no model carries must not read PLACED (see split_warns above).
+        unmodelled_fw=unmodelled_fw,
     )
     write_tank_continuity_audit(
         wb,
@@ -1340,7 +1359,7 @@ def main(
         len(residuals) + len(canvas.bottlenecks)
         + len(sched_warns) + len(placement.warnings)
         + len(density_violations) + len(hydration_warns) + len(inv_warns)
-        + len(fw_calib_warns)
+        + len(fw_calib_warns) + len(split_warns)
     )
     status = "ok" if total_warnings == 0 else "warn"
     og_tank_count = sum(1 for t in facility.tanks if t.type == "OG")

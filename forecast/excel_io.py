@@ -10,6 +10,8 @@ import openpyxl
 from openpyxl.utils import get_column_letter
 
 from .models import CalibrationResidual, BatchWeekState
+# ONE batch order for every writer (B9 < B10 < B100); see forecast/batch_order.
+from .batch_order import batch_sort_key, sorted_batches
 
 
 # ---------- Writer: BiologyProjection sheet ----------
@@ -29,7 +31,8 @@ def write_biology_projection(wb, states: Iterable[BatchWeekState], sheet_name: s
     # byte-reproducible run-to-run. The incoming `states` order depends on dict
     # iteration, which PYTHONHASHSEED randomizes across processes — leaving the
     # rows shuffled (identical data, different order), which breaks output diffs.
-    for s in sorted(states, key=lambda s: (s.batch_id, s.week_label)):
+    # Batches in the one shared natural order (B9 < B10 < B100).
+    for s in sorted(states, key=lambda s: (batch_sort_key(s.batch_id), s.week_label)):
         ws.append([
             s.batch_id, s.week_label, s.week_start, s.days_since_input,
             s.week_from_input, s.stage, round(s.count, 1), round(s.avg_weight_g, 3),
@@ -183,7 +186,12 @@ def write_batch_plan(wb, batch_locations, harvest_events, default_hog_yield: flo
                                round(sum(h["wt"]) / len(h["wt"]), 2), "", "", ""))
         plans.append({"batch": bid, "sw": weeks[0] if weeks else "-",
                       "peak": peak, "hw": hw, "hog_t": hog_t, "ms": milestones})
-    plans.sort(key=lambda p: p["sw"])
+    # BATCH order (B41, B42, ...), the one key every sheet uses. This sorted on
+    # the SW-entry week, on which every batch in flight at the forecast start
+    # ties, so the in-flight block kept the engine's tank-walk order and read
+    # B49 B48 ... B42 (operator, 2026-09-11: "seem out of order"). Batch number
+    # order is chronological order (tests/test_batch_order.py pins it).
+    plans.sort(key=lambda p: batch_sort_key(p["batch"]))
 
     ws.append(["SUMMARY - one row per batch"])
     ws.append(["Batch", "SW_entry", "Peak_tanks", "Harvest_window", "HOG_tonnes"])
@@ -419,7 +427,12 @@ def write_harvest_plan_output(
     for _evs in _by_week.values():
         for _e, _c in zip(_evs, whole_parts([e.count for e in _evs])):
             _shown[id(_e)] = _c
-    for ev in events_sorted:
+    # Rows are EMITTED in date order with same-date ties by BATCH number
+    # (operator, 2026-09-11), not by tank: 2028-W14 listed B56 (tank 33) above
+    # B55 (tank 42). The whole-fish rounding above still runs on the (date,
+    # tank) sequence, so every cell value is what it was; only the order moves.
+    for ev in sorted(events_sorted, key=lambda e: (
+            e.event_date, batch_sort_key(e.batch_id), e.source_tank_id)):
         wk = iso_week_label(ev.event_date)
         gross_avg_kg = ev.avg_wt_g / 1000.0
         gross_biomass = ev.count * gross_avg_kg
@@ -562,7 +575,9 @@ def write_transfer_plan_output(
             if m[10] != r[10]:
                 m[10] = "mixed"
     rows = [tuple(r) for r in _out]
-    rows.sort(key=lambda r: (r[0], r[2]))
+    # Date order, same-date ties by batch NUMBER (B9 < B10 < B100), stable
+    # inside a batch. The raw string put "B100" before "B37".
+    rows.sort(key=lambda r: (r[0], batch_sort_key(r[2])))
 
     for r in rows:
         ws.append([
@@ -693,7 +708,8 @@ def write_realization_report(wb, transfer_events, harvest_events=None,
     ws.append(["Batch", "Source_Tank", "Reason", "Found", "Occurrences",
                "First_Week", "Last_Week", "Fish_planned_total"])
     for (b, tk, reason, detail), (n, first, last, fp) in sorted(
-            stuck.items(), key=lambda kv: (-kv[1][0], kv[0][0], kv[0][1])):
+            stuck.items(),
+            key=lambda kv: (-kv[1][0], batch_sort_key(kv[0][0]), kv[0][1])):
         ws.append([b, tk, reason, detail, n, first, last, round(fp)])
 
     # ---- HARVEST -------------------------------------------------------
@@ -945,7 +961,7 @@ def write_transfer_template(
     for (b, w) in bw:
         weeks_by_batch[b].append(w)
 
-    for b in sorted(weeks_by_batch):
+    for b in sorted_batches(weeks_by_batch):
         bws = sorted(weeks_by_batch[b], key=lambda w: widx[w])
         # SW entry = the forecast TranOG week if any, else first-seen (in-flight).
         entry_wk = tog_week.get(b, bws[0])
@@ -1056,7 +1072,7 @@ def write_harvest_plan_report(
         # sales planning reads: how much HOG lands each month.
         mo_count = [0.0] * 12
         mo_hog = [0.0] * 12
-        for b in sorted(batches_by_year[year]):
+        for b in sorted_batches(batches_by_year[year]):
             months = [agg.get((year, b, m)) for m in range(1, 13)]
             tot_count = sum(m["count"] for m in months if m)
             tot_hog = sum(m["hog_kg"] for m in months if m)
@@ -1325,7 +1341,7 @@ def write_daily_harvest_schedule(
         live_avg_kg = (live_kg / cnt) if cnt else 0.0            # blended live kg/fish
         hog_avg_kg = live_avg_kg * hog_yield                     # blended HOG kg/fish
         tanks = ", ".join(str(t) for t in sorted(rec["tanks"]))
-        batches = ", ".join(sorted(rec["batches"]))
+        batches = ", ".join(sorted_batches(rec["batches"]))
         iso_y, iso_w, _ = ev_date.isocalendar()
         # Split the WEEK across its days, so the day rows tie to the Total row
         # under them (they missed it by 1-2 fish in 58 of 85 weeks before).
@@ -1398,7 +1414,11 @@ def write_harvest_report(
     for _ws_evs in _hr_by_week.values():
         for _e, _c in zip(_ws_evs, whole_parts([e.count for e in _ws_evs])):
             _hr_shown[id(_e)] = _c
-    for ev in evs:
+    # Emitted in date order, same-date ties by BATCH number (operator,
+    # 2026-09-11) -- the rounding above keeps its (date, tank) sequence, so
+    # every cell value is unchanged and only the row order moves.
+    for ev in sorted(evs, key=lambda e: (_d(e.event_date), batch_sort_key(e.batch_id),
+                                         e.source_tank_id)):
         d = _d(ev.event_date)
         wk = iso_week_label(ev.event_date)
         hog_yield = facility_limits_hog.get(wk, default_hog_yield)
@@ -1628,14 +1648,10 @@ def write_feed_forecast_monthly(
     # Max-size order for feed types (same ordering basis as the by-type block).
     size_of = {name: (ms if ms is not None else 0.0) for ms, name in ftypes}
 
-    def _batch_sort_key(b):
-        # Order B41, B42, ... numerically; non-standard ids sort after, by name.
-        s = str(b)
-        if s[:1] == "B" and s[1:].isdigit():
-            return (0, int(s[1:]), "")
-        return (1, 0, s)
-
-    batch_ids = sorted({bid for (bid, _n, _m) in fbtm}, key=_batch_sort_key)
+    # Natural batch order from the ONE shared key (forecast/batch_order). The
+    # private key that lived here was a second source of truth and not unique
+    # ("B041" and "B41" tied) over a set of strings, so a tie fell to hash order.
+    batch_ids = sorted_batches({bid for (bid, _n, _m) in fbtm})
     ws.append([])
     ws.append(["FEED BY BATCH & TYPE (kg)"])
     ws.append(["Batch", "Feed Type"] + mo_dates)
@@ -1681,25 +1697,44 @@ _LEDGER_DENSITY_LEGEND = (
     "freshwater week)."
 )
 
-# Count_Check is the ledger's own residual, and it is NOT always zero. Two known
-# movements are real but land outside the Mort/Cull columns, so they surface
-# here instead of being silently absorbed:
-#   * a 6N purge tank frozen by the manual override window is STARVE, so its
-#     mortality RATE is 0 by design (that zero is load-bearing elsewhere) while
-#     its count still declines;
-#   * the FW cull taken at TranOG belongs to the freshwater phase, so the
-#     seawater ledger sees the post-cull input but not the cull row.
-# Neither is a lost fish — InputConservationAudit and ReconciliationReport both
-# close — but an operator reading this sheet should know what the column is
-# carrying rather than assume a bug.
+# Count_Check is the ledger's own residual, and it is NOT always zero. One known
+# movement is real but lands outside the Mort/Cull columns, so it surfaces here
+# instead of being silently absorbed: a 6N purge tank frozen by the manual
+# override window is STARVE, so its mortality RATE is 0 by design (that zero is
+# load-bearing elsewhere) while its count still declines. Not a lost fish --
+# InputConservationAudit and ReconciliationReport both close -- but an operator
+# reading this sheet should know what the column is carrying.
+#
+# The week a batch entered seawater used to be a second case: the ledger reset
+# the opening to 0 and booked the TranOG as INPUT, so the FW cull at TranOG sat
+# outside it. Since 2026-09-11 (operator: "input is only egg inputs; moving FW
+# -> OG/SW is not an input") the opening holds the freshwater fish, the
+# crossing is Xfer_In/Xfer_Out, and that cull is booked -- the case is gone.
+# A batch split across FW and SW at the PR close whose FW part nothing models
+# is NOT absorbed either: its fish sit in the first week's opening and surface
+# here (detect, don't coerce), with a ValidationLog warning naming them.
 _LEDGER_CHECK_LEGEND = (
-    "Count_Check (fish) = open - mortality - harvest - cull + input - close. "
-    "Non-zero is EXPECTED on two kinds of row and is not a lost fish: a "
-    "manual-window week whose 6N purge tanks are frozen (STARVE, so the "
-    "mortality rate is 0 while the count still falls), and the week a batch "
-    "enters seawater (the FW cull at TranOG is booked to the freshwater "
-    "phase). Bio_Check is 0 by construction. Fish conservation is proven "
-    "separately by InputConservationAudit and ReconciliationReport."
+    "Count_Check (fish) = open - mortality - harvest - cull + input + xfer_in "
+    "- xfer_out - close. Input_Count = eggs stocked only. The move from "
+    "freshwater to seawater (TranOG) happens inside the batch and shows in "
+    "Xfer_In/Xfer_Out; it is not an input. Open holds every fish of the batch "
+    "at the start of the period, freshwater and seawater. A few fish of "
+    "Count_Check per batch-week are EXPECTED and are not lost fish: seawater "
+    "Mort_Count is the opening count x the week's mortality rate, while the "
+    "plan applies mortality day by day, per tank, in whole fish, to the fish "
+    "actually present (most visible on a harvest week); and a manual-window "
+    "week whose 6N purge tanks are frozen (STARVE, so the mortality rate is 0 "
+    "while the count still falls) carries a small one. A batch split across "
+    "freshwater and seawater at the PR close whose freshwater part is not "
+    "modelled carries those fish in Count_Check, and their biomass in "
+    "Bio_Check, on its first week (see the ValidationLog); otherwise Bio_Check "
+    "is 0 by construction. SGR, SFR and both FCRs are blank on a row that "
+    "includes a freshwater part held at its PR count and weight: no "
+    "freshwater biology or feed exists for it. The period TOTAL still prints "
+    "the facility's rates; on the week that part crosses to seawater, its "
+    "freshwater growth, with no feed behind it, is inside that TOTAL. Fish "
+    "conservation is proven separately by InputConservationAudit and "
+    "ReconciliationReport."
 )
 
 # MonthlyReport adds a third case: a month that MERGES the elapsed part of a
@@ -1708,9 +1743,12 @@ _LEDGER_CHECK_LEGEND = (
 # and has no column of its own here.
 _MONTHLY_CHECK_LEGEND = (
     _LEDGER_CHECK_LEGEND
-    + " On a month that merges a mid-month ProductionReport (its first month), "
-      "Count_Check also carries the PR's own 'Deviation count in period' -- the "
-      "site system's reconciliation figure, not a fish movement."
+    + " An egg stocking is booked whole in the month of the batch's input "
+      "date. On a month that merges a mid-month ProductionReport (its first "
+      "month), Count_Check also carries the PR's own 'Deviation count in "
+      "period' -- the site system's reconciliation figure, not a fish "
+      "movement -- including on a batch the PR harvested out before the "
+      "forecast starts."
 )
 
 _LEDGER_COLS = [
@@ -1727,12 +1765,89 @@ _LEDGER_COLS = [
 ]
 
 
+def held_fw_openings(fw_aggregates, fw_projected_batches) -> dict:
+    """{batch: (count, biomass_kg)} -- the ProductionReport's FRESHWATER fish
+    that no freshwater projection carries.
+
+    Operator rule (2026-09-11): the opening at the forecast start holds every
+    fish the PR holds, FW and SW, including the FW part of a batch that
+    straddles both. Such a batch is hydrated as seawater only
+    (production_report.hydrate_facility_state loads OG tanks) and run.py keeps
+    it out of the freshwater projection, so its FW part has no track; a
+    wholly-FW batch moved by a manual fw_to_og is the same. Those parts are
+    HELD here so the ledger opens on them.
+
+    Source order: a batch in `fw_projected_batches` takes its FW part from its
+    projection and is never held; any other batch takes it from the PR's FW
+    records. `fw_projected_batches` must be the batches the freshwater
+    projector actually RAN for (run.py records them), not "batches with an FW
+    row": a batch whose tran_og_date is already past is projected from the
+    PR's FW count starting in seawater, has no FW row, and was counted twice.
+
+    The contract for a later planning change that models a split batch's FW
+    part: add the batch to `fw_projected_batches` (it is then neither held
+    nor warned about) AND hand the ledger that track's weekly states through
+    an explicit input of its own -- the held figure here is never used beside
+    a projection, so nothing is counted twice, but the ledger needs the track
+    to show those fish. Report layer only: the planner never reads this."""
+    out: dict = {}
+    projected = set(fw_projected_batches or ())
+    for b in sorted_batches(fw_aggregates or {}):
+        a = fw_aggregates[b]
+        c = float(a.get("count", 0.0) or 0.0)
+        if c > 0 and b not in projected:
+            out[b] = (c, float(a.get("biomass_kg", 0.0) or 0.0))
+    return out
+
+
+def unmodelled_fw_warnings(held, tranog_events, sw_batches) -> tuple:
+    """(warning lines, {batch: fish}) for held FW parts that NOTHING moves.
+
+    A held part with a FW->SW move in the horizon (a scripted fw_to_og) is
+    modelled: the ledger moves it into seawater that week. One with none is
+    not -- the planner has no freshwater track for it, so its fish sit in the
+    opening and never reach seawater or harvest. Detect, don't coerce: the
+    ledger shows them in Count_Check on the batch's first week, and these
+    lines name them (ValidationLog). `sw_batches` = batches holding seawater
+    fish at the PR close, to tell a split batch from a wholly-FW one."""
+    moved = {getattr(ev, "batch_id", None) for ev in (tranog_events or ())}
+    sw = set(sw_batches or ())
+    lines: list = []
+    fish: dict = {}
+    for b in sorted_batches(held or {}):
+        if b in moved:
+            continue
+        c, kg = held[b]
+        fish[b] = c
+        if b in sw:
+            lines.append(
+                f"SPLIT BATCH AT PR CLOSE - {b}: {c:,.0f} fish ({kg:,.0f} kg) "
+                f"were in freshwater at the PR close while the rest of the "
+                f"batch was in seawater. The planner does not model that "
+                f"freshwater part (no freshwater projection, no scripted "
+                f"fw_to_og), so those fish are in the opening but never reach "
+                f"seawater or harvest: {b}'s first ledger week carries them in "
+                f"Count_Check (+{c:,.0f}) and InputConservationAudit marks the "
+                f"batch FW PART NOT MODELLED. Script an fw_to_og event for {b} "
+                f"to move them.")
+        else:
+            lines.append(
+                f"FW BATCH AT PR CLOSE NOT MODELLED - {b}: {c:,.0f} fish "
+                f"({kg:,.0f} kg) in freshwater at the PR close: no freshwater "
+                f"projection ran for this batch (is it missing from the "
+                f"Batches sheet?) and no fw_to_og moved it, so they are in the "
+                f"opening but never reach seawater or harvest: {b}'s first "
+                f"ledger week carries them in Count_Check (+{c:,.0f}).")
+    return lines, fish
+
+
 def _build_batch_week_ledger(
     batch_locations, harvest_events, batch_week_states,
     transfer_events=None, batches=None, tables=None, hog_yield=0.0,
     hog_overrides=None, sixn_move_in_feed=None,
     tranog_events=None, og_mort_states=None, realized_biology=None,
     window_openings=None, window_culls=None,
+    fw_openings=None, fw_transfer_basis=None, fw_projected=None,
 ):
     """Assemble a per-(batch, week) open/close production ledger.
 
@@ -1744,8 +1859,25 @@ def _build_batch_week_ledger(
       Net_Production = Gross_Growth - mort_bio
       SGR = ln(close_wt/open_wt)/7*100 ; SFR = feed / avg_bio / 7 * 100
       Bio_FCR = feed / gross_growth ; Econ_FCR = feed / net_production
-    Bio_Check is 0 by construction; Count_Check carries the small count residual.
-    Returns a list of row dicts ordered by (batch, week).
+    Input_Count = eggs stocked only (operator rule 2026-09-11). A batch's
+    FW->SW move (TranOG) is a move INSIDE the batch: its week opens on the
+    freshwater fish about to cross and shows the crossing in Xfer_In/Xfer_Out.
+    `fw_openings` {batch: (count, kg)} are PR freshwater parts no projection
+    carries (see held_fw_openings; held flat until their FW->SW week).
+    `fw_transfer_basis` is the manual fw_to_og balance {batch:
+    [fw_count_at_transfer, culled]}: the FW-side loss between the PR close and
+    the transfer is booked as mortality that week -- only when that balance
+    describes exactly ONE applied fw_to_og (see there). `window_culls` are the
+    manual fw_to_og culls, booked on their week. `fw_projected` = batches whose
+    freshwater part a projection carries (run.py: the batches the freshwater
+    projector actually ran for); a held part is never used for them.
+    Rates (SGR, SFR, FCRs) are blank on a row that carries a held part, whose
+    biology and feed are unknown. Bio_Check is 0 by construction except on the
+    first row of a held part nothing moves, where it carries that part's
+    biomass as Count_Check carries its fish; Count_Check carries the small
+    count residual.
+    Returns a list of row dicts ordered by (batch, week), batches in natural
+    order (forecast/batch_order).
     """
     from collections import defaultdict
     from math import log
@@ -1798,13 +1930,13 @@ def _build_batch_week_ledger(
             moved = getattr(ev, "count_transferred", 0.0)
         xfer[(ev.batch_id, iso_week_label(ev.event_date))] += moved
 
-    # TranOG fresh-stocking inflow per (batch, week): fish ENTERING OG from FW /
-    # appearing in-flight, with NO chained OG predecessor (opening OG balance 0).
-    # Credited as input at a genuine FW->OG boundary week only (open reset to 0
-    # there) — a two-model handoff where the FW projection's count does not flow
-    # by count into the realized OG entry. Empty when the caller passes no
-    # tranog_events; forecast.run passes placement.tranog_events, so on a
-    # controller plan this map is populated.
+    # FW->SW (TranOG) arrivals per (batch, week). A MOVE inside the batch, not
+    # an input: shown in Xfer_In/Xfer_Out, and used to find each batch's first
+    # FW->SW week, whose opening holds the freshwater fish about to cross. The
+    # comment that stood here said the FW projection's count "does not flow by
+    # count" into the realized OG entry; on the 9.10 PR it does, to +/-1 on all
+    # 12 arrivals (B50: W42 FW close 253,196, TranOG 253,196). Empty when the
+    # caller passes no tranog_events.
     tranog_in: dict[tuple, float] = defaultdict(float)
     for ev in (tranog_events or ()):
         wk = iso_week_label(ev.event_date)
@@ -1911,23 +2043,89 @@ def _build_batch_week_ledger(
             return cc, cw, cb, s.week_start
         return 0.0, 0.0, 0.0, None
 
+    # Each batch's FIRST FW->SW week (t_b). Its opening holds the freshwater
+    # fish about to cross; the crossing itself is Xfer_In/Xfer_Out.
+    _t_b: dict[str, str] = {}
+    for (_bt, _wt), _nt in tranog_in.items():
+        if _nt > 0 and (_bt not in _t_b or _wt < _t_b[_bt]):
+            _t_b[_bt] = _wt
+    # FW parts HELD at the PR close (held_fw_openings): in the facility from the
+    # report's first week, held flat -- no FW biology exists for them -- until
+    # their FW->SW week. A batch whose freshwater part a projection carries is
+    # never held: `fw_projected` names them explicitly (the projector's own
+    # list, which covers a batch whose projection starts in SEAWATER because
+    # its tran_og_date is already past -- it opens on the PR's FW count and has
+    # no FW/EGG row), and any batch with an FW/EGG row is added as a backstop.
+    _fw_projected = set(fw_projected or ()) | {
+        _b for (_b, _w), _s in bio_state.items() if _s.stage in ("FW", "EGG")}
+    _held: dict[str, tuple] = {}
+    for _b, _v in (fw_openings or {}).items():
+        _c, _kg = float(_v[0] or 0.0), float(_v[1] or 0.0)
+        if _c > 0 and _b not in _fw_projected:
+            _held[_b] = (_c, _kg)
+    _fw_basis = fw_transfer_basis or {}
+    # FW->SW events per batch (a manual fw_to_og emits exactly one TranOGEntry
+    # when it applies, none when refused) and the fish they placed: the D6 FW
+    # loss below is booked only on a balance that describes those events.
+    _tog_n: dict[str, int] = defaultdict(int)
+    _tog_placed: dict[str, float] = defaultdict(float)
+    for ev in (tranog_events or ()):
+        _p = sum(getattr(d, "count", 0.0) for d in getattr(ev, "destinations", []))
+        if _p > 0:
+            _tog_n[ev.batch_id] += 1
+            _tog_placed[ev.batch_id] += _p
+
+    def _fw_loss_to_transfer(b, held_count):
+        """FW fish lost between the PR close and a manual fw_to_og, or None.
+
+        The window's balance {b: [fw_count_at_transfer, culled]} SUMS every
+        fw_to_og event for the batch, a refused one included. It is used only
+        when it describes exactly one applied event -- one TranOG, and
+        fw_count == placed + culled (the FW conservation leg) -- and the loss
+        is a real one, 0 <= held - fw_count <= held. Anything else (a second
+        event refused or applied twice) books nothing and the residual stays
+        visible in Count_Check. Detect, don't coerce."""
+        bal = _fw_basis.get(b)
+        if not bal or _tog_n.get(b, 0) != 1:
+            return None
+        f, culled = float(bal[0] or 0.0), float(bal[1] or 0.0)
+        if f <= 0 or abs(f - (_tog_placed[b] + culled)) > max(1.0, 1e-6 * f):
+            return None
+        loss = held_count - f
+        return loss if -1e-6 <= loss <= held_count else None
+
     # All (batch, week) cells: union of realized + projected weeks.
     by_batch: dict[str, set] = defaultdict(set)
     for (b, wk) in set(rl) | set(bio_state) | set(harv) | set(cull):
         by_batch[b].add(wk)
+    if _held:
+        # A held part is in the facility on every report week up to its FW->SW
+        # week, including weeks on which the batch has no other row (a wholly-FW
+        # batch before its manual fw_to_og). With no FW->SW in the horizon it
+        # shows on the first report week only -- see the opening below.
+        _rl_weeks = sorted({_w for (_b, _w) in rl})
+        for _b in _held:
+            _t = _t_b.get(_b)
+            if _t is None:
+                if _rl_weeks:
+                    by_batch[_b].add(_rl_weeks[0])
+            else:
+                by_batch[_b].update(_w for _w in _rl_weeks if _w <= _t)
+                by_batch[_b].add(_t)
 
     rows = []
-    for b in sorted(by_batch):
+    for b in sorted(by_batch, key=batch_sort_key):
         weeks = sorted(by_batch[b])
+        _hb = _held.get(b)        # (count, kg) held PR freshwater part, or None
+        _tb = _t_b.get(b)         # the batch's first FW->SW week, or None
         for i, wk in enumerate(weeks):
             cc, cwt, cbio, ws_date = close_vals((b, wk))
-            # Weight to value an ARRIVAL at. 0 = "use the batch's own opening
-            # weight", which is right everywhere except the branches below that
-            # deliberately zero the opening balance: there the arrivals must
-            # still be credited at a real weight or their biomass books as
-            # growth. MUST be reset every week -- a value leaking from a
-            # previous iteration would mis-value an unrelated input.
-            _input_wt_g = 0.0
+            _is_tb = (wk == _tb)
+            # Freshwater fish in THIS week's opening that the seawater opening
+            # does not hold: the FW projection's balance on the batch's FW->SW
+            # week, or a held PR freshwater part (added after the SW opening).
+            fw_oc = fw_obio = 0.0
+            _fw_track_cross = False   # the FW part came from the FW projection
             if i == 0:
                 s0 = bio_state.get((b, wk))
                 if s0 and getattr(s0, "week_from_input", -1) == 0:
@@ -1938,6 +2136,20 @@ def _build_batch_week_ledger(
                     # AND input_count adds it again -> a spurious ~input residual
                     # on every batch's first week). Open is 0 before stocking.
                     oc, owt, obio = 0.0, 0.0, 0.0
+                elif s0 and _is_tb and _hb is None:
+                    # The batch's first ledger week is its FW->SW week and the
+                    # state is its freshwater projection crossing, so the
+                    # state's start-of-week balance is the FRESHWATER opening and
+                    # the seawater side opens empty. (This row used to open on
+                    # that FW balance AND credit the TranOG as input -- the same
+                    # fish twice.)
+                    oc, owt, obio = 0.0, 0.0, 0.0
+                    fw_oc = (s0.open_count if getattr(s0, "open_count", 0.0) > 0
+                             else s0.count)
+                    fw_obio = (s0.open_biomass_kg
+                               if getattr(s0, "open_biomass_kg", 0.0) > 0
+                               else s0.biomass_kg)
+                    _fw_track_cross = True
                 elif s0:
                     # Start-of-week balance (before the week's losses), not the
                     # weekly mean — the mean mis-states the open on week 0 (no
@@ -1949,17 +2161,13 @@ def _build_batch_week_ledger(
                            else s0.avg_weight_g)
                     obio = (s0.open_biomass_kg if getattr(s0, "open_biomass_kg", 0.0) > 0
                             else s0.biomass_kg)
-                elif (b, wk) in tranog_in:
-                    # In-flight OG batch's first ledger week entered via TranOG with
-                    # no opening balance -> reset open to 0 (inflow credited below).
-                    # Value the arrivals at the week's CLOSING weight: there is no
-                    # prior ledger week to read a true arrival weight from, and the
-                    # close understates it only by the week's own growth -- which
-                    # errs toward a HIGHER reported FCR, the safe direction. The
-                    # alternative, `owt` = 0, credits them at 0 g and books the
-                    # whole arriving biomass as growth (see the FW->OG branch).
+                elif _is_tb:
+                    # First ledger week is the batch's FW->SW week with no state
+                    # for it (a manual fw_to_og in the window): the seawater side
+                    # opens empty -- the window's opening snapshot overrides
+                    # below when there is one -- and the held freshwater part
+                    # (below) is the freshwater opening.
                     oc, owt, obio = 0.0, 0.0, 0.0
-                    _input_wt_g = cwt
                 else:
                     oc, owt, obio = cc, cwt, cbio
             else:
@@ -1968,29 +2176,24 @@ def _build_batch_week_ledger(
                 prev_is_fw_proj = (prev_s is not None
                                    and prev_s.stage in ("FW", "EGG")
                                    and (b, prev_wk) not in rl)
-                if (b, wk) in tranog_in and (b, wk) in rl and prev_is_fw_proj:
-                    # FW->OG boundary: the pick FRESH-STOCKS the whole OG entry via
-                    # TranOG; the OG opening balance is 0 (the FW projection is a
-                    # separate track whose close does not flow by COUNT into OG).
-                    # Reset open + credit the inflow (below); chaining the FW close
-                    # here would leave the two-engine handoff gap as a residual.
+                if _is_tb and prev_is_fw_proj:
+                    # FW->SW week on the freshwater projection. The fish that
+                    # cross ARE the projection's previous close -- the same fish,
+                    # moving tank type, not new stock (operator 2026-09-11:
+                    # "moving FW -> OG/SW is not an input"). So the week opens on
+                    # that FW close, the seawater side opens empty, and the
+                    # crossing is Xfer_In/Xfer_Out below.
                     #
-                    # The inflow must be credited by BIOMASS as well as by count,
-                    # and it was not. `input_bio` below is `input_count * owt`, and
-                    # `owt` is the opening weight this branch has just zeroed -- so
-                    # the arriving fish were credited at 0 g and their whole
-                    # existing biomass fell out as one week of GROWTH. Measured on
-                    # the shipped Sep'26 workbook: B50 opened 2026-W43 at zero
-                    # against a 2026-W42 close of 253,392 fish / 98,817 kg, booked
-                    # 108,256 kg of "growth" in one week, and reported Bio_FCR 0.09
-                    # for the week and 0.29 for October -- physically impossible,
-                    # and the operator spotted it. 24 batch-weeks carried an input
-                    # with a zeroed opening. Value the arrivals at the weight they
-                    # actually arrive with: the FW track's own closing weight for
-                    # the previous week, which is these same fish.
-                    _fw_c, _fw_wt, _fw_bio, _ = close_vals((b, prev_wk))
-                    _input_wt_g = _fw_wt
+                    # This replaced an opening RESET to 0 plus the TranOG
+                    # credited as input, which broke the close->open chain on
+                    # every arrival week and needed an "arrival weight" crutch
+                    # to keep the biomass out of growth (2026-09-08: B50 once
+                    # booked 108,256 kg of growth in one week, Bio_FCR 0.09).
+                    # Opening on the real FW balance values the fish at their
+                    # own weight with no crutch.
                     oc, owt, obio = 0.0, 0.0, 0.0
+                    fw_oc, _fw_wt, fw_obio, _ = close_vals((b, prev_wk))
+                    _fw_track_cross = True
                 else:
                     oc, owt, obio, _ = close_vals((b, prev_wk))
             # A manual-window week opens on its PRE-EVENT state, never on the
@@ -1999,11 +2202,56 @@ def _build_batch_week_ledger(
             if _wo is not None and _wo[0] > 0:
                 oc, obio = _wo[0], _wo[2]
                 owt = _wo[1] / _wo[0]
+            # Mortality is computed on the SEAWATER opening only, exactly as
+            # before: the freshwater fish have their own loss terms (the FW
+            # projection's close already net of them; a held part carries none
+            # until its transfer week, below).
+            _mort_basis = oc
+            # A row carrying a HELD part: its fish sit at the PR's count and
+            # weight with no FW biology and no FW feed, so a rate over them
+            # (SGR, SFR, FCR) is not a measurement -- blanked (see
+            # _rate_is_meaningful). On the crossing week the part's whole FW
+            # growth lands at once with no feed behind it (8/31 PR: B49 W36
+            # read Bio_FCR 0.52).
+            _carries_held = _hb is not None and (
+                (_tb is not None and wk <= _tb) or (_tb is None and i == 0))
+            # Held fish nothing moves (no FW->SW in the horizon): they leave the
+            # ledger unexplained after this row. Count_Check shows the fish;
+            # their biomass goes to Bio_Check, not into Gross_Growth (it read
+            # -90,854 kg of "growth" on B49's unmodelled split).
+            _unmodelled_kg = _hb[1] if (_hb is not None and _tb is None
+                                        and i == 0) else 0.0
+            if _carries_held:
+                fw_oc += _hb[0]
+                fw_obio += _hb[1]
+            if fw_oc > 0:
+                oc += fw_oc
+                obio += fw_obio
+                owt = obio * 1000.0 / oc
+            if _hb is not None and _tb is not None and wk < _tb:
+                # Still in freshwater at the week's close: held flat.
+                cc += _hb[0]
+                cbio += _hb[1]
+                cwt = cbio * 1000.0 / cc
             h = harv.get((b, wk), {"count": 0.0, "gross": 0.0, "wt_sum": 0.0})
             cu = cull.get((b, wk), {"count": 0.0, "bio": 0.0})
             _wc = _wcull.get((b, wk))
             if _wc is not None:
                 cu = {"count": cu["count"] + _wc[0], "bio": cu["bio"] + _wc[1]}
+            if _fw_track_cross and (b, wk) in rl:
+                # The FW->SW CROSSING cull. When TranOG_Date is itself a week
+                # start, the reconciliation cull and the stage flip land on the
+                # same day, so the cull sits in a state labelled SW -- which the
+                # `key not in rl` guard above never books. The opening now holds
+                # those fish, so the cull is a real removal, booked here once
+                # (the same term InputConservationAudit adds back). Zero on the
+                # ordinary mid-week TranOG_Date: that cull fell in the last FW
+                # week and was booked there.
+                _sx = bio_state.get((b, wk))
+                if (_sx is not None and _sx.stage == "SW"
+                        and (_sx.cull_count_week or 0.0) > 0):
+                    cu = {"count": cu["count"] + _sx.cull_count_week,
+                          "bio": cu["bio"] + (_sx.cull_biomass_kg_week or 0.0)}
             # Mortality count: for a FW/EGG PROJECTION week (close comes from the
             # biology, not realized BatchLocations) use the REALIZED mortality the
             # daily sim actually applied — open*weekly_rate% mis-counts when the
@@ -2013,9 +2261,10 @@ def _build_batch_week_ledger(
             _rlz = rl.get((b, wk))
             if (_s_st is not None and _s_st.stage in ("FW", "EGG")
                     and not (_rlz and _rlz.get("count", 0) > 0)):
-                mort_count = mortc.get((b, wk), oc * mortpct.get((b, wk), 0.0) / 100.0)
+                mort_count = mortc.get((b, wk),
+                                       _mort_basis * mortpct.get((b, wk), 0.0) / 100.0)
             else:
-                mort_count = oc * mortpct.get((b, wk), 0.0) / 100.0
+                mort_count = _mort_basis * mortpct.get((b, wk), 0.0) / 100.0
                 if not mort_count and _rmort.get((b, wk)):
                     # MANUAL-WINDOW week. Its weeks are realized in OG (they have
                     # BatchLocations rows) but carry no batch_week_state, so
@@ -2028,20 +2277,32 @@ def _build_batch_week_ledger(
                     # zero, never an addition, so any week that already booked
                     # mortality is untouched and nothing double-counts.
                     mort_count = _rmort[(b, wk)]
+            if _is_tb and _hb is not None:
+                # MANUAL fw_to_og: the freshwater fish lost between the PR close
+                # and the transfer. The held part opened at the PR's count; the
+                # transfer took fw_count_at_transfer (= placed + culled,
+                # manual_events), so the difference is FW mortality. Booked only
+                # from a balance that describes the one applied event (see
+                # _fw_loss_to_transfer); otherwise it stays in Count_Check.
+                _fl = _fw_loss_to_transfer(b, _hb[0])
+                if _fl is not None:
+                    mort_count += _fl
             mort_bio = mort_count * owt / 1000.0
-            input_count = inputc.get((b, wk), 0.0) + tranog_in.get((b, wk), 0.0)
-            # Value arrivals at the weight they ARRIVE with. `owt` is the
-            # batch's own opening weight and is 0 on the FW->OG boundary week
-            # (see above), which credited a whole batch's biomass at 0 g.
-            input_bio = input_count * (_input_wt_g or owt) / 1000.0
-            xf = xfer.get((b, wk), 0.0)
+            # INPUT = EGGS STOCKED, and nothing else (operator, 2026-09-11). The
+            # FW->SW move is inside the batch: it shows in Xfer_In/Xfer_Out and
+            # nets to zero, like every other move. Eggs open at 0 g, so their
+            # biomass input is 0.
+            input_count = inputc.get((b, wk), 0.0)
+            input_bio = input_count * owt / 1000.0
+            xf = xfer.get((b, wk), 0.0) + tranog_in.get((b, wk), 0.0)
             harv_gross = h["gross"]
             # Per-week HOG yield override (matches HarvestReport/HarvestPlan);
             # falls back to the scalar default when no override for the week.
             _hy = hog_overrides.get(wk, hog_yield) if hog_overrides else hog_yield
             harv_hog = harv_gross * _hy
             harv_avg_hog = ((h["wt_sum"] / h["count"]) * _hy) if h["count"] > 0 else 0.0
-            gross_growth = (cbio - obio) + mort_bio + harv_gross + cu["bio"] - input_bio
+            gross_growth = ((cbio - obio) + mort_bio + harv_gross + cu["bio"]
+                            - input_bio + _unmodelled_kg)
             net_prod = gross_growth - mort_bio
             f = feed.get((b, wk), 0.0)
             avg_bio = (obio + cbio) / 2.0
@@ -2051,7 +2312,8 @@ def _build_batch_week_ledger(
             econ_fcr = (f / net_prod) if net_prod > 0 else 0.0
             count_check = (oc - mort_count - h["count"] - cu["count"]
                            + input_count + xf - xf - cc)
-            # Bio_Check is 0 by construction (gross_growth balances the ledger).
+            # Bio_Check is 0 by construction (gross_growth balances the ledger),
+            # except the unmodelled held biomass above, which it then equals.
             bio_check = (obio + gross_growth - mort_bio - harv_gross - cu["bio"]
                          + input_bio - cbio)
             if oc <= 0 and cc <= 0 and h["count"] <= 0 and cu["count"] <= 0:
@@ -2073,6 +2335,10 @@ def _build_batch_week_ledger(
                 "cull_count": cu["count"], "cull_bio": cu["bio"],
                 "input_count": input_count, "xfer_in": xf, "xfer_out": xf,
                 "count_check": count_check, "bio_check": bio_check,
+                # Not printed; the monthly roll-up books eggs by it.
+                "input_bio": input_bio,
+                # Not printed: SGR/SFR/FCR blank (a held part is in the row).
+                "rates_unknown": _carries_held,
             })
     return rows
 
@@ -2106,6 +2372,13 @@ _FCR_MIN_SFR_PCT_DAY = 0.05    # below this the batch is not meaningfully feedin
 
 def _rate_is_meaningful(d: dict) -> tuple[bool, bool]:
     """(sgr_ok, fcr_ok) for one ledger row or period aggregate."""
+    if d.get("rates_unknown"):
+        # The period includes a freshwater part HELD at its PR count and weight
+        # (no FW biology, no FW feed): its growth is unknown until it crosses,
+        # and then lands at once with no feed behind it. No rate can be read
+        # off such a row -- blank, never a number (8/31 PR: B49 2026-W36 read
+        # Bio_FCR 0.52, 2026-09 read 0.86). SFR is blanked with them.
+        return False, False
     oc = d.get("open_count") or 0.0
     moved = ((d.get("harv_count") or 0.0) + (d.get("cull_count") or 0.0)
              + (d.get("input_count") or 0.0))
@@ -2134,7 +2407,8 @@ def _ledger_value_cells(d: dict) -> list:
         round(d["close_count"], 0), round(d["close_wt"], 1), round(d["close_bio"], 0),
         (round(_pk, 1) if _pk is not None else None),
         (round(d["sgr"], 4) if _sgr_ok else None), round(d["gross_growth"], 0),
-        round(d["net_prod"], 0), round(d["feed"], 0), round(d["sfr"], 4),
+        round(d["net_prod"], 0), round(d["feed"], 0),
+        (None if d.get("rates_unknown") else round(d["sfr"], 4)),
         (round(d["bio_fcr"], 2) if _fcr_ok else None),
         (round(d["econ_fcr"], 2) if _fcr_ok else None),
         round(d["mort_count"], 0), round(d["mort_bio"], 1),
@@ -2203,6 +2477,10 @@ def _ledger_total_cells(t: dict) -> list:
     # no conversion to report either. Latent on today's plan (0 of 210 such
     # rows) but the rule must not live in two places with two meanings.
     _fcr_ok = _sfr >= _FCR_MIN_SFR_PCT_DAY and (ob or 0) > 0
+    # NOT the held-freshwater rule. A row carrying a part held at its PR
+    # figures blanks its own rates, but its period TOTAL still prints the
+    # facility's (operator, 2026-09-11: "Show them anyway"); on the week that
+    # part crosses, its unfed freshwater growth is inside the total.
     c[7] = (round((log(cw / ow) / days * 100.0) if ow > 0 and cw > 0 else 0.0, 4)
             if _sgr_ok else None)
     c[11] = _sfr
@@ -2214,7 +2492,8 @@ def _ledger_total_cells(t: dict) -> list:
 
 def _write_ledger_sheet(wb, sheet_name, legends, head_cols, entries,
                         total_prefix, blanks: bool, filterable: bool) -> None:
-    """One ledger sheet. `entries` = (prefix_cells, value_cells, period, days)."""
+    """One ledger sheet. `entries` = (prefix_cells, value_cells, period, days,
+    dens_bio, dens_vol)."""
     if sheet_name in wb.sheetnames:
         del wb[sheet_name]
     ws = wb.create_sheet(sheet_name)
@@ -2279,6 +2558,9 @@ def write_weekly_report(
     realized_biology=None,
     window_openings=None,
     window_culls=None,
+    fw_openings=None,
+    fw_transfer_basis=None,
+    fw_projected=None,
 ) -> None:
     """Per-(week, batch) open/close production ledger (matches reference format).
 
@@ -2292,7 +2574,8 @@ def write_weekly_report(
         sixn_move_in_feed=sixn_move_in_feed,
         tranog_events=tranog_events, og_mort_states=og_mort_states,
         realized_biology=realized_biology, window_openings=window_openings,
-        window_culls=window_culls)
+        window_culls=window_culls, fw_openings=fw_openings,
+        fw_transfer_basis=fw_transfer_basis, fw_projected=fw_projected)
 
     # WEEK-MAJOR. _build_batch_week_ledger returns rows BATCH-major (all of
     # B41's weeks, then all of B42's), which is fine for reading one batch's
@@ -2303,7 +2586,7 @@ def write_weekly_report(
     # order is.
     _starts = {}
     entries = []
-    for d in sorted(rows, key=lambda r: (str(r["week"]), str(r["batch"]))):
+    for d in sorted(rows, key=lambda r: (str(r["week"]), batch_sort_key(r["batch"]))):
         if d.get("week_start") is not None:
             _starts.setdefault(d["week"], d["week_start"])
         entries.append(([scenario_name, d["week"], d["week_start"], d["batch"]],
@@ -2349,6 +2632,9 @@ def write_monthly_report(
     window_openings=None,
     window_culls=None,
     report_start=None,
+    fw_openings=None,
+    fw_transfer_basis=None,
+    fw_projected=None,
 ) -> None:
     """Per-(month, batch) open/close production ledger (matches reference format).
 
@@ -2375,7 +2661,8 @@ def write_monthly_report(
         # 0 here, and 2026-08 closed at -4,562 fish / -17,309 kg, which then
         # became 2026-09's opening.
         window_openings=window_openings,
-        window_culls=window_culls)
+        window_culls=window_culls, fw_openings=fw_openings,
+        fw_transfer_basis=fw_transfer_basis, fw_projected=fw_projected)
 
     # Roll the weekly ledger up to calendar months, splitting any week that
     # straddles a month boundary into its true month. CONTINUOUS flows (growth,
@@ -2410,6 +2697,26 @@ def write_monthly_report(
         except Exception:
             return None
 
+    # EGGS are booked WHOLE in the month of the batch's input date (operator,
+    # 2026-09-11) -- the month CostsAndProfit charges them in -- not spread by
+    # calendar day: a stocking week straddling a month end showed B63 as
+    # 488,571 + 81,429. Like harvest, the egg input advances the month-boundary
+    # Open/Close by ITS OWN fraction, so each month's printed identity still
+    # closes. An input date before the report opens books to the report's
+    # first month (the clip every other flow gets); an input date outside its
+    # own stocking week, or a batch without one, keeps the calendar-day split.
+    _rs = report_start.date() if hasattr(report_start, "date") else report_start
+
+    def _egg_month(b, months_here):
+        bt = batches.get(b) if isinstance(batches, dict) else None
+        d = getattr(bt, "input_date", None)
+        if d is None or not hasattr(d, "year"):
+            return None
+        d = d.date() if hasattr(d, "date") else d
+        if _rs is not None and d < _rs:
+            d = _rs
+        return {(d.year, d.month): 1.0} if (d.year, d.month) in months_here else None
+
     by_batch: dict[str, list] = defaultdict(list)
     for d in weekly:
         by_batch[d["batch"]].append(d)
@@ -2433,13 +2740,24 @@ def write_monthly_report(
             split_w = iso_week_month_split(wkd, clip_start=report_start)
             oc, ob = w["open_count"], w["open_bio"]
             hc, hg = w["harv_count"], w["harv_gross"]
+            # Egg month (see _egg_month): None = no eggs this week, or no
+            # usable input date -- then input splits by calendar day as before.
+            _ic = w.get("input_count") or 0.0
+            split_i = (_egg_month(b, set(split_c) | set(split_w))
+                       if _ic else None)
             dc, db = w["close_count"] - oc, w["close_bio"] - ob
             dc_h, db_h = -hc, -hg              # harvest part of the net delta
-            dc_n, db_n = dc - dc_h, db - db_h  # everything-else part of the delta
-            cum_c = cum_w = 0.0
+            if split_i is None:
+                dc_i = db_i = 0.0
+            else:
+                dc_i, db_i = _ic, (w.get("input_bio") or 0.0)  # egg part
+            dc_n, db_n = dc - dc_h - dc_i, db - db_h - db_i  # everything else
+            cum_c = cum_w = cum_i = 0.0
             for (yr, mon) in sorted(set(split_c) | set(split_w)):
                 fc = split_c.get((yr, mon), 0.0)   # calendar-day fraction
                 fw = split_w.get((yr, mon), 0.0)   # working-day fraction
+                fi = (split_i.get((yr, mon), 0.0)  # egg fraction
+                      if split_i is not None else fc)
                 mo = f"{yr}-{mon:02d}"
                 a = acc.get(mo)
                 if a is None:
@@ -2450,9 +2768,19 @@ def write_monthly_report(
                     # each by its own cumulative fraction
                     a["open_count"] = oc + cum_c * dc_n + cum_w * dc_h
                     a["open_bio"] = ob + cum_c * db_n + cum_w * db_h
+                    if split_i is not None:
+                        a["open_count"] += cum_i * dc_i
+                        a["open_bio"] += cum_i * db_i
+                        # A month the stocking week merely brushes (eggs are
+                        # booked in the other one) can end up all zeros; it
+                        # is dropped below rather than printed as an empty row.
+                        a["_from_eggs"] = True
                     acc[mo] = a
                 a["close_count"] = oc + (cum_c + fc) * dc_n + (cum_w + fw) * dc_h
                 a["close_bio"] = ob + (cum_c + fc) * db_n + (cum_w + fw) * db_h
+                if split_i is not None:
+                    a["close_count"] += (cum_i + fi) * dc_i
+                    a["close_bio"] += (cum_i + fi) * db_i
                 a["days"] += fc * 7.0
                 # Avg_Density is not a prorated flow either: accumulate the
                 # month's biomass and water and divide once, so the month reads
@@ -2464,11 +2792,22 @@ def write_monthly_report(
                 if _wpk is not None:
                     a["peak_density"] = (_wpk if a.get("peak_density") is None
                                          else max(a["peak_density"], _wpk))
+                # A week carrying a held freshwater part makes every month it
+                # touches unable to report a rate (see _rate_is_meaningful).
+                if w.get("rates_unknown"):
+                    a["rates_unknown"] = True
                 for k in FLOW_KEYS:
-                    a[k] += w[k] * (fw if k in HARVEST_KEYS else fc)
+                    a[k] += w[k] * (fw if k in HARVEST_KEYS
+                                    else (fi if k == "input_count" else fc))
                 cum_c += fc
                 cum_w += fw
+                cum_i += fi
         for mo, a in acc.items():
+            if a.get("_from_eggs") and not any(
+                    abs(a.get(k) or 0.0) > 1e-9 for k in
+                    FLOW_KEYS + ("open_count", "close_count", "open_bio",
+                                 "close_bio")):
+                continue      # nothing happened to this batch in this month
             rows_out.append((mo, b, a))
 
     # ---- merge the ELAPSED part of a mid-month PR -------------------------
@@ -2542,10 +2881,17 @@ def write_monthly_report(
             a["feed"], a["gross_growth"] = pb.feed_kg, pb.growth_kg
             a["mort_count"], a["mort_bio"] = pb.mort_count, pb.mort_bio_kg
             a["cull_count"], a["cull_bio"] = pb.cull_count, pb.cull_bio_kg
+            a["input_count"] = pb.input_count
+            # Count_Check = the row's own identity, which is the PR's deviation
+            # in period (legend above) -- never a forced 0. It read 0 while the
+            # printed columns gave -842 (B41, 2026-09, 9.10 PR).
+            a["count_check"] = (a["open_count"] + a["input_count"]
+                                - a["mort_count"] - a["harv_count"]
+                                - a["cull_count"] - a["close_count"])
             rows_out.append((_pr_month, b, a))
 
     _entries = []
-    for mo, b, a in sorted(rows_out, key=lambda x: (x[0], x[1])):
+    for mo, b, a in sorted(rows_out, key=lambda x: (x[0], batch_sort_key(x[1]))):
         open_count, open_bio = a["open_count"], a["open_bio"]
         close_count, close_bio = a["close_count"], a["close_bio"]
         open_wt = (open_bio / open_count * 1000.0) if open_count > 0 else 0.0
@@ -2573,6 +2919,7 @@ def write_monthly_report(
             "cull_count": a["cull_count"], "cull_bio": a["cull_bio"],
             "input_count": a["input_count"], "xfer_in": a["xfer_in"], "xfer_out": a["xfer_out"],
             "count_check": a["count_check"], "bio_check": a["bio_check"],
+            "rates_unknown": bool(a.get("rates_unknown")),
         }
         _entries.append(([scenario_name, mo, b], _ledger_value_cells(agg),
                          mo, a.get("days") or 7.0,
@@ -2606,6 +2953,7 @@ def write_input_conservation_audit(
     tranog_events=None,
     biology_states_by_batch=None,
     manual_fw_balance=None,
+    unmodelled_fw=None,
     sheet_name: str = "InputConservationAudit",
 ) -> None:
     """Input-fish conservation: every stocked batch must have a realized fate.
@@ -2726,7 +3074,7 @@ def write_input_conservation_audit(
     over_produced = []   # harvested + standing > input (impossible: fish created)
     fw_divergent = []    # realized seawater entry materially off the planned tran_og_count
     rowbuf = []
-    for bt in sorted(batches, key=lambda x: x.batch_id):
+    for bt in sorted(batches, key=lambda x: batch_sort_key(x.batch_id)):
         bid = bt.batch_id
         tog = bt.tran_og_date
         togd = (tog.date() if hasattr(tog, "date") else tog) if tog else None
@@ -2763,6 +3111,15 @@ def write_input_conservation_audit(
             dropped_batches += 1
             at_risk = bt.input_count or 0.0
             dropped_fish += at_risk
+        _unm = float((unmodelled_fw or {}).get(bid, 0.0) or 0.0)
+        if _unm > 0 and status != "*** DROPPED ***":
+            # Split across FW and SW at the PR close with nothing modelling
+            # the FW part: the seawater part is placed, but those fish never
+            # were -- the row must not read PLACED for them. Never over a
+            # DROPPED verdict: that is the stronger finding, and the exact
+            # string ideal_engine and the conservation gates count.
+            status = "*** FW PART NOT MODELLED ***"
+            at_risk = _unm
         # FW/TranOG reconciliation: realized seawater entry vs planned tran_og_count.
         planned_tog = bt.tran_og_count or 0
         realized_tog = tranog_placed.get(bid, 0.0)
@@ -2828,6 +3185,14 @@ def write_input_conservation_audit(
                    f"TankContinuityAudit (a never-placed batch has no tank rows). ***"])
     else:
         ws.append(["OK — every in-horizon batch reached the realized facility (0 dropped fish)."])
+    _unm_all = {b: float(c) for b, c in (unmodelled_fw or {}).items() if c and c > 0}
+    if _unm_all:
+        ws.append([f"*** {len(_unm_all)} batch(es) held freshwater fish at the PR "
+                   f"close that nothing models (no freshwater projection, no "
+                   f"scripted fw_to_og): {sum(_unm_all.values()):,.0f} fish, "
+                   f"{', '.join(sorted_batches(_unm_all))}. They are in the "
+                   f"ledger opening and never reach seawater or harvest — see "
+                   f"the ValidationLog. ***"])
     if over_produced:
         ws.append([f"*** {len(over_produced)} batch(es) OVER-PRODUCED (harvested + standing > "
                    f"stocked input — fish created): {', '.join(over_produced)} ***"])
@@ -2881,10 +3246,12 @@ def write_reconciliation_report(
 ) -> None:
     """Per-(batch, week) count + biomass balance check (OG side).
 
-    Formula: open - mortality - harvest + input = expected_close.
-    (Cull is FW-side: applied before fish reach OG; the `input` count
-    is already POST-cull, so cull doesn't enter this OG-side balance.
-    Shown in the output for transparency only.)
+    Formula: open - mortality - harvest + TranOG_In = expected_close, where
+    TranOG_In is the fish arriving from freshwater (the FW->SW move, which is
+    NOT an input -- only eggs are; this sheet is seawater-only, so the
+    arrival is how fish enter it). Cull_Count is shown for information only:
+    it happens in freshwater before the fish arrive, so TranOG_In is already
+    net of it and it does not enter this balance.
 
     Growth + mortality use the RECORDED realized biology (the net
     growth-minus-mortality biomass and mortality count the daily walker
@@ -2902,25 +3269,30 @@ def write_reconciliation_report(
     realized-biology + transfer terms are exact). TankContinuityAudit remains the
     authoritative per-tank check.
 
-    Open for first week = PR-hydrated initial count (in-flight batches)
-    or 0 (incoming batches arrive via TranOG events).
+    Open for first week = PR-hydrated SEAWATER count (in-flight batches) or 0
+    (batches arriving from freshwater, which enter via TranOG_In).
     """
     if sheet_name in wb.sheetnames:
         del wb[sheet_name]
     ws = wb.create_sheet(sheet_name)
     ws.append(["RECONCILIATION REPORT"])
+    # The formula this sheet actually computes. It used to say "- cull ... +
+    # input": the code never subtracted cull, and the arrival from freshwater
+    # is not an input (only eggs are). Values unchanged, 2026-09-11.
     ws.append([
-        "Per-(batch, week) count + biomass balance. open - mortality - cull - "
-        "harvest + input = expected_close. Mismatches above tolerance are flagged."
+        "Per-(batch, week) seawater count + biomass balance. open - mortality - "
+        "harvest + TranOG_In (fish arriving from freshwater) = expected_close. "
+        "Cull_Count is shown for information only: it happens in freshwater "
+        "before the fish arrive. Mismatches above tolerance are flagged."
     ])
     ws.append([])
     ws.append([
         "Week", "Batch",
         "Open_Count", "Mortality_Count", "Cull_Count", "Harvest_Count",
-        "Input_Count", "Expected_Close", "Actual_Close",
+        "TranOG_In", "Expected_Close", "Actual_Close",
         "Count_Delta",
         "Open_Bio_kg", "Growth_kg", "Mort_kg", "Cull_kg",
-        "Harvest_kg", "Input_kg",
+        "Harvest_kg", "TranOG_In_kg",
         "Expected_Bio_kg", "Actual_Bio_kg", "Biomass_Delta_kg",
         "Flag",
     ])
@@ -3003,7 +3375,7 @@ def write_reconciliation_report(
     # credits 6N at the +4-day grown weight, leaving a real biomass injection.
     # Mirrors TankContinuityAudit's per-tank transfer/grade kg (source_avg_wt_g /
     # pickup_source_avg_wt_g), summed to the batch. (TranOG is NOT included here —
-    # it's already the `input` term above.)
+    # it's already the TranOG_In term above.)
     xfer_net_kg: dict[tuple[str, str], float] = defaultdict(float)
     for ev in (transfer_events or []):
         wk = iso_week_label(ev.event_date)
@@ -3032,7 +3404,7 @@ def write_reconciliation_report(
 
     # Walk batches × weeks, write rows + flag mismatches.
     TOLERANCE = 100.0   # fish; below this absolute, treat as numerical noise
-    all_batches = sorted({b for (b, _) in loc_count} | set(pr_count.keys()))
+    all_batches = sorted_batches({b for (b, _) in loc_count} | set(pr_count.keys()))
     for batch in all_batches:
         prev_count = pr_count.get(batch, 0.0)
         prev_biomass = pr_biomass.get(batch, 0.0)
@@ -3080,8 +3452,8 @@ def write_reconciliation_report(
             # Net transfer + grade biomass (intra-batch ~0 except the 6N move-in
             # grown-weight injection); without this the injection reads as drift.
             expected_b += xfer_net_kg.get((batch, wk), 0.0)
-            # OG-side balance: cull is FW-side (input is already post-cull),
-            # so cull is shown as informational but not subtracted.
+            # OG-side balance: cull is FW-side (TranOG_In is already
+            # post-cull), so cull is shown as informational but not subtracted.
             expected_c = prev_count - mort - hv_c + in_c
             delta_c = actual_c - expected_c
             delta_b = actual_b - expected_b
@@ -3550,7 +3922,8 @@ def write_facility_map(
     _first_seen: dict = {}
     for r in sorted(batch_locations, key=lambda r: (r.week_label, r.tank_id)):
         _first_seen.setdefault(r.batch_id, r.week_label)
-    _batch_order = sorted(_first_seen, key=lambda b: (_first_seen[b], b))
+    _batch_order = sorted(_first_seen,
+                          key=lambda b: (_first_seen[b], batch_sort_key(b)))
     _batch_fill = {b: PatternFill("solid", fgColor=_PALETTE[i % len(_PALETTE)])
                    for i, b in enumerate(_batch_order)}
 
@@ -3921,6 +4294,11 @@ def write_validation_log(
             # badly. That is the same mis-filing the FW-calibration branch
             # above exists to correct.
             cat = "INFO - Per-week coverage (weeks on a Control default)"
+        elif w.startswith("SPLIT BATCH AT PR CLOSE"):
+            # Fish the PR holds that the plan never models: loud, by name.
+            cat = "WARNING - Split batch at PR close (FW part not modelled)"
+        elif w.startswith("FW BATCH AT PR CLOSE NOT MODELLED"):
+            cat = "WARNING - FW batch at PR close (not modelled)"
         elif "INV-1" in w:
             cat = "WARNING - INV-1 (one-batch-per-tank)"
         elif "INV-5" in w:
@@ -4049,7 +4427,10 @@ def write_calibration_diagnostics(
         "Current_FW_Correction", "Projected_PreCull_AvgWt_g", "Residual_pct",
         "Suggested_FW_Correction",
     ])
-    for r in residuals:
+    # Batch order, sorted HERE: the caller concatenates two lists (incoming,
+    # then FW in-flight), which read B57..B61 then B50..B56. Stable, so a
+    # batch's own rows keep their order.
+    for r in sorted(residuals, key=lambda r: batch_sort_key(r.batch_id)):
         ws.append([
             r.batch_id, r.tran_og_date, round(r.target_avg_wt_g, 2),
             round(r.current_fw_correction, 4),

@@ -200,7 +200,8 @@ import streamlit as st
 sys.path.insert(0, P["root"])
 ns = {"st": st, "pd": pd, "CONFIG_DIR": Path(P["cfg"])}
 exec(compile(lift(P["root"], names=("_edit_costs", "_read_or_explain",
-                                    "_records"),
+                                    "_records", "_data_editor",
+                                    "_editor_has_edits", "_same_table"),
                   assigns=("_READ_FIX_HINT",)), "app.py", "exec"), ns)
 ns["_edit_costs"]()
 """
@@ -523,7 +524,7 @@ from forecast import ideal as im
 from forecast.scenario_io import load_batches
 ns = {"st": st, "os": os, "_ROOT": Path(P["proj"]),
       "_config_fingerprint": lambda: "fp", "_cpu_workers": lambda: 1}
-exec(compile(lift(P["root"], prefixes=("_ideal",),
+exec(compile(lift(P["root"], names=("_resend_widget",), prefixes=("_ideal",),
                   assign_prefixes=("_IDEAL", "_TR_", "_REF_")),
              "app.py", "exec"), ns)
 ctx = im.load_context(P["proj"])
@@ -1112,7 +1113,8 @@ def test_every_new_widget_has_help():
     # The data editor's every column is configured (with help, above).
     ec = _func(tree, "_edit_costs")
     de = next(n for n in ast.walk(ec) if isinstance(n, ast.Call)
-              and getattr(n.func, "attr", "") == "data_editor")
+              and (getattr(n.func, "attr", "") == "data_editor"
+                   or getattr(n.func, "id", "") == "_data_editor"))
     cc = {k.arg: k.value for k in de.keywords}["column_config"]
     assert sorted(k.value for k in cc.keys) == sorted(
         ["Feed type", "Up to size (g)", "Item", "Price / kg"])

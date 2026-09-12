@@ -73,7 +73,8 @@ class _FakeSt:
 
 def _table(fake):
     tree = ast.parse(APP.read_text(encoding="utf-8"))
-    want = {"_ideal_limits_table", "_ideal_limit_seeds", "_ideal_default"}
+    want = {"_ideal_limits_table", "_ideal_limit_seeds", "_ideal_default",
+            "_resend_widget", "_ideal_editor_key"}
     body = [n for n in tree.body
             if isinstance(n, ast.FunctionDef) and n.name in want]
     assert sorted(n.name for n in body) == sorted(want)

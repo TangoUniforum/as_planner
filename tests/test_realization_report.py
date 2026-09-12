@@ -105,6 +105,19 @@ def test_distinct_reasons_do_not_merge():
     assert len(rows) == 2
 
 
+def test_stuck_rows_tie_break_by_batch_number():
+    """Equal occurrence counts fall back to the batch, by NUMBER (B9 < B10 <
+    B100), the one shared key (forecast/batch_order). test_batch_order's token
+    scan cannot see this sort -- its key names no batch (kv[0][0]) -- and a
+    plain string tie-break here left every test green (independent mutation
+    proof, 2026-09-11)."""
+    rows = _stuck(_sheet([
+        _mv(t, 43, 10.0, batch=b, moved=0.0, reason="source_holds_other_batch",
+            detail="B47")
+        for t, b in ((31, "B100"), (32, "B9"), (33, "B10"))]))
+    assert [r[0] for r in rows] == ["B9", "B10", "B100"]
+
+
 def test_applied_moves_never_appear_as_stuck():
     assert _stuck(_sheet([_mv(31, 41, 100.0), _mv(32, 42, 100.0, moved=60.0)])) == []
 

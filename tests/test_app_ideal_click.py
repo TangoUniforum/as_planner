@@ -777,7 +777,7 @@ tree = ast.parse(open(ROOT + "/app.py", encoding="utf-8").read())
 
 def keep(n):
     if isinstance(n, ast.FunctionDef):
-        return n.name.startswith("_ideal")
+        return n.name.startswith("_ideal") or n.name == "_resend_widget"
     return isinstance(n, ast.Assign) and any(
         getattr(t, "id", "").startswith(("_IDEAL", "_TR_", "_REF_"))
         for t in n.targets)
@@ -1065,3 +1065,386 @@ def test_the_optimizer_cost_and_stability_lines_on_every_branch():
 
 def test_the_optimizer_caps_are_refused_above_the_slider_and_handed_over():
     _drive(_OPT_CAPS_DRIVER)
+
+
+# ---- The browser's own copy of each widget value (2026-09-11) --------------
+# A real browser keeps its own copy of every widget's value and DROPS it when
+# a run in another mode finishes. Every mode but Run forecast ends in
+# st.stop(), and after a stopped run the SERVER keeps the widget's value. Back
+# on the page the browser shows what the widget tells it: the server's value
+# only when set_value is set, otherwise the widget's default — its minimum or
+# first option when it is drawn without value= — and the next click sends
+# that back as the value. The operator's step-2 optimizer ran on a 500 t cap,
+# 0-fish harvest limits and a 1-move budget that way. AppTest has no browser
+# (and re-seeds keys on the way back), so it cannot show the reset itself; it
+# CAN check the invariant the browser relies on, after every kind of run:
+# each keyed input carries the server's value to a browser that has no copy
+# of its own. (The reset itself was reproduced, and the fix confirmed, in
+# headless Edge.)
+_BROWSER_COPY = r'''
+KINDS = ("number_input", "slider", "text_input", "radio", "selectbox",
+         "multiselect", "date_input", "checkbox", "toggle")
+
+def shows(w):
+    """(what a browser with no copy of its own shows, the server's value),
+    or None when they agree or the value is sent along (set_value)."""
+    p = w.proto
+    if p.set_value:
+        return None
+    if w.type == "number_input":
+        shown, server = float(p.default), float(w.value)
+    elif w.type == "slider":
+        v = w.value if isinstance(w.value, (list, tuple)) else [w.value]
+        shown, server = [float(x) for x in p.default], [float(x) for x in v]
+    elif w.type == "text_input":
+        shown, server = p.default, w.value
+    elif w.type in ("radio", "selectbox"):
+        shown, server = p.default, w.index
+    elif w.type == "multiselect":
+        shown, server = list(p.default), list(w.indices)
+    elif w.type == "date_input":
+        shown, server = list(p.default), [w.value.strftime("%%Y/%%m/%%d")]
+    else:                                        # checkbox, toggle
+        shown, server = bool(p.default), bool(w.value)
+    return None if shown == server else (shown, server)
+
+def reset_boxes(at):
+    """-> (every keyed ideal_* input a browser would reset, as 'key: shows
+    X, server Y'; the keys looked at)."""
+    bad, keys = [], set()
+    for kind in KINDS:
+        for w in getattr(at, kind):
+            if w.key and w.key.startswith("ideal_"):
+                keys.add(w.key)
+                d = shows(w)
+                if d is not None:
+                    bad.append("%%s: shows %%r, server %%r" %% (w.key, d[0], d[1]))
+    return bad, keys
+
+def check(at, tag, want):
+    if at.exception:
+        fail(tag + ": " + "; ".join(str(e)[:300] for e in at.exception))
+    bad, keys = reset_boxes(at)
+    if want - keys:
+        fail("after " + tag + " these inputs were not drawn: "
+             + ", ".join(sorted(want - keys)))
+    if bad:
+        fail("after " + tag + ", a browser without its own copy of the value "
+             "would show (and on the next click send): " + "; ".join(bad))
+'''
+
+_HEAD = r'''
+import sys
+sys.path.insert(0, %(root)r)
+try:
+    from streamlit.testing.v1 import AppTest
+except Exception as e:
+    print("SKIP no AppTest: %%s" %% e)
+    raise SystemExit(0)
+
+def fail(msg):
+    print("FAIL " + msg)
+    raise SystemExit(1)
+'''
+
+# The real page, steps 1-2 (step 3 needs an uploaded PR, which AppTest cannot
+# set): after typing, a rerun, and a round trip through How it works,
+# Configure (both end in st.stop()) and Run forecast (finishes normally).
+_ROUND_TRIP_DRIVER = _HEAD + _BROWSER_COPY + r'''
+IDEAL = "Ideal (what should we stock?)"
+at = AppTest.from_file(%(app)r, default_timeout=600)
+at.session_state["app_mode"] = IDEAL
+at.run()
+_bad, WANT = reset_boxes(at)
+if not {"ideal_cap_t", "ideal_cads", "ideal_ref_cap", "ideal_ref_hmax",
+        "ideal_ref_lim_moves", "ideal_opt_obj", "ideal_opt_caps"} <= WANT:
+    fail("the Ideal page did not draw its inputs: %%r" %% sorted(WANT))
+check(at, "the first render", WANT)
+# Values the operator moved, so no box passes by sitting at its seed.
+at.number_input(key="ideal_ref_hmax").set_value(30000)
+at.number_input(key="ideal_ref_lim_moves").set_value(20)
+at.text_input(key="ideal_opt_cads").set_value("49, 56").run()
+check(at, "typing into the boxes", WANT)
+at.run()
+check(at, "a rerun", WANT)
+modes = at.radio(key="app_mode").options
+for start in ("How it works", "Configure", "Run forecast"):
+    other = next(m for m in modes if m.startswith(start))
+    at.radio(key="app_mode").set_value(other).run()
+    at.radio(key="app_mode").set_value(IDEAL).run()
+    check(at, "a round trip through " + start, WANT)
+got = (at.number_input(key="ideal_ref_hmax").value,
+       at.number_input(key="ideal_ref_lim_moves").value,
+       at.text_input(key="ideal_opt_cads").value)
+if got != (30000, 20, "49, 56"):
+    fail("the moved values did not survive: %%r" %% (got,))
+print("OK %%d Ideal inputs carry the server's value after typing, a rerun "
+      "and three mode round trips" %% len(WANT))
+'''
+
+# Step 3 on a synthetic page (the real _ideal* functions with a PR stub, as
+# _TR_OPT_DRIVER): its date, sizes, what-if boxes, move budget and optimizer
+# inputs, after typing, a rerun, and a round trip through a mode that ends in
+# st.stop() like every mode of app.py but Run forecast.
+_TR_ROUND_TRIP_DRIVER = _HEAD + _BROWSER_COPY + r'''
+SCRIPT = "ROOT = " + repr(%(root)r) + "\n" + r"""
+import ast, os, sys, datetime as dt
+from pathlib import Path
+from types import SimpleNamespace
+import streamlit as st
+sys.path.insert(0, ROOT)
+from forecast import ideal as im
+tree = ast.parse(open(ROOT + "/app.py", encoding="utf-8").read())
+
+def keep(n):
+    if isinstance(n, ast.FunctionDef):
+        return n.name.startswith("_ideal") or n.name == "_resend_widget"
+    return isinstance(n, ast.Assign) and any(
+        getattr(t, "id", "").startswith(("_IDEAL", "_TR_", "_REF_"))
+        for t in n.targets)
+
+ns = {"st": st, "os": os, "_ROOT": Path(ROOT),
+      "uploaded": SimpleNamespace(name="pr.xlsm", getvalue=lambda: b"PR bytes"),
+      "pr": {"ok": True, "forecast_start": dt.datetime(2026, 9, 1)},
+      "_effective_method": lambda: ("controller", {}, "test"),
+      "_method_obj": lambda k: SimpleNamespace(label="Controller"),
+      "_config_fingerprint": lambda: "fp",
+      "_cpu_workers": lambda: 1}
+exec(compile(ast.Module(body=[n for n in tree.body if keep(n)],
+                        type_ignores=[]), "app.py", "exec"), ns)
+ctx = im.load_context(ROOT)
+mode = st.radio("Mode", ["Ideal", "Other"], key="app_mode")
+if mode == "Ideal":
+    ns["_ideal_restore"]()
+    ns["_ideal_transition"](ctx, (49, 340000), 3800)
+    ns["_ideal_save"]()
+    st.stop()
+st.write("another mode")
+st.stop()
+"""
+
+at = AppTest.from_string(SCRIPT, default_timeout=120)
+at.run()
+_bad, WANT = reset_boxes(at)
+need = {"ideal_tr_cutoff", "ideal_tr_sizes", "ideal_tr_cap", "ideal_tr_hmax",
+        "ideal_tr_lim_moves", "ideal_tr_opt_obj", "ideal_tr_opt_smin",
+        "ideal_tr_opt_caps"}
+if need - WANT:
+    fail("step 3 did not draw %%r" %% sorted(need - WANT))
+check(at, "the first render", WANT)
+at.text_input(key="ideal_tr_sizes").set_value("300000")
+at.number_input(key="ideal_tr_hmax").set_value(45000)
+at.number_input(key="ideal_tr_lim_moves").set_value(18)
+at.number_input(key="ideal_tr_opt_smin").set_value(260000).run()
+check(at, "typing into the boxes", WANT)
+at.run()
+check(at, "a rerun", WANT)
+at.radio(key="app_mode").set_value("Other").run()
+at.radio(key="app_mode").set_value("Ideal").run()
+check(at, "a mode round trip", WANT)
+print("OK %%d step-3 inputs carry the server's value" %% len(WANT))
+'''
+
+
+def test_every_ideal_input_keeps_its_value_in_the_browser_after_a_round_trip():
+    _drive(_ROUND_TRIP_DRIVER)
+
+
+def test_every_step3_input_keeps_its_value_in_the_browser_after_a_round_trip():
+    _drive(_TR_ROUND_TRIP_DRIVER)
+
+
+# Drawn on every run of every mode (the sidebar): the browser never drops it.
+_ALWAYS_DRAWN = {"app_mode"}
+# Widget -> the position of its value / index / default argument.
+_VALUE_ARG = {"radio": 2, "selectbox": 2, "multiselect": 2, "checkbox": 1,
+              "toggle": 1, "number_input": 3, "text_input": 1,
+              "text_area": 1, "slider": 3, "select_slider": 2,
+              "date_input": 1, "time_input": 1, "color_picker": 1,
+              "pills": 2, "segmented_control": 2}
+
+
+def test_every_keyed_widget_drawn_without_a_value_is_re_sent():
+    """The same reset on every page. AppTest cannot reach the Run page's
+    manual-window panel, Decide or Optimize without an uploaded PR, so this
+    reads app.py: a keyed input drawn without value= / index= / default= (or
+    with **kwargs that pass one only on its first draw) must have its key
+    re-sent by _resend_widget earlier in the same function, be one of
+    _IDEAL_KEEP (re-sent by _ideal_restore, driven above), or be drawn on
+    every run. It checks the code's shape, not a browser."""
+    import ast
+    with open(APP, encoding="utf-8") as fh:
+        tree = ast.parse(fh.read())
+    parent = {c: p for p in ast.walk(tree) for c in ast.iter_child_nodes(p)}
+
+    def scope(n):
+        while n in parent:
+            n = parent[n]
+            if isinstance(n, ast.FunctionDef):
+                return n
+        return tree
+
+    def ident(e):
+        return (("lit", e.value) if isinstance(e, ast.Constant)
+                else ("expr", ast.dump(e)))
+
+    def is_resend(n):
+        return (isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                and n.func.id == "_resend_widget" and bool(n.args))
+
+    keep = next(n for n in tree.body if isinstance(n, ast.Assign)
+                and any(getattr(t, "id", None) == "_IDEAL_KEEP"
+                        for t in n.targets))
+    ideal_keep = set(ast.literal_eval(keep.value))
+    restore = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
+                   and n.name == "_ideal_restore")
+    assert any(isinstance(f, ast.For) and ast.unparse(f.iter) == "_IDEAL_KEEP"
+               and any(is_resend(c) for c in ast.walk(f))
+               for f in ast.walk(restore)), \
+        "_ideal_restore does not re-send the _IDEAL_KEEP keys"
+
+    resent = {}                                 # scope -> [(line, key)]
+    for n in ast.walk(tree):
+        if is_resend(n):
+            resent.setdefault(scope(n), []).append((n.lineno, ident(n.args[0])))
+        elif (isinstance(n, ast.For) and isinstance(n.target, ast.Name)
+              and any(is_resend(c) and isinstance(c.args[0], ast.Name)
+                      and c.args[0].id == n.target.id for c in ast.walk(n))):
+            for c in ast.walk(n.iter):          # for k in ("a", "b"): resend(k)
+                if isinstance(c, ast.Constant) and isinstance(c.value, str):
+                    resent.setdefault(scope(n), []).append(
+                        (n.lineno, ("lit", c.value)))
+    offenders, checked = [], 0
+    for n in ast.walk(tree):
+        if not (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                and n.func.attr in _VALUE_ARG):
+            continue
+        kw = {k.arg: k.value for k in n.keywords if k.arg}
+        if "key" not in kw or ({"value", "index", "default"} & set(kw)
+                               or len(n.args) > _VALUE_ARG[n.func.attr]):
+            continue                            # unkeyed, or drawn with its value
+        checked += 1
+        k = ident(kw["key"])
+        if k[0] == "lit" and (k[1] in ideal_keep or k[1] in _ALWAYS_DRAWN):
+            continue
+        if any(line < n.lineno and rk == k
+               for line, rk in resent.get(scope(n), ())):
+            continue
+        offenders.append(f"line {n.lineno}: {n.func.attr}("
+                         f"key={ast.unparse(kw['key'])})")
+    assert checked >= 50, f"the scan found only {checked} widgets"
+    assert not offenders, (
+        "keyed widget(s) drawn without value= / index= / default= and never "
+        "re-sent: after a round trip through another mode a real browser "
+        "shows them at their minimum / first option, and the next click "
+        "sends that — " + "; ".join(offenders))
+
+
+# ---- The same drop, for the page's data editors (2026-09-11) --------------
+# A data editor cannot be re-sent (Streamlit refuses writes to its key). In a
+# real browser, after Ideal -> How it works -> Ideal, the Tank & system limits
+# table SHOWED a density cap at 85 while every run used the 77 typed before:
+# the server keeps an editor's edits through a mode that ends in st.stop(),
+# the browser drops them and draws the bare table. The stand-in below is that
+# pair: data_editor records the table the browser is sent and returns it with
+# the edits held under the editor's key (the server's view).
+class _EditorSt:
+    class column_config:
+        Column = NumberColumn = staticmethod(lambda **kw: kw)
+
+    def __init__(self):
+        self.session_state = {}
+        self.sent = {}                      # editor key -> the table drawn
+        self.last_key = None
+
+    def data_editor(self, df, key=None, **kw):
+        self.sent[key], self.last_key = df.copy(), key
+        out = df.copy()
+        edits = (self.session_state.get(key) or {}).get("edited_rows", {})
+        for row, cells in edits.items():
+            for col, v in cells.items():
+                out.loc[out.index[row], col] = v
+        return out
+
+    def number_input(self, label, key=None, value=None, **kw):
+        if key not in self.session_state:
+            self.session_state[key] = value
+        return self.session_state[key]
+
+    def caption(self, *a, **kw):
+        pass
+
+    def warning(self, *a, **kw):
+        pass
+
+
+def _limits_table(fake):
+    import ast
+    from pathlib import Path
+    want = {"_ideal_limits_table", "_ideal_limit_seeds", "_ideal_default",
+            "_resend_widget", "_ideal_editor_key"}
+    with open(APP, encoding="utf-8") as fh:
+        tree = ast.parse(fh.read())
+    body = [n for n in tree.body
+            if isinstance(n, ast.FunctionDef) and n.name in want]
+    assert sorted(n.name for n in body) == sorted(want)
+    ns = {"st": fake, "os": os, "_ROOT": Path(ROOT)}
+    exec(compile(ast.Module(body=body, type_ignores=[]), APP, "exec"), ns)
+    return ns["_ideal_limits_table"]
+
+
+def test_a_table_edit_is_shown_after_a_round_trip_through_a_stopped_mode():
+    from forecast.config_io import load_config
+    control, _t, facility = load_config(os.path.join(ROOT, "config"))
+    ctx = {"control": control, "facility": facility}
+    fake = _EditorSt()
+    ss = fake.session_state
+    table = _limits_table(fake)
+    col = "Tank density cap (kg/m³)"
+
+    def run(n):                             # one Ideal run, the n-th overall
+        ss["_run_n"] = n
+        return table(ctx, "t")[0]
+
+    run(1)
+    k0 = fake.last_key
+    system = fake.sent[k0]["System"].iloc[0]
+    new = float(fake.sent[k0][col].iloc[0]) - 8
+    ss[k0] = {"edited_rows": {0: {col: new}}, "added_rows": [],
+              "deleted_rows": []}           # the operator edits a cell
+    assert run(2) == {system: new}
+    assert run(3) == {system: new}
+    assert fake.last_key == k0, "a rerun on the page re-mounted the editor"
+    # Run 4 is another mode, which ends in st.stop(): the edits stay under
+    # the editor's key on the server, the browser drops its copy. Run 5 is
+    # back on the Ideal page.
+    dens = run(5)
+    k = fake.last_key
+    shown = float(fake.sent[k][col].iloc[0])  # the browser has no edits now
+    assert dens == {system: new}             # what every run uses
+    assert shown == new, (
+        f"back on the page the table shows {shown:g} while the run uses "
+        f"{new:g}")
+    assert ss.get(k) is None                 # a new editor, with no edits
+    # A mode that finishes normally drops the editor's state on the server
+    # too: the table as left, in the same editor.
+    ss.pop(k, None)
+    assert run(7) == {system: new}
+    assert float(fake.sent[fake.last_key][col].iloc[0]) == new
+
+
+def test_both_ideal_data_editors_take_their_key_from_the_shared_rule():
+    """The batch table (step 2) cannot be driven with a stand-in cheaply;
+    it must take its key and table from the same rule as the limits table."""
+    import ast
+    with open(APP, encoding="utf-8") as fh:
+        tree = ast.parse(fh.read())
+    for name in ("_ideal_reference", "_ideal_limits_table"):
+        fn = next(n for n in tree.body
+                  if isinstance(n, ast.FunctionDef) and n.name == name)
+        calls = [n for n in ast.walk(fn) if isinstance(n, ast.Call)]
+        assert any(getattr(c.func, "id", None) == "_ideal_editor_key"
+                   for c in calls), name
+        ed = [c for c in calls if getattr(c.func, "attr", None) == "data_editor"]
+        assert ed and all(ast.unparse({k.arg: k.value for k in c.keywords}
+                                      ["key"]) == "ed_key" for c in ed), name

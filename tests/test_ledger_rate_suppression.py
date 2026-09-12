@@ -72,13 +72,15 @@ def test_a_big_harvest_does_NOT_kill_the_fcr():
     assert fcr_ok, "FCR is still meaningful — its denominator is balance-derived"
 
 
-def test_an_arrival_week_has_no_sgr():
-    """Nothing to compare against: the batch had no opening position."""
+def test_an_egg_stocking_week_has_no_sgr():
+    """Nothing to compare against: the batch had no opening position. (Only
+    eggs are Input since 2026-09-11; a FW->SW week opens on the freshwater
+    fish and keeps its SGR -- see tests/test_ledger_input_is_eggs.py.)"""
     sgr_ok, _ = _rate_is_meaningful(_row(open_count=0.0, input_count=253240.0))
     assert not sgr_ok
 
 
-def test_arrivals_change_the_mean_just_as_harvest_does():
+def test_an_input_changes_the_mean_just_as_harvest_does():
     sgr_ok, _ = _rate_is_meaningful(_row(input_count=50000.0))
     assert not sgr_ok
 

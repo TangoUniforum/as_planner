@@ -411,8 +411,22 @@ def test_no_ledger_row_reports_an_impossible_fcr(run_outputs):
 
 
 def test_an_arrival_week_does_not_book_the_arrival_as_growth(run_outputs):
-    """The specific defect: zero opening + a big input + growth ~= close_bio."""
+    """The specific defect: the arriving biomass booked as one week's growth.
+
+    Retargeted 2026-09-11. Only eggs are Input now; a FW->SW week OPENS on the
+    freshwater fish and shows the crossing in Xfer_In, so the old filter
+    (input > 0 with a zero opening) would pass without checking a single
+    arrival. The arrival weeks are read from TransferPlan's TranOG rows."""
     wb = _load(run_outputs)
+    tog = {}
+    tp = list(wb["TransferPlan"].iter_rows(values_only=True))
+    th = next(i for i, r in enumerate(tp) if r and r[0] == "Week")
+    tcol = {str(c).strip(): j for j, c in enumerate(tp[th]) if c is not None}
+    for r in tp[th + 1:]:
+        if r and r[tcol["Type"]] == "TranOG":
+            k = (str(r[tcol["Batch"]]), str(r[tcol["Week"]]))
+            tog[k] = tog.get(k, 0.0) + float(r[tcol["Count (fish)"]] or 0.0)
+    assert tog, "no TranOG arrivals in the plan -- nothing to check"
     ws = wb["WeeklyReport"]
     rows = list(ws.iter_rows(values_only=True))
     hdr = None
@@ -421,24 +435,25 @@ def test_an_arrival_week_does_not_book_the_arrival_as_growth(run_outputs):
             hdr = {str(c).strip(): j for j, c in enumerate(r) if c is not None}
             start = i + 1
             break
-    offenders = []
+    offenders, seen = [], 0
     for r in rows[start:]:
         if not r or r[hdr["Batch"]] is None:
             continue
-        try:
-            oc = float(r[hdr["Open_Count (fish)"]] or 0.0)
-            ic = float(r[hdr["Input_Count (fish)"]] or 0.0)
-            growth = float(r[hdr["Gross_Growth (kg)"]] or 0.0)
-            cbio = float(r[hdr["Close_Bio (kg)"]] or 0.0)
-        except (TypeError, ValueError):
+        k = (str(r[hdr["Batch"]]), str(r[hdr["Week"]]))
+        if k not in tog:
             continue
-        if ic <= 0 or oc > 0 or cbio <= 0:
-            continue
-        # Growth on an arrival week is ONE WEEK of growth. If it is most of the
-        # closing biomass, the arrivals themselves were booked as growth.
-        if growth > 0.5 * cbio:
-            offenders.append((r[hdr["Batch"]], r[hdr["Week"]], growth, cbio))
+        seen += 1
+        oc = float(r[hdr["Open_Count (fish)"]] or 0.0)
+        xin = float(r[hdr["Xfer_In (fish)"]] or 0.0)
+        growth = float(r[hdr["Gross_Growth (kg)"]] or 0.0)
+        cbio = float(r[hdr["Close_Bio (kg)"]] or 0.0)
+        # The week opens on the fish about to cross, shows them as a move,
+        # and books ONE week of growth -- never most of the closing biomass.
+        if oc <= 0 or xin + 1 < tog[k] or growth > 0.5 * cbio:
+            offenders.append((k, oc, xin, tog[k], growth, cbio))
+    assert seen, "no WeeklyReport row carries a TranOG week"
     assert not offenders, (
-        "arrival weeks booking the arriving biomass as growth: "
-        + "; ".join(f"{b} {w}: growth {g:,.0f} of close {c:,.0f}"
-                    for b, w, g, c in offenders[:5]))
+        "arrival weeks that open empty, hide the move, or book the arrival as "
+        "growth: " + "; ".join(f"{k}: open {o:,.0f} xfer_in {x:,.0f} (TranOG "
+                               f"{t:,.0f}) growth {g:,.0f} of close {c:,.0f}"
+                               for k, o, x, t, g, c in offenders[:5]))
