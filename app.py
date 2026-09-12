@@ -3628,7 +3628,6 @@ def _mw_copilot(uploaded, events, forecast_start=None, bad=None):
     `bad` is the save bar's infeasibility map. Both buttons here write
     scenario/manual_events.yaml — the same file ▶ Run forecast reads — so they
     honour the same reject-at-entry gate the Save button does."""
-    import shutil
     import tempfile
     from forecast.copilot import propose_upcoming, to_manual_events
     from forecast.manual_events import dump_manual_events
@@ -3698,7 +3697,8 @@ def _mw_copilot(uploaded, events, forecast_start=None, bad=None):
                 st.error(f"Co-pilot failed: {type(e).__name__}: {e}")
                 return
             finally:
-                shutil.rmtree(_wd, ignore_errors=True)
+                from forecast.temp_cleanup import remove_tree as _rm_tree
+                _rm_tree(_wd)
 
     props = st.session_state.get("mw_cp_props")
     if not props:
@@ -5864,6 +5864,119 @@ def _ideal_limit_text(ov: dict, ctrl) -> str:
     return "; ".join(parts)
 
 
+# A limit far from the value its box or cell starts at is flagged on the
+# Ideal page — display only, no run changes: 0 where that value is not 0, or
+# below _IDEAL_FAR_LOW / above _IDEAL_FAR_HIGH times it. Wide on purpose: it
+# catches a box knocked to its minimum (2026-09-11: step 2's optimizer ran at
+# 500 t, 0 fish, 0 feed and a 1-move budget after a mode round trip, and
+# nothing said so) or a slipped digit, not a what-if tens of percent off.
+_IDEAL_FAR_LOW = 0.5        # under 50 % of the starting value is flagged
+_IDEAL_FAR_HIGH = 2.0       # over 200 % of the starting value is flagged
+
+
+def _ideal_far(value, seed) -> bool:
+    """True when `value` is far from `seed`, the value its box or cell
+    starts at (Control, the files, or step 1's slider): 0 where the seed is
+    not 0 (a file that sets nothing counts as not 0), or outside
+    _IDEAL_FAR_LOW–_IDEAL_FAR_HIGH × a seed that is neither 0 nor None. A
+    blank value (a cleared cell keeps the file's value) is never far."""
+    if value is None:
+        return False
+    v = float(value)
+    if v != v:                              # NaN: a cleared cell
+        return False
+    s = None if seed is None else float(seed)
+    if s is not None and s != s:
+        s = None
+    if v == 0:
+        return s != 0
+    if not s:
+        return False
+    return v < _IDEAL_FAR_LOW * s or v > _IDEAL_FAR_HIGH * s
+
+
+def _ideal_flag_num(v) -> str:
+    """26,000 / 85.25 / 0 — thousands separated, no trailing zeros."""
+    return f"{float(v):,.2f}".rstrip("0").rstrip(".")
+
+
+def _ideal_limit_flags(items) -> list:
+    """-> 'Min harvest / wk: 0 fish (Control 26,000)' for each far item of
+    `items` = (label, page value, seed, unit, where the seed comes from[,
+    what a seed of None means — default "not set"])."""
+    out = []
+    for label, v, seed, unit, src, *why_none in items:
+        if _ideal_far(v, seed):
+            out.append(f"{label}: {_ideal_flag_num(v)} {unit} ("
+                       + (f"{src} {_ideal_flag_num(seed)})" if seed is not None
+                          else f"{src}: {(why_none or ['not set'])[0]})"))
+    return out
+
+
+def _ideal_table_flag_items(seeds, seed_moves, dens_ov, sys_ov, ctl_ov) -> list:
+    """The tank & system limits table and move budget of one run as
+    _ideal_limit_flags items. `seeds` = _ideal_limit_seeds; the overrides
+    are _ideal_limits_table's — only CHANGED cells are in them, and a cell at
+    its seed is never far. The move budget is judged against Control's
+    value (its 0 = "budget off": no ratio test)."""
+    items = []
+    for s, sd in sorted(seeds.items()):
+        if s in dens_ov:
+            # A density seed of None is not "unset": the system's tanks
+            # have DIFFERENT caps in your files (_ideal_limit_seeds).
+            items.append((f"{s} tank density cap", dens_ov[s], sd["density"],
+                          "kg/m³", "your files", "its tanks' caps differ"))
+        d = sys_ov.get(s) or {}
+        if "biomass" in d:
+            items.append((f"{s} system biomass limit", d["biomass"] / 1000.0,
+                          sd["biomass_t"], "t", "your files"))
+        if "feed_per_day" in d:
+            items.append((f"{s} system feed limit", d["feed_per_day"],
+                          sd["feed"], "kg/day", "your files"))
+    if "max_transfers_per_week" in ctl_ov:
+        items.append(("Weekly move budget", ctl_ov["max_transfers_per_week"],
+                      seed_moves, "moves", "Control"))
+    return items
+
+
+def _ideal_reset_limits(boxes, prefix, box_moves):
+    """on_click of a step's ↺ Reset to Control: every limit of that step back
+    to where it starts — `boxes` {widget key: seed}, the tank & system
+    limits table `prefix` and its weekly move budget (`box_moves`, the box's
+    seed), each with its _keep_ shadow.
+
+    A callback, because the boxes are drawn above the button and only a
+    callback — it runs before the next rerun — may set a drawn widget's key.
+    Values are WRITTEN, never popped: a value written through the Session
+    State API is sent with the widget, so the browser shows it even when it
+    dropped its own copy on a mode round trip (_resend_widget). The table
+    is rebuilt from the files and drawn as a NEW editor (the next nonce): a
+    browser keeps a data editor's edits per element, so the same editor
+    would go on showing them. Nothing is written to config/ or scenario/."""
+    ss = st.session_state
+    for k, v in boxes.items():
+        ss[k] = v
+        ss["_keep_" + k] = v
+    if "ideal_ref_cap" in boxes:            # no longer the optimizer's cap
+        ss.pop("_ideal_ref_cap_by_opt", None)
+    ss.pop(prefix + "_base", None)          # rebuilt from the files' seeds
+    ss.pop("_keep_" + prefix + "_edited", None)
+    ss[prefix + "_nonce"] = ss.get(prefix + "_nonce", 0) + 1
+    ss[prefix + "_moves"] = box_moves
+    ss["_keep_" + prefix + "_moves"] = box_moves
+
+
+def _ideal_far_warning(flags, what, runs):
+    """One warning for a step's far limits (_ideal_limit_flags), or none."""
+    if flags:
+        st.warning(
+            f"**Some {what} limits are far from Control** — "
+            + "; ".join(flags) + f". Each is 0, or under {_IDEAL_FAR_LOW:.0%} "
+            f"or over {_IDEAL_FAR_HIGH:.0%} of the value in brackets (where "
+            f"its box or cell starts). {runs} with them exactly as shown — "
+            f"press **↺ Reset to Control** to put every {what} limit back.")
+
+
 def _ideal():
     """What SHOULD we stock? The steady rhythm at a chosen biomass cap.
 
@@ -6165,7 +6278,6 @@ def _ideal_reference(ctx, today, cap_t):
     import datetime as _dt
     import hashlib as _hl
     import json as _json
-    import shutil as _sh
     import tempfile as _tf
     import pandas as _pd
     from forecast import ideal as _im
@@ -6304,6 +6416,39 @@ def _ideal_reference(ctx, today, cap_t):
                    "them. Change any to try it; only this run uses it, your "
                    "files are not changed.")
         r_dens, r_sys, r_ctl = _ideal_limits_table(ctx, "ideal_ref_lim")
+    # Loud when a limit is far from where its box or cell starts — display
+    # only: the optimizer and the run below use every value exactly as shown
+    # — and one button back to those starting values.
+    ref_moves = max(1, int(ctrl.max_transfers_per_week))
+    _ideal_far_warning(_ideal_limit_flags(
+        [("Biomass cap", cap_in, int(cap_t), "t", "step 1's cap slider"),
+         ("Max harvest / wk", hmax, seeds2["ideal_ref_hmax"], "fish",
+          "Control"),
+         ("Min harvest / wk", hmin, seeds2["ideal_ref_hmin"], "fish",
+          "Control"),
+         ("Min harvest weight", wmin, seeds2["ideal_ref_wmin"], "g",
+          "Control"),
+         ("Max feed / day", feed, seeds2["ideal_ref_feed"], "kg", "Control")]
+        + _ideal_table_flag_items(_ideal_limit_seeds(ctx),
+                                  int(ctrl.max_transfers_per_week),
+                                  r_dens, r_sys, r_ctl)),
+        "step-2", "The optimizer and the reference sheet run")
+    st.button("↺ Reset to Control", key="ideal_ref_reset",
+              on_click=_ideal_reset_limits,
+              args=(dict(seeds2, ideal_ref_cap=int(cap_t)), "ideal_ref_lim",
+                    ref_moves),
+              help=f"Puts every step-2 limit back where it starts: Biomass "
+                   f"cap to step 1's cap slider ({int(cap_t):,} t); Max "
+                   f"harvest / wk, Min harvest / wk, Min harvest weight and "
+                   f"Max feed / day to your Control values; every cell of "
+                   f"the Tank & system limits table to your files; and the "
+                   f"weekly move budget to Control ({ref_moves}). It "
+                   f"overwrites what you typed in those boxes and cells (and "
+                   f"a cap an optimizer Use button set, or a Min harvest "
+                   f"weight a step-1 scan copied in). The rhythm, the "
+                   f"batch table, the optimizer's settings and step 3 are "
+                   f"not touched, and nothing changes in Configure or in "
+                   f"your files.")
     ov = dict(max_biomass_kg=float(cap_in) * 1000.0,
               max_harvest_per_week=float(hmax),
               min_harvest_per_week=float(hmin),
@@ -6354,7 +6499,8 @@ def _ideal_reference(ctx, today, cap_t):
                      f"{type(e).__name__}: {e}")
             return
         finally:
-            _sh.rmtree(keep, ignore_errors=True)
+            from forecast.temp_cleanup import remove_tree as _rm_tree
+            _rm_tree(keep)
         from forecast import ideal_optimize as _io
         # Judged on the knobs AND limits it ran with (shared with the optimizer).
         gctrl = _io.judging_control(ctrl, m_ov, ov)
@@ -7406,7 +7552,6 @@ def _ideal_transition_runs(live, proposed, pr_bytes, pr_name, method,
     Today's plan runs at the CURRENT limits (where you are); the proposal —
     new sizes and/or the what-if `overrides` — at the new ones (where you
     would go). So "today at 3,800 t vs the proposal at 4,200 t" is one check."""
-    import shutil as _sh
     import tempfile as _tf
     from concurrent.futures import ProcessPoolExecutor
     from concurrent.futures.process import BrokenProcessPool
@@ -7449,7 +7594,8 @@ def _ideal_transition_runs(live, proposed, pr_bytes, pr_name, method,
         return (_ie.run_schedule(live, str(_ROOT), **kw),
                 _ie.run_schedule(proposed, str(_ROOT), **kw_b), note)
     finally:
-        _sh.rmtree(tmp, ignore_errors=True)
+        from forecast.temp_cleanup import remove_tree as _rm_tree
+        _rm_tree(tmp)
 
 
 def _ideal_tr_verdict(years_a, years_b, prop_gates, effect_year):
@@ -7767,7 +7913,6 @@ def _ideal_tr_optimizer(ctx, live, fs, cutoff, pr_file, tr_ov, tr_dens,
     import hashlib as _hl
     import json as _json
     import math as _math
-    import shutil as _sh
     import tempfile as _tf
     import pandas as _pd
     from forecast import ideal_optimize as _io
@@ -7947,7 +8092,8 @@ def _ideal_tr_optimizer(ctx, live, fs, cutoff, pr_file, tr_ov, tr_dens,
                 st.error(f"The transition optimizer could not run — "
                          f"{type(e).__name__}: {e}")
             finally:
-                _sh.rmtree(tmp, ignore_errors=True)
+                from forecast.temp_cleanup import remove_tree as _rm_tree
+                _rm_tree(tmp)
             bar.empty()
             if res is not None:
                 ss["_ideal_tr_opt"] = dict(sig=sig, res=res,
@@ -8234,8 +8380,9 @@ def _ideal_transition(ctx, today, cap_slider_t=None):
             help="The proposal's biomass cap, in tonnes (500–10,000). Today's "
                  "plan always runs at your current limits. Only a box you "
                  "move becomes a what-if; dated per-week rows in Configure → "
-                 "Limits still win for their weeks. The transition "
-                 "optimizer's Use button sets it to the plan's cap.",
+                 "Limits still win for their weeks. The Use buttons of the "
+                 "transition optimizer and of step 2's optimizer set it to "
+                 "the plan's cap.",
             **_ideal_default("ideal_tr_cap", seeds["ideal_tr_cap"]))
         tr_hmax = t2.number_input(
             "Max harvest / wk (fish)", min_value=0, step=1_000,
@@ -8275,11 +8422,36 @@ def _ideal_transition(ctx, today, cap_slider_t=None):
                   "starts at the nearest end and applies only if you move it.")
         st.markdown("**Tank & system limits for the proposal**")
         tr_dens, tr_sys, tr_ctl = _ideal_limits_table(ctx, "ideal_tr_lim")
-    tr_ov = _ideal_tr_overrides(seeds, {
-        "ideal_tr_cap": tr_cap, "ideal_tr_hmax": tr_hmax,
-        "ideal_tr_hmin": tr_hmin, "ideal_tr_wmin": tr_wmin,
-        "ideal_tr_feed": tr_feed})
+    tr_vals = {"ideal_tr_cap": tr_cap, "ideal_tr_hmax": tr_hmax,
+               "ideal_tr_hmin": tr_hmin, "ideal_tr_wmin": tr_wmin,
+               "ideal_tr_feed": tr_feed}
+    tr_ov = _ideal_tr_overrides(seeds, tr_vals)
     tr_ov.update(tr_ctl)                   # the move budget, if changed
+    # Loud when a what-if is far from Control — display only: the proposal
+    # runs with every value exactly as shown — and one button back.
+    tr_moves = max(1, int(ctrl0.max_transfers_per_week))
+    _ideal_far_warning(_ideal_limit_flags(
+        [(label, tr_vals[k], seeds[k], unit, "Control")
+         for k, _ck, _s, label, unit in _IDEAL_TR_LIMITS]
+        + _ideal_table_flag_items(_ideal_limit_seeds(ctx),
+                                  int(ctrl0.max_transfers_per_week),
+                                  tr_dens, tr_sys, tr_ctl)),
+        "what-if", "The proposal and the transition optimizer run (today's "
+                   "plan keeps your current limits)")
+    st.button("↺ Reset to Control", key="ideal_tr_reset",
+              on_click=_ideal_reset_limits,
+              args=(dict(seeds), "ideal_tr_lim", tr_moves),
+              help=f"Puts every what-if limit of the proposal back to your "
+                   f"Control values: Biomass cap, Max harvest / wk, Min "
+                   f"harvest / wk, Min harvest weight and Max feed / day; "
+                   f"every cell of the proposal's Tank & system limits table "
+                   f"to your files; and the weekly move budget to Control "
+                   f"({tr_moves}). It overwrites what you typed in those "
+                   f"boxes and cells (and a cap a Use button set — the "
+                   f"transition optimizer's or step 2's optimizer's). The "
+                   f"cutoff date, the batch sizes, the "
+                   f"optimizer's settings and step 2 are not touched, and "
+                   f"nothing changes in Configure or in your files.")
 
     # The transition optimizer: on exactly these limits (its caps replace the
     # cap box), this cutoff, engine and knobs; its Use button fills the sizes
@@ -9549,6 +9721,21 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# The app's own temp folders (tempfile.mkdtemp: as_forecast_, ideal_engine_,
+# ...): several are never removed and some hold a config copy. Folders older
+# than 2 days go — once per server process, before any mode draws, never one
+# this session's results point into (forecast.temp_cleanup).
+from forecast import temp_cleanup as _temp_cleanup  # noqa: E402
+_temp_cleanup.run_once(
+    keep=lambda: _temp_cleanup.referenced_folders(
+        {k: st.session_state[k] for k in list(st.session_state.keys())}),
+    # The first sweep on a machine with a backlog is slow (6,576 folders
+    # took 24.6 s, 2026-09-12): say so rather than show a blank page. Only
+    # drawn when the sweep runs — never on a later rerun.
+    busy=lambda: st.spinner(
+        "Clearing the app's old temp folders — once per server start; the "
+        "first time on a machine can take half a minute…"))
+
 st.title(f"AS Production Forecast — {_copy_label()}")
 # WHICH COPY AM I? Derived from where the file actually lives, never hardcoded.
 # The hardcoded version said "your production app is the one under OneDrive;
@@ -10676,7 +10863,6 @@ def _stocking_frontier_section():
                         or 80.0)
         except Exception:  # noqa: BLE001
             pass
-        import shutil
         _wd = tempfile.mkdtemp(prefix="as_frontier_")   # per-run dir: no cross-session clobber
         _tmp = Path(_wd) / "frontier_pr.xlsm"
         _tmp.write_bytes(uploaded.getvalue())
@@ -10687,7 +10873,8 @@ def _stocking_frontier_section():
                     reductions=reductions, welfare_density=_wl)
                 st.session_state["_frontier_sig"] = _sweep_inputs_sig()
         finally:
-            shutil.rmtree(_wd, ignore_errors=True)
+            from forecast.temp_cleanup import remove_tree as _rm_tree
+            _rm_tree(_wd)
 
     pts = st.session_state.get("frontier_pts")
     if not pts:

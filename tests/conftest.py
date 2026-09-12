@@ -44,6 +44,11 @@ from pathlib import Path
 import pytest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# The app deletes its own old temp folders at start (forecast.temp_cleanup).
+# Not from the suite: an AppTest run of app.py would sweep the machine's
+# real %TEMP%. Set here, at import, so every AppTest subprocess inherits it;
+# tests/test_temp_cleanup.py sweeps a fake temp dir with it unset.
+os.environ["AS_TEMP_CLEANUP_OFF"] = "1"
 LIVE_CALIB_LOG = os.environ.get(
     "FW_CALIB_GUARD_PATH", os.path.join(ROOT, "fw_calibration_history.jsonl"))
 LIVE_COSTS = os.environ.get(

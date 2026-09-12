@@ -104,6 +104,28 @@ which lifts the refusal** — so the hybrid on the live tree would now steer bot
 halves, which has never been measured. See §4.5. (Until 2026-09-03 this section
 said the arm was inert. That was wrong, and it predated the 2026-08-27 pins.)
 
+**Temp folders.** Every run works in a folder of its own in Windows' temp
+folder (`%TEMP%`; names starting `as_forecast_`, `ideal_engine_`, `as_cmp_`
+and a dozen more), and several were never removed — one machine held 491
+`as_forecast_` folders (111 MB), some with a copy of `config/`. Now, when the
+app starts (once per server process, not on every click), it deletes its own
+folders there that are older than **2 days**: only folders whose name starts
+with one of the app's prefixes, only directly in the temp folder — never a
+file, a link, or one something still has open (that one is skipped,
+untouched, and tried at the next start). It cannot see **another copy of the
+app running at the same time** (the LIVE and NEXT copies, or V1 — they share
+the temp folder): a result that copy has kept on screen for more than 2 days
+can lose its folder when this one starts — its tabs then say the file is
+gone; run it again. Windows does not clear these folders by itself (one
+machine had ~12,400 of them). The server window prints one line, e.g.
+`temp clean-up: removed 12 folders (3.4 MB) older than 2 days`. The first
+start on a machine with a backlog is slow — 6,576 old folders (~1 GB) took
+about 25 s — and the page shows *Clearing the app's old temp folders…*
+meanwhile; later starts only have a few days' folders to remove. The "Also
+saved at" path under a Run forecast result is one of these folders: download
+the workbook (⬇) to keep it. Your config, scenario and downloads are never in
+that folder.
+
 ### CLI
 ```
 python -m forecast.run --workbook <input.xlsm> [--output <output.xlsm>] --config-dir config --scenario-dir scenario
@@ -2653,6 +2675,26 @@ harvest weight** too; a scan copies it into step 2's box (step 3's what-if box
 keeps your Control value). The tank and system limits apply in steps 2–3 only
 (the quick model has no tanks).
 
+**Far from Control? — a warning, and ↺ Reset to Control.** A step-2 limit is
+flagged when it is **0** where its starting value is not, or **under 50 % or
+over 200 %** of its starting value: your Control value for Max harvest / wk,
+Min harvest / wk, Min harvest weight, Max feed / day and the move budget, your
+files' value for a cell of the tank & system limits table, and step 1's cap
+slider for the Biomass cap. A Min harvest weight a step-1 scan copied in is
+judged against Control too, so a step-1 weight box knocked to 0 cannot slip
+through a scan unflagged. One warning, above the optimizer and the ▶ Run
+button, lists every flagged limit, e.g. *Min harvest / wk: 0 fish (Control
+26,000)*. It is only a warning — the optimizer and the reference sheet run with
+every value exactly as shown (a Control move budget of 0, "off", is never
+flagged against). **↺ Reset to Control** puts every step-2 limit back to its
+starting value — the five boxes, every cell of the tank & system limits table
+and the move budget — and changes nothing in Configure or in your files; the
+rhythm, the batch table, the optimizer's settings and step 3 are not touched.
+Why: on 2026-09-11 a mode round trip left every step-2 box at its minimum
+(500 t, 0 fish, 0 kg/day, 1 move) and the optimizer ran 99 rhythms on them with
+nothing on the page saying so. That bug is fixed; this is the second line of
+defence.
+
 Two things are fixed by the method, not chosen: an empty facility cannot hold
 fish that would already be in seawater on day one, so those batches are left
 out (and listed); and 6N runs in **production** mode, as it will after 2028,
@@ -2885,6 +2927,16 @@ the start of the effect. To have the size and cap searched for you, use the
 **transition optimizer** (below). With costs set (§15), the caption under the
 verdict table also gives each schedule's cost and profit over the years both
 runs cover, priced from your saved costs when the page draws.
+
+The **Facility limits for this check** get the same warning and **↺ Reset to
+Control** as step 2, just under that expander and above the transition
+optimizer and the Check button: a what-if that is 0 where Control is not, or
+under 50 % / over 200 % of its Control value (a tank & system cell: of your
+files' value), is listed. Reset puts the five what-if boxes (a cap a Use
+button set too — the transition optimizer's or step 2's), the proposal's tank & system
+limits table and its move budget back to Control and your files; the cutoff
+date, the batch sizes and step 2 are not touched. Today's plan always runs at
+your current limits either way.
 
 **Within the limits? — the two-window rule** (your ruling, 2026-09-11).
 Today's plan already breaks limits in the near years from fish already

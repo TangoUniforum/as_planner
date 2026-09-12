@@ -145,7 +145,8 @@ def _run_scaled(input_path, config_dir, scenario_dir, reduction, fs, welfare):
                              worst_density=0.0, conserves=False, scaled_batches=0,
                              error=f"{type(e).__name__}: {e}")
     finally:
-        shutil.rmtree(work, ignore_errors=True)
+        from .temp_cleanup import remove_tree
+        remove_tree(work)
 
 
 def stocking_frontier(input_path, config_dir, scenario_dir, *,

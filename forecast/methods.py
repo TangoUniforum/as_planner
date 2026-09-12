@@ -235,7 +235,8 @@ def run_method(method: Method, input_path, out_path,
                              method.engine_kwargs)
         return rc, time.time() - t0
     finally:
-        shutil.rmtree(work, ignore_errors=True)
+        from .temp_cleanup import remove_tree
+        remove_tree(work)
 
 
 # --------------------------------------------------------------------------- #

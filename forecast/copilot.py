@@ -251,7 +251,8 @@ def _short_horizon_config(config_dir, window_n, n_weeks, buffer):
     new_text, n_sub = re.subn(r"(?m)^horizon_weeks:.*$",
                               f"horizon_weeks: {want}", text)
     if n_sub == 0:                            # unexpected layout — fall back to full
-        shutil.rmtree(tmp, ignore_errors=True)
+        from .temp_cleanup import remove_tree
+        remove_tree(tmp)
         return str(config_dir), None
     with open(ctrl_dst, "w", encoding="utf-8") as f:
         f.write(new_text)
@@ -322,7 +323,8 @@ def propose_upcoming(input_path, config_dir, scenario_dir, *,
 
     finally:
         if _cfg_tmp:
-            shutil.rmtree(_cfg_tmp, ignore_errors=True)
+            from .temp_cleanup import remove_tree
+            remove_tree(_cfg_tmp)
 
     proposals: list[Proposal] = []
     for wk, ww, _wd in weeks:
