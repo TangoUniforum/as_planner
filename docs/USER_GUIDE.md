@@ -181,6 +181,7 @@ Facility-wide knobs read into `ControlParams`:
 | `harvest_setpoint_lookahead_weeks` | **VESTIGIAL** — superseded by the dual-limit setpoint (§4.1/§4.3); kept for config back-compat but **not read** by the engine. Use `facility_biomass_deviation_pct` to set how close to the cap to run | 0.75 (ignored) |
 | `harvest_level_load` | **harvest smoother (ON by default)** — enforce `max_harvest_per_week` as a HARD ceiling + pre-harvest earlier so harvest is flat and biomass stays under cap. Paired with `rebalance_level`, which otherwise spikes harvest (see §4.3). Set `false` for old reactive behavior | **true** |
 | `hybrid_follow` | **L1 HARVEST GUIDE — `full` in the shipped config, and STEERING.** Two independent routes turn it on and either alone is enough: `config/control.yaml` ships `hybrid_purge_lever: true` and `hybrid_production_lever: true`, **and** the `controller-hybrid` arm pins both `True` in its own `overrides` (`forecast/methods.py`) — so setting the config values back to `false` would still leave that arm steering. Runs the whole-horizon L1 harvest envelope (`forecast/global_planner_poc.py`, via `forecast/hybrid_guide.py`) first and feeds it to the controller as a per-week target band. The **production** half is live. The **purge** half is refused outright while `sixn_level_drains: false` (`hybrid_guide.py:194` — level drains are the guard against over-filling one 6N pair, and the guide may not remove it). ⚠ **That refusal lifted on 2026-09-08**, when the operator set `sixn_level_drains: true`. Every `full` measurement quoted in this row was taken with the purge half REFUSED — they describe the *production-lever-alone* arm. Setting `hybrid_follow: full` on the live tree now runs **both** levers for the first time, an arm this table does not describe. Measure it before trusting it. (The live tree currently runs `hybrid_follow: 'off'`; the committed config still says `full`. That disagreement is an open operator decision, not a defect.) Note the guide's ceiling half applies only on weeks L1 itself calls production weeks and while the facility is under its hard cap; elsewhere it degrades to floor-only. The ceiling half is the point: it tells the reactive controller to harvest **less** in fat weeks so those fish are still there for lean ones — the one thing it can never decide for itself (all its own levers are `max()`). *Measured, 6 real PRs:* **totally empty harvest weeks 6 → 0**, weeks below floor 22.5 → 9.0, worst week 0 → 16,148 fish; **cost** peak biomass 102.6 → 107.1% of cap, peak density 102 → 124. `off` = old reactive-only behaviour. `floor` is **not** a no-op (that claim was retracted 2026-08-12) but it is **dominated** — measured on the 7.29 PR it produces a genuinely different plan (worst week 23,754 vs `off`'s 20,526) yet **11** weeks below the contract floor, worse than `off`'s 9 and far worse than `full`'s 3. Applying only the guide's floor half raises the lean weeks it can reach while leaving the controller free to over-harvest the fat ones; the **ceiling** half is what actually banks fish for later. Use `full` | `full` (dataclass default `off`) |
+| `split_batch_fw` | **SPLIT FW/SW BATCH AT THE PR CLOSE** (operator decision 2026-09-11, `forecast/split_batch.py`). `auto`: a batch the ProductionReport holds partly in freshwater and partly in seawater has its freshwater part **planned** — moved at its scenario `tran_og_date` (or the first forecast week once that has passed), through freshwater biology under its configured `fw_correction` (no auto-calibration), culled to the **remaining** target `tran_og_count − the fish already in seawater` (no cull when that is ≤ 0: *"target already met by the SW part"*), topping up the batch's own entry-tier tanks (bigger half into the heavier tank; past the density target it spills into empty entry tanks); and a wholly-freshwater batch whose `tran_og_date` is before the PR close — which the old engine never placed at all — moves in the first forecast week. One ValidationLog line per automatic transfer (§6, *A split batch at the PR close is planned automatically*). A scripted `fw_to_og` **always wins**. Inside a Manual starting events window nothing moves automatically: a batch whose transfer falls in the window — always so for an overdue batch, whose transfer is week 1 — needs a scripted `fw_to_og` (the FW→OG intake offers a past-date batch in week 1), or the run stops and names it. `off`: the V1 engine — a split batch's freshwater part is only warned about (`WARNING - Split batch at PR close (FW part not modelled)`, InputConservationAudit `FW PART NOT MODELLED`); an overdue wholly-freshwater batch is, as in V1, **never placed and not warned about** (InputConservationAudit reads it `pre-start`; only its ledger `Count_Check` shows the fish). Values `auto` / `off`, picked from a list in Configure; in `control.yaml` an unquoted `off` / `no` reads as off and `on` / `yes` as auto (YAML booleans), and any other text stops the run with an error naming the key. **Not tunable** (`methods.UNTUNABLE_KNOBS`): it decides whether the plan carries fish the PR says you have. The default lives in code, so a `control.yaml` without the key runs `auto` | `auto` (dataclass default; not written in the shipped config) |
 | `hybrid_follow_band` | how tightly the controller tracks the guide (± fraction). Chosen by a 90-cell paired sweep as the most **stable** setting: holds 0–1 empty weeks under neutral perturbation where wider bands drift to 3–4 | 0.10 (dataclass); **0.05** in the shipped config and pinned by the controller-hybrid method |
 | `harvest_smooth_lookahead_weeks` | level-load window K — weeks of coming-due biomass to spread the pre-harvest over | 6 |
 | `harvest_level_target` | flat fish/week floor when level-loading (unset/null = auto from realized growth) | null |
@@ -574,9 +575,30 @@ they're fixed. A valid window shows *"All N event(s) feasible against the
 uploaded PR."*
 
 **Rules / limits:**
-- `fw_to_og` destinations must be **empty OG tanks**, and the batch must still be
-  **in freshwater** at the event's week (you can't FW→OG a batch that's already
-  crossed to seawater).
+- `fw_to_og` destinations must be **entry-tier (OG1/2) tanks** that are either
+  **empty** or already hold **the same batch, on feed** (a same-cohort top-up —
+  B49's 8/31 intake goes into its own tanks 24 + 14). A tank holding another
+  batch, a 6N or OG3+ tank, or an off-feed tank is refused. The batch must still
+  be **in freshwater** at the event's week (you can't FW→OG a batch that's
+  already crossed to seawater).
+- **One `fw_to_og` per batch.** An `fw_to_og` moves the batch's **whole**
+  freshwater part — its count is a cull-down target, not a tranche — so a
+  second one for the same batch is refused: the editor stops offering a cohort
+  once an intake for it is in the window, the validator flags it, and the run
+  writes **`MANUAL EVENT REFUSED`** (it used to place the whole freshwater
+  count a second time — 480,000 fish from 250,225 — with every gate green).
+- **A batch whose transfer date has already passed** (its projection starts in
+  seawater, so it has no freshwater week) can still be scripted **in week 1**:
+  the editor and the run use the ProductionReport's own freshwater count and
+  weight for it. Without a script, such a batch — and every split batch — is
+  moved automatically (see *A split batch at the PR close is planned
+  automatically* in §6); a scripted `fw_to_og` always wins.
+- **Nothing moves automatically inside the window.** A freshwater batch whose
+  transfer week falls inside the window must be scripted with an `fw_to_og`,
+  or the run stops with an error naming it. For a batch whose transfer date had
+  already passed at the PR close (an overdue batch, a past-date split) the
+  transfer is week 1, so a shorter window cannot help — script it in week 1,
+  where the FW→OG intake offers it.
 - The window must be **shorter than the forecast horizon** — a window as long as
   the whole horizon is rejected (the planner needs weeks left to plan).
 - Conservation is enforced end-to-end: every event is counted in the audits, and
@@ -1105,24 +1127,97 @@ without the check, 85 harvest weeks compared, **0 differ, 0.0 fish**.
 > rates; on the week that part crosses to seawater, its freshwater growth —
 > with no feed behind it — is inside that TOTAL.
 >
+> **A split batch at the PR close is planned automatically** (Control
+> `split_batch_fw: auto`, the default — operator decision 2026-09-11). A batch
+> the PR holds partly in freshwater and partly in seawater (B49 on the 8/31 PR:
+> 47,743 fish in tanks 14 + 24, 250,225 in freshwater) has its freshwater part
+> **moved into seawater by the planner**: at the batch's scenario
+> `tran_og_date`, or in the first forecast week once that date has passed;
+> after freshwater growth (the batch's configured `fw_correction`, never
+> auto-calibrated) and mortality; culled to the **remaining** target —
+> `tran_og_count` minus the fish already in seawater at the PR close (B49:
+> 290,000 − 47,743 = 242,257), with **no cull** when the seawater part already
+> meets the target; landing as a **top-up of the batch's own entry-tier tanks**
+> (the bigger half into the heavier tank; a half that would pass the density
+> target spills into empty entry tanks). A top-up costs no move against the
+> weekly handling budget. The ledger follows it: the batch opens on every fish
+> the PR holds, its freshwater feed and mortality come from that freshwater
+> track, the crossing cull is booked on the transfer week, and Xfer_In /
+> Xfer_Out carry the fish that cross — so its SGR / SFR / FCR print normally.
+> Each automatic transfer writes **one** ValidationLog line:
+>
+> * **`WARNING - Split batch FW part auto-transferred`** — *"SPLIT BATCH B49:
+>   250,225 FW fish auto-transferred 2026-W38 per scenario tran_og_date
+>   (2026-09-14) - script an fw_to_og to override. 242,257 enter seawater
+>   after …"*. When the seawater part already meets `tran_og_count` it says
+>   **"target already met by the SW part"** and no reconcile cull is made;
+>   when fewer fish are left than the target it says **"NO reconcile cull:
+>   fewer fish than the remaining target … were left to cull from"** (the
+>   line never claims a cull that was not made).
+> * **`WARNING - Overdue FW batch auto-transferred`** — *"OVERDUE FW BATCH
+>   B50: … auto-transferred 2026-W36 (the first forecast week) - scenario
+>   tran_og_date 2026-08-27 is before the PR close …"*. A wholly-freshwater
+>   batch whose transfer date has already passed used to be **never placed**
+>   (its projection started in seawater and made no arrival); it now moves in
+>   the first forecast week, by the same rule and the same switch — culled to
+>   `tran_og_count` only when it holds more fish than that (B50 on 8/31 does
+>   not: *"… NO reconcile cull: fewer fish than tran_og_count 290,000 were
+>   left to cull from"*). InputConservationAudit reads it `In_Horizon` **Y**
+>   and balances its freshwater phase on its entry week (the PR count in; the
+>   handling mortality, reconcile cull and the fish placed out).
+> * **`WARNING - Split batch top-up past the density target`** — *"SPLIT
+>   BATCH B49: the top-up of its own tank #24 runs past the density target
+>   …"*. The top-up had no empty entry tank to spill into (or the spill was
+>   smaller than `min_tank_control` and would have opened a tank under the
+>   force-empty floor), so the surplus stays in the batch's own tank. Every
+>   fish is placed — the same rule as an ordinary arrival with fewer free
+>   entry tanks than it needs, which is packed into the tanks that are free —
+>   and the density audit judges the tank against its cap (a tank past the
+>   cap is a density breach there). Only a transfer with no entry tank at all
+>   stops the run, and a split always has its own.
+> * **`ERROR - Split batch FW part NOT placed`** / **`ERROR - Overdue FW batch
+>   NOT placed`** — the automatic transfer ran but not all its fish reached
+>   seawater; InputConservationAudit marks the batch **`FW PART DROPPED`** and
+>   its headline stops reading OK.
+> * **`INFO - Hybrid guide (L1) decision`** — *"HYBRID GUIDE - split batch
+>   B49: …"*, only on a hybrid run: the L1 guide counts the split's freshwater
+>   biomass but is not seeded with its arrival. An overdue batch gets
+>   *"HYBRID GUIDE - overdue FW batch B50: …"*: the guide seeds only the fish
+>   in seawater at the PR close and skips a batch dated before the forecast
+>   start, so it leaves that batch out for the whole horizon.
+>
+> **A scripted `fw_to_og` always wins**: that batch is not moved automatically
+> (the 8/31 PR with its shipped events plans exactly as before) — even when
+> that `fw_to_og` is refused and places no fish; the batch is then flagged
+> (below), never moved behind your back. InputConservation-
+> Audit judges an automatic split's seawater entry against its remaining
+> target (`FW_Flag` = `auto split (remaining target)`), not the whole-batch plan,
+> and starts its freshwater mass balance from the split's first freshwater
+> week's **opening** count — its freshwater track is often one week long, so
+> that week's mean count already has half the reconcile cull taken out
+> (measured against the mean, 2025-06-30 B40 and 2025-09-30 B42 read a false
+> `FW MASS-BALANCE BREACH` although every fish was accounted for). Every other
+> batch keeps the week-mean basis. BiologyProjection lists the split's
+> freshwater rows (stage FW) beside its seawater rows until the transfer week.
+>
 > **`WARNING - Split batch at PR close (FW part not modelled)`** (ValidationLog,
-> and a console WARN). A batch the PR holds partly in freshwater and partly in
-> seawater is planned from its seawater tanks only; its freshwater part is
-> moved only by a scripted `fw_to_og` event. If none is scripted, those fish
-> are **in the opening but never reach seawater or harvest** — the warning
-> names the batch and the count, the batch's first ledger week shows them in
-> `Count_Check` (+ that count) and their biomass in `Bio_Check` (not as negative
-> growth), and InputConservationAudit marks it `FW PART NOT MODELLED` instead
-> of `PLACED` (a batch already marked `DROPPED` keeps that verdict). Nothing is
-> forced to balance. **Script an `fw_to_og` for the batch** (Manual starting
-> events) to move them; the warning then goes quiet. When a later planning
-> change models the freshwater part itself, that batch stops being held from
-> the PR figures, so the warning also goes quiet and the fish are never counted
-> twice. (A wholly-freshwater batch that no freshwater projection ran for —
-> e.g. one missing from the Batches sheet — gets the sibling
-> `WARNING - FW batch at PR close (not modelled)`. A batch whose freshwater
-> projection *did* run is never held, even when its TranOG date is already
-> past and its projection starts in seawater.)
+> and a console WARN) is what the old engine says, and still says with
+> `split_batch_fw: off`: the batch is planned from its seawater tanks only and
+> its freshwater part is moved by nothing but a scripted `fw_to_og` event. If
+> none is scripted, those fish are **in the opening but never reach seawater or
+> harvest** — the warning names the batch and the count, the batch's first
+> ledger week shows them in `Count_Check` (+ that count) and their biomass in
+> `Bio_Check` (not as negative growth), and InputConservationAudit marks it
+> `FW PART NOT MODELLED` instead of `PLACED` (a batch already marked `DROPPED`
+> keeps that verdict). Nothing is forced to balance. A scripted `fw_to_og` that
+> placed **no** fish (every destination refused — `MANUAL EVENT REFUSED`) does
+> not count as moving the part: under `auto` too, that batch is then warned
+> about here and marked `FW PART NOT MODELLED` (it used to read `PLACED` while
+> its freshwater fish silently left the plan). (A wholly-freshwater batch
+> that no freshwater projection ran for — e.g. one missing from the Batches
+> sheet — gets the sibling `WARNING - FW batch at PR close (not modelled)`. A
+> batch whose freshwater projection *did* run is never held, even when its
+> TranOG date is already past and its projection starts in seawater.)
 >
 > On a scripted `fw_to_og`, the freshwater fish lost between the PR close and
 > the transfer are booked as `Mort_Count` on the transfer week only when the

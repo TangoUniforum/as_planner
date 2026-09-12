@@ -398,12 +398,30 @@ def main(
                               _oge_wk_start(_bm.tran_og_date, _fs0)))
         if _crossed:
             _lst = ", ".join(f"{b} (FW->OG ~{d})" for b, d in sorted(_crossed))
+            # A batch whose tran_og_date had already passed at the PR close (an
+            # overdue wholly-FW batch, or a split with a past date) crosses in
+            # week 1, so no window can end before it: its one way through is
+            # an fw_to_og in week 1, which the editor offers at the PR's own
+            # freshwater count and weight (manual_window.pr_fw_week1_fallback).
+            from .batch_order import batch_sort_key as _bsk_cr
+
+            def _d_cr(v):
+                return v.date() if hasattr(v, "date") else v
+            _past_cr = sorted({b for b, _d in _crossed
+                               if _d_cr(_bbi[b].tran_og_date) < _fs0}, key=_bsk_cr)
+            _how_cr = ("Add an explicit fw_to_og event for each crossing batch "
+                       "(Manual starting events -> FW->OG intake), or shorten the "
+                       "window so it ends before those dates.")
+            if _past_cr:
+                _how_cr += (f" {', '.join(_past_cr)}: its transfer date had already "
+                            f"passed at the PR close, so no window can end before "
+                            f"it - script its fw_to_og in week 1 (the editor offers "
+                            f"it there at the ProductionReport's own freshwater "
+                            f"count and weight).")
             raise ValueError(
                 f"Manual override window of {window_n} week(s) opens the forecast "
                 f"at {_new_start}, PAST the automatic FW->OG entry of: {_lst}. The "
-                f"window does not auto-transfer FW batches. Shorten the window so "
-                f"it ends before those dates, or add an explicit fw_to_og event "
-                f"for each crossing batch.")
+                f"window does not auto-transfer FW batches. {_how_cr}")
 
     # ----- Caps -----
     fs_date = control.forecast_start.date() if hasattr(control.forecast_start, "date") else control.forecast_start
@@ -478,6 +496,35 @@ def main(
     }
     in_flight_ids = og_in_flight_ids | fw_in_flight_ids
     incoming_batches = [b for b in batches if b.batch_id not in in_flight_ids]
+
+    # ----- SPLIT FW/SW BATCH + OVERDUE WHOLLY-FW BATCH (2026-09-11) -----
+    # A batch the PR holds partly in freshwater: the exclusion above keeps its
+    # FW part out of the freshwater projection, so nothing modelled it. With
+    # control.split_batch_fw "auto" (the default) its FW part is projected on
+    # its own FW track -- scenario tran_og_date, or the first forecast week once
+    # that has passed; culled to the REMAINING target -- merged into the
+    # batch's SW stream and landed on its own entry tanks. A wholly-FW batch
+    # whose tran_og_date is before the PR close (never placed before: its
+    # projection started in seawater) moves in the first forecast week. The
+    # classification reads the PR, not the post-window state; a manual fw_to_og
+    # wins (transferred_fw). Empty sets -- every PR with no split, every split
+    # the operator scripts, and `off` -- change nothing below.
+    from . import split_batch as _sb
+    _sb_class = _sb.SplitClassification()
+    if _sb.mode(control) == "auto":
+        _sb_class = _sb.classify(
+            og_records, fw_records, transferred_fw=transferred_fw,
+            batch_by_id={b.batch_id: b for b in batches},
+            forecast_start=_fw_proj_fs)
+    # A split batch whose SW part a window emptied is no longer OG-in-flight:
+    # it stays on the V1 path (projected as a wholly-FW batch).
+    _sb_split = {b for b in _sb_class.split_ids if b in og_in_flight_ids}
+    _sb_overdue = {b for b in _sb_class.overdue_ids if b in fw_in_flight_ids}
+    _sb_fw_states: dict = {}     # split batch -> its FW-track FW/EGG rows
+    _sb_splits: list = []        # their arrivals (one SizeClassSplit each)
+    _sb_expected: dict = {}      # auto batch -> fish its transfer places
+    _sb_entry: dict = {}         # auto batch -> the split (entry date, counts)
+    _sb_entry_row: dict = {}     # past-date split -> its FW track's entry row
 
     # ----- Optional: auto-calibrate FW growth to hit the transfer target -----
     # When control.auto_calibrate_fw is on, REPLACE each FW batch's fw_correction
@@ -556,6 +603,10 @@ def main(
     # ----- In-flight batches: forward-project per batch using PR-hydrated state -----
     batch_by_id = {b.batch_id: b for b in batches}
     in_flight_states: list = []
+    if _sb_split or _sb_overdue:
+        import dataclasses as _dc_sb
+        _sb_fw_control = _dc_sb.replace(
+            control, forecast_start=_fw_proj_fs, horizon_weeks=_fw_proj_horizon)
     # OG-in-flight projection (anchored to PR OG tank state).
     # sorted(): og_in_flight_ids is a SET OF batch_id STRINGS, so iterating it
     # raw put the OG in-flight batches into states_by_batch in hash-seed order
@@ -573,9 +624,31 @@ def main(
             continue
         agg_avg_wt = total_biomass * 1000.0 / total_count
         agg_cv = tank_list[0].cv_pct if tank_list else 16.0
-        in_flight_states.extend(
-            project_in_flight_batch(b_meta, tables, control, total_count, agg_avg_wt, agg_cv)
-        )
+        _og_rows = project_in_flight_batch(
+            b_meta, tables, control, total_count, agg_avg_wt, agg_cv)
+        if batch_id in _sb_split:
+            # The split's FW part: its own FW track (configured fw_correction,
+            # no auto-calibration, residuals not reported -- tran_og_avg_wt_g
+            # is a whole-batch figure and this is the remainder), merged into
+            # ONE SW row per week from its entry week, in this batch's place.
+            _fw_st, _fw_res, _fw_sp = _sb.project_fw_track(
+                b_meta, tables, _sb_fw_control, _sb_class.fw_count[batch_id],
+                _sb_class.fw_kg[batch_id], pr_closing,
+                target=_sb.remaining_target(b_meta.tran_og_count,
+                                            _sb_class.sw_count[batch_id]))
+            _og_rows, _sb_fw_states[batch_id] = _sb.merge_states(_og_rows, _fw_st)
+            if not _sb_fw_states[batch_id]:
+                # A PAST-DATE split crosses on day 1: no freshwater week, so
+                # the input audit balances its FW part on the track's own
+                # entry row (its seawater rows are the merged stream).
+                _er = next((s for s in _fw_st if s.stage == "SW"), None)
+                if _er is not None:
+                    _sb_entry_row[batch_id] = _er
+            _sb_splits.extend(_fw_sp)
+            if _fw_sp:
+                _sb_expected[batch_id] = _fw_sp[0].post_cull_count
+                _sb_entry[batch_id] = _fw_sp[0]
+        in_flight_states.extend(_og_rows)
     # FW-in-flight projection (anchored to PR FW physical-unit state).
     fw_in_flight_residuals: list = []
     fw_in_flight_splits: list = []
@@ -601,15 +674,42 @@ def main(
         import dataclasses as _dc_fw
         _fw_control = _dc_fw.replace(
             control, forecast_start=_fw_proj_fs, horizon_weeks=_fw_proj_horizon)
+        _b_proj = b_meta
+        if batch_id in _sb_overdue:
+            # OVERDUE: tran_og_date before the PR close. Under the raw date the
+            # projection starts in seawater and emits no arrival -- the batch
+            # was never placed. The first forecast week is the earliest the
+            # model can honour that date (same rule as a split).
+            _b_proj = _sb.fw_track_batch(
+                b_meta, forecast_start=_fw_proj_fs,
+                target=_sb.remaining_target(b_meta.tran_og_count, 0.0))
         fw_states, fw_resids, fw_splits = project_in_flight_fw_batch(
-            b_meta, tables, _fw_control, agg["count"], avg_wt_g, pr_closing
+            _b_proj, tables, _fw_control, agg["count"], avg_wt_g, pr_closing
         )
+        if batch_id in _sb_overdue and fw_splits:
+            _sb_expected[batch_id] = fw_splits[0].post_cull_count
+            _sb_entry[batch_id] = fw_splits[0]
         fw_projected_ids.add(batch_id)
         in_flight_states.extend(fw_states)
         fw_in_flight_residuals.extend(fw_resids)
         fw_in_flight_splits.extend(fw_splits)
     residuals.extend(fw_in_flight_residuals)
     splits.extend(fw_in_flight_splits)
+    # Split batches' arrivals, after every other in-flight arrival (natural
+    # batch order, from the OG loop's sorted walk). Their FW part is carried by
+    # a projection now, so the report layer must neither hold it at the PR
+    # figures nor warn that nothing models it.
+    splits.extend(_sb_splits)
+    fw_projected_ids |= _sb_split
+    if _sb_split or _sb_overdue:
+        for _b in _sb.sorted_ids(_sb_split | _sb_overdue):
+            _e = _sb_entry.get(_b)
+            print(f"  SPLIT/OVERDUE FW (split_batch_fw=auto): {_b} "
+                  + ("split" if _b in _sb_split else "overdue wholly-FW")
+                  + f", PR FW {_sb_class.fw_count.get(_b, 0.0):,.0f} fish -> "
+                  + (f"{_e.post_cull_count:,.0f} enter seawater "
+                     f"{_sb._as_date(_e.tran_og_date)}"
+                     if _e is not None else "no arrival within the horizon"))
     if fw_calib_warns:
         print(f"\n  FW auto-calibration ON — adjusted {len(fw_calib_warns)} batch(es) "
               f"to hit the pre-cull transfer target (Diagnostics residuals -> ~0):")
@@ -700,7 +800,8 @@ def main(
             purge_inflight=_guide_purge_inflight,
             purge_release_schedule=_guide_purge_schedule,
             manual_window_weeks=window_n,
-            fw_by_label=fw_addends_by_week(states_by_batch),
+            fw_by_label=fw_addends_by_week(
+                states_by_batch, extra_fw_states=_sb_fw_states or None),
             facility_limits=facility_limits)
         print(f"\n  HYBRID guide (hybrid_follow={control.hybrid_follow}): "
               + (harvest_guide.source if harvest_guide
@@ -768,6 +869,8 @@ def main(
             migration_plan=c.migration_plan,
             facility_limits=facility_limits,
             harvest_guide=harvest_guide,
+            extra_fw_states=_sb_fw_states or None,
+            split_batch_ids=_sb_split or None,
         )
         # Count violations: per-tank density > tank cap, OG6N excluded
         # in purge mode (depuration pool intentionally uncapped).
@@ -965,7 +1068,14 @@ def main(
                 if realized_last_week.get(s.batch_id) is None
                 or s.week_label <= realized_last_week[s.batch_id]]
 
-    write_biology_projection(wb, _to_realized_lifespan(states + in_flight_states))
+    # An auto-modelled split's FW track (split_batch.py) is real freshwater
+    # biology, kept out of the planner's one-SW-row-per-(batch, week) states:
+    # its FW rows join the sheet here. Without them B49 on 8/31 showed only
+    # its 47,743 seawater fish for 2026-W36/W37 while the ledger opened on
+    # 297,968. Empty (no split, or `off`) = the old sheet.
+    _bp_split_fw = [s for _b in _sb.sorted_ids(_sb_fw_states) for s in _sb_fw_states[_b]]
+    write_biology_projection(
+        wb, _to_realized_lifespan(states + in_flight_states + _bp_split_fw))
     write_calibration_diagnostics(wb, residuals)
 
     # ----- Stage 2.5: optional LP-guided LNS placement refinement (opt-in) -----
@@ -1097,6 +1207,15 @@ def main(
     rl_states_by_batch = {
         b: _to_realized_lifespan(sl) for b, sl in states_by_batch.items()
     }
+    if _sb_fw_states:
+        # A split's FW part is real freshwater biomass and feed: the report
+        # writers below read FW/EGG rows only (never one-row-per-week), so its
+        # FW track joins them here -- never states_by_batch, which the planner
+        # reads and which must hold one row per (batch, week).
+        rl_states_by_batch = dict(rl_states_by_batch)
+        for _b in _sb.sorted_ids(_sb_fw_states):
+            rl_states_by_batch[_b] = (list(rl_states_by_batch.get(_b, []))
+                                      + list(_sb_fw_states[_b]))
     write_advisory(
         wb, placement.batch_locations, placement.harvest_events,
         facility_limits, control, batches=batch_by_id, tables=tables,
@@ -1114,6 +1233,25 @@ def main(
         for m in (list(getattr(harvest_guide, "ledger", []))
                   if harvest_guide is not None else [])
     ]
+    if harvest_guide is not None:
+        # The L1 guide seeds an in-flight OG batch and moves on, so an
+        # automatically modelled split's ARRIVAL never reaches it (its FW
+        # biomass does, through fw_by_label). Folding the arrival into the
+        # seed is not built; say so where the guide's decisions are read.
+        from .time_grid import iso_week_label as _iwl_sb
+        for _b in _sb.sorted_ids(_sb_split):
+            _e = _sb_entry.get(_b)
+            if _e is not None:
+                _guide_notes.append(_sb.hybrid_guide_line(
+                    _b, _e.post_cull_count, _iwl_sb(_e.tran_og_date)))
+        # An OVERDUE batch is missing from the guide altogether: it holds no
+        # seawater fish at the close to seed, the guide skips an incoming
+        # batch dated before the forecast start, and its track has no FW week.
+        for _b in _sb.sorted_ids(_sb_overdue):
+            _e = _sb_entry.get(_b)
+            if _e is not None:
+                _guide_notes.append(_sb.hybrid_guide_overdue_line(
+                    _b, _e.post_cull_count, _iwl_sb(_e.tran_og_date)))
     if _guide_notes:
         print(f"\n  HYBRID guide ledger ({len(_guide_notes)} decision(s) — "
               f"also in the ValidationLog):")
@@ -1184,6 +1322,32 @@ def main(
          if t.batch_id and t.count > 0})
     for _m in split_warns:
         print(f"  WARN: {_m}")
+    # ONE line per automatic transfer (batch, fish, week, the rule, how to
+    # override), and a loud ERROR when its fish did not all reach seawater.
+    _sb_lines: list = []
+    _sb_unplaced: dict = {}
+    if _sb_expected:
+        from .time_grid import iso_week_label as _iwl_sb2
+        for _b in _sb.sorted_ids(_sb_expected):
+            _e = _sb_entry[_b]
+            _evs = [e for e in placement.tranog_events if e.batch_id == _b]
+            _placed = sum(float(getattr(e, "count_placed", 0.0) or 0.0) for e in _evs)
+            _wk = _iwl_sb2(_evs[0].event_date if _evs else _e.tran_og_date)
+            _bm = batch_by_id[_b]
+            _sb_lines.append(_sb.auto_transfer_line(
+                _b, fw_count=_sb_class.fw_count.get(_b, 0.0), week_label=_wk,
+                placed=_placed, tran_og_date=_bm.tran_og_date, pr_closing=pr_closing,
+                tran_og_count=_bm.tran_og_count,
+                sw_count=_sb_class.sw_count.get(_b, 0.0), overdue=_b in _sb_overdue,
+                arrival=_e.post_cull_count))
+            _miss = _sb.unplaced_split_parts({_b: _sb_expected[_b]}, _evs)
+            if _miss:
+                _sb_unplaced.update(_miss)
+                _sb_lines.append(_sb.not_placed_line(
+                    _b, expected=_sb_expected[_b], placed=_placed, week_label=_wk,
+                    overdue=_b in _sb_overdue))
+        for _m in _sb_lines:
+            print(f"  WARN: {_m}")
     write_validation_log(
         wb,
         residuals=residuals,
@@ -1194,7 +1358,7 @@ def main(
         invariant_warnings=(list(hydration_warns) + list(inv_warns)
                             + list(manual_warns) + list(fw_calib_warns)
                             + _guide_notes + _realized_warns
-                            + _coverage_notes + split_warns),
+                            + _coverage_notes + split_warns + _sb_lines),
         placed_batches={r.batch_id for r in placement.batch_locations},
     )
     write_daily_harvest_schedule(
@@ -1248,6 +1412,9 @@ def main(
         fw_openings=fw_openings,
         fw_transfer_basis=manual_fw_balance,
         fw_projected=fw_projected_ids,
+        # An auto-modelled split's FW track (split_batch.py): its FW feed,
+        # mortality and crossing cull, and the fish that cross.
+        split_fw=_sb_fw_states or None,
         sixn_move_in_feed=getattr(placement, "sixn_move_in_feed", None))
     write_monthly_report(
         wb, placement.batch_locations, placement.harvest_events, all_states,
@@ -1279,6 +1446,7 @@ def main(
         fw_openings=fw_openings,
         fw_transfer_basis=manual_fw_balance,
         fw_projected=fw_projected_ids,
+        split_fw=_sb_fw_states or None,
         sixn_move_in_feed=getattr(placement, "sixn_move_in_feed", None),
         pr_period=_pr_period)
     write_reconciliation_report(
@@ -1299,13 +1467,34 @@ def main(
         transfer_events=placement.transfer_events,
         grade_events=placement.grade_events,
     )
+    # The FW mass balance reads each batch's FW rows plus its crossing week:
+    # for an auto split those FW rows live on its own track (kept out of
+    # states_by_batch), so the audit gets them beside the merged SW stream.
+    _audit_states = states_by_batch
+    if _sb_fw_states:
+        _audit_states = dict(states_by_batch)
+        for _b in _sb.sorted_ids(_sb_fw_states):
+            _audit_states[_b] = (list(_sb_fw_states[_b])
+                                 + list(states_by_batch.get(_b, [])))
     write_input_conservation_audit(
         wb, batches, placement.batch_locations, placement.harvest_events, control,
         tranog_events=placement.tranog_events,
-        biology_states_by_batch=states_by_batch,
+        biology_states_by_batch=_audit_states,
         manual_fw_balance=manual_fw_balance,
         # Fish no model carries must not read PLACED (see split_warns above).
         unmodelled_fw=unmodelled_fw,
+        # An auto split is judged against its REMAINING target, and an
+        # automatic transfer that did not place its fish is a DROP.
+        split_remaining=({_b: _sb.remaining_target(batch_by_id[_b].tran_og_count,
+                                                   _sb_class.sw_count.get(_b, 0.0))
+                          for _b in _sb.sorted_ids(_sb_split)} or None),
+        unplaced_split_fw=_sb_unplaced or None,
+        # An overdue batch moved in the first forecast week: In_Horizon, and
+        # its FW balance from its entry row.
+        overdue_effective=({_b: _sb._as_date(_sb_entry[_b].tran_og_date)
+                            for _b in _sb.sorted_ids(_sb_overdue) if _b in _sb_entry}
+                           or None),
+        split_entry_rows=_sb_entry_row or None,
     )
     write_tank_continuity_audit(
         wb,
@@ -1359,7 +1548,7 @@ def main(
         len(residuals) + len(canvas.bottlenecks)
         + len(sched_warns) + len(placement.warnings)
         + len(density_violations) + len(hydration_warns) + len(inv_warns)
-        + len(fw_calib_warns) + len(split_warns)
+        + len(fw_calib_warns) + len(split_warns) + len(_sb_lines)
     )
     status = "ok" if total_warnings == 0 else "warn"
     og_tank_count = sum(1 for t in facility.tanks if t.type == "OG")

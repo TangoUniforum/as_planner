@@ -4212,12 +4212,35 @@ def phase_d_emit_events(
     fw_biomass_by_week: Optional[dict] = None,
     fw_feed_by_week: Optional[dict] = None,
     harvest_guide=None,
+    split_batch_ids=None,
 ) -> tuple[FacilityState, list[TranOGEntry], list[Transfer], list[Harvest],
            list[BatchLocationRow], list[str]]:
     """Walk the plan week by week; emit events from assignment diff +
     harvest demand; populate a fresh FacilityState with per-week
     tank states; record BatchLocationRows.
+
+    `split_batch_ids`: batches whose TranOG arrival is the automatically
+    modelled freshwater part of a batch already in seawater. Their arrival
+    tops up the batch's OWN entry-tier tanks (split_batch.plan_topup) and
+    the two passes that free tanks for arrivals count those tanks as
+    capacity. Empty/None = V1.
     """
+    _split_ids = frozenset(split_batch_ids or ())
+    if _split_ids:
+        from .split_batch import (own_entry_tanks as _sb_own,
+                                  plan_topup as _sb_topup,
+                                  spill_tanks_needed as _sb_spill_need)
+
+        def _sb_need(s, st_):
+            """Empty entry tanks a split top-up needs (None = not a top-up:
+            the batch holds no own entry tank, use the ordinary rule)."""
+            own = _sb_own(st_, s.batch_id)
+            if not own:
+                return None
+            return _sb_spill_need(
+                s, own, density_target_pct=control.density_target_pct,
+                empty_cap_kg=_max_kg_per_og_tank(facility) * control.density_target_pct,
+                min_tank_control=control.min_tank_control or 0.0)
     warnings: list[str] = []
     tranog_events: list[TranOGEntry] = []
     transfer_events: list[Transfer] = []
@@ -4283,6 +4306,15 @@ def phase_d_emit_events(
         wk = iso_week_label(
             og_entry_week_start(_as_date(s.tran_og_date), initial_state.today))
         _cohort_kg = s.post_cull_count * (s.post_cull_avg_wt_g / 1000.0)
+        if s.batch_id in _split_ids:
+            # A split top-up lands in the batch's own entry tanks: it needs
+            # only the empty tanks its spill would take (usually none), never
+            # the fresh-cohort floor -- pre-freeing for it would spend the
+            # move budget on tanks nothing uses.
+            _sn = _sb_need(s, initial_state)
+            if _sn is not None:
+                arrival_tank_need[wk] = arrival_tank_need.get(wk, 0) + _sn
+                continue
         # plan tanks resolved per-week below (tank_assignments); the config +
         # density floors are the schedule-time lower bound and are enough to pace.
         arrival_tank_need[wk] = arrival_tank_need.get(wk, 0) + _tranog_tank_need(
@@ -4635,6 +4667,11 @@ def phase_d_emit_events(
                 return 0
             _need = 0
             for _s in _arr_wk:
+                if _s.batch_id in _split_ids:
+                    _sn = _sb_need(_s, state)
+                    if _sn is not None:
+                        _need += _sn
+                        continue
                 _ta = ta_index.get((_s.batch_id, week_label))
                 _pn = len(_ta.tank_ids) if _ta and _ta.tank_ids else 0
                 _need += _tranog_tank_need(
@@ -5857,6 +5894,14 @@ def phase_d_emit_events(
             if _arrivals:
                 _need = 0
                 for s in _arrivals:
+                    if s.batch_id in _split_ids:
+                        # Own entry tanks are capacity for a split top-up:
+                        # vacating entry tanks it does not need would spend
+                        # moves against the hard weekly cap for nothing.
+                        _sn = _sb_need(s, state)
+                        if _sn is not None:
+                            _need += _sn
+                            continue
                     _ta = next((a for a in tank_assignments
                                 if a.week_label == week_label
                                 and a.batch_id == s.batch_id), None)
@@ -6123,6 +6168,57 @@ def phase_d_emit_events(
                 for split in splits:
                     if og_entry_day.get(split.batch_id) != day:
                         continue
+                    if (split.batch_id in _split_ids
+                            and iso_week_label(day) != week_label):
+                        # The ragged first planner week (a Tuesday start, e.g.
+                        # after a manual window) runs its day loop to
+                        # week_start + 7, so it visits the NEXT week's Monday
+                        # too. An ordinary arrival is protected there by having
+                        # no Phase-C row in the week before it enters seawater;
+                        # a split batch is already in seawater and has one, so
+                        # without this it topped up twice (measured: 484,514
+                        # fish placed for 242,257 on the 8/31 PR with a
+                        # one-week window). The entry belongs to its own week.
+                        continue
+                    if split.batch_id in _split_ids:
+                        # SPLIT BATCH TOP-UP (operator decision 1, 2026-09-11):
+                        # the automatically modelled FW part joins the fish
+                        # already in seawater -- the batch's own entry-tier
+                        # tanks, heaviest first, big class to the heavier
+                        # tank; a class past the density target spills into
+                        # empty entry tanks (plan-assigned ones first, then any,
+                        # by tank id -- the same fallback order as below).
+                        # TranOGEntry.apply is the one door: it merges a
+                        # same-batch landing and refuses 6N / OG3+ / off feed.
+                        _own = _sb_own(state, split.batch_id)
+                        if _own:
+                            _ta_s = next(
+                                (a for a in tank_assignments
+                                 if a.week_label == week_label
+                                 and a.batch_id == split.batch_id), None)
+                            _plan_e = [state.tanks_by_id[tid]
+                                       for tid in (_ta_s.tank_ids if _ta_s else [])
+                                       if tid in state.tanks_by_id
+                                       and state.tanks_by_id[tid].is_empty
+                                       and state.tanks_by_id[tid].system_id
+                                       in OG12_SYSTEMS]
+                            _plan_ids = {t.tank_id for t in _plan_e}
+                            _fb_e = sorted(
+                                (t for t in state.tanks_by_id.values()
+                                 if t.is_empty and t.system_id in OG12_SYSTEMS
+                                 and t.tank_id not in _plan_ids),
+                                key=lambda t: t.tank_id)
+                            _tp = _sb_topup(
+                                split, _own, _plan_e + _fb_e,
+                                density_target_pct=control.density_target_pct,
+                                min_tank_control=control.min_tank_control or 0.0)
+                            warnings.extend(f"{week_label}: {w}" for w in _tp.warnings)
+                            ev = TranOGEntry(batch_id=split.batch_id,
+                                             event_date=day,
+                                             destinations=_tp.allocations)
+                            warnings.extend(ev.apply(state))
+                            tranog_events.append(ev)
+                            continue
                     # Find this batch's Phase C tank assignment for THIS week.
                     ta = next(
                         (a for a in tank_assignments
@@ -6482,6 +6578,7 @@ def phase_d_emit_events(
 
 def fw_addends_by_week(
     biology_states_by_batch: dict[str, list[BatchWeekState]],
+    extra_fw_states: Optional[dict] = None,
 ) -> tuple[dict[str, float], dict[str, float]]:
     """Per-week-label FW/EGG biomass (kg) + feed (kg/day).
 
@@ -6494,17 +6591,23 @@ def fw_addends_by_week(
 
     Extracted so the hybrid guide's L1 pre-pass can measure the SAME FW load
     rather than recomputing it under a manual-window-shifted forecast start.
+
+    `extra_fw_states` ({batch: [FW/EGG rows]}) = the freshwater track of an
+    auto-modelled split batch (forecast/split_batch.py), kept OUT of
+    states_by_batch so no (batch, week) ever carries two rows. Summed after the
+    main dict, so None is byte-identical to the old function.
     """
     fw_biomass_by_week: dict[str, float] = {}
     fw_feed_by_week: dict[str, float] = {}
-    for _sts in biology_states_by_batch.values():
-        for _s in _sts:
-            if getattr(_s, "stage", None) in ("FW", "EGG"):
-                fw_biomass_by_week[_s.week_label] = (
-                    fw_biomass_by_week.get(_s.week_label, 0.0) + _s.biomass_kg)
-                fw_feed_by_week[_s.week_label] = (
-                    fw_feed_by_week.get(_s.week_label, 0.0)
-                    + getattr(_s, "feed_kg_day", 0.0))
+    for _src in (biology_states_by_batch, extra_fw_states or {}):
+        for _sts in _src.values():
+            for _s in _sts:
+                if getattr(_s, "stage", None) in ("FW", "EGG"):
+                    fw_biomass_by_week[_s.week_label] = (
+                        fw_biomass_by_week.get(_s.week_label, 0.0) + _s.biomass_kg)
+                    fw_feed_by_week[_s.week_label] = (
+                        fw_feed_by_week.get(_s.week_label, 0.0)
+                        + getattr(_s, "feed_kg_day", 0.0))
     return fw_biomass_by_week, fw_feed_by_week
 
 
@@ -6521,6 +6624,8 @@ def run_placement(
     migration_plan: Optional[dict] = None,
     facility_limits: Optional[FacilityLimits] = None,
     harvest_guide=None,
+    extra_fw_states: Optional[dict] = None,
+    split_batch_ids=None,
 ) -> tuple[PlacementResult, FacilityState]:
     """End-to-end Phase A → B → C → D.
 
@@ -6528,6 +6633,12 @@ def run_placement(
     and Phase C consume it as the source of truth for per-(batch, week)
     tank assignments. Their internal greedy logic is bypassed for any
     batch-week present in the plan; otherwise the greedy fallback runs.
+
+    `extra_fw_states` / `split_batch_ids`: an auto-modelled split batch's
+    freshwater track (for the FW-inclusive caps) and the batches whose
+    arrival tops up their own entry tanks (forecast/split_batch.py). Both
+    None -- every PR with no split, and every split the operator scripts --
+    is the V1 placement, byte for byte.
     """
     result = PlacementResult()
     result.load_table = phase_a_precalc(
@@ -6550,7 +6661,7 @@ def run_placement(
     result.warnings.extend(f"[C] {w}" for w in c_warns)
 
     fw_biomass_by_week, fw_feed_by_week = fw_addends_by_week(
-        biology_states_by_batch)
+        biology_states_by_batch, extra_fw_states=extra_fw_states)
 
     (final_state, tranog, transfers, harvests, grades, locs, d_warns,
      sixn_feed, realized_bio) = phase_d_emit_events(
@@ -6561,6 +6672,7 @@ def run_placement(
         fw_biomass_by_week=fw_biomass_by_week,
         fw_feed_by_week=fw_feed_by_week,
         harvest_guide=harvest_guide,
+        split_batch_ids=split_batch_ids,
     )
     result.tranog_events = tranog
     result.transfer_events = transfers

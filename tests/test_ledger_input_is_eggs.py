@@ -594,9 +594,13 @@ def test_a_dropped_batch_keeps_its_dropped_verdict():
 
 # ---- a real run ------------------------------------------------------------------------
 
-def _run_pr(tmp, copy_config, edit_scenario=None):
+def _run_pr(tmp, copy_config, edit_scenario=None, mode=None):
     cfg, scn = tmp / "config", tmp / "scenario"
     copy_config(ROOT / "config", cfg)
+    if mode is not None:               # split_batch_fw, on the TEMP copy only
+        ctl = cfg / "control.yaml"
+        ctl.write_text(ctl.read_text(encoding="utf-8").rstrip("\n")
+                       + f"\nsplit_batch_fw: '{mode}'\n", encoding="utf-8")
     shutil.copytree(ROOT / "scenario", scn)
     if edit_scenario is not None:
         edit_scenario(scn)             # a TEMP copy; never the live scenario
@@ -851,28 +855,46 @@ def _unscripted_split_and_late_b50(scn):
     p.write_text(txt[:j] + "tran_og_date: '2026-08-27'" + txt[k:], encoding="utf-8")
 
 
-@pytest.fixture(scope="module")
-def unscripted(tmp_path_factory, copy_config):
+@pytest.fixture(scope="module", params=["auto", "off"])
+def unscripted(request, tmp_path_factory, copy_config):
+    """Both engines on the same inputs. split_batch_fw 'auto' (the default,
+    operator decision 2026-09-11) models B49's FW part and moves the overdue
+    B50 in the first forecast week; 'off' is the V1 engine, whose DETECTION
+    (warning + audit) must still fire."""
     if not PR_0831.exists():
         pytest.skip("the 2026-08-31 ProductionReport is not on this machine")
-    tmp = tmp_path_factory.mktemp("eggs_unscripted")
-    path, _scn = _run_pr(tmp, copy_config, _unscripted_split_and_late_b50)
+    tmp = tmp_path_factory.mktemp("eggs_unscripted_" + request.param)
+    path, scn = _run_pr(tmp, copy_config, _unscripted_split_and_late_b50,
+                        mode=request.param)
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     out = SimpleNamespace(
+        mode=request.param, scenario=scn,
         weekly=_sheet_rows(wb, "WeeklyReport"), monthly=_sheet_rows(wb, "MonthlyReport"),
         vlog=[(str(r[1]), str(r[2])) for r in wb["ValidationLog"].iter_rows(values_only=True)
               if r and isinstance(r[0], int)])
     ica = list(wb["InputConservationAudit"].iter_rows(values_only=True))
     hi = next(i for i, r in enumerate(ica) if r and r[0] == "Batch")
     out.ica = {r[0]: dict(zip(ica[hi], r)) for r in ica[hi + 1:] if r and r[0]}
+    out.ica_head = [str(r[0]) for r in ica[:hi] if r and r[0]]
+    tp = list(wb["TransferPlan"].iter_rows(values_only=True))
+    th = next(i for i, r in enumerate(tp) if r and r[0] == "Week")
+    col = {str(c): j for j, c in enumerate(tp[th]) if c is not None}
+    tog = defaultdict(float)
+    for r in tp[th + 1:]:
+        if r and r[col["Type"]] == "TranOG":
+            tog[(str(r[col["Batch"]]), str(r[col["Week"]]))] += float(r[col["Count (fish)"]] or 0)
+    out.tog = dict(tog)
     wb.close()
     return out
 
 
 def test_real_run_an_unscripted_split_is_warned_by_name(unscripted):
-    """End to end through run.main: the ValidationLog names B49 and its count,
-    the audit does not say PLACED, and the first week shows the fish in
-    Count_Check and their biomass in Bio_Check (detect, don't coerce)."""
+    """split_batch_fw OFF (the V1 engine): the ValidationLog names B49 and its
+    count, the audit does not say PLACED, and the first week shows the fish
+    in Count_Check and their biomass in Bio_Check (detect, don't coerce).
+    Under 'auto' the same fish are modelled -- see the next test."""
+    if unscripted.mode != "off":
+        pytest.skip("the not-modelled detection is the split_batch_fw: off engine")
     _total, fw_n, fw_kg = _pr_fish()
     h = fw_n["B49"]
     assert h > 0, "B49 is no longer split on the 8/31 PR"
@@ -888,6 +910,78 @@ def test_real_run_an_unscripted_split_is_warned_by_name(unscripted):
     assert abs(_n(r, "Bio_Check (kg)") - fw_kg["B49"]) <= 1, r["Bio_Check (kg)"]
     assert _n(r, "Gross_Growth (kg)") > -0.05 * fw_kg["B49"]       # not in growth
     assert all(r[k] is None for k in RATES)
+    assert not any(k[0] == "B49" for k in unscripted.tog)         # never moved
+
+
+def test_real_run_an_unscripted_split_is_modelled_under_auto(unscripted):
+    """split_batch_fw AUTO: B49's FW part is modelled -- one line says so, the
+    audit reads PLACED, the first week opens on every B49 fish with a ~0
+    Count_Check and real rates, and the fish enter seawater once, in 2026-W38
+    (its scenario tran_og_date), culled to the remaining target."""
+    if unscripted.mode != "auto":
+        pytest.skip("auto only")
+    _total, fw_n, _kg = _pr_fish()
+    hits = [d for c, d in unscripted.vlog
+            if c == "WARNING - Split batch FW part auto-transferred"]
+    assert len(hits) == 1 and hits[0].startswith(
+        f"SPLIT BATCH B49: {fw_n['B49']:,.0f} FW fish auto-transferred 2026-W38"), hits
+    assert not any("Split batch at PR close" in c for c, _d in unscripted.vlog)
+    assert unscripted.ica["B49"]["Status"] == "PLACED"
+    b49 = {k: v for k, v in unscripted.tog.items() if k[0] == "B49"}
+    assert list(b49) == [("B49", "2026-W38")]
+    first = min(d["Week"] for d in unscripted.weekly)
+    (r,) = [d for d in unscripted.weekly if d["Batch"] == "B49" and d["Week"] == first]
+    assert abs(_n(r, "Count_Check (fish)")) <= 30, r["Count_Check (fish)"]
+    assert abs(_n(r, "Bio_Check (kg)")) <= 1, r["Bio_Check (kg)"]
+    assert r["SGR (%/day)"] is not None                           # real FW biology
+
+
+def test_real_run_an_overdue_fw_batch_moves_in_the_first_forecast_week(unscripted):
+    """B50's tran_og_date (2026-08-27) is before the PR close. V1 never placed
+    it: its projection started in seawater and emitted no arrival. Under auto
+    it enters seawater in the first forecast week, named in one line."""
+    b50 = {k: v for k, v in unscripted.tog.items() if k[0] == "B50"}
+    if unscripted.mode == "off":
+        assert not b50                                            # the V1 defect
+        return
+    first = min(d["Week"] for d in unscripted.weekly)
+    assert list(b50) == [("B50", first)], b50
+    hits = [d for c, d in unscripted.vlog
+            if c == "WARNING - Overdue FW batch auto-transferred"]
+    assert len(hits) == 1 and hits[0].startswith("OVERDUE FW BATCH B50:"), hits
+    assert unscripted.ica["B50"]["Status"] == "PLACED"
+    assert unscripted.ica_head[2].startswith("OK"), unscripted.ica_head[:3]
+
+
+def test_real_run_unscripted_ledger_chains_and_books_eggs_only(unscripted):
+    """The ledger rules hold on both engines: close[w] == open[w+1] on every
+    batch-week, the printed identity gives Count_Check, and Input is eggs."""
+    by = defaultdict(list)
+    for d in _batch_rows(unscripted.weekly):
+        by[d["Batch"]].append(d)
+    breaks = []
+    for b, rs in by.items():
+        rs.sort(key=lambda d: d["Week"])
+        for a, n in zip(rs, rs[1:]):
+            if _monday(n["Week"]) - _monday(a["Week"]) != timedelta(days=7):
+                continue
+            if abs(_n(n, "Open_Count (fish)") - _n(a, "Close_Count (fish)")) > 1:
+                breaks.append((b, n["Week"]))
+    assert not breaks, breaks[:5]
+    for rows in (unscripted.weekly, unscripted.monthly):
+        bad = [(d["Batch"], d.get("Week") or d.get("Month")) for d in _batch_rows(rows)
+               if abs(_printed_identity(d) - _n(d, "Count_Check (fish)")) > 5]
+        assert not bad, bad[:5]
+    from forecast.scenario_io import load_batches
+    weeks = sorted({d["Week"] for d in unscripted.weekly})
+    lo, hi = _monday(weeks[0]), _monday(weeks[-1]) + timedelta(days=6)
+    eggs = 0.0
+    for b in load_batches(unscripted.scenario):
+        d = b.input_date.date() if hasattr(b.input_date, "date") else b.input_date
+        if d and lo <= d <= hi:
+            eggs += float(b.input_count or 0)
+    total = sum(_n(d, "Input_Count (fish)") for d in _batch_rows(unscripted.weekly))
+    assert abs(total - eggs) <= 13, (total, eggs)
 
 
 def test_real_run_a_projection_starting_in_seawater_is_not_held_again(unscripted):

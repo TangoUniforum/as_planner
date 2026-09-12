@@ -728,8 +728,25 @@ def _apply_graded_harvest(state, ev: ManualEvent, idx: int, event_date=None,
     return warns
 
 
+def _second_fw_to_og_reason(ev, consumed) -> Optional[str]:
+    """Why a further fw_to_og for an already-transferred batch is refused, or
+    None. An fw_to_og moves the batch's WHOLE freshwater part -- its count is a
+    cull-down target, not a tranche -- so a second one for the same batch
+    re-placed the full FW count from the same (undecremented) projection: on
+    the 8/31 PR two events put 480,000 fish into seawater from 250,225, and
+    every gate passed (operator decision 4, 2026-09-11)."""
+    if consumed is None or not ev.batch or ev.batch not in consumed:
+        return None
+    k, wk = consumed[ev.batch]
+    return (f"batch {ev.batch} was already transferred to seawater by fw_to_og "
+            f"#{k} (week {wk}) - an fw_to_og moves the batch's WHOLE freshwater "
+            f"part (its count is a cull-down target), so a batch can be "
+            f"scripted only once. Edit that event instead.")
+
+
 def apply_events_for_week(state, events, week, week_start, week_label=None,
-                          handling_frac=0.0, fw_lookup=None, out_week_culls=None):
+                          handling_frac=0.0, fw_lookup=None, out_week_culls=None,
+                          consumed_fw=None):
     """Apply every manual event scheduled for `week` (1-based) at the start of
     that override-window week, dating each event at `week_start`.
 
@@ -742,6 +759,12 @@ def apply_events_for_week(state, events, week, week_start, week_label=None,
     is the only record of its FW losses). `fw_lookup` maps (batch_id, week_label)
     -> (count, avg_wt_g, cv) for fw_to_og events (the chosen FW batch's state at
     this week). Mutates `state`.
+
+    `consumed_fw` ({batch: (event index, week)}, default None = no guard, the
+    pre-2026-09-11 behaviour) records every batch an fw_to_og has already
+    moved -- across weeks, when the window passes the same dict every week --
+    and a further fw_to_og for it is REFUSED (MANUAL EVENT REFUSED). Only an
+    event that actually placed fish consumes its batch.
     """
     transfers: list = []
     harvests: list = []
@@ -773,11 +796,15 @@ def apply_events_for_week(state, events, week, week_start, week_label=None,
                 out_transfers=transfers, out_harvests=harvests)
         elif ev.type == TYPE_FW_TO_OG:
             fw = (fw_lookup or {}).get((ev.batch, week_label))
-            if fw is None:
+            _again = _second_fw_to_og_reason(ev, consumed_fw)
+            if _again is not None:
+                ew = [f"MANUAL week {week} fw_to_og #{i}: {_again}"]
+            elif fw is None:
                 ew = [f"MANUAL week {week} fw_to_og #{i}: no FW state for "
                       f"batch {ev.batch!r} at this week (must be an in-flight "
                       f"FW batch still in freshwater)"]
             else:
+                _t0 = len(tranogs)
                 ew, _culled = _apply_fw_to_og(
                     state, ev, i, fw[0], fw[1], fw[2], handling_frac,
                     event_date=week_start, out_tranog=tranogs,
@@ -787,6 +814,9 @@ def apply_events_for_week(state, events, week, week_start, week_label=None,
                 rec = fw_balance.setdefault(ev.batch, [0.0, 0.0])
                 rec[0] += fw[0]       # fw_count at the transfer week
                 rec[1] += _culled     # handling mortality + reconcile-to-target cull
+                if (consumed_fw is not None and len(tranogs) > _t0
+                        and tranogs[-1].count_placed > 0):
+                    consumed_fw[ev.batch] = (i, week)
         else:
             ew = [f"MANUAL week {week} event #{i}: unknown type "
                   f"'{ev.type}' — skipped"]
@@ -940,6 +970,9 @@ def validate_manual_events(state, events: list[ManualEvent], *,
 
     fw_lookup: dict = {}
     labels: list[str] = []
+    # The run's second-fw_to_og guard, mirrored (faithful path): a batch an
+    # earlier fw_to_og already moved cannot be scripted again.
+    consumed_fw: dict = {}
     if faithful:
         from .manual_window import _build_fw_lookup, advance_facility_one_week
         from .time_grid import forecast_week_labels
@@ -971,6 +1004,9 @@ def validate_manual_events(state, events: list[ManualEvent], *,
                 return w  # feasibility deferred to run (legacy behavior)
             if not ev.batch:
                 return w
+            _again = _second_fw_to_og_reason(ev, consumed_fw)
+            if _again is not None:
+                return w + [f"❌ {_again}"]
             fw = fw_lookup.get((ev.batch, week_label))
             if fw is None:
                 w.append(f"batch {ev.batch} is not in freshwater at week "
@@ -987,9 +1023,12 @@ def validate_manual_events(state, events: list[ManualEvent], *,
             # "MANUAL CULL ..." note _apply_fw_to_og emits is informational
             # traceability (a cull to hit the target is EXPECTED on a valid
             # transfer), NOT a feasibility failure — drop it so it doesn't block.
+            _placed: list = []
             wa, _culled = _apply_fw_to_og(
                 scratch, ev, i, fw[0], fw[1], fw[2], handling_frac,
-                event_date=week_start, out_tranog=[])
+                event_date=week_start, out_tranog=_placed)
+            if _placed and _placed[-1].count_placed > 0:
+                consumed_fw[ev.batch] = (i, ev.week or 1)
             return [m for m in wa if not m.startswith("MANUAL CULL")]
         return [f"unknown type '{ev.type}'"]
 

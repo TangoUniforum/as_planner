@@ -58,11 +58,13 @@ at = AppTest.from_file(sys.argv[1], default_timeout=300)
 at.session_state["app_mode"] = sys.argv[2]
 at.run()
 labels = set()
-for g in (at.checkbox, at.number_input, at.text_input):
+for g in (at.checkbox, at.number_input, at.text_input, at.selectbox):
     labels |= {w.label for w in g}
 print("<<<RESULT>>>" + json.dumps({
     "exceptions": [str(e.value) for e in at.exception],
     "labels": sorted(labels),
+    "selects": {w.label: [str(o) for o in w.options] for w in at.selectbox},
+    "texts": sorted(w.label for w in at.text_input),
 }))
 """
 
@@ -100,6 +102,15 @@ def test_every_control_knob_reaches_a_widget(widget_labels):
         if want not in widget_labels:
             missing.append(k)
     assert not missing, f"knobs with no widget (dropped on Save): {missing}"
+
+
+def test_split_batch_fw_is_picked_from_a_list_not_typed(rendered):
+    """split_batch_fw takes exactly two values. As a free-text box a typo was
+    saved and the next run stopped on it (2026-09-12 review); it renders as a
+    list of those two values, and never as a text box."""
+    lab = _control_labels()["split_batch_fw"]
+    assert rendered["selects"].get(lab) == ["auto", "off"], rendered["selects"]
+    assert lab not in rendered["texts"]
 
 
 def test_inactive_knobs_are_tucked_away_but_still_render(widget_labels):

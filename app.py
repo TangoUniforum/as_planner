@@ -1376,6 +1376,38 @@ _CONTROL_HELP = {
         "NOT TUNABLE: like the purge lever it is arm IDENTITY "
         "(methods.UNTUNABLE_KNOBS), so a tuned run cannot settle it — "
         "'Controller — hybrid' pins it ON, the plain controller does not.",
+    "split_batch_fw":
+        "What the plan does with a batch the ProductionReport holds partly in "
+        "freshwater and partly in seawater — a 'split batch', e.g. B49 on the "
+        "8/31 PR: 47,743 fish already in tanks 14 + 24 and 250,225 still in "
+        "freshwater — and with a wholly-freshwater batch whose transfer date "
+        "is already past at the PR close. 'auto': the freshwater part is "
+        "PLANNED. It moves into seawater at the batch's scenario tran_og_date "
+        "(or in the first forecast week once that date has passed), grows and "
+        "loses fish in freshwater until then, is culled to the REMAINING "
+        "target — tran_og_count minus the fish already in seawater; no cull "
+        "when the seawater part already meets it — and tops up the batch's "
+        "OWN entry tanks (the bigger half into the heavier tank; anything past "
+        "the density target spills into empty entry tanks). Every automatic "
+        "transfer writes one ValidationLog line saying so. A scripted fw_to_og "
+        "in Manual starting events always wins — that batch is not moved "
+        "automatically. Inside a Manual starting events window nothing moves "
+        "automatically: a batch whose transfer falls in the window — always "
+        "so for an overdue batch, whose transfer is week 1 — needs a scripted "
+        "fw_to_og (the FW→OG intake offers a past-date batch in week 1 at the "
+        "PR's own count and weight), or the run stops and names it. 'off': "
+        "the old engine — a split batch's freshwater part is not planned at "
+        "all (it never reaches seawater or harvest); the ValidationLog warns "
+        "and InputConservationAudit marks the batch FW PART NOT MODELLED. An "
+        "overdue wholly-freshwater batch under 'off' is, as in the old "
+        "engine, never placed and NOT warned about: InputConservationAudit "
+        "reads it 'pre-start' and only its ledger Count_Check shows the "
+        "fish. Values: auto / off, picked from a list here (in control.yaml "
+        "an unquoted off or no reads as off and on or yes as auto; any other "
+        "text stops the run). Default: auto, in code, so a "
+        "config written before this knob existed runs auto. NOT TUNABLE "
+        "(methods.UNTUNABLE_KNOBS): it decides whether the plan carries fish "
+        "the PR says you have, not how well it plans them.",
 }
 
 # Friendly display labels for the Control editor (the raw field name stays the key).
@@ -1439,7 +1471,30 @@ _CONTROL_LABEL = {
     "hybrid_guide_smooth_weeks": "  ↳ guide smoothing (weeks)",
     "hybrid_purge_lever": "  ↳ guide lever: 6N staging (purge)",
     "hybrid_production_lever": "  ↳ guide lever: harvest cap (production)",
+    "split_batch_fw": "Split FW/SW batch at PR close: auto / off",
 }
+
+# Control knobs with a FIXED set of values: Configure shows a list, never a
+# free-text box (a typo typed there was saved, and the next run stopped).
+_CONTROL_CHOICES = {
+    "split_batch_fw": ("auto", "off"),
+}
+
+
+def _control_choice_index(k, v):
+    """Index of the stored value `v` in _CONTROL_CHOICES[k], or None when it
+    is not a valid value. Read through the knob's own parser, so the page
+    shows what the run would use (split_batch_fw: a YAML `off` stored as
+    False, or blank = the default auto)."""
+    opts = _CONTROL_CHOICES[k]
+    if k == "split_batch_fw":
+        from types import SimpleNamespace
+        from forecast.split_batch import mode as _sb_mode
+        try:
+            return opts.index(_sb_mode(SimpleNamespace(split_batch_fw=v)))
+        except ValueError:
+            return None
+    return opts.index(v) if v in opts else None
 
 
 def _harvest_limit(default: float = 55_000.0) -> float:
@@ -1602,7 +1657,7 @@ _CONTROL_GROUPS = [
      "switchover.",
      ["forecast_start", "horizon_weeks", "scenario_name",
       "starvation_period_days", "sixn_growth", "sixn_production_start",
-      "sixn_transition_weeks"]),
+      "sixn_transition_weeks", "split_batch_fw"]),
     ("🎣 Harvest control",
      "How the weekly harvest is paced against the biomass cap and the contract "
      "floor.",
@@ -1667,7 +1722,18 @@ def _edit_control():
         def _knob(k, v):
             """Render one knob. EVERY key in `d` must land in `new` — a key
             that is skipped is silently dropped from the saved config."""
-            if isinstance(v, bool):
+            if k in _CONTROL_CHOICES:
+                # A fixed set of values: a list, never free text (a typo in
+                # a text box was saved and stopped the next run).
+                _opts = list(_CONTROL_CHOICES[k])
+                _idx = _control_choice_index(k, v)
+                if _idx is None:
+                    st.warning(f"{k}: the stored value {v!r} is not one of "
+                               f"{', '.join(_opts)} — pick one (the run refuses "
+                               f"it as it stands).")
+                new[k] = st.selectbox(_ctl_label(k), options=_opts,
+                                      index=_idx or 0, help=_ctl_help(k, v))
+            elif isinstance(v, bool):
                 new[k] = st.checkbox(_ctl_label(k), value=v,
                                      help=_ctl_help(k, v))
             elif isinstance(v, int):
@@ -2333,13 +2399,20 @@ def _mw_validate(state, ctx, events):
     return bad
 
 
-def _mw_fw_avail(ctx, window_labels):
+def _mw_fw_avail(ctx, window_labels, scripted=None):
     """{batch_id: {week_label: (count, avg_wt_g, cv)}} for every in-flight FW
     cohort still in freshwater somewhere in the window — the candidates a manual
     FW→OG intake can pull from (projected exactly like the run's _build_fw_lookup,
-    but over ALL FW batches, not just ones already referenced by an event)."""
+    but over ALL FW batches, not just ones already referenced by an event).
+
+    `scripted` = batches an fw_to_og in the window already moves. They are NOT
+    offered again: an fw_to_og takes the batch's WHOLE freshwater part, and the
+    run now refuses a second one (MANUAL EVENT REFUSED) — it used to put the
+    whole FW count into seawater twice."""
     from collections import defaultdict
+    from types import SimpleNamespace
     from forecast.biology import project_in_flight_fw_batch
+    from forecast.manual_window import pr_fw_week1_fallback, week1_label
     fw_records = ctx.get("fw_records") or []
     if not fw_records or ctx.get("control") is None:
         return {}
@@ -2348,11 +2421,16 @@ def _mw_fw_avail(ctx, window_labels):
         agg[r.batch_id]["count"] += r.closing_count
         agg[r.batch_id]["biomass_kg"] += r.closing_biomass_kg
     win = set(window_labels)
+    _done = set(scripted or ())
+    # Week 1 of the window (the PR-derived forecast start), for the past-date
+    # fallback below.
+    _wk1 = (week1_label(SimpleNamespace(forecast_start=ctx.get("forecast_start")))
+            or week1_label(ctx.get("control")))
     out: dict[str, dict] = {}
     _skipped = []
     for bid, a in agg.items():
         b_meta = ctx["batch_by_id"].get(bid)
-        if a["count"] <= 0 or b_meta is None:
+        if a["count"] <= 0 or b_meta is None or bid in _done:
             continue
         avg_wt = a["biomass_kg"] * 1000.0 / a["count"]
         try:
@@ -2365,6 +2443,17 @@ def _mw_fw_avail(ctx, window_labels):
         cv = b_meta.tran_og_cv or 16.0
         wk = {s.week_label: (s.close_count, s.close_avg_weight_g, cv)
               for s in states if s.stage == "FW" and s.week_label in win}
+        # PAST-DATE FALLBACK -- the run's own rule (operator decision 5,
+        # manual_window.pr_fw_week1_fallback): a cohort whose transfer date
+        # had already passed at the PR close (an overdue batch, a past-date
+        # split) is projected starting in SEAWATER and has no freshwater
+        # week, so week 1 carries the PR's own freshwater count and weight.
+        # Without it the editor could not script the fw_to_og the run then
+        # demands for such a batch inside a window.
+        if _wk1 is not None and _wk1 in win and _wk1 not in wk:
+            _fb = pr_fw_week1_fallback(states, _wk1, a["count"], avg_wt, cv)
+            if _fb is not None:
+                wk[_wk1] = _fb
         if wk:
             out[bid] = wk
     if _skipped:
@@ -3165,7 +3254,14 @@ def _mw_fw_intake(state, ctx, rows, labels, date_for):
     caller's container (no inner expander — the editor already lives in one)."""
     from forecast.sixn import SIXN_ALL_TANKS
     from forecast.manual_events import ManualEvent, ManualDest
-    avail = _mw_fw_avail(ctx, labels)
+    from forecast.batch_order import sorted_batches
+    _already = sorted_batches({e.batch for e in _mw_events()
+                               if e.type == "fw_to_og" and e.batch})
+    avail = _mw_fw_avail(ctx, labels, scripted=_already)
+    if _already:
+        st.caption(f"Already brought in by an FW→OG intake in this window (one "
+                   f"per cohort — it moves the whole freshwater part): "
+                   f"{', '.join(_already)}. Edit or delete that event to change it.")
     if not avail:
         st.caption("No in-flight freshwater cohorts are still in freshwater "
                    "during this window.")

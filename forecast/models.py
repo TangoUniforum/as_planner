@@ -386,6 +386,16 @@ class ControlParams:
     # without a code change — the purge and production paths are independent.
     hybrid_purge_lever: bool = True         # 6N move-in sizing (purge weeks)
     hybrid_production_lever: bool = True    # harvest cap + STARVE entry
+    # SPLIT FW/SW BATCH (operator decision 2026-09-11, forecast/split_batch.py).
+    # "auto" = a batch the ProductionReport holds partly in freshwater and
+    # partly in seawater has its FW part MODELLED: moved at its scenario
+    # tran_og_date (or the first forecast week once that has passed), culled to
+    # the remaining target, topping up the batch's own entry tanks -- and an
+    # OVERDUE wholly-FW batch (tran_og_date before the PR close) moves in the
+    # first forecast week. A manual fw_to_og always wins. "off" = the V1 engine
+    # (the FW part is only warned about). The default lives HERE, in code: a
+    # control.yaml written before the key existed runs "auto".
+    split_batch_fw: str = "auto"            # "auto" | "off"
 
 
 @dataclass

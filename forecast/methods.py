@@ -122,6 +122,12 @@ UNTUNABLE_KNOBS = frozenset({
     # A search that could switch a guard off to score better is a search that
     # sells a rule to buy a number.
     "sixn_level_drains",
+    # FOLLOWS THE INPUTS, not a lever (operator decision 2026-09-11).
+    # split_batch_fw decides whether the plan carries a split batch's
+    # freshwater fish at all -- `off` leaves ~240,000 of the PR's own fish
+    # outside the plan forever. A search free to switch it would score a
+    # lighter facility by forgetting fish the report says are there.
+    "split_batch_fw",
     # DEFINES WHICH ARM YOU ARE RUNNING, so it is not the search's to set: a
     # space containing it could turn `controller` into `controller-hybrid` and
     # have the Compare board unknowingly compare a method with itself. The

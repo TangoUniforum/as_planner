@@ -119,8 +119,18 @@ def _build_fw_lookup(events, fw_records, control, pr_closing, tables, batch_by_i
     referenced by an fw_to_og event, by projecting its in-flight FW trajectory.
     Only FW-stage (pre-TranOG) weeks are indexed — a manual FW->OG must happen
     while the batch is still in freshwater.
+
+    PAST-DATE FALLBACK (operator decision 5, 2026-09-11). A batch whose
+    tran_og_date has already passed at the PR close is projected starting in
+    SEAWATER, so it has no FW-stage week at all -- and no fw_to_og could ever
+    be scripted for it, although the PR says its fish are still in freshwater
+    (B36 split on 2024-11-30; an overdue wholly-FW batch). For such a batch --
+    its projected first week is SW -- week 1 is indexed with the PR-measured FW
+    state (the report's own count and weight). A batch still in EGGS at week 1
+    gets no fallback: eggs cannot be moved into seawater.
     """
     from collections import defaultdict
+    from .batch_order import batch_sort_key
     from .manual_events import TYPE_FW_TO_OG
     fw_batches = {ev.batch for ev in (events or [])
                   if ev.type == TYPE_FW_TO_OG and ev.batch}
@@ -132,8 +142,9 @@ def _build_fw_lookup(events, fw_records, control, pr_closing, tables, batch_by_i
         if r.batch_id in fw_batches:
             agg[r.batch_id]["count"] += r.closing_count
             agg[r.batch_id]["biomass_kg"] += r.closing_biomass_kg
+    wk1 = week1_label(control)
     lookup: dict = {}
-    for bid in fw_batches:
+    for bid in sorted(fw_batches, key=batch_sort_key):
         a = agg.get(bid)
         b_meta = batch_by_id.get(bid)
         if not a or a["count"] <= 0 or b_meta is None:
@@ -145,7 +156,36 @@ def _build_fw_lookup(events, fw_records, control, pr_closing, tables, batch_by_i
         for s in states:
             if s.stage == "FW":
                 lookup[(bid, s.week_label)] = (s.close_count, s.close_avg_weight_g, cv)
+        if wk1 is not None and (bid, wk1) not in lookup:
+            fb = pr_fw_week1_fallback(states, wk1, a["count"], avg_wt, cv)
+            if fb is not None:
+                lookup[(bid, wk1)] = fb
     return lookup
+
+
+def week1_label(control):
+    """The label of the first forecast week (control.forecast_start), or None."""
+    fs = getattr(control, "forecast_start", None) if control is not None else None
+    if fs is None:
+        return None
+    fs = fs.date() if hasattr(fs, "date") else fs
+    return forecast_week_labels(fs, 1)[0]
+
+
+def pr_fw_week1_fallback(states, wk1, pr_count, pr_avg_wt_g, cv):
+    """(count, avg_wt_g, cv) to offer an fw_to_og in week 1 from the PR's OWN
+    freshwater figures, or None. ONE rule for the run (_build_fw_lookup) and
+    the editor (app._mw_fw_avail), so the editor offers exactly what the run
+    accepts: a batch whose projection is already in SEAWATER in week 1 (its
+    tran_og_date passed at the PR close -- an overdue batch, a past-date
+    split) has no freshwater week to script from. A batch still in eggs, or
+    still in freshwater (it has real FW weeks), gets none."""
+    if wk1 is None:
+        return None
+    first = next((s for s in states if s.week_label == wk1), None)
+    if first is None or first.stage != "SW":
+        return None
+    return (pr_count, pr_avg_wt_g if pr_avg_wt_g > 0 else first.open_avg_weight_g, cv)
 
 
 def sixn_release_schedule(state, transfer_events, window_start, window_n,
@@ -320,6 +360,10 @@ def advance_facility_window(state, batch_by_id, tables, forecast_start,
     warnings: list[str] = []
     manual_fw_balance: dict[str, list[float]] = {}
     purge_hold: dict = {}   # tank_id -> (pre-freeze stage, batch) for handoff restore
+    # Batches an fw_to_og has already moved, across every window week: a
+    # second fw_to_og for one of them is REFUSED (manual_events
+    # _second_fw_to_og_reason) -- it used to re-place the whole FW part.
+    consumed_fw: dict = {}
     week_start = forecast_start
     for i in range(n_weeks):
         # Depuration hold FIRST: in purge mode, freeze any pre-existing 6N tank
@@ -355,7 +399,7 @@ def advance_facility_window(state, batch_by_id, tables, forecast_start,
             tr, hv, tn, w, fwb = apply_events_for_week(
                 state, events, i + 1, week_start, week_label=labels[i],
                 handling_frac=handling_frac, fw_lookup=fw_lookup,
-                out_week_culls=_wk_culls)
+                out_week_culls=_wk_culls, consumed_fw=consumed_fw)
             for _cb, _cn, _cbio in _wk_culls:
                 _e = manual_fw_cull.setdefault((_cb, labels[i]), [0.0, 0.0])
                 _e[0] += _cn

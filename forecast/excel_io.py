@@ -1809,8 +1809,21 @@ def unmodelled_fw_warnings(held, tranog_events, sw_batches) -> tuple:
     opening and never reach seawater or harvest. Detect, don't coerce: the
     ledger shows them in Count_Check on the batch's first week, and these
     lines name them (ValidationLog). `sw_batches` = batches holding seawater
-    fish at the PR close, to tell a split batch from a wholly-FW one."""
-    moved = {getattr(ev, "batch_id", None) for ev in (tranog_events or ())}
+    fish at the PR close, to tell a split batch from a wholly-FW one.
+
+    A move that was APPLIED and placed NO fish (every destination refused --
+    a scripted fw_to_og whose tanks could not take the cohort) moves nothing,
+    so it no longer counts as moving the part. It used to: a split whose only
+    fw_to_og was refused read PLACED while its freshwater fish silently left
+    the plan (2026-09-12 review). An event never applied is judged by its
+    presence, as before."""
+    moved = set()
+    for ev in (tranog_events or ()):
+        _p = float(getattr(ev, "count_placed", 0.0) or 0.0)
+        _r = float(getattr(ev, "count_refused", 0.0) or 0.0)
+        if _p <= 0 and _r > 0:
+            continue                    # applied, and every fish refused
+        moved.add(getattr(ev, "batch_id", None))
     sw = set(sw_batches or ())
     lines: list = []
     fish: dict = {}
@@ -1848,6 +1861,7 @@ def _build_batch_week_ledger(
     tranog_events=None, og_mort_states=None, realized_biology=None,
     window_openings=None, window_culls=None,
     fw_openings=None, fw_transfer_basis=None, fw_projected=None,
+    split_fw=None,
 ):
     """Assemble a per-(batch, week) open/close production ledger.
 
@@ -1876,6 +1890,15 @@ def _build_batch_week_ledger(
     first row of a held part nothing moves, where it carries that part's
     biomass as Count_Check carries its fish; Count_Check carries the small
     count residual.
+    `split_fw` {batch: [FW/EGG rows]} = the freshwater track of a split batch
+    the planner modelled automatically (forecast/split_batch.py): its FW part
+    is in the opening at the PR's count, its FW feed, mortality and culls are
+    booked from that track until the entry week, and the crossing cull
+    (TranOG_Date on a week start) is booked to the FW phase on the entry week,
+    where Xfer_In = Xfer_Out = the fish placed. Real FW biology, so the rates
+    print by the ordinary rules. The caller names such a batch in
+    `fw_projected` too (run.py does), so its PR freshwater part is never held
+    beside the track.
     Returns a list of row dicts ordered by (batch, week), batches in natural
     order (forecast/batch_order).
     """
@@ -2015,6 +2038,17 @@ def _build_batch_week_ledger(
         if s.stage in ("FW", "EGG") and s.feed_kg_week and key not in rl:
             feed[key] += s.feed_kg_week
 
+    # AUTO-MODELLED SPLIT BATCH: its freshwater track, (batch, week) -> row.
+    # Kept apart from bio_state because the batch's seawater part owns that
+    # key; the FW part's feed is real freshwater feed on top of the SW feed.
+    _sfw: dict[tuple, object] = {}
+    for _b, _rows in (split_fw or {}).items():
+        for _s in _rows or ():
+            if getattr(_s, "stage", None) in ("FW", "EGG"):
+                _sfw[(_b, _s.week_label)] = _s
+                if _s.feed_kg_week:
+                    feed[(_b, _s.week_label)] += _s.feed_kg_week
+
     # OG-phase weekly mortality % (the pick's per-OG-batch-week rate). fw_states
     # cover only FW weeks, so OG weeks would otherwise read mort=0 and leak the
     # ~decline into Count_Check. Fill OG weeks only; setdefault never overrides an
@@ -2096,7 +2130,7 @@ def _build_batch_week_ledger(
 
     # All (batch, week) cells: union of realized + projected weeks.
     by_batch: dict[str, set] = defaultdict(set)
-    for (b, wk) in set(rl) | set(bio_state) | set(harv) | set(cull):
+    for (b, wk) in set(rl) | set(bio_state) | set(harv) | set(cull) | set(_sfw):
         by_batch[b].add(wk)
     if _held:
         # A held part is in the facility on every report week up to its FW->SW
@@ -2202,11 +2236,31 @@ def _build_batch_week_ledger(
             if _wo is not None and _wo[0] > 0:
                 oc, obio = _wo[0], _wo[2]
                 owt = _wo[1] / _wo[0]
+            # AUTO-MODELLED SPLIT: the freshwater part rides beside the
+            # seawater opening -- its PR count on the first week, else the FW
+            # track's previous close (the chain) -- and, on the entry week, is
+            # the fish that cross, at the FW track's own weight.
+            _sp_now = _sfw.get((b, wk))
+            _sp_prev = _sfw.get((b, weeks[i - 1])) if i > 0 else None
+            if i == 0 and _sp_now is not None:
+                fw_oc += (_sp_now.open_count if _sp_now.open_count > 0
+                          else _sp_now.count)
+                fw_obio += (_sp_now.open_biomass_kg if _sp_now.open_biomass_kg > 0
+                            else _sp_now.biomass_kg)
+            elif _sp_prev is not None:
+                fw_oc += _sp_prev.close_count
+                fw_obio += _sp_prev.close_biomass_kg
+            _split_cross = (b in (split_fw or {}) and _is_tb
+                            and not _fw_track_cross)
             # Mortality is computed on the SEAWATER opening only, exactly as
             # before: the freshwater fish have their own loss terms (the FW
             # projection's close already net of them; a held part carries none
             # until its transfer week, below).
             _mort_basis = oc
+            if _split_cross:
+                # The split's entry week: the fish that crossed spend the week
+                # in seawater too, so the seawater rate applies to them as well.
+                _mort_basis = oc + tranog_in.get((b, wk), 0.0)
             # A row carrying a HELD part: its fish sit at the PR's count and
             # weight with no FW biology and no FW feed, so a rate over them
             # (SGR, SFR, FCR) is not a measurement -- blanked (see
@@ -2233,6 +2287,11 @@ def _build_batch_week_ledger(
                 cc += _hb[0]
                 cbio += _hb[1]
                 cwt = cbio * 1000.0 / cc
+            if _sp_now is not None:
+                # Split FW part still in freshwater at the week's close.
+                cc += _sp_now.close_count
+                cbio += _sp_now.close_biomass_kg
+                cwt = cbio * 1000.0 / cc if cc > 0 else 0.0
             h = harv.get((b, wk), {"count": 0.0, "gross": 0.0, "wt_sum": 0.0})
             cu = cull.get((b, wk), {"count": 0.0, "bio": 0.0})
             _wc = _wcull.get((b, wk))
@@ -2252,6 +2311,20 @@ def _build_batch_week_ledger(
                         and (_sx.cull_count_week or 0.0) > 0):
                     cu = {"count": cu["count"] + _sx.cull_count_week,
                           "bio": cu["bio"] + (_sx.cull_biomass_kg_week or 0.0)}
+            if _split_cross and (b, wk) in rl:
+                # The split's crossing cull, booked to the FW phase: when
+                # TranOG_Date is a week start it rides on the merged SW row
+                # (split_batch.merge_states), which the `key not in rl` guard
+                # never books. On a mid-week date it fell in the last FW week
+                # and is booked there from the track (below).
+                _sx = bio_state.get((b, wk))
+                if (_sx is not None and _sx.stage == "SW"
+                        and (_sx.cull_count_week or 0.0) > 0):
+                    cu = {"count": cu["count"] + _sx.cull_count_week,
+                          "bio": cu["bio"] + (_sx.cull_biomass_kg_week or 0.0)}
+            if _sp_now is not None and (_sp_now.cull_count_week or 0.0) > 0:
+                cu = {"count": cu["count"] + _sp_now.cull_count_week,
+                      "bio": cu["bio"] + (_sp_now.cull_biomass_kg_week or 0.0)}
             # Mortality count: for a FW/EGG PROJECTION week (close comes from the
             # biology, not realized BatchLocations) use the REALIZED mortality the
             # daily sim actually applied — open*weekly_rate% mis-counts when the
@@ -2287,6 +2360,9 @@ def _build_batch_week_ledger(
                 _fl = _fw_loss_to_transfer(b, _hb[0])
                 if _fl is not None:
                     mort_count += _fl
+            if _sp_now is not None:
+                # The split FW part's own freshwater mortality (daily sim).
+                mort_count += getattr(_sp_now, "mort_count_week", 0.0) or 0.0
             mort_bio = mort_count * owt / 1000.0
             # INPUT = EGGS STOCKED, and nothing else (operator, 2026-09-11). The
             # FW->SW move is inside the batch: it shows in Xfer_In/Xfer_Out and
@@ -2561,6 +2637,7 @@ def write_weekly_report(
     fw_openings=None,
     fw_transfer_basis=None,
     fw_projected=None,
+    split_fw=None,
 ) -> None:
     """Per-(week, batch) open/close production ledger (matches reference format).
 
@@ -2575,7 +2652,8 @@ def write_weekly_report(
         tranog_events=tranog_events, og_mort_states=og_mort_states,
         realized_biology=realized_biology, window_openings=window_openings,
         window_culls=window_culls, fw_openings=fw_openings,
-        fw_transfer_basis=fw_transfer_basis, fw_projected=fw_projected)
+        fw_transfer_basis=fw_transfer_basis, fw_projected=fw_projected,
+        split_fw=split_fw)
 
     # WEEK-MAJOR. _build_batch_week_ledger returns rows BATCH-major (all of
     # B41's weeks, then all of B42's), which is fine for reading one batch's
@@ -2635,6 +2713,7 @@ def write_monthly_report(
     fw_openings=None,
     fw_transfer_basis=None,
     fw_projected=None,
+    split_fw=None,
 ) -> None:
     """Per-(month, batch) open/close production ledger (matches reference format).
 
@@ -2662,7 +2741,8 @@ def write_monthly_report(
         # became 2026-09's opening.
         window_openings=window_openings,
         window_culls=window_culls, fw_openings=fw_openings,
-        fw_transfer_basis=fw_transfer_basis, fw_projected=fw_projected)
+        fw_transfer_basis=fw_transfer_basis, fw_projected=fw_projected,
+        split_fw=split_fw)
 
     # Roll the weekly ledger up to calendar months, splitting any week that
     # straddles a month boundary into its true month. CONTINUOUS flows (growth,
@@ -2954,6 +3034,10 @@ def write_input_conservation_audit(
     biology_states_by_batch=None,
     manual_fw_balance=None,
     unmodelled_fw=None,
+    split_remaining=None,
+    unplaced_split_fw=None,
+    overdue_effective=None,
+    split_entry_rows=None,
     sheet_name: str = "InputConservationAudit",
 ) -> None:
     """Input-fish conservation: every stocked batch must have a realized fate.
@@ -2971,6 +3055,21 @@ def write_input_conservation_audit(
     (a calibration gap) — not lost fish (the realized count is conserved
     downstream), but a real production divergence that was previously only buried
     in a FW-Calibration warning. The FW_Flag surfaces it as a clear row.
+
+    Split batches modelled automatically (forecast/split_batch.py):
+    `split_remaining` {batch: remaining target} judges their seawater entry
+    against the REMAINING target (tran_og_count less the fish already in
+    seawater at the PR close), not the whole-batch plan; `unplaced_split_fw`
+    {batch: fish} names an automatic transfer whose fish did not all reach
+    seawater -- a real loss from the plan, status FW PART DROPPED and counted
+    in the dropped headline. A split's FW mass balance starts from its first
+    freshwater week's OPENING count (see the balance below).
+    `overdue_effective` {batch: entry date} names an overdue wholly-FW batch
+    the automatic path moved in the first forecast week: it reads In_Horizon
+    Y, and its FW balance is its entry row (PR count in; handling mortality +
+    reconcile cull and the fish placed out). `split_entry_rows` {batch: row}
+    = the FW track's entry row of a PAST-DATE split (no freshwater week;
+    2024-11-30 B36), balanced the same way.
     """
     from datetime import timedelta
     _FW_DIVERGENCE_THRESH = 0.05   # flag |realized - planned| / planned beyond this
@@ -3032,10 +3131,34 @@ def write_input_conservation_audit(
     # NOT left to the tolerance — it is larger than the tolerance.
     _FW_BALANCE_THRESH = 0.02   # flag |residual| / first_FW_count beyond 2%
     fw_loss = {}   # batch_id -> (first_fw_count, mortality, cull) over FW/EGG weeks
+    # Batches the automatic split path modelled (forecast/split_batch.py). Both
+    # sets are empty on every run without one, so the balance below is the old
+    # one byte for byte.
+    _split_set = set(split_remaining or ())
+    _overdue_eff = dict(overdue_effective or {})
+    _split_entry = dict(split_entry_rows or {})
     for b_id, sl in (biology_states_by_batch or {}).items():
         ordered = sorted(sl, key=lambda s: s.week_label)
         fws = [s for s in ordered if s.stage in ("FW", "EGG")]
         if not fws:
+            if b_id in _overdue_eff and ordered:
+                # OVERDUE wholly-FW batch moved in the first forecast week: its
+                # crossing is on day 1, so it has NO freshwater week and its
+                # whole freshwater phase is that crossing -- the PR's count in,
+                # the handling mortality + reconcile cull (booked on the entry
+                # row) out. Balanced from the entry row's OPENING, not its mean.
+                _e0 = ordered[0]
+                _b0 = float(getattr(_e0, "open_count", 0.0) or 0.0) or _e0.count
+                fw_loss[b_id] = (_b0, 0.0, float(_e0.cull_count_week or 0.0))
+            elif b_id in _split_entry:
+                # PAST-DATE SPLIT (tran_og_date passed at the PR close): its FW
+                # part crosses on day 1 too, so it has no freshwater week, and
+                # its seawater rows are the MERGED stream (SW part + arrival).
+                # Balanced on the FW track's own entry row instead: the PR's FW
+                # count in, the handling loss (+ any reconcile cull) out.
+                _e0 = _split_entry[b_id]
+                _b0 = float(getattr(_e0, "open_count", 0.0) or 0.0) or _e0.count
+                fw_loss[b_id] = (_b0, 0.0, float(_e0.cull_count_week or 0.0))
             continue
         m = sum(getattr(s, "mort_count_week", 0.0) for s in fws)
         c = sum(getattr(s, "cull_count_week", 0.0) for s in fws)
@@ -3062,7 +3185,20 @@ def write_input_conservation_audit(
                         None)
         if crossing is not None:
             c += getattr(crossing, "cull_count_week", 0.0)
-        fw_loss[b_id] = (fws[0].count, m, c)
+        _base = fws[0].count
+        if b_id in _split_set and (getattr(fws[0], "open_count", 0.0) or 0.0) > 0:
+            # AUTO-MODELLED SPLIT: its freshwater track is short -- often ONE
+            # week -- so the reconcile cull of a mid-week tran_og_date falls in
+            # its FIRST freshwater week, and that week's MEAN count already
+            # has about half the cull taken out. Measured against the mean, a
+            # split that conserves exactly read as a breach (2025-06-30 B40:
+            # 91,782 placed + 40 mort + 5,310 cull = 97,132 = the PR's FW
+            # count, reported -2.8%; 2025-09-30 B42 -2.5%). Its first week
+            # opens on the PR's own count, so the balance starts there.
+            # Splits only: every other batch keeps the long-standing mean
+            # (the tolerance above absorbs its half-week lag).
+            _base = fws[0].open_count
+        fw_loss[b_id] = (_base, m, c)
     fw_bal_base = 0.0       # summed first-FW count of crossed-in-horizon batches
     fw_bal_residual = 0.0   # summed signed residual (first - tranog - mort - cull)
     fw_bal_abs = 0.0        # summed |residual|
@@ -3091,6 +3227,11 @@ def write_input_conservation_audit(
         beyond_plannable = og_entry is not None and og_entry > last_week_start
         in_h = (togd is not None and fs <= togd <= horizon_end
                 and not beyond_plannable)
+        if bid in _overdue_eff:
+            # An overdue batch the automatic path moved in the first forecast
+            # week is IN the horizon (it enters seawater there), although its
+            # scenario date -- shown in TranOG_Date -- is before the start.
+            in_h = True
         if is_placed or hv > 0:
             status = "PLACED"
         elif togd is None:
@@ -3120,6 +3261,15 @@ def write_input_conservation_audit(
             # string ideal_engine and the conservation gates count.
             status = "*** FW PART NOT MODELLED ***"
             at_risk = _unm
+        _unp = float((unplaced_split_fw or {}).get(bid, 0.0) or 0.0)
+        if _unp > 0 and status != "*** DROPPED ***":
+            # An automatic split/overdue transfer that did not place all its
+            # fish: those fish left the plan. Counted as dropped so the
+            # headline cannot read OK over them.
+            status = "*** FW PART DROPPED ***"
+            at_risk = _unp
+            dropped_batches += 1
+            dropped_fish += _unp
         # FW/TranOG reconciliation: realized seawater entry vs planned tran_og_count.
         planned_tog = bt.tran_og_count or 0
         realized_tog = tranog_placed.get(bid, 0.0)
@@ -3129,9 +3279,26 @@ def write_input_conservation_audit(
         # intentional, NOT an FW-survival calibration miss, so it must not be
         # mislabeled "FW UNDER/OVER plan" or counted in fw_divergent.
         _man_fw = (manual_fw_balance or {}).get(bid)
+        _split_rem = (split_remaining or {}).get(bid)
         fw_flag = ""
         if _man_fw is not None:
             fw_flag = "manual fw_to_og"
+        elif _split_rem is not None:
+            # Auto-modelled split: part of the batch was already in seawater at
+            # the PR close, so the whole-batch tran_og_count is the wrong yard-
+            # stick for this entry (B49: 242,257 against 290,000 read -16%).
+            if _split_rem <= 0:
+                fw_flag = "auto split: target met by the SW part (no cull)"
+            elif realized_tog > 0:
+                _div = (realized_tog - _split_rem) / _split_rem
+                if _div < -_FW_DIVERGENCE_THRESH:
+                    fw_flag = "auto split: UNDER remaining target"
+                    fw_divergent.append((bid, _div))
+                elif _div > _FW_DIVERGENCE_THRESH:
+                    fw_flag = "auto split: OVER remaining target"
+                    fw_divergent.append((bid, _div))
+                else:
+                    fw_flag = "auto split (remaining target)"
         elif realized_tog > 0 and planned_tog > 0:
             _div = (realized_tog - planned_tog) / planned_tog
             if _div < -_FW_DIVERGENCE_THRESH:
@@ -3185,6 +3352,12 @@ def write_input_conservation_audit(
                    f"TankContinuityAudit (a never-placed batch has no tank rows). ***"])
     else:
         ws.append(["OK — every in-horizon batch reached the realized facility (0 dropped fish)."])
+    _unp_all = {b: float(c) for b, c in (unplaced_split_fw or {}).items() if c and c > 0}
+    if _unp_all:
+        ws.append([f"*** FW PART DROPPED: {len(_unp_all)} batch(es) whose freshwater "
+                   f"part was modelled automatically but did not all reach "
+                   f"seawater: {sum(_unp_all.values()):,.0f} fish, "
+                   f"{', '.join(sorted_batches(_unp_all))} - see the ValidationLog. ***"])
     _unm_all = {b: float(c) for b, c in (unmodelled_fw or {}).items() if c and c > 0}
     if _unm_all:
         ws.append([f"*** {len(_unm_all)} batch(es) held freshwater fish at the PR "
@@ -4299,6 +4472,20 @@ def write_validation_log(
             cat = "WARNING - Split batch at PR close (FW part not modelled)"
         elif w.startswith("FW BATCH AT PR CLOSE NOT MODELLED"):
             cat = "WARNING - FW batch at PR close (not modelled)"
+        elif (w.startswith(("SPLIT BATCH ", "OVERDUE FW BATCH "))
+              and "FW PART NOT PLACED" in w):
+            # The automatic transfer ran but its fish did not all reach
+            # seawater: fish missing from the plan (forecast/split_batch.py).
+            cat = ("ERROR - Overdue FW batch NOT placed"
+                   if w.startswith("OVERDUE") else
+                   "ERROR - Split batch FW part NOT placed")
+        elif w.startswith("SPLIT BATCH "):
+            # A decision the tool took on its own (operator decision
+            # 2026-09-11): one line per automatic transfer, and how to
+            # override it. Must stay AFTER the "AT PR CLOSE" branch above.
+            cat = "WARNING - Split batch FW part auto-transferred"
+        elif w.startswith("OVERDUE FW BATCH "):
+            cat = "WARNING - Overdue FW batch auto-transferred"
         elif "INV-1" in w:
             cat = "WARNING - INV-1 (one-batch-per-tank)"
         elif "INV-5" in w:
@@ -4314,7 +4501,13 @@ def write_validation_log(
             "WARNING - Density",
             f"{wk}: {loc} (batch {bid}) at {d:.1f} kg/m³ > cap {cap:.1f}"))
     for w in placement_warnings or ():
-        if "INV-4" in w:
+        if "SPLIT BATCH " in w and "past the density target" in w:
+            # forecast/split_batch.plan_topup: an automatic split top-up that
+            # had no empty entry tank to spill into (or a spill smaller than
+            # min_tank_control) and stayed in the batch's own tank past the
+            # density target. Its own category, not the generic Phase-D bin.
+            cat = "WARNING - Split batch top-up past the density target"
+        elif "INV-4" in w:
             cat = "WARNING - INV-4 (1 kg rule)"
         elif "INV-5" in w:
             cat = "WARNING - INV-5 (min_tank_control)"
