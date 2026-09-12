@@ -366,7 +366,7 @@ def test_held_parts_their_warnings_and_the_audit_list_batches_by_number():
     excel_io.write_input_conservation_audit(
         wb, [], [], [], ctrl, unmodelled_fw={"B100": 1.0, "B10": 1.0, "B9": 1.0})
     head = [str(r[0]) for r in wb["InputConservationAudit"].iter_rows(values_only=True)
-            if r and r[0] and "nothing models" in str(r[0])]
+            if r and r[0] and "nothing in this run moves" in str(r[0])]
     assert head and "B9, B10, B100" in head[0], head
 
 

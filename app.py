@@ -899,10 +899,10 @@ def _frames_to_biology(growth_df, mort_df, feed_df, cull_df, models):
 # operator who has never seen the codebase: (1) what it is in plain language,
 # (2) what raising/lowering (or toggling) it does to the plan, (3) the unit and
 # the current validated setting where one exists. Knobs whose values were
-# CHOSEN BY MEASUREMENT carry a closing caution to tune via Analyze, not by
-# hand.
+# CHOSEN BY MEASUREMENT carry a closing caution to tune via Decide → 2 · Search,
+# not by hand.
 _VALIDATED = (" Validated setting — chosen by measurement; prefer tuning it "
-              "via Analyze rather than editing by hand.")
+              "with Decide → 2 · Search rather than editing by hand.")
 _CONTROL_HELP = {
     "forecast_start":
         "The forecast's week 1. Computed automatically from the uploaded "
@@ -998,7 +998,7 @@ _CONTROL_HELP = {
         "amber/red on the checklist instead. 0 switches the budget off. Every "
         "planning method reads it. Unit: moves/week.",
     "default_hog_yield":
-        "Converts live (gross) weight to sold weight — HOG means head-off, "
+        "Converts live (gross) weight to sold weight. HOG means head-on, "
         "gutted. Sold kg = live kg × this. Used wherever harvest tonnage or "
         "revenue is reported. Unit: ratio. Per-week overrides live on the "
         "Limits tab.",
@@ -1118,27 +1118,25 @@ _CONTROL_HELP = {
         "UNCONDITIONALLY, because leaving it off produced empty harvest weeks "
         "and that breaks the steady-harvest contract. Flipping this box "
         "changes only a line in the run summary. Kept so older configs still "
-        "load. Nothing to tune: no Analyze/Optimize search touches it, and no "
+        "load. Nothing to tune: no Decide knob search touches it, and no "
         "setting of it changes a plan.",
     "harvest_prep_density_limit":
         "HARVEST-PREP DENSITY LIMIT (kg/m3). Operator rule, 2026-09-08: a tank "
-        "being prepared for harvest is not exempt from density — it has a "
-        "RAISED cap of 150. Fish off feed before shipping are meant to be "
-        "dense, but not unboundedly so. **0 = detect only** (the shipped "
-        "default): harvest-prep consolidation still merges a batch into its "
-        "fullest tank at any density, and every merge over 150 is reported in "
-        "the ValidationLog as HARVEST-PREP OVER LIMIT. On the 2026-08-31 plan "
-        "that is 29 merges, worst 254 kg/m3 — invisible before this, because a "
-        "consolidated tank is normally harvested inside the same week and the "
-        "end-of-week snapshot never sees the peak. Set 150 to ENFORCE it: the "
-        "pass then bin-packs the group into as few of its own tanks as fit. "
-        "That works (29 over-limit merges → 0) but MEASURED COST on the same "
-        "plan is 2 weeks over the hard 15-move handling budget and 3 over the "
-        "55,000 harvest ceiling, one of them 2027-W05 at 64,136 (+16.6%). "
-        "The operator ruled on 2026-09-08 that 150 cannot be exceeded even in "
-        "harvest prep, so 150 is now the DEFAULT. Those breach weeks are real "
-        "and still need solving — they are simply no longer hidden behind an "
-        "impossible merge. Set 0 only to reproduce a plan made before this.",
+        "being prepared for harvest is not exempt from density. It has a "
+        "RAISED cap of 150, and 150 cannot be exceeded even in harvest prep. "
+        "Any value above 0 (150 by default) is ENFORCED: the harvest-prep "
+        "consolidation pass packs a batch into as few of its own tanks as fit "
+        "under this limit, instead of merging them all into one tank. "
+        "MEASURED on the 2026-08-31 plan: over-limit merges fall from 29 to 0. "
+        "The cost is 2 weeks over the hard 15-move handling budget and 3 "
+        "weeks over the harvest ceiling (worst 2027-W05, 64,136 fish, "
+        "+16.6%). Those breach weeks are real and still need solving; they "
+        "are no longer hidden behind a merge that cannot be done. 0 = detect "
+        "only (the behaviour before 2026-09-08): the pass merges into the "
+        "fullest tank at any density, and the ValidationLog reports every "
+        "merge over 150 as HARVEST-PREP OVER LIMIT (29 merges on that plan, "
+        "worst 254 kg/m3). Set 0 only to reproduce an older plan. Unit: "
+        "kg/m3.",
     "sixn_level_drains":
         "Levels the flow through depuration: caps how full one 6N pair may "
         "get (at the weekly harvest limit) so weekly fills don't pile into a "
@@ -1146,9 +1144,9 @@ _CONTROL_HELP = {
         "harvests (measured: biggest weekly drain 110k -> 68k fish, more "
         "weeks meeting the floor). Only affects depuration mode — but note "
         "that turning it OFF also disables the harvest guide's 6N staging "
-        "lever, whatever that checkbox says. Validated by measurement — and "
-        "held OUT of every Analyze/Optimize search as a safety guard, so this "
-        "one you do set by hand.",
+        "lever, whatever that checkbox says. Validated by measurement, and "
+        "held OUT of every Decide knob search as a safety guard, so this "
+        "one you set by hand.",
     "density_target_pct":
         "How full to pack each tank when placing fish, as a fraction of that "
         "tank's density cap. 0.90 = fill to 90%, leaving 10% headroom for "
@@ -1157,8 +1155,9 @@ _CONTROL_HELP = {
         "fraction."
         + _VALIDATED,
     "density_welfare_threshold_kg_m3":
-        "The fish-welfare crowding line, BELOW each tank's hard density cap "
-        "(Configure → Facility): "
+        "The fish-welfare crowding line: one value for every tank, not a "
+        "fraction of each tank's hard density cap (Configure → Facility), so "
+        "it can equal a tank's cap: "
         "fish reared above it count as 'crowded' in the quality reports (Run "
         "KPI, Compare 'Best welfare', Optimize 'Product quality'). "
         "Reporting/scoring only — it never changes the plan. Unit: kg/m3.",
@@ -1200,7 +1199,8 @@ _CONTROL_HELP = {
         "forever (measured: 53,006 fish held 58 weeks off feed; 4 of 8 test "
         "months trap fish this way). Set to N and a tank that has purged "
         "longer than N weeks drains anyway, using the exceptional relief "
-        "band. 0 = off, the shipped behaviour. Unit: weeks.",
+        "band. 0 = off (the code's fallback, used only when the config sets "
+        "no value). Unit: weeks.",
     "sixn_drain_largest_first":
         "6N drain order. On = a purge pair empties its BIGGEST tank first. Off "
         "= tank-number order, which can spend the week's processing limit on a "
@@ -1242,7 +1242,8 @@ _CONTROL_HELP = {
         "why it was switched back off. So: if per-system utilisation is your "
         "binding problem, try 8 (15 measured identical — the leftover handling "
         "budget binds first), then check the worst harvest week and the relief "
-        "ceiling on YOUR PR in Analyze before keeping it. Never adopt it on "
+        "ceiling on YOUR PR in Decide → 2 · Search before keeping it. Never "
+        "adopt it on "
         "the system-balance numbers alone.",
     "harvest_setpoint_lookahead_weeks":
         "DOES NOTHING (inactive). Superseded by the newer harvest logic — no "
@@ -1287,7 +1288,10 @@ _CONTROL_HELP = {
         "needed to hit target (a planning assumption, not a guarantee the "
         "fish grow that fast); each batch's tuned value is clamped to the "
         "min/max below and flagged if it hits a clamp. Off = use each batch's "
-        "hand-set FW correction.",
+        "hand-set FW correction. Not applied to the freshwater part of a "
+        "split batch (Control → split_batch_fw = auto). That part grows at "
+        "the batch's own FW correction and is not written to the calibration "
+        "history.",
     "auto_calibrate_fw_min":
         "Lower clamp on the auto-tuned freshwater growth multiplier. A batch "
         "that would need LESS growth than this allows is capped here and "
@@ -1316,12 +1320,13 @@ _CONTROL_HELP = {
         "so on that arm no guide is built at all. The byte-identical "
         "measurement across 21 PRs (2026-08-21) predates those pins "
         "(2026-08-27) and no longer describes this. The purge lever is "
-        "refused outright whenever 'Level 6N purge drains' is off (it is, "
-        "here) — so as configured today this is the PRODUCTION-LEVER-ALONE "
-        "arm, and that is the measurement row that applies. On the real "
-        "workbook weeks under the harvest floor "
-        "fall 20 → 16 with both, 20 → 14 with the production lever alone, "
-        "with no empty harvest weeks. Measured on 6 real PRs on 2026-08-03 "
+        "refused outright whenever 'Level 6N purge drains' is off. The guide "
+        "then steers through the production lever alone, and the "
+        "production-lever row of the measurement below is the one that "
+        "applies. Check 'Level 6N purge drains' (6N depuration group) for "
+        "this install's setting. On the real workbook, weeks under the "
+        "harvest floor fall 20 → 16 with both levers and 20 → 14 with the "
+        "production lever alone, with no empty harvest weeks. Measured on 6 real PRs on 2026-08-03 "
         "WITH THE LEVERS ON, before four 2026-08-20/21 changes and not "
         "reproduced since: totally empty harvest weeks 6 → 0; the cost is a "
         "higher biomass peak (the held-back fish are still "
@@ -1387,8 +1392,12 @@ _CONTROL_HELP = {
         "loses fish in freshwater until then, is culled to the REMAINING "
         "target — tran_og_count minus the fish already in seawater; no cull "
         "when the seawater part already meets it — and tops up the batch's "
-        "OWN entry tanks (the bigger half into the heavier tank; anything past "
-        "the density target spills into empty entry tanks). Every automatic "
+        "OWN entry tanks (the bigger half into the heavier tank). Fish past "
+        "the density target spill into empty entry tanks. If no empty entry "
+        "tank is left, or the remainder is fewer than the force-empty floor, "
+        "those fish stay in the batch's own tank past the target. The "
+        "ValidationLog says so, and the density audit judges that tank "
+        "against its cap. Every automatic "
         "transfer writes one ValidationLog line saying so. A scripted fw_to_og "
         "in Manual starting events always wins — that batch is not moved "
         "automatically. Inside a Manual starting events window nothing moves "
@@ -1559,11 +1568,11 @@ _FACILITY_HELP = {
     "volume_m3": "Tank water volume. Sets the tank's biomass cap together with "
         "the density cap: cap (kg) = volume × max density. Unit: m³.",
     "max_density_kg_m3": "The most fish weight allowed per m³ of this tank — the "
-        "hard crowding cap. Tank biomass cap (kg) = volume × this. Unit: kg/m³. "
-        "Grow-out tanks are 95.",
+        "hard crowding cap. Tank biomass cap (kg) = volume × this. Each tank "
+        "has its own value, shown in this column. Unit: kg/m³.",
     "max_feed_kg_day": "The most feed this tank can deliver in one day. For "
         "grow-out fish, feed is usually the binding limit before space is. "
-        "Unit: kg/day. Grow-out tanks are 1,000.",
+        "Each tank has its own value, shown in this column. Unit: kg/day.",
     "type": "What the tank is for: FW = freshwater stages (eggs to smolt), "
         "OG = seawater grow-out (including the 6N depuration tanks).",
 }
@@ -1572,14 +1581,20 @@ _BATCH_HELP = {
     "input_date": "The day the batch's eggs are stocked — its egg stage "
         "starts. Format: YYYY-MM-DD.",
     "input_count": "How many eggs are stocked on the input date — the count "
-        "the egg stage starts from. Configure → Costs charges the egg price "
-        "on this number. Unit: eggs.",
+        "the egg stage starts from. Configure → Targets & prices → Costs "
+        "charges the egg price on this number. Unit: eggs.",
     "tran_sf_date": "The day the batch moves from first-feeding to the "
         "smolt stage within freshwater. Format: YYYY-MM-DD.",
     "tran_og_date": "The day the batch enters seawater (the TranOG transfer). "
-        "From here on the forecast tracks it tank by tank. Format: YYYY-MM-DD.",
-    "tran_og_count": "Planned number of fish entering seawater — fish above "
-        "this count at transfer are culled to hit it. Unit: fish.",
+        "From here on the forecast tracks it tank by tank. If this date has "
+        "already passed at the PR close, the batch's freshwater fish move in "
+        "the first forecast week (Control → split_batch_fw = auto). Format: "
+        "YYYY-MM-DD.",
+    "tran_og_count": "Planned number of fish entering seawater, for the WHOLE "
+        "batch. Fish above this count at transfer are culled to hit it. For a "
+        "batch split between FW and SW at the PR close, the freshwater part "
+        "is culled to this count minus the fish already in seawater. There is "
+        "no cull when the seawater part already meets it. Unit: fish.",
     "tran_og_avg_wt_g": "Planned average fish weight at seawater entry (the "
         "pre-cull target the freshwater phase aims for). Unit: grams.",
     "tran_og_cv": "How spread-out the fish sizes are at entry (coefficient of "
@@ -1590,8 +1605,10 @@ _BATCH_HELP = {
         "live on the Biology tab.",
     "fw_correction": "Freshwater growth multiplier for this batch: 1.0 = grow "
         "exactly by the freshwater growth table, 1.1 = 10% faster, 0.9 = 10% "
-        "slower. Ignored (auto-tuned) when 'Auto-calibrate FW' is on in "
-        "Control.",
+        "slower. When 'Auto-calibrate FW' is on in Control, the auto-tuned "
+        "value replaces this one. The exception is the freshwater part of a "
+        "batch split between FW and SW at the PR close: it always grows at "
+        "this value.",
     "sgr_correction": "Seawater growth multiplier for this batch: 1.0 = grow "
         "exactly by the seawater growth table; above/below = faster/slower. "
         "Calibrate against how the cohort is actually performing.",
@@ -1676,9 +1693,8 @@ _CONTROL_GROUPS = [
       "chronic_pressure_frac", "chronic_pressure_weeks", "chronic_relief_pct",
       "chronic_max_frees_per_week"]),
     ("🧊 6N depuration",
-     "The purge pipeline: how fills are sized and how tanks drain. Two of "
-     "these were measured and rejected as defaults in August 2026 — see the "
-     "tooltips.",
+     "The purge pipeline: how fills are sized and how tanks drain. Each "
+     "tooltip gives what that knob was measured to do.",
      ["sixn_level_drains", "sixn_drain_largest_first",
       "sixn_overdue_drain_weeks"]),
     ("⚙️ Engine internals",
@@ -3517,7 +3533,8 @@ def _mw_raw_grid(state):
         "mode `stage` (purge, harvested later) — set mode `harvest` to drain "
         "it in the scripted week · "
         "**og_to_6n**: from_tank → 6N to_tanks · "
-        "**fw_to_og**: batch + count=target → to_tanks. "
+        "**fw_to_og**: batch + count=target → to_tanks (one per batch; it "
+        "moves the whole freshwater part). "
         "to_tanks: comma-separated; `tank:count` for an explicit per-tank "
         "amount; `tank@big` / `tank@small` to route an fw_to_og size split "
         "(combinable: `45:1000@small`).")
@@ -3532,7 +3549,13 @@ def _mw_raw_grid(state):
             "type": st.column_config.SelectboxColumn("Type",
                 options=["og_transfer", "harvest", "graded_harvest",
                          "og_to_6n", "fw_to_og"]),
-            "batch": st.column_config.TextColumn("Batch", help="FW batch (fw_to_og)"),
+            "batch": st.column_config.TextColumn("Batch", help=(
+                "fw_to_og only: the freshwater batch to bring into seawater. "
+                "One fw_to_og per batch. It moves the batch's WHOLE freshwater "
+                "part, and Count is the target that part is culled down to. A "
+                "second fw_to_og row for the same batch is refused (MANUAL "
+                "EVENT REFUSED in the ValidationLog); edit the first row "
+                "instead.")),
             "from_tank": st.column_config.NumberColumn("From tank", step=1),
             "to_tanks": st.column_config.TextColumn("To tanks",
                 help="comma-separated tank IDs; tank:count for an explicit amount"),
@@ -3626,7 +3649,8 @@ def _mw_copilot(uploaded, events, forecast_start=None, bad=None):
     are scripted. Engine is forecast.copilot (UI-free); this is just the shell.
 
     `bad` is the save bar's infeasibility map. Both buttons here write
-    scenario/manual_events.yaml — the same file ▶ Run forecast reads — so they
+    this PR's scenario/manual_events/<PR closing>.yaml — the same file ▶ Run
+    forecast reads — so they
     honour the same reject-at-entry gate the Save button does."""
     import tempfile
     from forecast.copilot import propose_upcoming, to_manual_events
@@ -3796,7 +3820,8 @@ def _mw_copilot(uploaded, events, forecast_start=None, bad=None):
                 # The ops are in the working set, so Save window can retry.
                 st.session_state.pop("mw_cp_props", None)
                 st.error(f"Added {len(chosen)} operation(s) to the window, but "
-                         f"couldn't write scenario/manual_events.yaml: {e}. "
+                         f"couldn't write scenario/manual_events/"
+                         f"{_pr_closing()}.yaml: {e}. "
                          f"They are NOT on disk yet — use 💾 Save window to retry.")
                 return
             st.session_state.pop("mw_cp_props", None)
@@ -3813,7 +3838,8 @@ def _mw_copilot(uploaded, events, forecast_start=None, bad=None):
 def _manual_window_editor(uploaded):
     """Run-mode editor: SEE the projected facility week by week, click a tank to
     act on it in context (harvest / move / 6N / FW→OG), validated against the
-    uploaded PR, saved to scenario/manual_events.yaml (which the run reads). The
+    uploaded PR, saved to scenario/manual_events/<PR closing>.yaml (which the
+    run reads). The
     flat grid lives on behind an Advanced expander. No Excel sheets involved."""
     from forecast.time_grid import week_start as _week_start
     # The section-toggle widgets (rollup / FW intake / advanced) render BELOW the
@@ -4018,10 +4044,12 @@ def _manual_window_editor(uploaded):
                             "✓ Every grow-out tank and system, and the "
                             "whole-facility biomass total, are within limits "
                             "across this window. Tanks whose fish are off "
-                            "feed for harvest carry NO density cap (rule R8) "
-                            "— 6N while it purges, and ANY tank starving in "
-                            "place — so they are not flagged here (dense, "
-                            "off-feed fish awaiting harvest is normal). 6N's "
+                            "feed for harvest (rule R8: 6N while it purges, "
+                            "and any tank starving in place) are not "
+                            "checked here (dense, off-feed fish awaiting "
+                            "harvest is normal). After a run, the "
+                            "ValidationLog's WARNING - Density lines judge "
+                            "them against 150 kg/m³. 6N's "
                             "system biomass cap is still "
                             "checked on the SystemLimitsAudit sheet after a "
                             "run.")
@@ -5093,7 +5121,7 @@ def _edit_targets_prices():
     basis = c1.radio("Target basis", ["hog", "gross"], horizontal=True,
                      index=0 if t["basis"] == "hog" else 1, key="tgt_basis",
                      help="Which weight your targets are written in: hog = "
-                          "head-off gutted (sold) kg; gross = live kg out of "
+                          "head-on gutted (sold) kg; gross = live kg out of "
                           "the water. Pick the one your sales plan uses.")
     tol = c2.number_input("Tolerance (%)", min_value=0.0, max_value=50.0,
                           value=float(t["tolerance_pct"]), step=1.0,
@@ -5221,7 +5249,8 @@ def _edit_targets_prices():
     st.divider()
     _target_solver_panel()
     st.markdown("**Price per fish size** — turns harvest into revenue on the "
-                "Analyze board. Each harvest event is priced by its average "
+                "Decide board and in the Run page's Costs & profit tab. Each "
+                "harvest event is priced by its average "
                 "fish weight; harvest falling in **no band is reported as "
                 "unpriced** (a loud gap, never an invented price).")
     _ok, e = _read_or_explain(lambda: _ana.load_economics(CONFIG_DIR),
@@ -5237,7 +5266,7 @@ def _edit_targets_prices():
     ebasis = c4.radio("Price basis", ["hog", "gross"], horizontal=True,
                       index=0 if e["basis"] == "hog" else 1, key="eco_basis",
                       help="Which weight the price bands and revenue are "
-                           "written in: hog = head-off gutted (sold) kg; "
+                           "written in: hog = head-on gutted (sold) kg; "
                            "gross = live kg. Match your sales price list.")
     mcv = c5.number_input(
         "Sales model CV (%)", min_value=0.0, max_value=60.0,
@@ -5970,11 +5999,12 @@ def _ideal_far_warning(flags, what, runs):
     """One warning for a step's far limits (_ideal_limit_flags), or none."""
     if flags:
         st.warning(
-            f"**Some {what} limits are far from Control** — "
+            f"**Some {what} limits are far from where they start** — "
             + "; ".join(flags) + f". Each is 0, or under {_IDEAL_FAR_LOW:.0%} "
-            f"or over {_IDEAL_FAR_HIGH:.0%} of the value in brackets (where "
-            f"its box or cell starts). {runs} with them exactly as shown — "
-            f"press **↺ Reset to Control** to put every {what} limit back.")
+            f"or over {_IDEAL_FAR_HIGH:.0%} of the value in brackets, which "
+            f"is where its box or cell starts: Control, step 1's cap slider "
+            f"or your files. {runs} with them exactly as shown — press "
+            f"**↺ Reset to Control** to put every {what} limit back.")
 
 
 def _ideal():
@@ -6433,6 +6463,11 @@ def _ideal_reference(ctx, today, cap_t):
                                   int(ctrl.max_transfers_per_week),
                                   r_dens, r_sys, r_ctl)),
         "step-2", "The optimizer and the reference sheet run")
+    # Help text only: Control's own budget, or the box's 1 when Control is 0.
+    _ref_mb_txt = (f"Control ({ref_moves})"
+                   if int(ctrl.max_transfers_per_week) >= 1 else
+                   "1, where its box starts: Control's budget is 0 = off, "
+                   "and a box left at 1 keeps it off")
     st.button("↺ Reset to Control", key="ideal_ref_reset",
               on_click=_ideal_reset_limits,
               args=(dict(seeds2, ideal_ref_cap=int(cap_t)), "ideal_ref_lim",
@@ -6442,7 +6477,7 @@ def _ideal_reference(ctx, today, cap_t):
                    f"harvest / wk, Min harvest / wk, Min harvest weight and "
                    f"Max feed / day to your Control values; every cell of "
                    f"the Tank & system limits table to your files; and the "
-                   f"weekly move budget to Control ({ref_moves}). It "
+                   f"weekly move budget to {_ref_mb_txt}. It "
                    f"overwrites what you typed in those boxes and cells (and "
                    f"a cap an optimizer Use button set, or a Min harvest "
                    f"weight a step-1 scan copied in). The rhythm, the "
@@ -8438,6 +8473,11 @@ def _ideal_transition(ctx, today, cap_slider_t=None):
                                   tr_dens, tr_sys, tr_ctl)),
         "what-if", "The proposal and the transition optimizer run (today's "
                    "plan keeps your current limits)")
+    # Help text only: Control's own budget, or the box's 1 when Control is 0.
+    _tr_mb_txt = (f"Control ({tr_moves})"
+                  if int(ctrl0.max_transfers_per_week) >= 1 else
+                  "1, where its box starts: Control's budget is 0 = off, "
+                  "and a box left at 1 keeps it off")
     st.button("↺ Reset to Control", key="ideal_tr_reset",
               on_click=_ideal_reset_limits,
               args=(dict(seeds), "ideal_tr_lim", tr_moves),
@@ -8445,8 +8485,8 @@ def _ideal_transition(ctx, today, cap_slider_t=None):
                    f"Control values: Biomass cap, Max harvest / wk, Min "
                    f"harvest / wk, Min harvest weight and Max feed / day; "
                    f"every cell of the proposal's Tank & system limits table "
-                   f"to your files; and the weekly move budget to Control "
-                   f"({tr_moves}). It overwrites what you typed in those "
+                   f"to your files; and the weekly move budget to "
+                   f"{_tr_mb_txt}. It overwrites what you typed in those "
                    f"boxes and cells (and a cap a Use button set — the "
                    f"transition optimizer's or step 2's optimizer's). The "
                    f"cutoff date, the batch sizes, the "
@@ -8830,7 +8870,15 @@ profit* tab, the Ideal optimizers' Cost / Profit columns and step 2's
 **What it may never do.** The PR is *state only* — it carries no instructions.
 Nothing else is read from the workbook, and the source file is never written
 back. A batch in the PR can never be silently ignored: every in-horizon batch
-must reach the facility or the run fails its input-conservation gate.
+must reach the facility or the run fails its input-conservation gate. The one
+exception is a batch's freshwater part that nothing moves: **Split FW/SW batch
+at PR close** (Configure → Control) set to `off`, or a scripted `fw_to_og` for
+the batch that placed no fish (every destination refused). The ValidationLog
+warns and InputConservationAudit marks it FW PART NOT MODELLED, but the gate
+still passes. Under `off`, a wholly-freshwater batch whose transfer date is
+before the PR close is also never placed and not flagged (the audit reads it
+'pre-start'). Under `auto`, the default, both are moved automatically unless a
+scripted `fw_to_og` takes over (layer 4).
 
 **What binds it.** Hydration validation (unknown tanks/batches are refused
 loudly), the derived-start contract, and the input-conservation audit
@@ -8888,6 +8936,9 @@ because you may intend a dark week.""")
 transfer date, on the freshwater growth/mortality/cull tables, calibrated
 per batch (auto-calibrated to land each batch on its planned entry weight
 when 'Auto-calibrate FW' is on — a planning assumption, not a guarantee).
+The one exception is a split batch's freshwater part: it always grows on the
+batch's configured fw_correction, because the entry-weight target is for the
+whole batch and this part is only the remainder.
 
 **What it may never do.** Freshwater fish are **never harvested** and never
 placed by the planner — their trajectory is a given. But they are never
@@ -8910,6 +8961,19 @@ tank by moving its fish forward (or into 6N to purge), never by dropping the
 arrival. Room-making is *anticipatory*: empty tanks near an arrival (≤3 weeks
 out) are **reserved** so a rebalancing pass can't consume them first, with a
 6-week lookahead budgeting the rest.
+
+**Split and overdue batches** (Split FW/SW batch at PR close = `auto`, the
+default). A batch the ProductionReport holds partly in freshwater brings its
+freshwater part into seawater at its tran_og_date, or in the first forecast
+week once that date has passed. That part is culled to what is left of the
+target (tran_og_count minus the fish already in seawater; no cull if the
+seawater part already meets it). It tops up the batch's own entry tanks, the
+bigger class into the heavier tank, instead of being spread across
+{k['n_entry_tanks']} tanks; only fish past the density target spill into
+empty entry tanks. A wholly-freshwater batch whose transfer date had already
+passed at the PR close moves in the first forecast week. Each automatic move
+writes one ValidationLog line, and a scripted fw_to_og replaces it. Details:
+USER_GUIDE §5, 'A split batch at the PR close is planned automatically'.
 
 **What it may never do.** Arrivals may not enter grow-out or 6N directly; an
 arrival may never be silently dropped (a whole class of lost-fish bugs was
@@ -8938,7 +9002,7 @@ quality passes that level crowding, feed and biomass across systems
 | **R5** | **No harvest and no 6N staging from entry-tier tanks** — fish route forward first. |
 | **R6** | Fish ≥ 1 kg *may stay* in an entry tank (stuck-in-place is legal and measured-necessary — never force-evicted). |
 | **R7** | **6N is one-way**: fish moved into depuration leave only by harvest, never by transfer. |
-| **R8** | **Fish preparing for harvest carry no density cap** — judged on stage (`STARVE`), so it covers both 6N depuration and, after the 6N production switch, in-place starvation in an ordinary grow-out tank. They are off feed, not growing, and gone within the hold, so the feed-loading reason for the cap does not apply. It is also what makes harvest-prep consolidation legal: the whole group fits in one tank and the rest go back to the rotation. |
+| **R8** | **Fish preparing for harvest are not held to the grow-out cap** — judged on stage (`STARVE`), so it covers both 6N depuration and, after the 6N production switch, in-place starvation in an ordinary grow-out tank. They are off feed, not growing, and gone within the hold, so the feed-loading reason for the grow-out cap does not apply. They are judged against a raised 150 kg/m³ harvest-prep limit instead (operator, 2026-09-08): the run's audit lists any tank-week over it as ValidationLog *WARNING - Density*, and the harvest-prep merge packs a batch's tanks into as few as fit under the Control harvest-prep density limit (150 by default), the rest going back to the rotation. Only 6N fill sizing still treats a purge tank as uncapped. |
 
 **Moving fish costs fish.** Every tank-to-tank deposit is charged
 `handling_mortality_pct` (2026-08-21) — rebalances, consolidation, relief
@@ -9029,10 +9093,13 @@ a **3-pair fallow rotation** (pairs 61/67, 63/69, 65/71, fixed order
 harvested and the resting pair refills from the oldest mature fish.
 
 **The 6N-specific rules:**
-* **One batch, one tank** — a purge tank has **no density cap at all**
-  (operator rule, 2026-08-21): the fish are off feed, not growing, and gone
-  within the hold, so what bounds the tank is the *harvest schedule*, not
-  kg/m³. A whole batch therefore fills ONE tank however dense it gets.
+* **One batch, one tank** — a purge tank's fill is **sized with no density
+  cap** (operator rule, 2026-08-21): the fish are off feed, not growing, and
+  gone within the hold, so what bounds the fill is the *harvest schedule*, not
+  kg/m³. A whole batch therefore fills ONE tank however dense it gets. The
+  run's audit still judges the tank against the raised 150 kg/m³ harvest-prep
+  limit (operator, 2026-09-08) and lists any tank-week over it as ValidationLog
+  *WARNING - Density*.
   The sister (67/69/71) is **not overflow capacity** — it exists so a
   *second, different* batch needing harvest the same week is not mixed into
   an occupied tank, because mixing destroys per-batch count fidelity at
@@ -9043,8 +9110,9 @@ harvested and the resting pair refills from the oldest mature fish.
   fixed and audited). Fish hydrated from the PR already mid-purge are the one
   exemption — their residency clock predates the forecast.
 * **R7 one-way** — once in depuration, fish leave only by harvest.
-* **R8 no density cap on harvest-prep** — a purging tank is bounded by the
-  harvest schedule, not by kg/m³.
+* **R8 harvest-prep density** — a purging tank's fill is bounded by the
+  harvest schedule, not by kg/m³; the audit still flags a tank-week over
+  150 kg/m³.
 * Make-room routes through 6N too: a tank freed for an arrival sends its
   fish to purge, staging them for harvest — never harvested in place.
 
@@ -9140,7 +9208,10 @@ Independent invariants, each catching a *different* failure (the hard lesson:
 
 1. **In-facility continuity (0 drift)** — every tank-week balances exactly.
 2. **Input conservation, both ends** — every batch reaches the facility (0
-   dropped) and none harvests more than it stocked (0 over-produced).
+   dropped) — a freshwater part that nothing moves (split_batch_fw: off, or
+   the batch's scripted fw_to_og was refused) is flagged FW PART NOT MODELLED
+   but not counted as dropped — and none
+   harvests more than it stocked (0 over-produced).
 3. **Facility-level distributed loss** — catches many small same-sign leaks
    that per-row tolerances would each forgive.
 4. **FW → seawater reconciliation** — realized entry vs plan per batch (a
@@ -9345,11 +9416,14 @@ after the run ends.""")
   whole-fish rounding. **No fish are lost.** But `WeeklyReport` still reports
   mortality on those weeks — about **1,000 fish over an 85-week horizon**, up
   to 28 on a single batch-week — that the population never lost, so the two
-  sheets disagree in their Mortality column alone (Harvest and Close match
-  exactly; Open, Cull and Input match on every week except a batch's
-  freshwater-to-seawater week, where `WeeklyReport` opens on the freshwater
-  fish and shows the move in Xfer_In/Xfer_Out, while the seawater-only
-  `ReconciliationReport` opens without them and lists them as `TranOG_In`).
+  sheets' Mortality columns disagree on those weeks. Harvest matches exactly.
+  Open and Close match too, except where a batch has fish in freshwater:
+  `WeeklyReport` counts them (a split batch's freshwater part from the first
+  forecast week until it moves; on the freshwater-to-seawater week, the fish
+  that cross, shown in Xfer_In/Xfer_Out), while the seawater-only
+  `ReconciliationReport` leaves them out until they arrive and books the
+  arrival as `TranOG_In`. `ReconciliationReport` has no Input column (input is
+  eggs only), and its Cull_Count is shown for information only.
   A second, smaller effect sits on ordinary grow-out
   weeks: 77 of them differ by ~4 fish (314 in total, 0.007% of a batch), which
   is whole-fish rounding applied per tank per day and summed. Measured
@@ -9640,7 +9714,9 @@ def _acc_calibration_section():
     st.subheader("🧪 Freshwater calibration history")
     st.caption(
         "Every run with FW auto-calibration on back-solves each freshwater "
-        "batch's `fw_correction` so the model lands exactly on that batch's "
+        "batch's `fw_correction` (not a split batch's freshwater part, which "
+        "keeps its configured value) so the model lands exactly on that "
+        "batch's "
         "`tran_og_avg_wt_g` at its transfer date.\n\n"
         "**Read this as a gap against the TRANSFER TARGET, not against "
         "reality.** For a batch already transferred that target is an "
@@ -10825,7 +10901,8 @@ def _run_costs_tab(r, config_dir):
     m = st.columns(4)
     m[0].metric("Revenue", _run_money(t.get("revenue"), cur),
                 help="Sales over the horizon: every harvest priced on the "
-                     "economics.yaml price bands (the Analyze pricing). Each "
+                     "economics.yaml price bands (Configure → Targets & "
+                     "prices; the same pricing Decide uses). Each "
                      "week's harvest counts, whole, in the month its Monday "
                      "falls in. — when economics.yaml sets no price bands.")
     m[1].metric("Total cost", _run_money(t.get("total"), cur),
@@ -12367,7 +12444,8 @@ def _compare_and_choose():
             "judged on STAGE (`STARVE`, rule R8), so it covers 6N "
             "depuration AND in-place starvation in an ordinary grow-out "
             "tank. Compare it to that tank's own cap in Configure → "
-            "Facility (grow-out tanks ship at 95). Lower = more headroom.\n"
+            "Facility (set per tank there, e.g. 85 or 120 in the current "
+            "facility config). Lower = more headroom.\n"
             "- **between-sys CV** — how *evenly* biomass is spread **system-to-"
             "system**. 0 = perfectly balanced; higher = some systems packed while "
             "others sit light.\n"
@@ -13427,9 +13505,13 @@ def _analyze(skip_lever_check=False):
 
         a1, a2 = st.columns(2)
         if a1.button("✅ Adopt this plan", type="primary", key="ana_adopt",
-                     help="Saves the winning knobs (if any) to config, makes "
-                          "this the method ▶ Run forecast uses, and loads the "
-                          "run into the tabs."):
+                     help="Writes the winning knobs (if any) into "
+                          "config/control.yaml, overwriting those values "
+                          "there. Makes this plan's method the one ▶ Run "
+                          "forecast uses for THIS SESSION only: after the app "
+                          "restarts, your promoted default applies again (use "
+                          "⭐ Promote to keep it). Loads the run into the Run "
+                          "forecast tabs."):
             _refusal = _adoption_refusal(winner, _card_ok)
             if _refusal:
                 st.error(_refusal)
@@ -13802,19 +13884,26 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
         k1, k2, k3, k4, k5 = st.columns(5)
         k1.metric("Violations", r["violations"],
                   help="Tank-weeks where realized density exceeds that tank's "
-                       "own cap (per-tank, from facility config). Fish "
-                       "PREPARING FOR HARVEST are excluded — judged on stage "
-                       "(STARVE, rule R8), so it covers both 6N depuration and "
-                       "in-place starvation in an ordinary grow-out tank after "
-                       "the 6N production switch. Those tanks have no density "
-                       "cap at all: the fish are off feed, not growing, and "
-                       "gone within the hold.")
+                       "own cap (per tank, from Configure → Facility). Fish "
+                       "PREPARING FOR HARVEST (stage STARVE, rule R8) are not "
+                       "counted here: 6N depuration, and fish starving in "
+                       "place in a grow-out tank after the 6N production "
+                       "switch. They do not have unlimited density. Harvest "
+                       "prep has its own raised limit (Control → Harvest-prep "
+                       "density limit), applied when the harvest-prep pass "
+                       "merges a batch's tanks. A merge over it is logged in "
+                       "the ValidationLog as HARVEST-PREP OVER LIMIT. "
+                       "Separately, the run's own audit judges every "
+                       "harvest-prep tank-week against a fixed 150 kg/m³ "
+                       "(whatever the Control value) and lists each one over "
+                       "it in the ValidationLog as WARNING - Density.")
         k2.metric("Worst density", f"{r['worst_density']:.1f} kg/m³",
-                  help="Worst density among the tanks COUNTED ABOVE — i.e. the "
+                  help="Worst density among the tanks COUNTED ABOVE — the "
                        "deepest breach, not the highest density in the plan. "
-                       "Harvest-prep tanks legitimately run far denser and are "
-                       "excluded; 0.0 here means no tank breached its cap, not "
-                       "that no tank was dense.")
+                       "Harvest-prep tanks may run denser, up to the "
+                       "harvest-prep limit, and are not counted. 0.0 here "
+                       "means no counted tank breached its cap, not that no "
+                       "tank was dense.")
         _wl = r.get("welfare_density", 80)
         k3.metric("Reared density",
                   f"{r.get('mean_rearing_density', 0):.0f} kg/m³",
@@ -14273,15 +14362,20 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
                     fig = px.line(
                         bv, x="Week", y="Mortality + Cull (fish)",
                         color="Batch", markers=True,
-                        title="Weekly losses (mortality + scheduled culls)",
+                        title="Weekly losses (mortality + culls)",
                     )
                     fig.update_layout(height=300, yaxis_title="fish lost / week")
                     st.plotly_chart(fig, use_container_width=True)
                     st.caption(
                         "Mortality from the per-week mortality table, plus "
-                        "any cull events at scheduled DSI thresholds. Plotted "
-                        "separately because per-week losses (~50–200 fish) "
-                        "are tiny next to the 200k+ batch total — they "
+                        "culls: the scheduled bottom culls in freshwater, the "
+                        "handling loss when a batch moves from eggs to "
+                        "freshwater and from freshwater to seawater, and at "
+                        "seawater entry the cull down to its transfer target "
+                        "(tran_og_count, or what is left of it for a split "
+                        "batch). Those transfer weeks can show thousands of "
+                        "fish. Plotted separately because ordinary weekly "
+                        "losses are small next to the batch total and "
                         "disappear in the Count chart above."
                     )
 
@@ -14655,7 +14749,7 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
                       help="The span of weeks over which this batch is harvested "
                            "out.")
             m4.metric("HOG (t)", f"{bp['HOG_t']:.0f}",
-                      help="Total HOG (head-off, gutted) tonnes this batch yields over its "
+                      help="Total HOG (head-on, gutted) tonnes this batch yields over its "
                            "harvest window.")
             st.dataframe(pd.DataFrame(bp["milestones"]), hide_index=True,
                          use_container_width=True)

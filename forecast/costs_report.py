@@ -297,7 +297,8 @@ def _economics(config_dir) -> tuple[Optional[dict], str]:
     if econ is None:
         return None, (f"Revenue: NOT PRICED{_DASH}economics.yaml is missing "
                       f"or has no price bands.")
-    return econ, "Revenue: economics.yaml price bands (the Analyze pricing)."
+    return econ, ("Revenue: economics.yaml price bands (Configure → Targets "
+                  "& prices; the same pricing Decide uses).")
 
 
 def _cell_value(v):

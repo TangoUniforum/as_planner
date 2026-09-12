@@ -173,6 +173,8 @@ A per-run figure quoted from an earlier scenario was once wrong by 10x
 (`min_harvest_weight_g`, `max_harvest_per_week`, `tran_og_default_tanks`, the
 hybrid levers, …) and `register()` refuses any method whose space intersects it.
 A search that could relax those would "win" by breaking the operator's contracts.
+*(Updated 2026-09-12: the list in forecast/methods.py now holds 17 names,
+`split_batch_fw` among them.)*
 
 Standalone value: Phase 1 alone replaces a tuned tournament.
 

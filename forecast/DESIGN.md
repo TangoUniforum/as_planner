@@ -89,6 +89,12 @@ INPUTS
       Control status block (R8-R16) overwritten with run summary.
 ```
 
+*(Updated 2026-09-12: as built, Advisory is the per-week capacity table —
+biomass and feed against each week's resolved limits, excess, harvest and an
+OK / REDUCE flag — and ValidationLog is the numbered issue list (# | Category |
+Detail) where the FW-calibration, bottleneck, placement, manual-window,
+split-batch and per-week-coverage lines land. See USER_GUIDE §5.)*
+
 **Time grid.** Internal simulation = date-driven (daily where required:
 mid-week TranOG, starvation, intra-week event ordering). External
 aggregation = weekly ticks anchored at `forecast_start + N*7`. Daily
@@ -248,6 +254,9 @@ Governed by Control R26 `6N Production Start Date`.
 - Operator-pinned `HarvestPlan` rows past the transition date carry
   implicit pinned starvation windows backward (the planner reserves
   zero-feed time for those tanks).
+  *(Updated 2026-09-12: pins are no longer read — HarvestPlan and
+  TransferPlan are outputs only. Script starting-state harvests and transfers
+  as manual starting events instead, USER_GUIDE §3.5.)*
 
 ### 5c. Transition
 
@@ -263,6 +272,10 @@ Governed by Control R26 `6N Production Start Date`.
 - Operator pre-populates initial `HarvestPlan` rows (oldest-first
   schedule of tanks queued for harvest at forecast start).
 - Algorithm builds on top of those pinned rows.
+
+*(Updated 2026-09-12: pins are no longer read — HarvestPlan and TransferPlan
+are outputs only. Script starting-state harvests and transfers as manual
+starting events instead, USER_GUIDE §3.5.)*
 
 ---
 
@@ -284,6 +297,10 @@ buffer headroom, then escalates to Advisory.
 **HarvestPlan dual-use:** operator-pinned rows are truth (treated as
 hard constraints); algorithm adds further rows to meet facility caps.
 Pinned harvests post-transition imply pinned starvation windows.
+
+*(Updated 2026-09-12: pins are no longer read — HarvestPlan and TransferPlan
+are outputs only. Script starting-state harvests and transfers as manual
+starting events instead, USER_GUIDE §3.5.)*
 
 ---
 
@@ -555,7 +572,7 @@ Core engine modules (2026-06; see `forecast/` for the full list):
 | `placement.py` | Phases A-D execution. Plan-driven Phase B (no greedy fallback), sticky Phase C, Phase D event emission + per-batch even-out + density-trigger Grade + purge cascade + `_try_graded_move_in` |
 | `sixn.py` | 6N purge round-robin sequencing + pair queue initialization |
 | `production_report.py` | PR sheet reader + OG hydration into `FacilityState` |
-| `excel_io.py` | The report writers (the ProductionReport reader is production_report.py; CostsAndProfit: costs_report.py; RunConfig: config_snapshot.py) (folded the planned `advisory.py`/`reports.py` here for simpler module layout). Outputs: BatchLocations, HarvestPlan, TransferPlan, HarvestReport, WeeklyReport, MonthlyReport, FeedForecastWeekly/Monthly, Daily Harvest Schedule, FacilityMap, BiologyProjection, Diagnostics, ReconciliationReport, TankContinuityAudit, **Advisory**, **ValidationLog**, **Control status block**. `Pinned` column on HarvestPlan + TransferPlan distinguishes operator pins from planner-emitted rows (no IO bleed across runs). |
+| `excel_io.py` | The report writers (the ProductionReport reader is production_report.py; CostsAndProfit: costs_report.py; RunConfig: config_snapshot.py) (folded the planned `advisory.py`/`reports.py` here for simpler module layout). Outputs: BatchLocations, HarvestPlan, TransferPlan, HarvestReport, WeeklyReport, MonthlyReport, FeedForecastWeekly/Monthly, Daily Harvest Schedule, FacilityMap, BiologyProjection, Diagnostics, ReconciliationReport, TankContinuityAudit, **Advisory**, **ValidationLog**, **Control status block**. `Pinned` column on HarvestPlan + TransferPlan distinguishes operator pins from planner-emitted rows (no IO bleed across runs). *(Updated 2026-09-12: no `Pinned` column any more — HarvestPlan and TransferPlan are outputs only; the upload is read for its ProductionReport alone.)* |
 | `run.py` | Pipeline orchestrator + PR_CORRECTION 2-pass evaluator + density-violation counting + Control status writeback |
 | `config_io.py` / `scenario_io.py` | YAML config + scenario loaders (the engine's inputs) |
 | `tiers.py` | The R1-R8 movement rules and the R8 density exemption |

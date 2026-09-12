@@ -573,7 +573,7 @@ def test_input_conservation_does_not_claim_placed_for_unmodelled_fish():
     assert any("250,225" in str(h) for h in head)
     # the conservation gate scans for "DROP"; this is not a dropped batch
     assert not any("DROP" in str(h).upper() for h in head if "NOT MODELLED" in str(h)
-                   or "nothing models" in str(h))
+                   or "nothing in this run moves" in str(h))
 
 
 def test_a_dropped_batch_keeps_its_dropped_verdict():

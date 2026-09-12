@@ -96,7 +96,7 @@ def test_one_far_value_alone_warns():
     assert one == ["Max feed / day: 0 kg (Control 33,000)"]
     ns["_ideal_far_warning"](one, "step-2", "The run")
     assert len(fake.warnings) == 1, "a single far value must warn"
-    assert one[0] in fake.warnings[0] and "far from Control" in fake.warnings[0]
+    assert one[0] in fake.warnings[0] and "far from where they start" in fake.warnings[0]
     ns["_ideal_far_warning"]([], "step-2", "The run")
     assert len(fake.warnings) == 1, "nothing far: no warning"
 
@@ -132,7 +132,7 @@ def boom(at, what):
         fail(what + ": " + "; ".join(str(e)[:300] for e in at.exception))
 
 def far(at):
-    return [w.value for w in at.warning if "far from Control" in w.value]
+    return [w.value for w in at.warning if "far from where they start" in w.value]
 
 def check_far(at, what, want):
     w = far(at)

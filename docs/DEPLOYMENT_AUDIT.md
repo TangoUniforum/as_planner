@@ -78,6 +78,7 @@ None. No finding produces an active conservation break, data-integrity failure, 
 - **L1.** Grade event conserves count but not biomass (`events.py:285-309`); the single live grade path is biomass-safe by construction. Add a biomass-conservation assert symmetric to INV-3.
 - **L2.** `open_biomass_kg` pairs opening count with day-0 post-growth weight (`biology.py:490-493`) — one day's growth overstatement in the open-biomass ledger column; reporting-only, never reaches the cap.
 - **L3.** Dropped-batch audit can't see a partially-placed batch losing a sub-population (`excel_io.py:1460-1524`); `PLACED` is binary. Latent coverage seam.
+  *(Updated 2026-09-12: for a batch's freshwater part at the PR close this is no longer binary — InputConservationAudit reads FW PART NOT MODELLED when nothing moves that part, or FW PART DROPPED when the automatic transfer placed only some of it, with those fish in Fish_At_Risk; see USER_GUIDE §5, 'A split batch at the PR close is planned automatically'. For every other batch PLACED is still binary.)*
 - **L4.** TranOG reconciliation cull vs scheduled bottom cull in the FW transit window (`biology.py:367-413`) — latent under-stocking risk; live culls fire ~100 days before TranOG.
 - **L5.** Immediate-harvest path increments progress by requested `take`, not actual `ev.count` (`placement.py:2861`); bounded by one tank's remnant.
 - **L6.** Move-in/harvest count uses FIFO-oldest avg weight but pulls biggest fish first (`placement.py:2623-2632`); biases *under* the cap, self-correcting.

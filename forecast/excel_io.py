@@ -486,9 +486,14 @@ def write_transfer_plan_output(
                "run. Type=Transfer rows are real tank-to-tank moves (one row "
                "= one move; same-week duplicate legs are merged). Type=TranOG "
                "is one row per destination tank and From_Tank reads 'FW'. "
-               "Type=Grade emits a pickup row and a retention row, and the "
-               "Grade column carries 'pickup'/'retention' for those; on "
-               "Transfer rows Grade is A = big size class, B = small."])
+               "Type=Grade is either a planner size grade (Channel "
+               "grade_event: one row per destination tank, the source tank "
+               "among them) or a graded harvest (Channel graded_harvest: a "
+               "pickup row and a retention row). Grade: A = big size class, "
+               "B = small on a row that carries one class (TranOG arrivals, "
+               "including a split batch's automatic top-up); 'pickup' / "
+               "'retention' on graded-harvest rows; blank otherwise (planner "
+               "grades, most transfers)."])
     ws.append([])
     ws.append([
         "Week", "Batch", "Type", "From_Tank", "To_Tank",
@@ -1724,11 +1729,15 @@ _LEDGER_CHECK_LEGEND = (
     "plan applies mortality day by day, per tank, in whole fish, to the fish "
     "actually present (most visible on a harvest week); and a manual-window "
     "week whose 6N purge tanks are frozen (STARVE, so the mortality rate is 0 "
-    "while the count still falls) carries a small one. A batch split across "
-    "freshwater and seawater at the PR close whose freshwater part is not "
-    "modelled carries those fish in Count_Check, and their biomass in "
-    "Bio_Check, on its first week (see the ValidationLog); otherwise Bio_Check "
-    "is 0 by construction. SGR, SFR and both FCRs are blank on a row that "
+    "while the count still falls) carries a small one. A batch with "
+    "freshwater fish at the PR close that nothing in the run moves into "
+    "seawater (the ValidationLog names it: 'Split batch at PR close (FW part "
+    "not modelled)' or 'FW batch at PR close (not modelled)'; the one it does "
+    "not name is a wholly-freshwater batch whose transfer date is before the "
+    "PR close under split_batch_fw: off, which is never placed and gets no "
+    "ValidationLog line) carries those "
+    "fish in Count_Check, and their biomass in Bio_Check, on its first week; "
+    "otherwise Bio_Check is 0 by construction. SGR, SFR and both FCRs are blank on a row that "
     "includes a freshwater part held at its PR count and weight: no "
     "freshwater biology or feed exists for it. The period TOTAL still prints "
     "the facility's rates; on the week that part crosses to seawater, its "
@@ -1836,13 +1845,18 @@ def unmodelled_fw_warnings(held, tranog_events, sw_batches) -> tuple:
             lines.append(
                 f"SPLIT BATCH AT PR CLOSE - {b}: {c:,.0f} fish ({kg:,.0f} kg) "
                 f"were in freshwater at the PR close while the rest of the "
-                f"batch was in seawater. The planner does not model that "
-                f"freshwater part (no freshwater projection, no scripted "
-                f"fw_to_og), so those fish are in the opening but never reach "
-                f"seawater or harvest: {b}'s first ledger week carries them in "
-                f"Count_Check (+{c:,.0f}) and InputConservationAudit marks the "
-                f"batch FW PART NOT MODELLED. Script an fw_to_og event for {b} "
-                f"to move them.")
+                f"batch was in seawater, and nothing in this run moves that "
+                f"freshwater part into seawater (no freshwater projection ran "
+                f"for it, and no fw_to_og placed any of its fish). Those fish "
+                f"are in the opening but never reach seawater or harvest: "
+                f"{b}'s first ledger week carries them in Count_Check "
+                f"(+{c:,.0f}) and InputConservationAudit marks the batch FW "
+                f"PART NOT MODELLED. To move them: if {b}'s fw_to_og was "
+                f"refused (see MANUAL EVENT REFUSED), fix its destination "
+                f"tanks; if none is scripted, script one or set "
+                f"split_batch_fw to auto in Control. Both need {b}'s row in "
+                f"Configure -> Batches (the automatic transfer also needs its "
+                f"tran_og_date).")
         else:
             lines.append(
                 f"FW BATCH AT PR CLOSE NOT MODELLED - {b}: {c:,.0f} fish "
@@ -3346,13 +3360,22 @@ def write_input_conservation_audit(
     pct = (100.0 * dropped_fish / in_horizon_input) if in_horizon_input > 0 else 0.0
     ws.append(["INPUT-FISH CONSERVATION AUDIT"])
     ws.append([f"Generated: {datetime.now().isoformat(timespec='seconds')}"])
+    _unp_all = {b: float(c) for b, c in (unplaced_split_fw or {}).items() if c and c > 0}
     if dropped_fish > 0:
+        # Keep the leading "N batch(es) DROPPED — N stocked fish" token:
+        # tools/run_compare.py parses it, ideal_engine selects on DROPPED.
         ws.append([f"*** {dropped_batches} batch(es) DROPPED — {dropped_fish:,.0f} stocked "
-                   f"fish ({pct:.1f}% of in-horizon input) never placed. NOT caught by "
-                   f"TankContinuityAudit (a never-placed batch has no tank rows). ***"])
+                   f"fish ({pct:.1f}% of in-horizon input) never placed in seawater. "
+                   f"NOT caught by TankContinuityAudit (fish never placed have no "
+                   f"tank rows)."
+                   + (f" Includes {', '.join(sorted_batches(_unp_all))}: fish "
+                      f"an automatic freshwater-to-seawater transfer (split or "
+                      f"overdue batch) did not place - see the FW PART DROPPED "
+                      f"line."
+                      if _unp_all else "")
+                   + " ***"])
     else:
         ws.append(["OK — every in-horizon batch reached the realized facility (0 dropped fish)."])
-    _unp_all = {b: float(c) for b, c in (unplaced_split_fw or {}).items() if c and c > 0}
     if _unp_all:
         ws.append([f"*** FW PART DROPPED: {len(_unp_all)} batch(es) whose freshwater "
                    f"part was modelled automatically but did not all reach "
@@ -3361,11 +3384,12 @@ def write_input_conservation_audit(
     _unm_all = {b: float(c) for b, c in (unmodelled_fw or {}).items() if c and c > 0}
     if _unm_all:
         ws.append([f"*** {len(_unm_all)} batch(es) held freshwater fish at the PR "
-                   f"close that nothing models (no freshwater projection, no "
-                   f"scripted fw_to_og): {sum(_unm_all.values()):,.0f} fish, "
+                   f"close that nothing in this run moves into seawater (no "
+                   f"freshwater projection, and no fw_to_og that placed fish): "
+                   f"{sum(_unm_all.values()):,.0f} fish, "
                    f"{', '.join(sorted_batches(_unm_all))}. They are in the "
-                   f"ledger opening and never reach seawater or harvest — see "
-                   f"the ValidationLog. ***"])
+                   f"ledger opening and never reach seawater or harvest - the "
+                   f"ValidationLog says why and how to move them. ***"])
     if over_produced:
         ws.append([f"*** {len(over_produced)} batch(es) OVER-PRODUCED (harvested + standing > "
                    f"stocked input — fish created): {', '.join(over_produced)} ***"])

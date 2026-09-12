@@ -344,7 +344,7 @@ def walk(node, out=None):
     return out
 
 def far(at):
-    return [w.value for w in at.warning if "far from Control" in w.value]
+    return [w.value for w in at.warning if "far from where they start" in w.value]
 
 def check_far(at, what, want, buttons):
     w = far(at)
@@ -355,7 +355,7 @@ def check_far(at, what, want, buttons):
         fail(what + ": the warning does not list %%r: %%r" %% (miss, w[0]))
     els = walk(at.main)
     iw = next(i for i, e in enumerate(els)
-              if isinstance(e, Warning) and "far from Control" in e.value)
+              if isinstance(e, Warning) and "far from where they start" in e.value)
     for lab in buttons:
         ib = [i for i, e in enumerate(els)
               if isinstance(e, Button) and lab in str(e.label)]
