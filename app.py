@@ -10634,6 +10634,97 @@ def _run_costs_unpriced(c):
     return float(kg), types
 
 
+# The ValidationLog category a PER-WEEK COVERAGE line is filed under
+# (forecast/excel_io.py), the prefix every such line starts with, and the
+# reading note each metric line ends with (forecast/caps.coverage_gap_notes).
+# The category is matched by prefix, as the log is read everywhere else.
+_COVERAGE_CATEGORY = "INFO - Per-week coverage"
+_COVERAGE_LINE = "PER-WEEK COVERAGE - "
+_COVERAGE_NOTE = " An absent row means"
+
+
+def _coverage_warning_lines(advisory_entries) -> list:
+    """The Run page's warning for weeks that plan on a Control default, as
+    markdown lines — [] when there is nothing to say.
+
+    A facility metric steered week by week in scenario/limits.yaml falls back
+    to the Control default once its dated rows run out (on the 2026-08-31 PR
+    every 2027 week did). The engine already detects it and files one
+    ValidationLog row per metric; this reads those rows — `advisory_entries`
+    from `_parse_output_workbook` — and nothing else: the headline, the week
+    and every figure come from the lines themselves, never recomputed.
+    Returns a headline, one bullet per metric (the line's own first sentence),
+    the fix, and any "check failed" line verbatim. Rows that are not dicts, or
+    carry no detail, are skipped, so a result from an older cache never
+    raises."""
+    import re as _re
+    metrics, failed, note = [], [], ""
+    for e in advisory_entries or ():
+        if not isinstance(e, dict):
+            continue
+        if not str(e.get("Category") or "").startswith(_COVERAGE_CATEGORY):
+            continue
+        det = str(e.get("Detail") or "").strip()
+        if not det:
+            continue
+        if det.startswith(_COVERAGE_LINE + "check failed"):
+            failed.append(det)
+            continue
+        body = det[len(_COVERAGE_LINE):] if det.startswith(_COVERAGE_LINE) else det
+        name, sep, rest = body.partition(": ")
+        if not sep:
+            name, rest = "", body
+        first, has_note, tail = rest.partition(_COVERAGE_NOTE)
+        # The engine's own reading note ("... check it rather than assume
+        # it."), kept once for the fix line — quoted, never reworded.
+        if has_note and not note:
+            note = (_COVERAGE_NOTE + tail).strip()
+        metrics.append((name.strip(), first.strip()))
+    out = []
+    if metrics:
+        n = len(metrics)
+        many = n != 1
+        # "67 after 2026-W53": the week after which a metric's rows stop.
+        after = [_re.search(r"\b\d+ after (\d{4}-W\d{1,2})\b", d)
+                 for _m, d in metrics]
+        # A line can ALSO name weeks before its first row or holes inside
+        # its span ("4 before 2026-W42 and 38 after 2027-W14"): the headline
+        # names only the trailing gap, so it says there is more below.
+        other = any(_re.search(r"\b\d+ before \d{4}-W\d{1,2}\b"
+                               r"|\b\d+ inside the covered span\b", d)
+                    for _m, d in metrics)
+        if all(after):
+            weeks = sorted({a.group(1) for a in after})
+            out.append(
+                f"⚠ **{n} metric{'s' if many else ''} run{'' if many else 's'}"
+                f" past your dated per-week limits** and "
+                f"use{'' if many else 's'} the Control default after "
+                f"{weeks[0]}"
+                + (" at the earliest" if len(weeks) > 1 else "")
+                + (" (plus other weeks your rows do not cover — see below)"
+                   if other else "") + ".")
+        else:
+            # A gap only BEFORE the first row, or inside the span: the rows
+            # did not run out, so the headline must not say they did.
+            out.append(
+                f"⚠ **{n} metric{'s' if many else ''} ha{'ve' if many else 's'}"
+                f" weeks your dated per-week rows do not cover** and "
+                f"plan{'' if many else 's'} those weeks on the Control "
+                f"default.")
+        out += [f"- `{m}`: {d}" if m else f"- {d}" for m, d in metrics]
+        out.append(
+            "Fix: add per-week rows in **Configure → Limits** (or change the "
+            "Control default)." + (" " + note if note else "")
+            + " The same lines are in the workbook's ValidationLog "
+            "(INFO - Per-week coverage).")
+    for d in failed:
+        fence = "``" if "`" in d else "`"
+        out.append(f"⚠ The per-week coverage check failed, so this run "
+                   f"cannot say which weeks plan on a Control default: "
+                   f"{fence}{d}{fence}")
+    return out
+
+
 def _run_costs_caption(r):
     """The one line under the KPI row, or None when this run has no priced
     CostsAndProfit sheet (the tab says why). Profit is withheld when feed
@@ -13769,6 +13860,14 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
         pd.DataFrame(r["harvest_events"]) if r["harvest_events"] else pd.DataFrame()))
     bio_df = _rv_memo("bio_df", _rid,
                       lambda: pd.DataFrame(r.get("biology_projection", [])))
+
+    # Weeks that plan on a Control default because the dated per-week rows
+    # stop early. The run files it as an INFO row in the ValidationLog; it is
+    # said here too, from those same rows (display only). A result without
+    # them — an older cache — shows nothing.
+    _cov_lines = _coverage_warning_lines(r.get("advisory_entries"))
+    if _cov_lines:
+        st.warning("\n\n".join(_cov_lines))
 
     (tab_over, tab_batch, tab_period, tab_harvest, tab_feed, tab_yearly,
      tab_plan, tab_costs) = st.tabs([

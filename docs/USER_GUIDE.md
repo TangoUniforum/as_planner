@@ -245,7 +245,8 @@ it **once** and it applies to every week of every horizon.
 > 3,650,000 / 27,500 **derate** — worth ~131 t of horizon production, silently.
 > Since 2026-09-03 the run says so: a `PER-WEEK COVERAGE` line in the
 > ValidationLog names any facility metric whose rows stop before the horizon
-> ends (§5). It reports; it changes no cap.
+> ends (§5), and the Run page shows it as a warning above the result tabs.
+> It reports; it changes no cap.
 
 **Configure → Limits** has three parts:
 
@@ -1031,6 +1032,29 @@ Three things keep it worth reading rather than noise:
   purpose;
 - `sgr_correction_og` is **excluded**: it has no Control default to fall back
   to, so coverage is not a question for it.
+
+**Also on the Run page (2026-09-12).** The **Run forecast** results show the
+same lines as one warning, directly above the result tabs: a headline, one
+bullet per metric with the line's own detail, and the fix — add per-week rows
+in **Configure → Limits** (or change the Control default) — followed by the
+line's own note (check the default rather than assume it). The headline takes
+one of two forms, read from the gap shape the lines name:
+
+- **"N metrics run past your dated per-week limits and use the Control default
+  after 2026-W53"** — every line has weeks *after* its last row (entry
+  stopped). The week named is the **last week your rows cover**, as the line
+  gives it; the default starts the week after. "At the earliest" is added when
+  the metrics stop at different weeks, and "(plus other weeks your rows do not
+  cover — see below)" when a line also has weeks before its first row or holes
+  inside its span.
+- **"N metrics have weeks your dated per-week rows do not cover"** — at least
+  one line has no weeks after its last row (the rows start mid-horizon, or have
+  holes): the rows did not run out, so the headline does not say they did.
+
+It is built from the run's own ValidationLog rows and recomputes nothing, so a
+result replayed from the cache or picked on the compare board shows it too, and
+a `check failed` line is shown verbatim. No line, no warning. Display only: the
+workbook is unchanged.
 
 It is **detection only**. `caps.resolve_facility_cap` is unchanged and still
 falls back exactly as before; the note reaches `invariant_warnings`, a
