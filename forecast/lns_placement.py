@@ -167,11 +167,17 @@ def drift_count(placement, batch_week_states, initial_state, realized_biology=No
 
     from .excel_io import write_tank_continuity_audit
     wb = openpyxl.Workbook()
+    # audit_touched_empty_tanks=False: this count ACCEPTS OR REJECTS placement
+    # moves, so it keeps the audit scope it was validated with. The shipped
+    # sheet (2026-09-12) also audits a tank empty at both ends of a week that
+    # fish passed through; letting this gate see those rows could change what
+    # LNS accepts -- an engine decision left to the operator (numbers sandbox
+    # engine_patches/counts-02_lns_gate_sees_staging_tanks.diff).
     write_tank_continuity_audit(
         wb, placement.batch_locations, batch_week_states,
         placement.harvest_events, placement.transfer_events,
         placement.grade_events, placement.tranog_events, initial_state,
-        realized_biology=realized_biology)
+        realized_biology=realized_biology, audit_touched_empty_tanks=False)
     return _count_drift_rows(wb["TankContinuityAudit"])
 
 

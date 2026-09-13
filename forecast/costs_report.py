@@ -58,6 +58,8 @@ NOT_COMPUTED = "NOT COMPUTED"
 FEED_BLOCK = "FEED BY TYPE"
 KIND_MONTH = "Month"
 KIND_PRE_START = "Month (before report opens)"
+# The first month of a report that opens mid-month: forecast days only.
+KIND_PART_MONTH = "Month (forecast from {start})"
 NONE_TEXT = "—"                 # a figure that does not exist (never a 0)
 UNPRICED_TEXT = "(unpriced)"
 NO_CURRENCY = "currency not set"
@@ -326,18 +328,38 @@ def build_costs_rows(drivers: dict, costs: dict, economics: Optional[dict], *,
     if economics is not None:
         rev = {}
         for m, rows in harvest.items():
-            got = revenue_for(rows, economics)
+            # clip_start: a month's price override prices the harvest this
+            # sheet books to that month (the first week belongs to the report's
+            # first month, not the month of its Monday).
+            got = revenue_for(rows, economics, clip_start=drivers.get("start"))
             rev[m] = got["total"]
             unpriced_rev += got["unpriced_kg"]
     pl = _costs.monthly_pl(drivers["feed"], drivers["eggs"], rev, hog,
                            drivers["month_days"], costs)
     cur = economics["currency"] if economics is not None else NO_CURRENCY
+    # The fingerprint is an MD5 (costs.costs_sig / economics_sig), and the note
+    # now says so. It used to say "sha", so a reader checking it with SHA-256
+    # got a false "changed" (the corpus builder did). read_costs_sheet accepts
+    # both labels, so a workbook written before this still parses.
     note = (f"Each month's spend against that month's sales{_DASH}a month "
             f"with little harvest shows a loss. {revenue_note} Costs: "
-            f"config/{_costs.COSTS_FILE} (sha {sha}).")
+            f"config/{_costs.COSTS_FILE} (md5 {sha}).")
     if economics_sha is not None:
-        note += f" Price bands: config/economics.yaml (sha {economics_sha})."
+        note += f" Price bands: config/economics.yaml (md5 {economics_sha})."
     note += f" Currency: {cur}."
+    # A report that opens mid-month (a mid-month PR) prices only the forecast
+    # days of that month: the PR's own days are neither forecast spend nor
+    # forecast sales. MonthlyReport and HarvestPlan Report DO add the PR's
+    # month-to-date harvest to that month, so the same month label carries two
+    # HOG figures -- say so here, and mark the row's Kind.
+    start = drivers.get("start")
+    if start is not None and start.day != 1:
+        note += (f" The first month covers the forecast days only "
+                 f"({start} to month end): the ProductionReport's own days "
+                 f"(1st to {start - dt.timedelta(days=1)}) are neither forecast "
+                 f"spend nor forecast sales. MonthlyReport and HarvestPlan "
+                 f"Report add the PR's month-to-date harvest to that month, so "
+                 f"their HOG for it is higher.")
     if unpriced_rev > 0.5:
         note += (f" {unpriced_rev:,.0f} kg of harvest "
                  f"({economics.get('basis', 'hog')} basis) falls outside "
@@ -349,9 +371,12 @@ def build_costs_rows(drivers: dict, costs: dict, economics: Optional[dict], *,
                  f"in config/{_costs.COSTS_FILE} and is left out of the feed "
                  f"cost: total cost is understated and profit overstated.")
     rows: list = [[TITLE], [note], [], _headers(COLUMNS, cur)]
+    _part = (f"{start.year}-{start.month:02d}"
+             if start is not None and start.day != 1 else None)
     for r in pl["months"]:
         kind = KIND_PRE_START if r["period"] in drivers["pre_start"] \
-            else KIND_MONTH
+            else (KIND_PART_MONTH.format(start=start) if r["period"] == _part
+                  else KIND_MONTH)
         rows.append([_cell_value(dict(r, kind=kind)[f]) for _h, f in COLUMNS])
     for r in pl["years"] + [pl["total"]]:
         rows.append([_cell_value(r[f]) for _h, f in COLUMNS])
@@ -484,7 +509,7 @@ def write_costs_sheet(wb, *, config_dir, batch_locations, states_by_batch,
         ws.append(row)
     _style(ws, layout)
     print(f"  {COSTS_SHEET}: {len(drivers['months'])} month(s) priced from "
-          f"{where} (sha {sha})")
+          f"{where} (md5 {sha})")
     return {"status": "ok", "sha": sha, "months": list(drivers["months"]),
             "body_last": layout["body_last"],
             "feed_header": layout["feed_header"],
@@ -536,9 +561,11 @@ def read_costs_sheet(ws) -> dict:
         return {"status": "error",
                 "error": f"{COSTS_SHEET}: row {HEADER_ROW} is not the "
                          f"expected header"}
-    sha = re.search(r"config/costs\.yaml \(sha ([0-9a-f]{8})\)", note)
-    esha = re.search(r"config/economics\.yaml \(sha ([0-9a-f]{8}|none)\)",
-                     note)
+    # "(md5 ...)" since 2026-09-12; "(sha ...)" on workbooks written before --
+    # the same MD5 either way, so both parse to the same key.
+    sha = re.search(r"config/costs\.yaml \((?:md5|sha) ([0-9a-f]{8})\)", note)
+    esha = re.search(
+        r"config/economics\.yaml \((?:md5|sha) ([0-9a-f]{8}|none)\)", note)
     out = {"status": "ok", "sha": sha.group(1) if sha else None,
            "economics_sha": esha.group(1) if esha else None,
            "currency": cur, "note": note, "months": [], "years": [],

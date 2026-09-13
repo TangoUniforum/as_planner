@@ -880,17 +880,17 @@ board are pinned `off` so you can always see them side by side.
 | **HarvestPlan** | single-table harvest plan (Week/Batch/Tank/Count/Gross/HOG…) | the actionable harvest plan |
 | **TransferPlan** | every tank-to-tank move, grade and TranOG row the plan executes (refused transfers omitted; see the RealizationReport note) | the actionable transfer plan |
 | **HarvestPlan Report** | per-year blocks, per-batch Units/AvWt/Biomass by month + **bottom monthly TOTAL row** | **monthly sales planning** (HOG tonnes landed per month) |
-| **YearlySummary** | facility-wide per-year: harvest count/HOG t/gross t/avg wt, feed t, peak+mean biomass, utilization | **year-over-year trends** |
-| **TransferTemplate** | (A) the canonical batch journey through seawater; (B) per-batch summary: SW entry week + weeks-from-start, entry weight/count/density, peak tank footprint, peak density (×cap) + Density_Status flag, harvest window + weight | **the general plan at a glance** — which batches enter when, their footprint, density risk, and harvest timing |
-| **Batch Plan** | per batch, **in batch order** (B41, B42, …): a summary header, then the milestone timeline (each tier entered, week, weight, tanks) with handling moves per batch/fish | one batch's path |
-| **Daily Harvest Schedule** | each week's harvest — **all tanks combined** — split evenly Mon–Fri (blended avg weights), with a per-week **Total** row and a blank line between weeks; Tank/Batch list every contributor | daily ops |
+| **YearlySummary** | facility-wide per calendar year: harvest count/HOG t/gross t/avg wt (each event in the year of its date, in the whole fish HarvestPlan shows — plus, on a mid-month PR, the PR's own harvest of that month, exactly as HarvestPlan Report adds it), feed t (each week split **by calendar day**, so a year's feed equals the CostsAndProfit / FeedForecastMonthly year), peak+mean biomass, utilization (each week in the year it starts). Row 2 says which basis each column uses | **year-over-year trends** |
+| **TransferTemplate** | (A) the canonical batch journey through seawater; (B) per-batch summary: SW entry week (the batch's TranOG week; `(in-flight)` = in seawater at the start with no TranOG; `(split: part in SW from <week>)` = a batch split across FW and SW at the PR close — the same rule Batch Plan uses) + weeks-from-start, entry count/weight (**the fish of its TranOG rows**, as TransferPlan shows them; an in-flight batch: its first week's close) and density, peak tank footprint, peak density (×cap — a tank preparing for harvest is judged at 150 kg/m³, exactly as the R8 audit judges it) + Density_Status flag, harvest window + weight (fish-weighted). A batch harvested out in the first week (no tank row) still has a row | **the general plan at a glance** — which batches enter when, their footprint, density risk, and harvest timing |
+| **Batch Plan** | per batch, **in batch order** (B41, B42, …): a summary header, then the milestone timeline (each tier entered, week, weight, tanks) with handling moves per batch/fish. Every harvested batch has a row — also one harvested out in the first week, which has no tank row; SW_entry follows the TransferTemplate rule; the Harvest weight is fish-weighted (total live kg ÷ fish) | one batch's path |
+| **Daily Harvest Schedule** | each week's harvest — **all tanks combined** — split evenly over its Mon–Fri days (blended avg weights), never a day before the report opens (a Saturday/Sunday report start puts its first week on its own date), with a per-week **Total** row and a blank line between weeks; Tank/Batch list every contributor | daily ops |
 | **FeedForecastWeekly / Monthly** | feed by feed-type × period matrix | feed ordering |
 | **Advisory** | per-week capacity table: biomass/feed vs caps + excess + OK/REDUCE | capacity headroom + over-cap weeks |
-| **FacilityMap** | tank × week grid (cell = "Batch# AvgWt/Density"); **below it**: per-system × week **feed (kg/day)** and **biomass (kg)** blocks, each with a FACILITY total row | occupancy at a glance + per-system load vs caps |
+| **FacilityMap** | tank × week grid (cell = "Batch# AvgWt/Density"; red bold = over the tank's cap, a tank preparing for harvest judged at 150 kg/m³ as the R8 audit does); **below it**: per-system × week **feed (kg/day)** and **biomass (kg)** blocks, each with an FW (hatchery) row and a FACILITY total row — so the feed FACILITY row is the Advisory's Total_Feed and the biomass FACILITY row its Total_Biomass | occupancy at a glance + per-system load vs caps |
 | **BatchLocations** | per-(week, batch, tank) occupancy | raw realized placement |
 | **ValidationLog** | numbered warnings (# / Category / Detail), incl. FW-calibration + bottleneck (annotated with resolution), **`INFO - Per-week coverage`** (below) and the **realized-plan** categories below | diagnostics — **read the `(realized plan)` categories first** |
 | **InputConservationAudit** | per batch: placed/dropped, harvested, standing, **FW reconciliation** (planned vs realized seawater entry) + **closed FW mass-balance** (`first_FW_count` vs `realized_TranOG + FW_mort + FW_cull`; §6 #6). A batch whose freshwater part at the PR close nothing models reads **`*** FW PART NOT MODELLED ***`**, never `PLACED`, with those fish in `Fish_At_Risk` (see the split-batch warning below) | conservation + FW calibration gaps |
-| **TankContinuityAudit** | per-(tank, week) balance + **facility conservation summary** | 0-drift proof |
+| **TankContinuityAudit** | per-(tank, week) balance + **facility conservation summary**. A week the occupant changes holds both batches' flows, so its Batch cell names both, departing first (`B54->B56`); a tank empty at both ends of a week that fish passed through still gets a row, so its in/out legs are in the proof. Growth_kg and Mort_kg print whenever they are not zero, negatives included, so every row re-adds from its own columns | 0-drift proof |
 | **ReconciliationReport / SystemLimitsAudit** | per-batch **seawater-only** open/close balance, `open − mortality − harvest + TranOG_In = expected close` — `TranOG_In` / `TranOG_In_kg` are the fish arriving from freshwater (a move, not an input; the columns were called `Input_Count` / `Input_kg` before 2026-09-11, values unchanged), and `Cull_Count` is informational (it happens in freshwater, before arrival). Count reconciles **exactly** via recorded realized biology; biomass within tolerance / per-system realized biomass + feed vs cap, flagged `BIOMASS_OVER` / `FEED_OVER` | deeper audits — *TankContinuityAudit is the authoritative 0-drift biomass check* |
 | **RealizationReport** | the **intent** check, for all three event families. **Transfers**: events emitted / applied in full / in part / refused whole, fish planned vs moved, **share of planned movement realized**, a per-week table, and **STUCK RELATIONSHIPS** (one row per batch+source tank+reason, so a refusal repeated many times reads as one fact with a first/last week). **Harvest**: decided vs taken, split into taken-as-decided / INV-5 force-emptied (took *more*) / short / refused. **TranOG**: fish planned to enter vs entered, and **fish that never entered the facility at all**. **Grading**: Grade (size split) and GradedHarvest (the peel), applied vs refused whole | "did the plan actually happen?" — see the note below |
 | **WeeklyReport / MonthlyReport** | the per-(period, batch) production ledger — open/close count, weight, biomass, **Avg_Density**, SGR, feed, FCR, mortality, harvest, transfers, checks — plus a **TOTAL row per period** and a real **AutoFilter** already applied — filter these. **`Input_Count` is eggs stocked, nothing else**; the move from freshwater to seawater shows in `Xfer_In`/`Xfer_Out` (see *Reading the ledger* below) | detailed batch accounting; reading one batch, or slicing by batch/period |
@@ -988,8 +988,14 @@ board are pinned `off` so you can always see them side by side.
 > operator decision 2026-09-02). A forecast's first week whose Monday falls before
 > the report opens is booked in the first month the report covers. **HarvestPlan
 > Report**, **MonthlyReport** and **CostsAndProfit** all use this rule, so their
-> monthly HOG tie out. Continuous flows (feed, growth, mortality) split by
-> calendar day. The per-event **HarvestReport** is unprorated detail (each row
+> monthly HOG tie out — with one stated exception: on a **mid-month PR**,
+> MonthlyReport and HarvestPlan Report add the PR's own month-to-date harvest
+> to its month (see *A mid-month PR completes its own month*), while
+> CostsAndProfit prices the forecast days only (its row reads *Month (forecast
+> from …)* and row 2 says so). The app's target grading, Decide panels and
+> Harvest tab use the same first-week rule (they read the report's opening
+> date from the workbook's own ProductionReport). Continuous flows (feed,
+> growth, mortality) split by calendar day. The per-event **HarvestReport** is unprorated detail (each row
 > keeps its event-date month).
 >
 > **Eggs** are booked whole in the month of the batch's **input date** — the
@@ -1098,7 +1104,9 @@ without the check, 85 harvest weeks compared, **0 differ, 0.0 fish**.
 > Control default silently passes every week you raised in `scenario/limits.yaml`):
 >
 > * `WARNING - Harvest floor (realized plan)` — every week under the floor in
->   force *that week*. Misses under 0.5% of the floor are tagged
+>   force *that week*, **including a week with no harvest at all** (named
+>   `NO HARVEST this week`; before 2026-09-12 such weeks were never judged, so
+>   a plan with 40 empty weeks showed none of them here). Misses under 0.5% of the floor are tagged
 >   `[rounding-scale]` so a handful of "72 fish" lines cannot train you to
 >   ignore the category. Operator-scripted manual-window weeks are **excluded**
 >   with a note saying so: those weeks run only your script (the `MANUAL WINDOW`
@@ -1109,6 +1117,18 @@ without the check, 85 harvest weeks compared, **0 differ, 0.0 fish**.
 >   `max_transfers_per_week`, counted in the same unit the planner clamps to
 >   (distinct applied source→dest tank pairs, not sheet rows).
 >
+> Two detection-only categories (2026-09-12) say when the forecast's opening
+> or horizon is not what you would assume:
+>
+> * `WARNING - PR fish not hydrated` — ProductionReport fish that no tank
+>   received: a fish group without a Bnn batch id (e.g. `35A`), or a batch whose
+>   roll-up row holds fish its Unit rows do not, plus one line comparing the
+>   PR's facility closing count with the fish hydrated. The forecast's opening
+>   then differs from the PR's own total by those fish.
+> * `WARNING - Plan ends before the horizon` — the realized plan stopped
+>   before `horizon_weeks` with fish still in the tanks (the planner walks only
+>   weeks its projection has load for), naming the last week and the fish left.
+>
 > The older `WARNING - Harvest Scheduler` entries remain, but they now say
 > plainly that they are a **demand-stage** observation and point here for the
 > final answer.
@@ -1118,7 +1138,11 @@ without the check, 85 harvest weeks compared, **0 differ, 0.0 fish**.
 > month is split across two sources: the days the PR already reported, and the
 > forecast that starts the next day. **MonthlyReport** and **HarvestPlan
 > Report** merge the two, so the month reads as the month rather than as the
-> tail of it. Measured on the 8.13 PR: August showed 70,444 of its 134,289
+> tail of it; **YearlySummary** adds the same PR harvest to that year's
+> harvest columns (its feed and biomass stay the forecast's, and row 2 says
+> so). **CostsAndProfit** does NOT merge: it is the cash view of the
+> forecast days, so its first row reads *Month (forecast from …)* and row 2
+> names the PR days it leaves out. Measured on the 8.13 PR: August showed 70,444 of its 134,289
 > harvested fish — 48% of the real tonnage — on the two sheets sales planning
 > reads.
 >
@@ -1350,8 +1374,8 @@ re-run to get it back.
 - **Overview** — advisory issues + tank-occupancy heatmap + per-system biomass + **realized** per-system feed (read from `SystemLimitsAudit`, with the per-system feed-cap line). This is the *fed plan after harvest/FIFO* — **not** the `BiologyProjection` per-batch feed, which is the unharvested projection (fish growing along the curve, ignoring harvest/caps) and runs far higher (10k+ vs a realized ~3–4k). If a feed line looks like it spikes to 5–10× the cap, you're looking at projection feed, not the plan.
 - **Per-Batch** — per-batch weight/biomass/density/losses over a period slider
 - **Period Summary** — facility biomass, weekly harvest, active batches, density
-- **Harvest** — totals, per-week stacked harvest, avg harvest weight, **monthly HOG rollup (sales planning)**, and a **Daily harvest schedule** table — each week's harvest with **all tanks combined**, split evenly across its five operating days (Mon–Fri), with a shaded per-week **Total** row and a blank line between weeks (the same as the *Daily Harvest Schedule* Excel sheet)
-- **Feed** — whole-facility feed (kg/day) week by week against that week's own delivery cap: peak feed, weeks over the cap, the worst week as % of cap, and a CSV download.
+- **Harvest** — totals, per-week stacked harvest, avg harvest weight, **monthly HOG rollup (sales planning)** — months by the workbook's own rule, so a first week whose Monday falls before the report opens is in the report's first month, as on HarvestPlan Report and CostsAndProfit — and a **Daily harvest schedule** table — each week's harvest with **all tanks combined**, split evenly across its Mon–Fri days (never a day before the report opens), with a shaded per-week **Total** row and a blank line between weeks (the same days and whole-fish split as the *Daily Harvest Schedule* Excel sheet)
+- **Feed** — whole-facility feed (kg/day) week by week against that week's own delivery cap, read row for row from the workbook's **Advisory** sheet (`Total_Feed` vs `Feed_Limit`: the realized feeding rate, hatchery included, 6N purge tanks at 0 — the basis the run flags REDUCE FEED on): peak feed, weeks over the cap, the worst week as % of cap, and a CSV download. The weekly feed TOTALS, which also count the 6N move-in fish's pre-transfer feed, are in WeeklyReport and FeedForecast.
 - **Yearly** — HOG tonnes / feed / peak biomass / count per year
 - **Plan** — the **production-flow template** (TransferTemplate §A: the canonical seawater journey every batch follows — FW → OG1/2 nursery → 1 kg lock → grow-out fan-out → finishing → harvest drain) at the top, then the **per-batch plan summary** (§B): entry timing, footprint, harvest window, with a **density-risk highlight** + peak-density-per-batch chart (OVER CAP flagged)
 - **Costs & profit** — this run's CostsAndProfit sheet (cash view): revenue, total cost, profit and spend per kg HOG sold; revenue and cost by month; the monthly and yearly tables; feed by type. It says when a result predates costs, when costs are not set or not computed, when costs.yaml or the price bands changed since the run, and withholds Profit when feed is unpriced (§15).
@@ -1433,6 +1457,11 @@ mode (see `tests/test_coordinator_regression.py`):
 > **biomass signed-sum −474 kg** (abs 841 kg) across ~3,200 tank-weeks, the
 > ReconciliationReport biomass residual is **exactly 0**, and **no** row carries
 > a `BIO_DRIFT` flag. Before, the same run showed −38,776 kg and 5 flags.
+> *(Dated measurement, one run. The 2026-09-12 corpus found one BIO_DRIFT
+> row each on the 9.10 and 2024-11-30 PRs: a tank that took a grade in and
+> moved fish out in the same week — the known turnover-week timing artefact,
+> not lost fish. Those rows now print their negative growth and mortality,
+> so they re-add from their own columns.)*
 
 ### The negative-control policy — every alarm ships with a proof it can fire
 
@@ -3405,8 +3434,16 @@ forecast on fish sold early in it. (The Ideal reference sheet's steady year
 keeps the name **Cost per kg HOG**: there stocking and harvest balance.)
 
 **Fixed cost is charged by calendar days**, on every surface: a part month by
-its days, and on the Ideal page each year by the days of its ISO weeks — so
-the same days carry the same fixed cost on the Run sheet and the Ideal page.
+its days, and on the Ideal page each year by the days of its ISO weeks (the
+first year from the forecast's own first day, when that is after the week's
+Monday) — so the same days carry the same fixed cost on the Run sheet and the
+Ideal page.
+
+**An Ideal "year" is ISO weeks YYYY-W01 to W52/53** (Monday to Sunday) — every
+Ideal figure, check and cost is read on that basis, and the page says so. The
+Run workbook's YearlySummary and CostsAndProfit use calendar years, so the
+same year can differ by one boundary week between the two (step 3 today,
+2029: 7,103 t HOG on the Ideal page, 7,202 t on the sheet).
 
 **Feed with no price is never priced at 0.** If a feed type has no price (for
 example after a rename in Biology), its kg are left out of the feed cost, so
@@ -3431,7 +3468,8 @@ opening cost for fish already in the water, which the forecast never fed.
   harvested, revenue, profit, spend per kg HOG sold and any unpriced feed kg. A
   **feed by type** block below it gives each type's item, price, kg and cost.
   Feed kg ties to the FeedForecastMonthly sheet. Row 2 names the pricing,
-  the currency and the first 8 characters of the fingerprints of `costs.yaml`
+  the currency and the first 8 characters of the MD5 fingerprints (labelled
+  `md5`; workbooks written before 2026-09-12 say `sha` for the same MD5) of `costs.yaml`
   and `economics.yaml`. If
   the file is invalid **or empty**, the sheet says **NOT COMPUTED** and why
   (an empty file reads "the file is empty — costs not set"), and the run

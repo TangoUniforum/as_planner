@@ -60,13 +60,20 @@ def test_summing_a_column_without_skipping_TOTAL_double_counts():
 
 
 def test_app_feed_reader_skips_the_total_row():
-    """app.py's feed-vs-cap chart sums Feed (kg) per week off this sheet."""
-    import re
+    """app.py's feed-vs-cap chart used to sum Feed (kg) per week off this
+    sheet, so it had to skip the TOTAL row. Since 2026-09-12 (numbers
+    sandbox) it reads the Advisory's per-day Total_Feed row for row -- the
+    basis the engine flags REDUCE FEED on -- and never sums the ledger, so it
+    cannot double-count a TOTAL row. Pinned so a later edit that goes back to
+    summing WeeklyReport has to face this test (and the TOTAL row) again.
+    The behaviour itself is pinned in test_numbers_consistency
+    (test_display_feed_tab_reads_the_advisory)."""
     src = open("app.py", encoding="utf-8").read()
-    i = src.index('w, f = g("Week"), g("Feed (kg)")')
-    window = src[i:i + 600]
-    assert 'g("Batch")' in window and "TOTAL" in window, (
-        "app.py sums Feed (kg) per week without skipping the TOTAL row")
+    i = src.index("def _feed_weekly(")
+    body = src[i:src.index("\ndef ", i + 10)]
+    assert '"Advisory"' in body, "the feed tab no longer reads the Advisory"
+    assert 'g("Feed (kg)")' not in body and '"WeeklyReport"' not in body, (
+        "the feed tab sums the ledger again: it must skip the TOTAL row")
 
 
 def test_grouped_sheet_carries_blank_rows_and_no_filter():

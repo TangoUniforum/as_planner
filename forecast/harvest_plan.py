@@ -81,31 +81,35 @@ class MonthRow:
         return f"{'over' if pct > 0 else 'short'} {abs(pct):.0f}%"
 
 
-def month_of(week_label: str) -> Optional[str]:
+def month_of(week_label: str, clip_start=None) -> Optional[str]:
     """'2026-W44' -> '2026-11', by the ISO week's MONDAY.
 
     A week is attributed to the month its Monday falls in, matching
     analysis.week_to_month, so this view and the targets gate agree about which
     month a week belongs to. Disagreeing would put the gap in one month and the
-    lever in another.
+    lever in another. `clip_start` (the report's opening date) applies the
+    workbook's first-week rule, exactly as analysis.week_to_month does.
     """
     from .analysis import week_to_month
-    return week_to_month(week_label)
+    return week_to_month(week_label, clip_start)
 
 
 def build_rows(monthly_actual: dict, targets: Optional[dict],
-               week_labels, facility_overrides: dict) -> list[MonthRow]:
+               week_labels, facility_overrides: dict,
+               clip_start=None) -> list[MonthRow]:
     """Join the three sources into one table.
 
     monthly_actual      {'YYYY-MM': kg} from analysis.harvest_by_period
     targets             analysis.load_targets() result, or None
     week_labels         every planner week in the run, in order
     facility_overrides  FacilityLimits.overrides — {(week, metric): value}
+    clip_start          the report's opening date (month_of); pass the SAME
+                        value harvest_by_period was given
     """
     tmonthly = ((targets or {}).get("monthly") or {})
     weeks_by_month: dict[str, list] = {}
     for wl in week_labels or ():
-        m = month_of(wl)
+        m = month_of(wl, clip_start)
         if m:
             weeks_by_month.setdefault(m, []).append(wl)
 

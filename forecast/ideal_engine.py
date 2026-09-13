@@ -234,6 +234,13 @@ class YearRead:
     # forecast.costs.year_cost charges the fixed monthly cost by those days
     # (a 53-week year is 371 days, not 12 months). None = not read.
     first_week: Optional[str] = None
+    # The first CALENDAR DAY the year's figures cover when the run opens after
+    # the Monday of `first_week` (a Tuesday forecast start): the fixed cost is
+    # charged from this day, as the CostsAndProfit sheet charges it from the
+    # report's first day. None = the Monday of first_week. It used to charge
+    # from that Monday, one day before the forecast opened on the 8/31 PR --
+    # fixed_monthly/31 more than the arm's own CostsAndProfit.
+    first_day: Optional[dt.date] = None
     # Standing biomass (OG + FW, kg, as `standing_peak_kg`) in the year's
     # last week read: the fish still in the water when the year - or, for
     # the last year, the run - ends. None = not read.
@@ -909,6 +916,17 @@ def eggs_by_year(batches, start, years, *, end=None) -> dict:
     return out
 
 
+def _first_day(first_week, start) -> Optional[dt.date]:
+    """The forecast start when it falls AFTER the Monday of `first_week` (a
+    run opening mid-week), else None (the year starts on that Monday)."""
+    if start is None:
+        return None
+    s = _as_date(start, "start")
+    y, w = str(first_week).split("-W")
+    monday = dt.date.fromisocalendar(int(y), int(w), 1)
+    return s if monday < s <= monday + dt.timedelta(days=6) else None
+
+
 def read_workbook(path, control, facility, bands, cv_pct: float,
                   hog_yield: float, years: Sequence[int], *,
                   facility_limits=None, start=None) -> dict:
@@ -1104,6 +1122,7 @@ def read_workbook(path, control, facility, bands, cv_pct: float,
             gain_t=(gross_kg + standing[-1] - standing_before) / 1000.0,
             feed_kg_by_type=feed.get(y) if feed is not None else None,
             first_week=W[0],
+            first_day=_first_day(W[0], start),
             standing_end_kg=standing[-1],
         )
 

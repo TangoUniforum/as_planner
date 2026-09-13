@@ -491,10 +491,12 @@ def project_batch(
     #         m_weekly_pct, cull_pct_today, feed_kg_day, feed_type,
     #         biomass_kg, cull_count_today, cull_biomass_today)
     days: list[tuple] = []
+    _sow: dict = {}     # start-of-day weight (report layer: week-0 opening)
 
     cur_date = input_date
     while cur_date < forecast_end:
         dsi = (cur_date - input_date).days
+        _sow[cur_date] = cur_weight
 
         # Per-day cull accumulators (count + biomass of fish removed today
         # by handling-mortality, scheduled bottom culls, or TranOG
@@ -671,6 +673,8 @@ def project_batch(
             close_avg_weight_g=last[4],
             close_biomass_kg=last[11],
             mort_count_week=sum(d[14] for d in days_in_w),
+            open_avg_weight_pre_g=_sow.get(days_in_w[0][0], days_in_w[0][4]),
+            feed_kg_by_type=_feed_by_type_days(days_in_w),
         ))
 
     return out, residual, split
@@ -874,9 +878,11 @@ def project_in_flight_batch(
     cur_weight = float(initial_avg_wt_g)
 
     days: list[tuple] = []
+    _sow: dict = {}     # start-of-day weight (report layer: week-0 opening)
     cur_date = forecast_start
     while cur_date < forecast_end:
         dsi = (cur_date - input_date).days
+        _sow[cur_date] = cur_weight
         wfi = max(0, dsi // 7)
         m_weekly = _mortality_weekly_pct(tables, wfi)
         _pre_mort = cur_count
@@ -937,6 +943,8 @@ def project_in_flight_batch(
             close_avg_weight_g=last[4],
             close_biomass_kg=last[11],
             mort_count_week=sum(d[14] for d in days_in_w),
+            open_avg_weight_pre_g=_sow.get(days_in_w[0][0], days_in_w[0][4]),
+            feed_kg_by_type=_feed_by_type_days(days_in_w),
         ))
     return out
 
@@ -1077,9 +1085,11 @@ def project_in_flight_fw_batch(
     residuals: list[CalibrationResidual] = []
     splits: list[SizeClassSplit] = []
     days: list[tuple] = []
+    _sow: dict = {}     # start-of-day weight (report layer: week-0 opening)
     cur_date = forecast_start
     while cur_date < forecast_end:
         dsi = (cur_date - input_date).days
+        _sow[cur_date] = cur_weight
         cull_count_today = 0.0
         cull_biomass_today = 0.0
         cull_pct_today = 0.0
@@ -1227,8 +1237,21 @@ def project_in_flight_fw_batch(
             close_avg_weight_g=last[4],
             close_biomass_kg=last[11],
             mort_count_week=sum(d[14] for d in days_in_w),
+            open_avg_weight_pre_g=_sow.get(days_in_w[0][0], days_in_w[0][4]),
+            feed_kg_by_type=_feed_by_type_days(days_in_w),
         ))
     return out, residuals, splits
+
+
+def _feed_by_type_days(days_in_w) -> dict:
+    """{feed type: kg} over a week's daily series, each day's feed booked to
+    that DAY's size-band type (days tuple: [9] feed kg, [10] feed type).
+    Report layer only (BatchWeekState.feed_kg_by_type)."""
+    out: dict = {}
+    for d in days_in_w:
+        if d[9]:
+            out[d[10]] = out.get(d[10], 0.0) + d[9]
+    return out
 
 
 # ---------- orchestrator ----------

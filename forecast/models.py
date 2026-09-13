@@ -594,3 +594,16 @@ class BatchWeekState:
     # so Count_Check reconciles across weeks where the mortality table steps
     # mid-week (early FW) — the end-of-week rate over/under-counts the real loss.
     mort_count_week: float = 0.0
+    # ADDITIVE (2026-09-12, numbers sandbox) -- report-layer fields, read by no
+    # planner module. `open_avg_weight_g` above is the weight after the first
+    # simulated day's GROWTH (the day's closing weight); manual_window reads it
+    # as a fallback weight, so it is left exactly as it is. The ledger's
+    # week-0 opening needs the weight BEFORE that day's growth -- the PR's own
+    # closing weight for an in-flight batch -- or week 0 opens one day of
+    # growth heavy (+23 t on the 8/31 PR) and its FCR reads ~7/6 high.
+    open_avg_weight_pre_g: float = 0.0
+    # Feed kg per feed TYPE over the week's days, each day typed by its own
+    # size band. `feed_type` above is the END-of-week type; booking the whole
+    # week's feed to it billed every band-crossing week's early days to the
+    # larger type (a1: 367 t of freshwater feed in 109 crossing weeks).
+    feed_kg_by_type: Optional[dict] = None

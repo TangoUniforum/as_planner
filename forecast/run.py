@@ -255,6 +255,16 @@ def main(
             print(f"    {system:>5}: {info['biomass_kg']:>10,.0f} kg, "
                   f"{info['count']:>10,.0f} fish across {info['units']} units "
                   f"in batches {sorted(info['batches'])}")
+    # PR fish no tank receives (a fish group without a Bnn id, a batch roll-up
+    # its Unit rows do not hold): named in the ValidationLog, so a forecast
+    # opening that differs from the PR's own total is never silent. Detection
+    # only -- what is hydrated is unchanged (production_report.
+    # pr_structure_warnings).
+    try:
+        from .production_report import pr_structure_warnings as _pr_struct
+        hydration_warns.extend(_pr_struct(_pr_sheet(wb)))
+    except Exception as _prs_err:                                  # noqa: BLE001
+        hydration_warns.append(f"PR NOT HYDRATED - check failed: {_prs_err!r}")
     for w in hydration_warns:
         print(f"  WARN: {w}")
     # Pass the 6N mode explicitly: R8 exempts 6N only WHILE IT PURGES,
@@ -1201,6 +1211,7 @@ def main(
     write_batch_plan(
         wb, placement.batch_locations, placement.harvest_events,
         default_hog_yield=control.default_hog_yield,
+        tranog_events=placement.tranog_events,
     )
     # Realized-lifespan biology states (FW/EGG biomass + feed for the FW-inclusive
     # report corrections). Defined here so the Advisory can use it too.
@@ -1281,7 +1292,41 @@ def main(
         _window_labels = frozenset()
     _realized_warns = realized_plan_audit(
         placement.harvest_events, placement.transfer_events,
-        facility_limits, control, window_weeks=_window_labels)
+        facility_limits, control, window_weeks=_window_labels,
+        # Every week the realized plan covers, so a week with NO harvest at all
+        # is judged (and named) too -- not only weeks that had an event.
+        plan_weeks=sorted({r.week_label for r in placement.batch_locations}))
+
+    # PLAN ENDS EARLY (detection only). The realized loop walks the weeks the
+    # projection has load for, so once the projection runs out of batches the
+    # plan simply stops -- 11 of 85 horizon weeks on the 2026-02-28 era run,
+    # with 7,128 fish / 37,762 kg still in tank 63 and no line anywhere. Named
+    # here when the last realized week is before the horizon's last week AND
+    # fish are still in tanks then. Nothing below feeds the planner.
+    _plan_end_notes: list = []
+    try:
+        _bl_wks = sorted({r.week_label for r in placement.batch_locations})
+        _hz = forecast_week_labels(fs_date, control.horizon_weeks)
+        if _bl_wks and _hz and _bl_wks[-1] < _hz[-1]:
+            _last = _bl_wks[-1]
+            _left = [r for r in placement.batch_locations
+                     if r.week_label == _last and (r.count or 0) > 0]
+            if _left:
+                _missing = sum(1 for w in _hz if w > _last)
+                _plan_end_notes.append(
+                    f"PLAN ENDS EARLY - the realized plan stops at {_last}, "
+                    f"{_missing} week(s) before the horizon's last week "
+                    f"{_hz[-1]} (horizon_weeks={control.horizon_weeks}), with "
+                    f"{sum(r.count for r in _left):,.0f} fish "
+                    f"({sum(r.biomass_kg for r in _left):,.0f} kg) still in "
+                    f"{len({r.tank_id for r in _left})} tank(s). The planner "
+                    f"walks only weeks its projection has load for, so no "
+                    f"sheet covers the remaining weeks and those fish are "
+                    f"never harvested in this run.")
+    except Exception as _pe_err:                                   # noqa: BLE001
+        _plan_end_notes = [f"PLAN ENDS EARLY - check failed: {_pe_err!r}"]
+    for _m in _plan_end_notes:
+        print(f"  WARN: {_m}")
 
     # PER-WEEK COVERAGE. A metric the operator steers week by week, whose rows
     # STOP before the horizon ends, hands the remaining weeks a number nobody
@@ -1358,7 +1403,8 @@ def main(
         invariant_warnings=(list(hydration_warns) + list(inv_warns)
                             + list(manual_warns) + list(fw_calib_warns)
                             + _guide_notes + _realized_warns
-                            + _coverage_notes + split_warns + _sb_lines),
+                            + _coverage_notes + split_warns + _sb_lines
+                            + _plan_end_notes),
         placed_batches={r.batch_id for r in placement.batch_locations},
     )
     write_daily_harvest_schedule(
@@ -1380,6 +1426,7 @@ def main(
         default_hog_yield=control.default_hog_yield, hog_overrides=facility_hog_overrides,
         sixn_move_in_feed=getattr(placement, "sixn_move_in_feed", None),
         biology_states_by_batch=rl_states_by_batch,
+        report_start=report_start, pr_period=_pr_period,
     )
     write_feed_forecast_weekly(
         wb, placement.batch_locations, rl_states_by_batch, fs_date, tables, batch_by_id,
@@ -1389,6 +1436,15 @@ def main(
         sixn_move_in_feed=getattr(placement, "sixn_move_in_feed", None),
         report_start=report_start)
     all_states = _to_realized_lifespan(states + in_flight_states)
+    # The PR-hydrated seawater opening per batch (the same anchor the
+    # continuity audits open from). The ledgers use it only for a batch with
+    # nothing else to open on -- a PR batch missing from batches.yaml.
+    _pr_openings: dict = {}
+    for _t in audit_initial_state.tanks_by_id.values():
+        if _t.batch_id and (_t.count or 0) > 0:
+            _e = _pr_openings.setdefault(_t.batch_id, [0.0, 0.0])
+            _e[0] += float(_t.count)
+            _e[1] += float(_t.biomass_kg or 0.0)
     write_weekly_report(
         wb, placement.batch_locations, placement.harvest_events, all_states,
         transfer_events=placement.transfer_events, batches=batch_by_id, tables=tables,
@@ -1415,7 +1471,8 @@ def main(
         # An auto-modelled split's FW track (split_batch.py): its FW feed,
         # mortality and crossing cull, and the fish that cross.
         split_fw=_sb_fw_states or None,
-        sixn_move_in_feed=getattr(placement, "sixn_move_in_feed", None))
+        sixn_move_in_feed=getattr(placement, "sixn_move_in_feed", None),
+        pr_openings=_pr_openings)
     write_monthly_report(
         wb, placement.batch_locations, placement.harvest_events, all_states,
         transfer_events=placement.transfer_events, batches=batch_by_id, tables=tables,
@@ -1448,7 +1505,7 @@ def main(
         fw_projected=fw_projected_ids,
         split_fw=_sb_fw_states or None,
         sixn_move_in_feed=getattr(placement, "sixn_move_in_feed", None),
-        pr_period=_pr_period)
+        pr_period=_pr_period, pr_openings=_pr_openings)
     write_reconciliation_report(
         wb,
         placement.batch_locations,
@@ -1532,7 +1589,8 @@ def main(
 
     write_facility_map(wb, placement.batch_locations, facility,
                        batches=batch_by_id, tables=tables,
-                       biology_states_by_batch=rl_states_by_batch)
+                       biology_states_by_batch=rl_states_by_batch,
+                       control=control)
 
     # Config snapshot: embed the exact app-managed config + scenario this
     # run used into the output workbook, so the saved file is a complete,

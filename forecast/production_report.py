@@ -175,6 +175,87 @@ def parse_pr_worksheet(
     return closing_date, og_records, fw_records
 
 
+def pr_structure_warnings(ws) -> list[str]:
+    """ValidationLog lines for ProductionReport fish that hydration does NOT
+    load into any tank. Detection only -- nothing here changes what is
+    hydrated (the seeding rule is an engine decision, see engine_patches).
+
+    parse_pr_worksheet builds tank records from `Unit:` rows under a
+    `Fish group` row that carries a Bnn id. Two things therefore fall out
+    silently: (1) a fish group whose name has no Bnn id (2024-11-30 PR: '35A'
+    and '35B', 251,701 seawater fish -- a console WARN, no ValidationLog line,
+    and the planner sees those tanks empty); (2) fish recorded on a BATCH
+    roll-up row that its Unit rows do not hold (B41 449,643, B42 447,248, B43
+    469,134 with zero Unit rows -- the forecast opens them from the scenario's
+    projection instead). The PR facility total and the week-0 opening then
+    differ by up to 30% with no trace. Each case gets a line, plus one line
+    comparing the PR's facility closing count with the fish hydrated.
+
+    Layout read the same way parse_pr_worksheet reads it: the Closing Month
+    row carries the facility closing count in column 7; a Fish group row
+    carries the group's closing count in column 7; Unit rows under it carry
+    each unit's."""
+    groups: list = []                  # [label, bnn or None, group_count, units]
+    facility_close = None
+    for row in ws.iter_rows(values_only=True):
+        if not row:
+            continue
+        c1 = row[0] if len(row) > 0 else None
+        if isinstance(c1, str) and "Closing Month" in c1:
+            v = row[6] if len(row) > 6 else None
+            if isinstance(v, (int, float)):
+                facility_close = float(v)
+            continue
+        c3 = row[2] if len(row) > 2 else None
+        if isinstance(c3, str) and "Fish group" in c3:
+            m = re.search(r"B\d+", c3)
+            v = row[6] if len(row) > 6 else None
+            groups.append([c3.split(":", 1)[-1].strip(),
+                           m.group(0) if m else None,
+                           float(v) if isinstance(v, (int, float)) else 0.0, []])
+            continue
+        c4 = row[3] if len(row) > 3 else None
+        if isinstance(c4, str) and "Unit" in c4 and groups:
+            v = row[6] if len(row) > 6 else None
+            if isinstance(v, (int, float)) and v > 0:
+                groups[-1][3].append((c4.replace("Unit:", "").strip(), float(v)))
+    out: list[str] = []
+    hydrated = 0.0
+    for label, bnn, g_count, units in groups:
+        u_sum = sum(c for _u, c in units)
+        if bnn is None:
+            fish = u_sum if units else g_count
+            if fish > 0.5:
+                out.append(
+                    f"PR NOT HYDRATED - fish group '{label}' has no Bnn batch "
+                    f"id: {fish:,.0f} fish in {len(units)} unit(s) "
+                    f"({', '.join(u for u, _c in units) or 'none'}) are not "
+                    f"loaded into any tank, so the planner sees those tanks "
+                    f"empty. Rename the group to its batch (e.g. B35) in the "
+                    f"ProductionReport, or add the batch, to model them.")
+            continue
+        hydrated += u_sum
+        if abs(g_count - u_sum) > 0.5:
+            out.append(
+                f"PR NOT HYDRATED - {bnn}: its batch row closes at "
+                f"{g_count:,.0f} fish but its Unit rows hold {u_sum:,.0f} "
+                f"({len(units)} unit(s)): {g_count - u_sum:+,.0f} fish are on "
+                f"the batch row only and are not loaded into any tank. The "
+                f"forecast opens {bnn}'s tanks from the Unit rows"
+                + (" (none), so a freshwater batch starts from its scenario "
+                   "projection instead" if not units else "") + ".")
+    if facility_close is not None and abs(facility_close - hydrated) > 0.5:
+        out.append(
+            f"PR NOT HYDRATED - facility: the ProductionReport closes at "
+            f"{facility_close:,.0f} fish; its Unit rows under Bnn batches hold "
+            f"{hydrated:,.0f} ({hydrated - facility_close:+,.0f}, "
+            f"{(hydrated - facility_close) / facility_close * 100.0:+.1f}%). "
+            f"The forecast's opening is built from those Unit rows (and the "
+            f"scenario's projection for batches with none), so it does not "
+            f"equal the PR's own total.")
+    return out
+
+
 _PR_CANON = "productionreport"
 
 

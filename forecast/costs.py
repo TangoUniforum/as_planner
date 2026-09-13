@@ -441,6 +441,18 @@ def year_weeks_fixed_months(yread) -> float:
         raise ValueError(f"year {year}: first week {first!r} and {weeks} "
                          f"week(s) do not lie inside the year's {n} ISO "
                          f"weeks")
+    # A run that opens AFTER the first week's Monday (a Tuesday forecast
+    # start) covers only the days from its opening: charge from that day, the
+    # day the CostsAndProfit sheet charges from, so the two surfaces charge
+    # the same days (USER_GUIDE §15). Charging from the Monday added one day
+    # the forecast does not cover on the 8/31 PR (fixed_monthly/31).
+    first_day = getattr(yread, "first_day", None)
+    if first_day is not None and weeks > 0:
+        monday = dt.date.fromisocalendar(int(m[1]), int(m[2]), 1)
+        fd = first_day.date() if isinstance(first_day, dt.datetime) else first_day
+        if monday < fd <= monday + dt.timedelta(days=6):
+            return fixed_months_between(
+                fd, monday + dt.timedelta(days=7 * weeks - 1))
     return iso_weeks_fixed_months(first, weeks)
 
 

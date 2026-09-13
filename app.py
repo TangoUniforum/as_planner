@@ -4749,40 +4749,72 @@ def _forecast_months():
     try:
         t = _ana.load_targets(CONFIG_DIR)
         rows = _ana.harvest_rows(res["output_path"])
+        # The report's opening date: the first week belongs to the first month
+        # the report covers (the workbook's own rule), not its Monday's month.
+        _rs = _result_report_start(res)
         monthly, _y = _ana.harvest_by_period(
-            rows, basis=(t or {}).get("basis", "hog"))
+            rows, basis=(t or {}).get("basis", "hog"), clip_start=_rs)
         weeks = sorted({r.get("week") for r in rows if r.get("week")})
-        partial = _hp.partial_months(_hp.build_rows(monthly, t, weeks, {}))
-        monthly = dict(monthly)
-        # BASIS. harvest_by_period returns HOG kg unless the targets say
-        # gross; read_pr_period gives GROSS kg. Adding them straight made the
-        # first month read 669 t against an honest hog figure of ~592 t —
-        # a 13% overstatement on the month a target is most likely set against.
-        _basis = (t or {}).get("basis", "hog")
-        stitched = _pr_month_to_date_kg()
-        if stitched and _basis == "hog":
-            from forecast.config_io import load_control as _lc
-            _yield = float(getattr(_lc(CONFIG_DIR), "default_hog_yield", 0.0)
-                           or 0.0)
-            # No yield configured -> do NOT guess. Stitching gross into a hog
-            # column would overstate the month; showing the forecast tail alone
-            # merely understates it, and the caption says which you are seeing.
-            stitched = stitched * _yield if _yield > 0 else 0.0
-        first = min(monthly) if monthly else None
-        # ...and it must be credited to the PR's OWN month. A forecast whose
-        # first harvest month is later than the PR's closing month would
-        # otherwise receive another month's fish.
-        _pr = st.session_state.get("_pr") or {}
-        _cl = _pr.get("closing")
-        _pr_month = ("%04d-%02d" % (_cl.year, _cl.month)) if _cl else None
-        if first and stitched and _pr_month and first != _pr_month:
-            stitched = 0.0
+        partial = _hp.partial_months(_hp.build_rows(monthly, t, weeks, {},
+                                                    clip_start=_rs))
+        monthly, stitched, first = _stitch_pr_month(
+            monthly, (t or {}).get("basis", "hog"))
         if first and stitched:
-            monthly[first] = monthly.get(first, 0.0) + stitched
             partial = set(partial) - {first}      # now a WHOLE month
         return sorted(monthly), monthly, partial, stitched
     except Exception:                                        # noqa: BLE001
         return [], {}, set(), 0.0
+
+
+def _result_report_start(res):
+    """The date `res`'s report opens (its PR closing + 1), read once from the
+    output workbook (analysis.report_start_of) and kept with the result. None
+    when it cannot be read -- the month rule then falls back to the plain ISO
+    Monday, exactly as before."""
+    if not res or not res.get("output_path"):
+        return None
+    key = str(res.get("output_path"))
+    got = res.get("_report_start")
+    if not (isinstance(got, dict) and got.get("path") == key):
+        from forecast import analysis as _ana
+        got = {"path": key, "rs": _ana.report_start_of(key)}
+        res["_report_start"] = got
+    return got["rs"]
+
+
+def _stitch_pr_month(monthly: dict, basis: str):
+    """(monthly, stitched kg, first month): the ProductionReport's elapsed-
+    month harvest added to the FIRST month, when that month is the PR's own
+    (a mid-month PR). The ONE stitch every target surface uses -- the Decide
+    editor, the harvest-plan panel and the Decide/Analyze grade -- so a
+    September target is judged on one September (it was 738.8 t in Decide and
+    563.2 t in Analyze on the 9.10 PR)."""
+    monthly = dict(monthly)
+    # BASIS. harvest_by_period returns HOG kg unless the targets say
+    # gross; read_pr_period gives GROSS kg. Adding them straight made the
+    # first month read 669 t against an honest hog figure of ~592 t —
+    # a 13% overstatement on the month a target is most likely set against.
+    stitched = _pr_month_to_date_kg()
+    if stitched and basis == "hog":
+        from forecast.config_io import load_control as _lc
+        _yield = float(getattr(_lc(CONFIG_DIR), "default_hog_yield", 0.0)
+                       or 0.0)
+        # No yield configured -> do NOT guess. Stitching gross into a hog
+        # column would overstate the month; showing the forecast tail alone
+        # merely understates it, and the caption says which you are seeing.
+        stitched = stitched * _yield if _yield > 0 else 0.0
+    first = min(monthly) if monthly else None
+    # ...and it must be credited to the PR's OWN month. A forecast whose
+    # first harvest month is later than the PR's closing month would
+    # otherwise receive another month's fish.
+    _pr = st.session_state.get("_pr") or {}
+    _cl = _pr.get("closing")
+    _pr_month = ("%04d-%02d" % (_cl.year, _cl.month)) if _cl else None
+    if first and stitched and _pr_month and first != _pr_month:
+        stitched = 0.0
+    if first and stitched:
+        monthly[first] = monthly.get(first, 0.0) + stitched
+    return monthly, (stitched if first else 0.0), first
 
 
 def _pr_month_to_date_kg() -> float:
@@ -4850,25 +4882,19 @@ def _harvest_plan_panel():
     try:
         rows_h = _ana.harvest_rows(res["output_path"])
         t = _ana.load_targets(CONFIG_DIR)
+        _rs = _result_report_start(res)
         monthly, _yearly = _ana.harvest_by_period(
-            rows_h, basis=(t or {}).get("basis", "hog"))
+            rows_h, basis=(t or {}).get("basis", "hog"), clip_start=_rs)
         from forecast.config_io import load_control
         from forecast.scenario_io import load_limits
         _fl, _sl = load_limits(SCENARIO_DIR, load_control(CONFIG_DIR))
         weeks = sorted({r.get("week") for r in rows_h if r.get("week")})
         # Stitch the ProductionReport's elapsed-month actuals exactly as
-        # _forecast_months does, or this panel calls the first month "partial"
-        # while the editor beside it calls the same month whole.
-        _st_kg = _pr_month_to_date_kg()
-        if _st_kg and (t or {}).get("basis", "hog") == "hog":
-            from forecast.config_io import load_control as _lc2
-            _y2 = float(getattr(_lc2(CONFIG_DIR), "default_hog_yield", 0.0) or 0.0)
-            _st_kg = _st_kg * _y2 if _y2 > 0 else 0.0
-        monthly = dict(monthly)
-        _first = min(monthly) if monthly else None
-        if _first and _st_kg:
-            monthly[_first] = monthly.get(_first, 0.0) + _st_kg
-        rows = _hp.build_rows(monthly, t, weeks, _fl.overrides)
+        # _forecast_months does (the SAME helper), or this panel calls the
+        # first month "partial" while the editor beside it calls it whole.
+        monthly, _st_kg, _first = _stitch_pr_month(
+            monthly, (t or {}).get("basis", "hog"))
+        rows = _hp.build_rows(monthly, t, weeks, _fl.overrides, clip_start=_rs)
         if _first and _st_kg:
             rows = [r for r in rows]        # keep order; first month is whole now
     except Exception as e:                                   # noqa: BLE001
@@ -6569,6 +6595,7 @@ def _ideal_reference(ctx, today, cap_t):
     st.markdown(f"#### Engine answer, steady year {r['year']}: "
                 + ("within every limit ✅" if ok
                    else "**breaks the limits** ❌ — see the checks"))
+    st.caption(_IDEAL_YEAR_BASIS_NOTE)
     m = st.columns(6)
     m[0].metric("HOG / yr", f"{y.hog_t:,.0f} t",
                 help="Head-on-gutted tonnes harvested in the steady third "
@@ -6848,6 +6875,22 @@ def _ideal_tr_cash_note(today_reads, plan_reads, plan="this plan"):
             "run ends carry their eggs and feed but none of their sales"
             + stock + ", so Profit favours smaller future batches — weigh it "
             "against the stock left at the end.")
+
+
+# Which days a "year" covers on the Ideal page. Its figures are read per ISO
+# LABEL-year (forecast.ideal_engine.read_workbook: the weeks YYYY-W01 ..
+# W52/53, Monday to Sunday), while the Run workbook's YearlySummary and
+# CostsAndProfit use CALENDAR years -- so the same "2029" can differ by one
+# boundary week (step 3 today, 2029: 7,103 t HOG here, 7,202 t on the sheet).
+# Said on the page, not changed: switching the Ideal page to calendar years
+# would move every Ideal figure, and that is the operator's call.
+_IDEAL_YEAR_BASIS_NOTE = (
+    "A year on this page is its ISO weeks YYYY-W01 to W52 (or W53), Monday "
+    "to Sunday — the basis every Ideal figure, check and cost is read on. The "
+    "Run workbook's YearlySummary and CostsAndProfit use calendar years (1 Jan "
+    "to 31 Dec), so the same year can differ by one boundary week between the "
+    "two. The effect year is the first such ISO year that starts on or after "
+    "the date named.")
 
 
 def _ideal_ref_cost_metrics(y, pricing, econ_sig=None):
@@ -8636,6 +8679,7 @@ def _ideal_transition(ctx, today, cap_slider_t=None):
         "budget, the harvest floor, a week with no harvest and the biomass "
         "cap. A ✗ year is not a real result: its tonnage prices fish the "
         "facility could not carry, feed, handle or land within its limits.")
+    st.caption(_IDEAL_YEAR_BASIS_NOTE)
 
     if not both:
         st.error("**The two runs share no year**, so there is nothing to "
@@ -11158,11 +11202,17 @@ _BATCH_TIER_ORDER = ["Nursery (OG1/2)", "Grow-out OG3", "Grow-out OG4",
                      "Grow-out OG5", "Finishing OG6", "Finishing/depuration OG6N"]
 
 
-def _derive_batch_plans(bl_df, he_df):
+def _derive_batch_plans(bl_df, he_df, sw_entry=None):
     """Per-batch journey from BatchLocations (+ HarvestPlan): a summary header plus
     the milestone timeline (the tier transitions each batch makes, when, at what
     weight/tanks, through to harvest). Pure derivation from data already in the
-    output workbook — the 'where each batch is + how it got there' traceability."""
+    output workbook — the 'where each batch is + how it got there' traceability.
+
+    Mirrors the workbook's Batch Plan sheet: a batch harvested out whole in the
+    first week (no BatchLocations row) still gets a plan, the Harvest weight is
+    FISH-WEIGHTED (total live kg / fish), and `sw_entry` {batch: label} -- the
+    TransferTemplate SW_Entry_Week, the rule both sheets share -- names the
+    seawater entry when given."""
     plans = []
     if bl_df is None or bl_df.empty:
         return plans
@@ -11173,9 +11223,26 @@ def _derive_batch_plans(bl_df, he_df):
     if he_df is not None and not he_df.empty:
         for b, g in he_df.groupby("Batch"):
             wks = sorted(str(w) for w in g["Week"])
+            _n = float(pd.to_numeric(g["Count"], errors="coerce").fillna(0).sum())
+            _kg = float(pd.to_numeric(g["Gross_kg"], errors="coerce").fillna(0).sum())
             hv[str(b)] = {"first": wks[0], "last": wks[-1],
                           "hog_t": float(g["HOG_kg"].sum()) / 1000.0,
-                          "avg_wt": float(pd.to_numeric(g["Avg_wt_kg"], errors="coerce").mean())}
+                          "avg_wt": (_kg / _n) if _n > 0 else float("nan")}
+    for b in sorted_batches(set(hv) - {str(x) for x in bl["Batch"].unique()}):
+        # Harvested out before the first week's closing snapshot: no tank row.
+        h = hv[b]
+        plans.append({"Batch": b,
+                      "SW_entry": (sw_entry or {}).get(
+                          b, "— (no tank week: harvested out in the first week)"),
+                      "Peak_tanks": 0,
+                      "Harvest_window": f"{h['first']}–{h['last']}",
+                      "HOG_t": round(h["hog_t"], 0),
+                      "milestones": [{"Week": f"{h['first']}–{h['last']}",
+                                      "Event": "Harvest", "Systems": "→ harvest",
+                                      "AvgWt (kg)": (round(h["avg_wt"], 2)
+                                                     if h["avg_wt"] == h["avg_wt"]
+                                                     else None),
+                                      "Tanks": None}]})
     for b, g in bl.groupby("Batch"):
         g = g.sort_values("Week")
         weeks = list(dict.fromkeys(g["Week"]))
@@ -11206,7 +11273,9 @@ def _derive_batch_plans(bl_df, he_df):
             milestones.append({"Week": f"{h['first']}–{h['last']}", "Event": "Harvest",
                                "Systems": "→ harvest",
                                "AvgWt (kg)": round(h["avg_wt"], 2), "Tanks": None})
-        plans.append({"Batch": str(b), "SW_entry": weeks[0] if weeks else "—",
+        plans.append({"Batch": str(b),
+                      "SW_entry": ((sw_entry or {}).get(str(b))
+                                   or (weeks[0] if weeks else "—")),
                       "Peak_tanks": peak_tanks,
                       "Harvest_window": (f"{h['first']}–{h['last']}" if h else "—"),
                       "HOG_t": round(h["hog_t"], 0) if h else 0.0,
@@ -11327,16 +11396,26 @@ def _transfer_plan_rows(out_path) -> list[dict]:
         wb.close()
 
 
-def _daily_harvest_table(he_df):
+def _daily_harvest_table(he_df, report_start=None):
     """Per-day (Mon–Fri) breakout of the WEEK's total harvest for the Harvest tab.
 
     All tanks harvesting in the same ISO week are COMBINED into one block: their
-    count + biomass are summed and split evenly across the five operating days,
+    count + biomass are summed and split evenly across the week's operating days,
     with blended average weights (total biomass ÷ total fish), a **Total** row,
     and a blank row before the next week. The Tank/Batch columns list every tank
     and batch that contributed. Returns (DataFrame, {total-row positions},
-    {blank-row positions}) so the caller can shade the totals."""
+    {blank-row positions}) so the caller can shade the totals.
+
+    SAME AS THE SHEET (2026-09-12): the days are time_grid.harvest_schedule_days
+    -- Mon-Fri minus any day before `report_start` (the day after the PR
+    closes), the rule the Daily Harvest Schedule sheet uses -- and the week is
+    split with excel_io.whole_parts, so the day rows add up to the Total row.
+    This table used to list all five days (a harvest on 2026-08-31, the day
+    before the 8/31 forecast opens) while the sheet it says it matches listed
+    four."""
     import datetime as _dt
+    from forecast.excel_io import whole_parts as _whole_parts
+    from forecast.time_grid import harvest_schedule_days as _hsd
     cols = ["Week", "Date", "Tank", "Batch", "Count", "Live kg",
             "Avg live (kg)", "HOG kg", "Avg HOG (kg)"]
     rows: list[dict] = []
@@ -11353,8 +11432,7 @@ def _daily_harvest_table(he_df):
         sub = df[df["Week"] == wk]
         try:
             y, w = int(wk[:4]), int(wk[6:8])
-            days = [_dt.date.fromisocalendar(y, w, 1) + _dt.timedelta(days=i)
-                    for i in range(5)]
+            days = _hsd(_dt.date.fromisocalendar(y, w, 1), report_start)
         except Exception:  # noqa: BLE001 — a non-week label just gets skipped
             continue
         cnt = _num(sub["Count"])
@@ -11368,13 +11446,16 @@ def _daily_harvest_table(he_df):
         bats = (", ".join(sorted_batches(sub["Batch"].dropna().astype(str).unique()))
                 if "Batch" in sub else "")
         n = len(days)
-        for d in days:
+        _dc = _whole_parts([cnt / n] * n)
+        _dg = _whole_parts([gross / n] * n)
+        _dh = _whole_parts([hog / n] * n)
+        for _i, d in enumerate(days):
             rows.append({
                 "Week": wk, "Date": d.strftime("%Y-%m-%d"),
                 "Tank": tanks, "Batch": bats,
-                "Count": f"{round(cnt / n):,}", "Live kg": f"{round(gross / n):,}",
+                "Count": f"{_dc[_i]:,.0f}", "Live kg": f"{_dg[_i]:,.0f}",
                 "Avg live (kg)": f"{live_avg:.2f}",
-                "HOG kg": f"{round(hog / n):,}", "Avg HOG (kg)": f"{hog_avg:.2f}"})
+                "HOG kg": f"{_dh[_i]:,.0f}", "Avg HOG (kg)": f"{hog_avg:.2f}"})
         total_pos.add(len(rows))
         rows.append({
             "Week": wk, "Date": "Total", "Tank": tanks, "Batch": bats,
@@ -11387,84 +11468,64 @@ def _daily_harvest_table(he_df):
 
 
 def _feed_weekly(out_path):
-    """(DataFrame, notes) — whole-facility feed per week against THAT week's cap.
+    """(DataFrame, notes) — whole-facility feed per DAY, week by week, against
+    THAT week's cap: the workbook's own Advisory sheet, `Total_Feed (kg/day)`
+    against `Feed_Limit (kg/day)`.
 
-    Feed is summed from WeeklyReport's per-batch `Feed (kg)`, which is every
-    tank the plan holds, so freshwater and 6N are included rather than only the
-    grow-out systems. The cap is `feed_per_day` resolved per week from the
-    workbook's OWN RunConfig snapshot (falling back to the Control default), so
-    the line drawn here is the limit that run actually planned against — a
-    reused workbook can never be judged against someone else's limits, and the
-    cap genuinely moves (the live scenario drops it to 27,500 kg/day from
-    2026-W37).
-
-    The comparison is per DAY because that is how the constraint is written:
-    a feed system delivers so many kg per day, so a week's total is only
-    meaningful divided by seven.
+    ONE SOURCE (2026-09-12). This tab used to divide WeeklyReport's weekly
+    `Feed (kg)` by 7 and compare that with caps it resolved itself. That weekly
+    total includes the 6N purge move-in's pre-transfer feed -- a TOTAL-feed
+    item, not a per-day rate -- so it was a second definition of "facility feed
+    per day": on one run it showed 9 weeks over the cap where the Advisory (the
+    basis the engine flags REDUCE FEED on, and the optimizer's feed metrics
+    read) shows 6. The Advisory row is the realized end-of-week feeding rate,
+    freshwater (hatchery) included, STARVE (6N purge) tanks at 0, and its limit
+    is the per-week resolved cap the run planned against. The weekly feed
+    TOTAL (with the move-in feed) stays in the WeeklyReport and FeedForecast
+    sheets.
     """
     import openpyxl
-    import yaml
     try:
         wb = openpyxl.load_workbook(out_path, read_only=True, data_only=True)
     except Exception as e:                                     # noqa: BLE001
         return pd.DataFrame(), f"could not open the workbook ({e})"
     try:
-        if "WeeklyReport" not in wb.sheetnames:
-            return pd.DataFrame(), "this workbook has no WeeklyReport sheet"
-        hdr, per_week = None, {}
-        for row in wb["WeeklyReport"].iter_rows(values_only=True):
+        if "Advisory" not in wb.sheetnames:
+            return pd.DataFrame(), "this workbook has no Advisory sheet"
+        hdr, rows = None, []
+        for row in wb["Advisory"].iter_rows(values_only=True):
             if hdr is None:
                 labs = [str(c).strip() if c else "" for c in row]
-                if "Week" in labs and "Batch" in labs:
+                if labs and labs[0] == "Week" and any(
+                        x.startswith("Total_Feed") for x in labs):
                     hdr = labs
                 continue
-            g = (lambda n: row[hdr.index(n)]
-                 if n in hdr and hdr.index(n) < len(row) else None)
-            w, f = g("Week"), g("Feed (kg)")
-            # SKIP THE PER-WEEK TOTAL ROW. WeeklyReport carries a TOTAL row per
-            # week (2026-09-07), which repeats that week's feed in the same
-            # column -- summing it doubles every week's feed against the cap.
-            if str(g("Batch") or "").strip().upper() == "TOTAL":
+            if not row or not str(row[0] or "").startswith("20"):
                 continue
-            if w and isinstance(f, (int, float)):
-                per_week[str(w)] = per_week.get(str(w), 0.0) + float(f)
-        # Per-week caps + the default, from the run's own stamp.
-        caps_by_week, default_cap = {}, 0.0
-        try:
-            from forecast.config_snapshot import read_config_snapshot
-            blocks = read_config_snapshot(wb) or {}
-            ctl = yaml.safe_load(blocks.get("config/control.yaml") or "") or {}
-            default_cap = float(ctl.get("max_feed_per_day_kg") or 0.0)
-            lim = yaml.safe_load(
-                blocks.get("scenario/limits.yaml") or "") or {}
-            for r_ in (lim.get("facility") or []):
-                if r_.get("metric") == "feed_per_day":
-                    caps_by_week[str(r_["week"])] = float(r_["value"])
-        except Exception:                                      # noqa: BLE001
-            pass
+
+            def g(prefix, _r=row, _h=hdr):
+                i = next((j for j, x in enumerate(_h) if x.startswith(prefix)),
+                         None)
+                v = _r[i] if i is not None and i < len(_r) else None
+                return float(v) if isinstance(v, (int, float)) else None
+
+            per_day, cap_day = g("Total_Feed"), g("Feed_Limit")
+            if per_day is None:
+                continue
+            rows.append({
+                "Week": str(row[0]),
+                "Feed (kg/day)": round(per_day),
+                "Cap (kg/day)": round(cap_day) if cap_day else None,
+                "% of cap": (round(per_day / cap_day * 100.0, 1)
+                             if cap_day else None),
+                "Over": ("OVER" if cap_day and per_day > cap_day else ""),
+            })
     finally:
         wb.close()
-    if not per_week:
-        return pd.DataFrame(), "the WeeklyReport carries no Feed (kg) column"
-    rows = []
-    for w in sorted(per_week):
-        kg = per_week[w]
-        cap_day = caps_by_week.get(w, default_cap)
-        per_day = kg / 7.0
-        rows.append({
-            "Week": w,
-            "Feed (kg/week)": round(kg),
-            "Feed (kg/day)": round(per_day),
-            "Cap (kg/day)": round(cap_day) if cap_day else None,
-            "% of cap": (round(per_day / cap_day * 100.0, 1)
-                         if cap_day else None),
-            "Over": ("OVER" if cap_day and per_day > cap_day else ""),
-        })
-    note = ("caps read from the run's own RunConfig snapshot"
-            if caps_by_week else
-            ("no per-week feed caps in this run — showing the Control default"
-             if default_cap else
-             "no feed cap configured, so nothing is drawn to compare against"))
+    if not rows:
+        return pd.DataFrame(), "the Advisory sheet carries no Total_Feed column"
+    note = ("the Advisory sheet's own per-week Feed_Limit, the cap this run "
+            "planned against")
     return pd.DataFrame(rows), note
 
 
@@ -11968,6 +12029,30 @@ _BOARD_LENSES = [
 ]
 
 
+def _board_under_cap(out_path, m, cap_tol) -> bool:
+    """The board's "Under cap" badge: every week's standing biomass within
+    THAT week's cap x `cap_tol`.
+
+    Judged week by week (Advisory Total_Biomass / Biomass_Limit, via
+    analysis.convergence_review -- the same series the Decide "Facility biomass
+    cap" gate reads), not the horizon PEAK over the FIRST week's cap: that flat
+    comparison, retired from the gate, survived here and passed a plan 4.7%
+    over its week's cap (2026-02-28 PR: peak 1.005 x the first week's 3.80M,
+    worst week 1.047 x its 3.65M). The flat form is kept only as the fallback
+    for a workbook with no Advisory series."""
+    _cr = None
+    try:
+        from forecast import analysis as _cap_ana
+        _cr = _cap_ana.convergence_review(out_path)
+    except Exception:                                            # noqa: BLE001
+        _cr = None
+    if _cr and _cr.get("worst_pct") is not None:
+        return float(_cr["worst_pct"]) / 100.0 <= cap_tol
+    if m is None or not getattr(m, "biomass_cap", 0):
+        return True
+    return m.overall_peak_biomass <= m.biomass_cap * cap_tol
+
+
 def _board_score(out_path):
     """Metrics + HARD-GATE status for one method's output workbook. Gates are
     pass/fail badges shown on every method; a method that fails Conserves or
@@ -12003,7 +12088,7 @@ def _board_score(out_path):
     # cap, not over it; only a material overshoot fails. Tolerance = the band + margin.
     dev = float(_cfg.get("facility_biomass_deviation_pct", 0.005) or 0.005)
     cap_tol = 1.0 + max(dev, 0.005) + 0.01
-    under_cap = (m.overall_peak_biomass <= m.biomass_cap * cap_tol) if m.biomass_cap else True
+    under_cap = _board_under_cap(out_path, m, cap_tol)
     gates = {
         "Conserves": verdict["gate"] != "FAIL",
         "Fully placed": verdict.get("unplaced_batches", 0) == 0,
@@ -12569,16 +12654,30 @@ def _ana_grade(res, targets, econ):
                    f"({cached['err']}) — targets/revenue unavailable for it.")
     rows = cached["rows"]
     tr = None
+    # The report's opening date: the first week is graded in the first month
+    # the report covers (the workbook's rule), not its Monday's month -- the
+    # 8/31 PR's September read 572.5 t here against 644.6 t on the sheets.
+    _rs = _result_report_start(res)
     if targets:
         monthly, yearly = _ana.harvest_by_period(
-            rows, basis=targets.get("basis", "hog"))
+            rows, basis=targets.get("basis", "hog"), clip_start=_rs)
+        # The PR's elapsed-month harvest, stitched exactly as the Decide
+        # target editor stitches it (_stitch_pr_month), so one September is
+        # graded everywhere; its year gets the same fish.
+        monthly, _stk, _first = _stitch_pr_month(
+            monthly, targets.get("basis", "hog"))
+        if _first and _stk:
+            yearly = dict(yearly)
+            yearly[_first[:4]] = yearly.get(_first[:4], 0.0) + _stk
         # Pass the REAL horizon, not one inferred from harvest: a stale target
         # left in targets.yaml from an earlier cycle would otherwise be graded
         # 0-vs-target and counted as a miss the plan never had a chance at.
         tr = _ana.review_targets(
             monthly, yearly, targets,
-            horizon_weeks=_ana.plan_weeks(res["output_path"]))
-    rev = _ana.revenue_for(rows, econ) if (econ and rows) else None
+            horizon_weeks=_ana.plan_weeks(res["output_path"]),
+            clip_start=_rs)
+    rev = (_ana.revenue_for(rows, econ, clip_start=_rs)
+           if (econ and rows) else None)
     dcached = res.get("_ana_density")
     if not dcached or dcached.get("rid") != rid or dcached.get("schema") != _schema:
         dcached = {"rid": rid, "schema": _schema,
@@ -13949,6 +14048,11 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
         pd.DataFrame(r["harvest_events"]) if r["harvest_events"] else pd.DataFrame()))
     bio_df = _rv_memo("bio_df", _rid,
                       lambda: pd.DataFrame(r.get("biology_projection", [])))
+    # The date this run's REPORT opens (its PR closing + 1), read from the
+    # workbook: the Harvest tab's months and daily table clip on it, as the
+    # workbook's own sheets do.
+    _run_rs = _rv_memo("report_start", _rid,
+                       lambda: _result_report_start(r))
 
     # Weeks that plan on a Control default because the dated per-week rows
     # stop early. The run files it as an INFO row in the ValidationLog; it is
@@ -14001,12 +14105,17 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
                               yaxis_title="kg/day")
             st.plotly_chart(fig, use_container_width=True)
             st.caption(
-                f"Feed is summed from every tank the plan holds — freshwater "
-                f"and 6N included, not just grow-out — and compared PER DAY, "
-                f"because that is how the limit is written. The dotted line is "
-                f"each week's own cap ({_fnote}). A week over the line is one "
-                f"the feed system cannot deliver as planned; the checklist's "
-                f"per-system feed gate breaks the same overage down by system.")
+                f"The workbook's **Advisory** sheet, row for row: the realized "
+                f"feeding rate of every tank the plan holds (freshwater "
+                f"hatchery included; 6N purge tanks eat nothing) in kg per "
+                f"DAY, because that is how the limit is written — the same "
+                f"figure the run flags REDUCE FEED on. The dotted line is each "
+                f"week's own cap ({_fnote}). A week over the line is one the "
+                f"feed system cannot deliver as planned; the checklist's "
+                f"per-system feed gate judges each system against its own "
+                f"limit. The weekly feed TOTALS (which also count the 6N "
+                f"move-in fish's pre-transfer feed) are in the WeeklyReport "
+                f"and FeedForecast sheets.")
             if len(_over):
                 st.warning(
                     f"{len(_over)} week(s) plan more feed than the facility can "
@@ -14167,8 +14276,19 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
                 )
                 fig.add_hline(y=100, line_dash="dash", line_color="red",
                               annotation_text="100% (cap)")
-                fig.add_hline(y=85, line_dash="dot", line_color="orange",
-                              annotation_text="85% target")
+                # The planner's own `density_target_pct` (Control), read the
+                # way the Per-Batch density chart reads it. A literal 85 here
+                # drew the target 5 points below the 90% the planner aims at.
+                _sys_dt = 0.90
+                try:
+                    from forecast.config_io import load_control as _lc_sys
+                    _sys_dt = float(getattr(_lc_sys(CONFIG_DIR),
+                                            "density_target_pct", 0.90) or 0.90)
+                except Exception:  # noqa: BLE001
+                    pass
+                fig.add_hline(y=_sys_dt * 100.0, line_dash="dot",
+                              line_color="orange",
+                              annotation_text=f"{_sys_dt * 100:.0f}% target")
                 fig.update_layout(height=380, yaxis_title="% of cap",
                                   legend=dict(title="System"))
                 st.plotly_chart(fig, use_container_width=True)
@@ -14547,13 +14667,16 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
             st.plotly_chart(fig, use_container_width=True)
 
             # Monthly rollup (sales planning): HOG tonnes + count per calendar
-            # month, derived from each event's ISO week.
-            import datetime as _dt
+            # month, derived from each event's ISO week by the workbook's own
+            # rule (analysis.week_to_month with the report's opening date): a
+            # first week whose Monday precedes the report is booked to the
+            # report's first month. A copy of the plain Monday rule here
+            # charted a 72 t "August" bar for a forecast opening 2026-09-01.
+            from forecast import analysis as _ana_hm
 
             def _wk_to_month(wk):
                 try:
-                    y, w = int(str(wk)[:4]), int(str(wk)[6:8])
-                    return _dt.date.fromisocalendar(y, w, 1).strftime("%Y-%m")
+                    return _ana_hm.week_to_month(str(wk), _run_rs)
                 except Exception:
                     return None
 
@@ -14603,13 +14726,15 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
             st.markdown("**Daily harvest schedule (Mon–Fri)**")
             st.caption(
                 "**All tanks harvesting in a week are combined**, then split "
-                "evenly across the five operating days (Mon–Fri), with a **Total** "
+                "evenly across the week's operating days (Mon–Fri, never a day "
+                "before the report opens), with a **Total** "
                 "row per week and a blank line between weeks. Tank/Batch list every "
                 "tank + batch that contributed; average weights are blended (total "
                 "biomass ÷ total fish). Same as the Excel 'Daily Harvest Schedule' "
                 "sheet.")
             _dh, _totpos, _blankpos = _rv_memo(
-                "harvest_daily", _rid, lambda: _daily_harvest_table(he_df))
+                "harvest_daily", _rid,
+                lambda: _daily_harvest_table(he_df, _run_rs))
             if _dh.empty:
                 st.info("No datable harvest events for a daily breakout.")
             else:
@@ -14714,8 +14839,13 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
         # ---- Per-batch plan: where each batch is + how it got there ----
         st.divider()
         st.subheader("Per-batch plan — journey + milestones")
+        # SW entry per batch from TransferTemplate §B (the rule the Batch Plan
+        # sheet shares), so this view and both sheets name the same week.
+        _sw_map = {str(p.get("Batch")): p.get("SW_Entry_Week")
+                   for p in (r.get("plan_summary") or [])
+                   if p.get("Batch") and p.get("SW_Entry_Week")}
         bplans = _rv_memo("bplans", _rid,
-                          lambda: _derive_batch_plans(bl_df, he_df))
+                          lambda: _derive_batch_plans(bl_df, he_df, _sw_map))
         if not bplans:
             st.info("No batch-location data to build per-batch plans.")
         else:

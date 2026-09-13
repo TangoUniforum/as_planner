@@ -144,15 +144,59 @@ def save_promoted_default(config_dir, method: str, overrides: dict,
 # --------------------------------------------------------------------------- #
 # Harvest readers — HarvestPlan rows -> period totals + revenue
 # --------------------------------------------------------------------------- #
-def week_to_month(week_label: str) -> Optional[str]:
+def week_to_month(week_label: str, clip_start=None) -> Optional[str]:
     """'2026-W31' -> '2026-07' (month of the ISO week's Monday — the SAME
     convention as the app's monthly harvest table, so targets and the Harvest
-    tab can never disagree about which month a week belongs to)."""
+    tab can never disagree about which month a week belongs to).
+
+    `clip_start` (the date the REPORT opens: PR closing + 1 day) applies the
+    workbook's own first-week rule (time_grid.iso_week_month_split): a first
+    week whose Monday falls before the report opens belongs to the first month
+    the report covers. Without it, the 8/31 PR's first week (Monday
+    2026-08-31) was graded in AUGUST -- a month the forecast does not cover --
+    and September read 572.5 t in Decide against 644.6 t on HarvestPlan Report
+    and CostsAndProfit, flipping a September target from MET to MISSED.
+    None keeps the plain Monday rule."""
     try:
         y, w = int(str(week_label)[:4]), int(str(week_label)[6:8])
-        return _dt.date.fromisocalendar(y, w, 1).strftime("%Y-%m")
+        monday = _dt.date.fromisocalendar(y, w, 1)
     except (ValueError, TypeError):
         return None
+    if clip_start is not None:
+        from .time_grid import iso_week_month_split
+        ((yy, mm),) = iso_week_month_split(monday, clip_start=clip_start)
+        return "%04d-%02d" % (yy, mm)
+    return monday.strftime("%Y-%m")
+
+
+def report_start_of(out_path) -> Optional[_dt.date]:
+    """The date a run's REPORT opens -- its ProductionReport's closing date + 1
+    day -- read from the output workbook itself (it carries the PR it ran
+    on), or None when no ProductionReport parses in it.
+
+    The one source for the first-week month rule on the app side
+    (week_to_month's clip_start): the workbook's own sheets clip on this date
+    (run.py's report_start), so a surface that clips on it agrees with them.
+    Not the Control forecast_start cell: a manual override window shifts that
+    to the PLANNING start (2026-09-15 on the 8/31 closing)."""
+    import openpyxl
+    from .production_report import find_pr_sheet, parse_pr_worksheet
+    try:
+        wb = openpyxl.load_workbook(out_path, read_only=True, data_only=True)
+    except Exception:                                          # noqa: BLE001
+        return None
+    try:
+        ws = find_pr_sheet(wb)
+        if ws is None:
+            return None
+        closing, _og, _fw = parse_pr_worksheet(ws, quiet=True)
+    except Exception:                                          # noqa: BLE001
+        return None
+    finally:
+        wb.close()
+    if closing is None:
+        return None
+    return closing + _dt.timedelta(days=1)
 
 
 def harvest_rows(out_path) -> list[dict]:
@@ -204,14 +248,15 @@ def harvest_rows_from_ws(ws) -> list[dict]:
     return rows
 
 
-def harvest_by_period(rows: list[dict], basis: str = "hog"
-                      ) -> tuple[dict, dict]:
-    """({'YYYY-MM': kg}, {'YYYY': kg}) on the given basis ('hog'|'gross')."""
+def harvest_by_period(rows: list[dict], basis: str = "hog",
+                      clip_start=None) -> tuple[dict, dict]:
+    """({'YYYY-MM': kg}, {'YYYY': kg}) on the given basis ('hog'|'gross').
+    `clip_start` = the report's opening date (see week_to_month)."""
     key = "hog_kg" if basis == "hog" else "gross_kg"
     monthly: dict[str, float] = {}
     yearly: dict[str, float] = {}
     for r in rows:
-        m = week_to_month(r["week"])
+        m = week_to_month(r["week"], clip_start)
         if m is None:
             continue
         monthly[m] = monthly.get(m, 0.0) + r[key]
@@ -259,20 +304,22 @@ def plan_weeks(out_path) -> list:
         wb.close()
 
 
-def full_periods(week_labels) -> tuple[set, set]:
+def full_periods(week_labels, clip_start=None) -> tuple[set, set]:
     """(months, years) the plan's horizon covers COMPLETELY.
 
     A period is judgeable only when every ISO week belonging to it is in the
     plan. The horizon's first and last month are almost always partial -- a run
     starting 2026-08-24 holds one week of August -- and grading a whole-month
     target against a one-week slice reports a collapse that never happened.
+    `clip_start` (the report's opening date) books a first week whose Monday
+    precedes it to the first month the report covers, as week_to_month does.
     """
     weeks = {str(w) for w in (week_labels or ()) if w}
     if not weeks:
         return set(), set()
     months: dict = {}
     for wl in weeks:
-        m = week_to_month(wl)
+        m = week_to_month(wl, clip_start)
         if m:
             months.setdefault(m, set()).add(wl)
     full_m = set()
@@ -293,7 +340,7 @@ def full_periods(week_labels) -> tuple[set, set]:
 
 
 def review_targets(monthly: dict, yearly: dict, targets: dict,
-                   horizon_weeks=None) -> dict:
+                   horizon_weeks=None, clip_start=None) -> dict:
     """Score actuals against targets — PENALIZED, not hard-gated (operator
     decision): a miss beyond tolerance is flagged, never disqualifying.
 
@@ -320,10 +367,14 @@ def review_targets(monthly: dict, yearly: dict, targets: dict,
     A blackout month INSIDE the horizon is still judged MISSED — that is a real
     failure and the whole point of the gate.
 
+    `clip_start` = the report's opening date: pass the SAME value given to
+    harvest_by_period, so the months judged are the months the actuals were
+    booked to (full_periods / week_to_month's first-week rule).
+
     Returns {rows: [{period, target_kg, actual_kg, pct, status, note}],
              judged, met, close, missed, worst_pct, total_shortfall_kg}."""
     tol = float(targets.get("tolerance_pct", 5.0))
-    full_m, full_y = full_periods(horizon_weeks)
+    full_m, full_y = full_periods(horizon_weeks, clip_start)
     # Fallback bounds, used only when the caller could not supply the horizon.
     lo_m, hi_m = (min(monthly), max(monthly)) if monthly else ("", "")
     lo_y, hi_y = (min(yearly), max(yearly)) if yearly else ("", "")
@@ -936,12 +987,14 @@ def system_feed_review(out_path) -> Optional[dict]:
             "by_system": dict(sorted(over.items(), key=lambda kv: -kv[1]))}
 
 
-def revenue_for(rows: list[dict], economics: dict) -> dict:
+def revenue_for(rows: list[dict], economics: dict, clip_start=None) -> dict:
     """Revenue for a plan: each harvest event's kg is SPREAD across the price
     bands with the size-biased lognormal (model_cv_pct), then priced per band
     — with the band's monthly price override when one exists for the event's
     month, else its default price. kg in no band (distribution tails outside
-    the ladder) is unpriced, reported loudly.
+    the ladder) is unpriced, reported loudly. `clip_start` (the report's
+    opening date) picks the event's month by the workbook's first-week rule
+    (week_to_month), so a month's override prices the harvest booked to it.
 
     Returns {total, priced_kg, unpriced_kg, currency, by_band}."""
     basis = economics.get("basis", "hog")
@@ -957,7 +1010,7 @@ def revenue_for(rows: list[dict], economics: dict) -> dict:
         w, kg = r[wt_key], r[kg_key]
         if kg <= 0 or w <= 0:
             continue
-        month = week_to_month(r["week"])
+        month = week_to_month(r["week"], clip_start)
         event_priced = 0.0
         for i, b in enumerate(bands):
             frac = biomass_band_fraction(w, cv, b["min_kg"], b["max_kg"])
@@ -1166,10 +1219,16 @@ def evaluate_gates(ctx: dict) -> list[dict]:
 
 
 def _gate_conservation(ctx):
+    # `overprod` is a BATCH count (tuning._conservation parses it out of the
+    # audit's "*** N batch(es) OVER-PRODUCED" headline), and `dropped` is the
+    # largest number on a DROPPED row. Printing "1 over-produced fish" for one
+    # batch 182,453 fish over (2024-11-30 PR, B36) understated it five orders
+    # of magnitude; the label now says what the number counts.
     d, o = int(ctx.get("dropped") or 0), int(ctx.get("overprod") or 0)
     if d == 0 and o == 0:
         return "PASS", "0 dropped / 0 over-produced"
-    return "FAIL", f"{d} dropped / {o} over-produced fish"
+    return "FAIL", (f"{d:,} dropped / {o} batch(es) over-produced -- see "
+                    f"InputConservationAudit for the fish")
 
 
 def _gate_no_empty_week(ctx):
@@ -1625,9 +1684,13 @@ def sixn_trapped_review(out_path) -> Optional[dict]:
     # across consecutive weeks with no refill is exactly the stuck signature
     # (tank 69: 53,006 -> 51,516 over 58 unbroken weeks).
     def _wk_index(label):
+        # CALENDAR week index: consecutive ISO weeks differ by exactly 1,
+        # across 52- and 53-week years alike. year*53 + week read 2027-W52 ->
+        # 2028-W01 as a gap of 2 (2027 has 52 weeks), split one 75-week
+        # residency in two, and counted its fish twice (8/31 PR, no events).
         try:
             y, w = label.split("-W")
-            return int(y) * 53 + int(w)
+            return _dt.date.fromisocalendar(int(y), int(w), 1).toordinal() // 7
         except (ValueError, AttributeError):
             return None
 
@@ -1955,8 +2018,17 @@ def realized_plan_audit(
     facility_limits,
     control,
     window_weeks=frozenset(),
+    plan_weeks=None,
 ) -> list[str]:
     """Warnings measured on the FINAL plan, for the ValidationLog.
+
+    `plan_weeks` = every week the realized plan covers (run.py passes the
+    BatchLocations weeks). A week with NO harvest event is then judged too,
+    at 0 fish, and named as a NO HARVEST week -- the worst floor miss the
+    steady-harvest contract knows. Iterating only the weeks that HAD an event
+    made every empty week invisible: the 8/31 PR without its manual events
+    harvested nothing in 40 of 85 weeks and this category named none of them.
+    None keeps the old event-weeks-only scope (callers that pass no weeks).
 
     Every other harvest-floor warning in the tool is raised mid-plan, by the
     pass that happened to notice a shortfall — the scheduler warns from its
@@ -2001,12 +2073,19 @@ def realized_plan_audit(
         if w:
             hv[w] += float(getattr(ev, "count", 0.0) or 0.0)
     skipped = sorted(w for w in hv if w in window)
-    for w in sorted(hv):
+    _judge = set(hv) | {str(w) for w in (plan_weeks or ()) if w}
+    for w in sorted(_judge):
         if w in window:
             continue
-        got = hv[w]
+        got = hv.get(w, 0.0)
         floor = resolve_facility_cap(METRIC_MIN_HARVEST, w, facility_limits, control)
         ceil_ = resolve_facility_cap(METRIC_MAX_HARVEST, w, facility_limits, control)
+        if floor and got <= 0.0:
+            out.append(
+                f"HARVEST FLOOR - {w}: NO HARVEST this week (0 fish) against "
+                f"the {floor:,.0f} floor in force -- an empty week breaks the "
+                f"steady-harvest contract")
+            continue
         if floor and got < floor - 1.0:
             short = floor - got
             # Separate a real shortfall from the known ~0.2% mortality-pad

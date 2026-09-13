@@ -227,6 +227,29 @@ def iso_week_month_split(event_date, clip_start=None) -> dict[tuple[int, int], f
     return {(monday.year, monday.month): 1.0}
 
 
+def harvest_schedule_days(event_date, report_start=None) -> list[date]:
+    """The operating days a week's harvest is spread over, for the Daily
+    Harvest Schedule sheet AND the app's daily table (one rule, two surfaces).
+
+    Mon-Fri of the event's ISO week, minus any day before `report_start` (the
+    day after the PR closes): the forecast never schedules a day it does not
+    cover. If NO Mon-Fri day remains -- a forecast opening on a Saturday or
+    Sunday, whose first week holds no weekday at all -- the week's harvest is
+    put on max(event date, report_start), the day it is dated in
+    HarvestReport. It used to keep all five pre-start days instead, which put
+    a whole week's harvest (19,433 fish on the 2024-11-30 PR) on Mon-Fri of
+    the PR's own month, before the "Forecast start" printed in the sheet's
+    header."""
+    d = _as_date(event_date)
+    monday = d - timedelta(days=d.weekday())
+    days = [monday + timedelta(days=i) for i in range(5)]
+    if report_start is not None:
+        rs = _as_date(report_start)
+        kept = [x for x in days if x >= rs]
+        days = kept if kept else [max(d, rs)]
+    return days
+
+
 def calendar_day_month_split(week_start, days: int = 7,
                              clip_start=None) -> dict[tuple[int, int], float]:
     """(year, month) -> fraction of a weekly DAILY flow in that calendar month.

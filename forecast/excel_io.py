@@ -114,13 +114,43 @@ _BP_ORDER = ["Nursery (OG1/2)", "Grow-out OG3", "Grow-out OG4", "Grow-out OG5",
              "Finishing OG6", "Finishing/depuration OG6N"]
 
 
+def sw_entry_label(batch_id, first_seen_week, tranog_week):
+    """The ONE rule for a batch's seawater-entry week, shared by Batch Plan's
+    SUMMARY and TransferTemplate section B (they used to disagree by two weeks
+    on an automatically split batch: Batch Plan took the first week the batch
+    had any seawater fish, TransferTemplate its TranOG week).
+
+    SW entry = the week of the batch's forecast TranOG when it has one, else
+    the first week it is seen in a tank, tagged "(in-flight)". A batch whose
+    first tank week is EARLIER than its TranOG is a split batch: part of it was
+    already in seawater at the PR close. It keeps its TranOG week and is tagged
+    "(split: part in SW from <first week>)" so the earlier seawater fish are
+    not hidden. Returns (label, entry_week)."""
+    if tranog_week:
+        if first_seen_week and first_seen_week < tranog_week:
+            return (f"{tranog_week} (split: part in SW from {first_seen_week})",
+                    tranog_week)
+        return tranog_week, tranog_week
+    if first_seen_week:
+        return f"{first_seen_week} (in-flight)", first_seen_week
+    return "-", None
+
+
 def write_batch_plan(wb, batch_locations, harvest_events, default_hog_yield: float = 0.81,
-                     sheet_name: str = "Batch Plan") -> None:
+                     sheet_name: str = "Batch Plan", tranog_events=None) -> None:
     """Per-batch journey: a summary header + the milestone timeline (each conveyor
     tier the batch enters — SW entry → grow-out → finishing → harvest — with week,
     systems, weight, tank count), derived from BatchLocations + harvest events. The
     'where each batch is + how it got there' as a shareable Excel sheet; mirrors the
-    app's Plan-tab per-batch plan."""
+    app's Plan-tab per-batch plan.
+
+    ONE ROW PER HARVESTED BATCH TOO. The batch list is BatchLocations' batches
+    UNION the harvest events' batches: a batch harvested out whole in the first
+    forecast week has no end-of-week tank row, and the sheet used to drop it
+    (B41 on the 8/31 PR: 5,322 fish / 14 t HOG in HarvestPlan, absent here).
+    The Harvest milestone weight is FISH-WEIGHTED (total live kg / fish, the
+    TransferTemplate formula), not a mean of per-event weights. SW_entry follows
+    `sw_entry_label` when `tranog_events` is given."""
     import collections
     if sheet_name in wb.sheetnames:
         del wb[sheet_name]
@@ -133,15 +163,23 @@ def write_batch_plan(wb, batch_locations, harvest_events, default_hog_yield: flo
     by_batch = collections.defaultdict(list)
     for r in batch_locations:
         by_batch[r.batch_id].append(r)
-    hv = collections.defaultdict(lambda: {"weeks": [], "hog": 0.0, "wt": []})
+    hv = collections.defaultdict(lambda: {"weeks": [], "hog": 0.0, "cnt": 0.0,
+                                          "wsum": 0.0})
     for ev in harvest_events:
         h = hv[ev.batch_id]
         h["weeks"].append(iso_week_label(ev.event_date))
         h["hog"] += ev.count * (ev.avg_wt_g / 1000.0) * default_hog_yield
-        h["wt"].append(ev.avg_wt_g / 1000.0)
+        h["cnt"] += ev.count
+        h["wsum"] += ev.count * ev.avg_wt_g / 1000.0
+    tog_week: dict = {}
+    for ev in (tranog_events or ()):
+        _w = iso_week_label(ev.event_date)
+        if ev.batch_id not in tog_week or _w < tog_week[ev.batch_id]:
+            tog_week[ev.batch_id] = _w
 
     plans = []
-    for bid, recs in by_batch.items():
+    for bid in set(by_batch) | set(hv):
+        recs = by_batch.get(bid, [])
         recs = sorted(recs, key=lambda r: r.week_label)
         weeks = list(dict.fromkeys(r.week_label for r in recs))
         wk_tanks = collections.defaultdict(set)
@@ -183,8 +221,17 @@ def write_batch_plan(wb, batch_locations, harvest_events, default_hog_yield: flo
         hog_t = (h["hog"] / 1000.0) if h else 0.0
         if h and h["weeks"]:
             milestones.append((hw, "Harvest", "-> harvest",
-                               round(sum(h["wt"]) / len(h["wt"]), 2), "", "", ""))
-        plans.append({"batch": bid, "sw": weeks[0] if weeks else "-",
+                               round(h["wsum"] / h["cnt"], 2) if h["cnt"] else "",
+                               "", "", ""))
+        if tranog_events is not None:
+            sw_lbl, _ = sw_entry_label(bid, weeks[0] if weeks else None,
+                                       tog_week.get(bid))
+            if not weeks:
+                sw_lbl = "- (no tank week: harvested out in the first week)"
+        else:
+            sw_lbl = (weeks[0] if weeks
+                      else "- (no tank week: harvested out in the first week)")
+        plans.append({"batch": bid, "sw": sw_lbl,
                       "peak": peak, "hw": hw, "hog_t": hog_t, "ms": milestones})
     # BATCH order (B41, B42, ...), the one key every sheet uses. This sorted on
     # the SW-entry week, on which every batch in flight at the forecast start
@@ -381,6 +428,30 @@ def whole_parts(values) -> list[float]:
     return floors
 
 
+def whole_harvest_counts(harvest_events) -> dict:
+    """{id(event): whole fish} -- THE whole-fish count every harvest sheet shows.
+
+    The engine carries fractional fish. HarvestPlan, HarvestReport and the
+    Daily Harvest Schedule print whole fish that tie to the WEEK (whole_parts
+    over each ISO week's events, in (event_date, tank) order). The period
+    totals -- HarvestPlan Report's months and YearlySummary's years -- used to
+    round the FRACTIONAL period sum instead, so they drifted from the rows
+    under them: d1 2025 YearlySummary read 1,607,946 against 1,607,934 summed
+    from HarvestReport, and HarvestPlan Report's TOTAL missed the sum of its
+    own batch rows by 1-2 fish. A period total built from these numbers is
+    exactly the sum of the rows a reader can add up."""
+    events_sorted = sorted(harvest_events,
+                           key=lambda e: (e.event_date, e.source_tank_id))
+    by_week: dict = {}
+    for ev in events_sorted:
+        by_week.setdefault(iso_week_label(ev.event_date), []).append(ev)
+    shown: dict = {}
+    for evs in by_week.values():
+        for e, c in zip(evs, whole_parts([x.count for x in evs])):
+            shown[id(e)] = c
+    return shown
+
+
 def write_harvest_plan_output(
     wb,
     harvest_events,
@@ -420,13 +491,8 @@ def write_harvest_plan_output(
     # Advisory (which records the decision, not the split) disagreed with all
     # of them. Largest-remainder keeps the rows tying to the week: floor
     # everything, then hand the shortfall to the largest fractions.
-    _by_week: dict[str, list] = {}
-    for ev in events_sorted:
-        _by_week.setdefault(iso_week_label(ev.event_date), []).append(ev)
-    _shown: dict[int, float] = {}
-    for _evs in _by_week.values():
-        for _e, _c in zip(_evs, whole_parts([e.count for e in _evs])):
-            _shown[id(_e)] = _c
+    # whole_harvest_counts is that rule, shared with the period totals.
+    _shown: dict[int, float] = whole_harvest_counts(harvest_events)
     # Rows are EMITTED in date order with same-date ties by BATCH number
     # (operator, 2026-09-11), not by tank: 2028-W14 listed B56 (tank 33) above
     # B55 (tank 42). The whole-fish rounding above still runs on the (date,
@@ -920,10 +986,15 @@ def write_transfer_template(
     ])
 
     from .sixn import is_purge_mode as _is_purge_mode
-    from .tiers import effective_density_cap as _eff_cap
+    from .tiers import (effective_density_cap as _eff_cap,
+                        HARVEST_PREP_DENSITY_CAP as _PREP_CAP)
     cap = {t.tank_id: t.max_density_kg_m3 for t in facility.tanks}
     tsys = {t.tank_id: t.system_id for t in facility.tanks}
-    weeks = sorted({r.week_label for r in batch_locations})
+    # Tank weeks plus harvest weeks (a batch harvested out in week 1 has only
+    # the latter). Week LABELS, not batch ids.
+    _tt_weeks = ({r.week_label for r in batch_locations}
+                 | {iso_week_label(ev.event_date) for ev in harvest_events})
+    weeks = sorted(_tt_weeks)
     widx = {w: i for i, w in enumerate(weeks)}
 
     bw = defaultdict(lambda: {"cnt": 0.0, "wsum": 0.0, "tanks": set(), "maxratio": 0.0})
@@ -933,10 +1004,13 @@ def write_transfer_template(
         e["wsum"] += r.avg_wt_g * r.count
         e["tanks"].add(r.tank_id)
         # Peak density is judged through R8 (tiers.effective_density_cap) --
-        # the SAME rule as the engine, run.py's violation audit and the
-        # optimizer's alert, so a tank called legal in one place is never
-        # called a breach in another. R8 returns +inf for a tank preparing
-        # for harvest, which drops it from the peak entirely.
+        # the SAME rule as run.py's violation audit, so a tank called legal in
+        # one place is never called a breach in another. A tank preparing for
+        # harvest is judged against HARVEST_PREP_DENSITY_CAP (the operator's
+        # 150, ruling 2026-09-08: a raised cap, not an exemption), exactly as
+        # run.py passes it. This used to omit harvest_prep_cap, so R8 returned
+        # +inf and the prep tank vanished from the peak: B36 read 0.88 while
+        # the R8 audit's own peak for it was 0.971 (d2 corpus run).
         #
         # This replaced a system-based `!= "OG6N"` test that was wrong in BOTH
         # directions: it hid real breaches once 6N runs as a PRODUCTION system
@@ -945,13 +1019,34 @@ def write_transfer_template(
         # harvest-prep consolidation step now creates on purpose.
         c = _eff_cap(cap.get(r.tank_id) or 0.0, tsys.get(r.tank_id, ""),
                      getattr(r, "stage", ""),
-                     _is_purge_mode(control, r.week_start))
+                     _is_purge_mode(control, r.week_start),
+                     harvest_prep_cap=_PREP_CAP)
         if r.density_kg_m3 and c and c != float("inf"):
             e["maxratio"] = max(e["maxratio"], r.density_kg_m3 / c)
 
+    # The batch's FIRST forecast TranOG week, and the fish that entered
+    # seawater in it (summed over its TranOG rows that week) at their entry
+    # weight. Entry_Count is THAT count -- the TransferPlan TranOG total, the
+    # InputConservationAudit's Realized_TranOG -- not the batch's closing
+    # count of the entry week, which is net of a week's mortality and, for a
+    # split batch, includes the part already in seawater at the PR close
+    # (B49 on the 8/31 PR read 287,599 against 240,000 fish that entered).
     tog_week = {}
+    tog_cnt: dict = defaultdict(float)
+    tog_wsum: dict = defaultdict(float)
     for ev in (tranog_events or []):
-        tog_week[ev.batch_id] = iso_week_label(ev.event_date)
+        _w = iso_week_label(ev.event_date)
+        if ev.batch_id not in tog_week or _w < tog_week[ev.batch_id]:
+            tog_week[ev.batch_id] = _w
+    for ev in (tranog_events or []):
+        if iso_week_label(ev.event_date) != tog_week.get(ev.batch_id):
+            continue
+        for d in getattr(ev, "destinations", []) or []:
+            # Each destination's WHOLE fish as the TransferPlan TranOG row shows
+            # it (round(count)), so Entry_Count is the sum of those rows exactly.
+            _n = round(float(getattr(d, "count", 0.0) or 0.0), 0)
+            tog_cnt[ev.batch_id] += _n
+            tog_wsum[ev.batch_id] += _n * float(getattr(d, "avg_wt_g", 0.0) or 0.0)
 
     hv = defaultdict(lambda: {"first": None, "cnt": 0.0, "wsum": 0.0})
     for ev in harvest_events:
@@ -966,25 +1061,42 @@ def write_transfer_template(
     for (b, w) in bw:
         weeks_by_batch[b].append(w)
 
-    for b in sorted_batches(weeks_by_batch):
+    for b in sorted_batches(set(weeks_by_batch) | set(hv)):
+        h = hv.get(b)
+        hstart = h["first"] if h and h["first"] else ""
+        h_wt = (h["wsum"] / h["cnt"] / 1000.0) if (h and h["cnt"]) else ""
+        if b not in weeks_by_batch:
+            # Harvested out whole before the first week's closing snapshot, so
+            # the batch has no tank row at all (B41 on the 8/31 PR). It used to
+            # be dropped from this section while HarvestPlan carried its fish.
+            ws.append([
+                b, "- (no tank week: harvested out in the first week)", "", "",
+                "", "", 0, "", "", hstart, "",
+                round(h_wt, 2) if h_wt != "" else "", "OK",
+            ])
+            continue
         bws = sorted(weeks_by_batch[b], key=lambda w: widx[w])
-        # SW entry = the forecast TranOG week if any, else first-seen (in-flight).
-        entry_wk = tog_week.get(b, bws[0])
-        if entry_wk not in widx:
+        # SW entry: the one rule shared with Batch Plan (sw_entry_label).
+        entry_lbl, entry_wk = sw_entry_label(b, bws[0], tog_week.get(b))
+        if entry_wk not in widx or (b, entry_wk) not in bw:
             entry_wk = bws[0]
-        in_flight = b not in tog_week
+            entry_lbl = entry_wk + " (in-flight)"
         e0 = bw[(b, entry_wk)]
-        entry_wt = (e0["wsum"] / e0["cnt"] / 1000.0) if e0["cnt"] else 0.0
+        if tog_cnt.get(b):
+            entry_cnt = tog_cnt[b]
+            entry_wt = tog_wsum[b] / tog_cnt[b] / 1000.0
+        else:
+            # In flight at the forecast start: no forecast TranOG, so the
+            # first week it is seen (its closing count and weight).
+            entry_cnt = e0["cnt"]
+            entry_wt = (e0["wsum"] / e0["cnt"] / 1000.0) if e0["cnt"] else 0.0
         peak_tanks = max(len(bw[(b, w)]["tanks"]) for w in bws)
         peak_wk = max(bws, key=lambda w: bw[(b, w)]["maxratio"])
         peak_ratio = bw[(b, peak_wk)]["maxratio"]
-        h = hv.get(b)
-        hstart = h["first"] if h and h["first"] else ""
         h_off = (widx[hstart] - widx[entry_wk]) if (hstart and hstart in widx) else ""
-        h_wt = (h["wsum"] / h["cnt"] / 1000.0) if (h and h["cnt"]) else ""
         ws.append([
-            b, entry_wk + (" (in-flight)" if in_flight else ""),
-            widx[entry_wk], round(entry_wt, 2), round(e0["cnt"], 0),
+            b, entry_lbl,
+            widx[entry_wk], round(entry_wt, 2), round(entry_cnt, 0),
             round(e0["maxratio"], 2) if e0["maxratio"] else "",
             peak_tanks, round(peak_ratio, 2) if peak_ratio else "",
             widx[peak_wk] - widx[entry_wk],
@@ -1035,9 +1147,16 @@ def write_harvest_plan_report(
     agg: dict[tuple, dict] = defaultdict(lambda: {"count": 0.0, "hog_kg": 0.0})
     years: set[int] = set()
     batches_by_year: dict[int, set] = defaultdict(set)
+    # UNITS are the whole fish HarvestPlan shows for each event
+    # (whole_harvest_counts), so a month's Units is exactly the sum of the
+    # HarvestPlan Count rows booked to it and the TOTAL row is exactly the sum
+    # of the batch rows above it. Rounding the fractional month instead missed
+    # both by 1-2 fish (a1 2026-10: TOTAL 218,512 over rows summing 218,511).
+    _whole = whole_harvest_counts(harvest_events)
     for ev in harvest_events:
         hog_yield = facility_limits_hog.get(iso_week_label(ev.event_date), default_hog_yield)
         hog_kg = ev.count * ev.avg_wt_g / 1000.0 * hog_yield
+        _cnt = _whole.get(id(ev), ev.count)
         # The week's harvest goes WHOLE to its ISO Monday's month — the sales
         # contract convention, undivided. But an ISO week starts on a MONDAY,
         # so the first week of a forecast opening the day after a month-end PR
@@ -1048,7 +1167,7 @@ def write_harvest_plan_report(
         for (yr, mo), frac in iso_week_month_split(
                 ev.event_date, clip_start=report_start).items():
             e = agg[(yr, ev.batch_id, mo)]
-            e["count"] += ev.count * frac
+            e["count"] += _cnt * frac
             e["hog_kg"] += hog_kg * frac
             years.add(yr)
             batches_by_year[yr].add(ev.batch_id)
@@ -1143,6 +1262,8 @@ def write_yearly_summary(
     sixn_move_in_feed=None,
     biology_states_by_batch=None,
     sheet_name: str = "YearlySummary",
+    report_start=None,
+    pr_period=None,
 ) -> None:
     """Facility-wide per-year rollup for at-a-glance yearly trends.
 
@@ -1156,67 +1277,95 @@ def write_yearly_summary(
     feed + FW/EGG projected feed -- the SAME three sources FeedForecast and the
     Weekly/Monthly ledger sum, so the annual feed total ties out across all of
     them (FW feed is hatchery feed, part of total facility feed ordered).
+
+    YEAR ATTRIBUTION (2026-09-12, numbers sandbox). Feed is a daily flow, so
+    each week's feed is split between years BY CALENDAR DAY, clipped at
+    `report_start` -- the same _feed_by_type_week / _feed_by_type_month
+    roll-up FeedForecastMonthly and CostsAndProfit use, so the three Year
+    figures tie. It used to book a whole week in the year of its Monday, and
+    2029-W53-type boundary weeks moved up to 182 t between years. Harvest is
+    counted in the year of each event's date (HarvestReport's Year column) in
+    the whole fish HarvestPlan shows (whole_harvest_counts). On a MID-MONTH
+    PR the elapsed part of its month (the PR's own harvest) is added to the
+    closing year exactly as HarvestPlan Report and MonthlyReport add it, so the
+    three agree on the year's harvest; feed and biomass stay forecast-only (a
+    note row says so). Peak/Mean biomass and utilisation take each week in
+    the year of its start (a stock, not a flow).
     """
     from collections import defaultdict
     from .caps import resolve_facility_cap, METRIC_BIOMASS
-    from .biology import realized_feed_kg_day
 
     if sheet_name in wb.sheetnames:
         del wb[sheet_name]
     ws = wb.create_sheet(sheet_name)
 
-    # Per-week facility biomass + realized feed (kg/day), with each week's year.
+    # Per-week facility biomass, with each week's year. (Feed is rolled up
+    # below by calendar day, from the FeedForecast sources.)
     wk_bio: dict[str, float] = defaultdict(float)
-    wk_feed: dict[str, float] = defaultdict(float)
     wk_year: dict[str, int] = {}
     for r in batch_locations:
         wk_bio[r.week_label] += r.biomass_kg
         if r.week_label not in wk_year and hasattr(r.week_start, "year"):
             wk_year[r.week_label] = r.week_start.year
-        # STARVE tank-weeks (6N depuration) eat nothing — handled by the helper
-        # (biomass still counts above; feed does not).
-        wk_feed[r.week_label] += _row_feed_kg_day(r, batches, tables)
 
-    # 6N purge move-in fish ate 4 pre-transfer days in their source tank (shown
-    # in 6N = STARVE above) — add that real feed (already weekly kg) per week so
-    # the yearly feed tonnes match the FeedForecast / ledger totals.
-    wk_movein: dict[str, float] = defaultdict(float)
-    for (_bid, wk_, _ftype), kg in (sixn_move_in_feed or {}).items():
-        if kg:
-            wk_movein[wk_] += kg
-
-    # FW/EGG projected feed (hatchery) AND biomass per week. FW fish live in FW
-    # tanks, absent from batch_locations, so both are sourced here from the biology
-    # projection. The biomass is folded into wk_bio because FW/EGG biomass is real
-    # facility biomass counted against the 3.8M cap (audit H2) — so Peak/Mean/
-    # Utilisation are FW-inclusive, mirroring the long-standing FW-feed correction.
-    wk_fwfeed: dict[str, float] = defaultdict(float)
+    # FW/EGG biomass per week. FW fish live in FW tanks, absent from
+    # batch_locations, so it is sourced here from the biology projection and
+    # folded into wk_bio because FW/EGG biomass is real facility biomass
+    # counted against the 3.8M cap (audit H2) — so Peak/Mean/Utilisation are
+    # FW-inclusive, mirroring the long-standing FW-feed correction.
     for states in (biology_states_by_batch or {}).values():
         for s in states:
             if s.stage not in ("FW", "EGG"):
                 continue
-            if s.feed_kg_week:
-                wk_fwfeed[s.week_label] += s.feed_kg_week
             wk_bio[s.week_label] += s.biomass_kg
             wk_year.setdefault(s.week_label,
                                s.week_start.year if hasattr(s.week_start, "year") else None)
 
-    # Harvest per year (HOG via per-week override or default).
+    # Harvest per year (HOG via per-week override or default), in the whole
+    # fish HarvestPlan/HarvestReport show, in the year of each event's date.
     hog_overrides = hog_overrides or {}
     yr_hc: dict[int, float] = defaultdict(float)
     yr_gross: dict[int, float] = defaultdict(float)
     yr_hog: dict[int, float] = defaultdict(float)
+    _whole = whole_harvest_counts(harvest_events)
     for ev in harvest_events:
         d = ev.event_date.date() if hasattr(ev.event_date, "date") else ev.event_date
         y = d.year
         gross = ev.count * ev.avg_wt_g / 1000.0
         hy = hog_overrides.get(iso_week_label(ev.event_date), default_hog_yield)
-        yr_hc[y] += ev.count
+        yr_hc[y] += _whole.get(id(ev), ev.count)
         yr_gross[y] += gross
         yr_hog[y] += gross * hy
+    # The elapsed part of a mid-month PR's month: added to its year exactly as
+    # HarvestPlan Report adds it to its month (default HOG yield), so the two
+    # sheets agree on the year's harvest. 9.10 PR before this: 2026 read
+    # 863,457 fish here against 921,265 on HarvestPlan Report -- the PR's
+    # 57,808 fish landed 1-10 Sep.
+    _pr_merged = None
+    if pr_period is not None and getattr(pr_period, "is_mid_month", False):
+        _py = pr_period.closing_date.year
+        _pn = _pg = 0.0
+        for _b, _pb in pr_period.batches.items():
+            if _pb.harv_count <= 0:
+                continue
+            _pn += _pb.harv_count
+            _pg += _pb.harv_gross_kg
+        if _pn > 0:
+            yr_hc[_py] += _pn
+            yr_gross[_py] += _pg
+            yr_hog[_py] += _pg * default_hog_yield
+            _pr_merged = (_py, _pn, pr_period.closing_date)
 
-    # Feed + biomass + utilisation per year.
+    # Feed per year: each week split by CALENDAR DAY, clipped at report_start
+    # -- the FeedForecastMonthly / CostsAndProfit roll-up, so the Year rows tie.
+    _ftw, _fws = _feed_by_type_week(batch_locations, biology_states_by_batch,
+                                    tables, batches, sixn_move_in_feed)
+    _ftm, _fmonths = _feed_by_type_month(_ftw, _fws, report_start)
     yr_feed: dict[int, float] = defaultdict(float)
+    for (_name, _mo), _kg in _ftm.items():
+        yr_feed[int(_mo[:4])] += _kg
+
+    # Biomass + utilisation per year (a stock: each week in its start's year).
     yr_bio: dict[int, list] = defaultdict(list)
     yr_util: dict[int, list] = defaultdict(list)
     for wk, bio in wk_bio.items():
@@ -1224,20 +1373,23 @@ def write_yearly_summary(
         if y is None:
             continue
         yr_bio[y].append(bio)
-        yr_feed[y] += wk_feed.get(wk, 0.0) * 7.0 + wk_movein.get(wk, 0.0)
         cap = resolve_facility_cap(METRIC_BIOMASS, wk, facility_limits, control)
         if cap:
             yr_util[y].append(100.0 * bio / cap)
-    # FW/EGG feed in a separate pass so FW-only weeks (no OG biomass, absent from
-    # wk_bio) still contribute their hatchery feed to the annual total.
-    for wk, fw in wk_fwfeed.items():
-        y = wk_year.get(wk)
-        if y is not None:
-            yr_feed[y] += fw
 
-    years = sorted(set(yr_hc) | set(yr_bio))
+    years = sorted(set(yr_hc) | set(yr_bio) | {y for y, v in yr_feed.items()
+                                               if v > 0.5})
     ws.append(["YEARLY SUMMARY (facility-wide)"])
-    ws.append([])
+    _note = ("Harvest: each event in the year of its date, in the whole fish "
+             "HarvestPlan shows. Feed: each week split by calendar day (as "
+             "FeedForecastMonthly and CostsAndProfit). Peak/Mean biomass and "
+             "utilisation: each week in the year it starts.")
+    if _pr_merged is not None:
+        _note += (f" {_pr_merged[0]} harvest INCLUDES {_pr_merged[1]:,.0f} fish "
+                  f"the ProductionReport landed from the 1st to "
+                  f"{_pr_merged[2]} (as HarvestPlan Report and MonthlyReport "
+                  f"include them); feed and biomass are the forecast's only.")
+    ws.append([_note])
     ws.append([
         "Year", "Harvest_Count (fish)", "Harvest_HOG (t)", "Harvest_Gross (t)",
         "Avg_HOG_Wt (kg)", "Feed (t)", "Peak_Biomass (t)", "Mean_Biomass (t)",
@@ -1279,9 +1431,10 @@ def write_daily_harvest_schedule(
     a per-week Total row, and a blank separator. The Tank/Batch columns list
     every tank/batch that contributed. Days before `report_start` are clipped
     and the week's total re-spread over the days that remain, so nothing is
-    scheduled before the forecast opens; a week wholly before it keeps all
-    five days rather than vanishing, which is the case that retired the
-    earlier clip on the shifted forecast_start.
+    scheduled before the forecast opens; a week with no weekday left (a
+    Saturday/Sunday report start) goes on its own event date
+    (time_grid.harvest_schedule_days -- the app's daily table uses the same
+    rule).
     """
     from collections import defaultdict
     from datetime import timedelta
@@ -1320,25 +1473,20 @@ def write_daily_harvest_schedule(
         if rec["ev_date"] is None or ev_date < rec["ev_date"]:
             rec["ev_date"] = ev_date
 
+    from .time_grid import harvest_schedule_days
     for wk_label in sorted(by_week):
         rec = by_week[wk_label]
         ev_date = rec["ev_date"]
-        monday = ev_date - timedelta(days=ev_date.weekday())
-        mon_fri = [monday + timedelta(days=i) for i in range(5)]
         # Never schedule a day the forecast does not cover. An ISO week starts
         # on a Monday, so a forecast opening the day after a month-end PR opens
         # mid-week: on the 2026-08-31 closing this sheet listed a harvest on
         # Mon 2026-08-31, which belongs to August and to the PR, not to the
         # September forecast. The week's TOTAL is unchanged -- it is spread over
         # the operating days that remain (4 instead of 5), so no fish move
-        # months. If every day would be clipped (a manual-window week dated
-        # wholly before a shifted start) the week keeps all five days rather
-        # than vanishing.
-        _fs = getattr(report_start, "date", lambda: report_start)()
-        if _fs is not None:
-            _kept = [d for d in mon_fri if d >= _fs]
-            if _kept:
-                mon_fri = _kept
+        # months. A week with NO weekday left (a Saturday/Sunday report start)
+        # goes on its own event date -- see time_grid.harvest_schedule_days,
+        # the rule the app's daily table uses too.
+        mon_fri = harvest_schedule_days(ev_date, report_start)
         n_days = len(mon_fri)
         cnt, live_kg = rec["count"], rec["live_kg"]
         hog_yield = facility_limits_hog.get(wk_label, default_hog_yield)
@@ -1478,8 +1626,22 @@ def _feed_by_type_week(batch_locations, biology_states_by_batch, tables,
         for s in states:
             if s.stage in ("FW", "EGG") and s.feed_kg_week:
                 wk_start.setdefault(s.week_label, s.week_start)
-                ftw[(s.feed_type, s.week_label)] += s.feed_kg_week
+                for _ft, _kg in _fw_feed_by_type(s):
+                    ftw[(_ft, s.week_label)] += _kg
     return ftw, wk_start
+
+
+def _fw_feed_by_type(s):
+    """[(feed type, kg)] for one FW/EGG projection week: each DAY's feed under
+    that day's own size-band type (BatchWeekState.feed_kg_by_type) when the
+    state carries it and it sums to the week's feed, else the whole week under
+    the end-of-week type as before. A band-crossing week used to bill all its
+    days to the larger type (a1: 367 t of FW feed in 109 such weeks)."""
+    by = getattr(s, "feed_kg_by_type", None) or {}
+    tot = sum(by.values())
+    if by and abs(tot - (s.feed_kg_week or 0.0)) <= 1e-6 * max(1.0, tot):
+        return sorted(by.items())
+    return [(s.feed_type, s.feed_kg_week)]
 
 
 def _feed_by_batch_type_week(batch_locations, biology_states_by_batch, tables,
@@ -1512,7 +1674,8 @@ def _feed_by_batch_type_week(batch_locations, biology_states_by_batch, tables,
         for s in states:
             if s.stage in ("FW", "EGG") and s.feed_kg_week:
                 wk_start.setdefault(s.week_label, s.week_start)
-                fbtw[(batch_id, s.feed_type, s.week_label)] += s.feed_kg_week
+                for _ft, _kg in _fw_feed_by_type(s):
+                    fbtw[(batch_id, _ft, s.week_label)] += _kg
     return fbtw, wk_start
 
 
@@ -1868,6 +2031,15 @@ def unmodelled_fw_warnings(held, tranog_events, sw_batches) -> tuple:
     return lines, fish
 
 
+def _open_wt_before_growth(s):
+    """The week's opening average weight BEFORE its first day's growth
+    (BatchWeekState.open_avg_weight_pre_g), or None when the state does not
+    carry it (a state built elsewhere, e.g. a test fixture) -- the caller then
+    keeps open_avg_weight_g, exactly as before."""
+    v = getattr(s, "open_avg_weight_pre_g", 0.0) or 0.0
+    return float(v) if v > 0 else None
+
+
 def _build_batch_week_ledger(
     batch_locations, harvest_events, batch_week_states,
     transfer_events=None, batches=None, tables=None, hog_yield=0.0,
@@ -1875,9 +2047,16 @@ def _build_batch_week_ledger(
     tranog_events=None, og_mort_states=None, realized_biology=None,
     window_openings=None, window_culls=None,
     fw_openings=None, fw_transfer_basis=None, fw_projected=None,
-    split_fw=None,
+    split_fw=None, pr_openings=None,
 ):
     """Assemble a per-(batch, week) open/close production ledger.
+
+    `pr_openings` {batch: (count, kg)} = the PR-hydrated seawater opening per
+    batch (run.py sums audit_initial_state's tanks). Used ONLY for a batch's
+    first week when nothing else supplies its opening (no biology state, not
+    its FW->SW week): a PR batch missing from batches.yaml. It used to open on
+    its own CLOSE, so a week-0 harvest landed in Count_Check instead of
+    reducing Open (B34: opened 112,168 = post-harvest close, PR 129,912).
 
     Open = prior week's realized close (chained); Close = this week's realized
     state (BatchLocations aggregate, falling back to the biology projection for
@@ -1951,13 +2130,22 @@ def _build_batch_week_ledger(
             feed[(bid, _wk)] += kg
 
     # Harvest per (batch, week).
-    harv: dict[tuple, dict] = defaultdict(lambda: {"count": 0.0, "gross": 0.0, "wt_sum": 0.0})
+    harv: dict[tuple, dict] = defaultdict(lambda: {"count": 0.0, "gross": 0.0, "wt_sum": 0.0,
+                                                   "whole": 0.0})
+    # The WHOLE fish HarvestPlan shows for each event (whole_harvest_counts):
+    # the Harv_Count cell prints their sum, so a week's TOTAL is exactly the
+    # HarvestPlan week and a month's TOTAL exactly the HarvestPlan Report
+    # month. The fractional count stays the flow the balance uses, so
+    # Count_Check is unchanged. Rounding the batch's fractional sum instead
+    # left MonthlyReport's TOTAL 1-3 fish off HarvestPlan Report's.
+    _whole_hv = whole_harvest_counts(harvest_events)
     for ev in harvest_events:
         key = (ev.batch_id, iso_week_label(ev.event_date))
         e = harv[key]
         e["count"] += ev.count
         e["gross"] += ev.count * ev.avg_wt_g / 1000.0
         e["wt_sum"] += ev.avg_wt_g * ev.count
+        e["whole"] += _whole_hv.get(id(ev), ev.count)
 
     # Transfers per (batch, week): intra-batch moves, so In == Out (net 0).
     xfer: dict[tuple, float] = defaultdict(float)
@@ -2194,9 +2382,11 @@ def _build_batch_week_ledger(
                     oc, owt, obio = 0.0, 0.0, 0.0
                     fw_oc = (s0.open_count if getattr(s0, "open_count", 0.0) > 0
                              else s0.count)
-                    fw_obio = (s0.open_biomass_kg
-                               if getattr(s0, "open_biomass_kg", 0.0) > 0
-                               else s0.biomass_kg)
+                    _pre = _open_wt_before_growth(s0)
+                    fw_obio = (fw_oc * _pre / 1000.0 if _pre is not None
+                               else (s0.open_biomass_kg
+                                     if getattr(s0, "open_biomass_kg", 0.0) > 0
+                                     else s0.biomass_kg))
                     _fw_track_cross = True
                 elif s0:
                     # Start-of-week balance (before the week's losses), not the
@@ -2209,6 +2399,16 @@ def _build_batch_week_ledger(
                            else s0.avg_weight_g)
                     obio = (s0.open_biomass_kg if getattr(s0, "open_biomass_kg", 0.0) > 0
                             else s0.biomass_kg)
+                    # ...and BEFORE the first day's growth. open_avg_weight_g
+                    # is the first simulated day's CLOSING weight, so week 0
+                    # opened one day of growth heavy: B44 3,231.2 g against the
+                    # PR's 3,216.1 g (9.10 PR), +23 t facility-wide, week-0
+                    # Bio_FCR 1.40 against 1.19 the next week, and a 1-day
+                    # first week opened on its own close (Bio_FCR 1e14).
+                    _pre = _open_wt_before_growth(s0)
+                    if _pre is not None and oc > 0:
+                        owt = _pre
+                        obio = oc * _pre / 1000.0
                 elif _is_tb:
                     # First ledger week is the batch's FW->SW week with no state
                     # for it (a manual fw_to_og in the window): the seawater side
@@ -2216,6 +2416,11 @@ def _build_batch_week_ledger(
                     # below when there is one -- and the held freshwater part
                     # (below) is the freshwater opening.
                     oc, owt, obio = 0.0, 0.0, 0.0
+                elif (pr_openings or {}).get(b) and pr_openings[b][0] > 0:
+                    # No biology state (no batches.yaml metadata): open on the
+                    # PR-hydrated balance, never on the week's close.
+                    oc, obio = float(pr_openings[b][0]), float(pr_openings[b][1])
+                    owt = obio * 1000.0 / oc
                 else:
                     oc, owt, obio = cc, cwt, cbio
             else:
@@ -2257,10 +2462,17 @@ def _build_batch_week_ledger(
             _sp_now = _sfw.get((b, wk))
             _sp_prev = _sfw.get((b, weeks[i - 1])) if i > 0 else None
             if i == 0 and _sp_now is not None:
-                fw_oc += (_sp_now.open_count if _sp_now.open_count > 0
+                _sp_oc = (_sp_now.open_count if _sp_now.open_count > 0
                           else _sp_now.count)
-                fw_obio += (_sp_now.open_biomass_kg if _sp_now.open_biomass_kg > 0
-                            else _sp_now.biomass_kg)
+                fw_oc += _sp_oc
+                # Before its first day's growth, like every other week-0
+                # opening (_open_wt_before_growth): the split's FW part opened
+                # one day heavy (B49 +1,564 kg on the 8/31 PR, no events).
+                _sp_pre = _open_wt_before_growth(_sp_now)
+                fw_obio += (_sp_oc * _sp_pre / 1000.0 if _sp_pre is not None
+                            else (_sp_now.open_biomass_kg
+                                  if _sp_now.open_biomass_kg > 0
+                                  else _sp_now.biomass_kg))
             elif _sp_prev is not None:
                 fw_oc += _sp_prev.close_count
                 fw_obio += _sp_prev.close_biomass_kg
@@ -2306,7 +2518,8 @@ def _build_batch_week_ledger(
                 cc += _sp_now.close_count
                 cbio += _sp_now.close_biomass_kg
                 cwt = cbio * 1000.0 / cc if cc > 0 else 0.0
-            h = harv.get((b, wk), {"count": 0.0, "gross": 0.0, "wt_sum": 0.0})
+            h = harv.get((b, wk), {"count": 0.0, "gross": 0.0, "wt_sum": 0.0,
+                                   "whole": 0.0})
             cu = cull.get((b, wk), {"count": 0.0, "bio": 0.0})
             _wc = _wcull.get((b, wk))
             if _wc is not None:
@@ -2396,8 +2609,20 @@ def _build_batch_week_ledger(
             net_prod = gross_growth - mort_bio
             f = feed.get((b, wk), 0.0)
             avg_bio = (obio + cbio) / 2.0
-            sgr = (log(cwt / owt) / 7.0 * 100.0) if owt > 0 and cwt > 0 else 0.0
-            sfr = (f / avg_bio / 7.0 * 100.0) if avg_bio > 0 else 0.0
+            # DAYS the row's biology covers. A freshwater/egg PROJECTION row
+            # (no tank row; close from the biology) is calendar-true: its first
+            # week runs [forecast start, next Monday), 1-6 days. Its rates are
+            # per day of THAT (d1 2024-W48: 1 day; dividing its growth by 7
+            # understated SGR 7x). Seawater rows keep 7: the planner walks a
+            # full 7 days in its first week too (engine question, see
+            # engine_patches), and their rates must match that walk.
+            _wdays = 7.0
+            if (b, wk) not in rl and _s_st is not None \
+                    and _s_st.stage in ("FW", "EGG") and ws_date is not None \
+                    and hasattr(ws_date, "weekday") and ws_date.weekday() != 0:
+                _wdays = float(7 - ws_date.weekday())
+            sgr = (log(cwt / owt) / _wdays * 100.0) if owt > 0 and cwt > 0 else 0.0
+            sfr = (f / avg_bio / _wdays * 100.0) if avg_bio > 0 else 0.0
             bio_fcr = (f / gross_growth) if gross_growth > 0 else 0.0
             econ_fcr = (f / net_prod) if net_prod > 0 else 0.0
             count_check = (oc - mort_count - h["count"] - cu["count"]
@@ -2419,8 +2644,11 @@ def _build_batch_week_ledger(
                     if (b, wk) in rl and rl[(b, wk)]["dens_vol"] > 0 else None),
                 "sgr": sgr, "gross_growth": gross_growth, "net_prod": net_prod,
                 "feed": f, "sfr": sfr, "bio_fcr": bio_fcr, "econ_fcr": econ_fcr,
+                "days": _wdays,
                 "mort_count": mort_count, "mort_bio": mort_bio,
                 "harv_count": h["count"], "harv_gross": harv_gross,
+                # Printed Harv_Count: the whole fish HarvestPlan shows.
+                "harv_count_shown": h.get("whole", h["count"]),
                 "harv_hog": harv_hog, "harv_avg_hog": harv_avg_hog,
                 "cull_count": cu["count"], "cull_bio": cu["bio"],
                 "input_count": input_count, "xfer_in": xf, "xfer_out": xf,
@@ -2458,6 +2686,7 @@ def _build_batch_week_ledger(
 # (see the Avg_Density legend) and a 0 would assert a result.
 _SGR_POP_CHANGE_TOL = 0.01     # >1% of the opening count leaves the mean unsafe
 _FCR_MIN_SFR_PCT_DAY = 0.05    # below this the batch is not meaningfully feeding
+_FCR_MIN_GROWTH_KG = 0.5       # Gross_Growth prints to the kg: below this it reads 0
 
 
 def _rate_is_meaningful(d: dict) -> tuple[bool, bool]:
@@ -2499,10 +2728,19 @@ def _ledger_value_cells(d: dict) -> list:
         (round(d["sgr"], 4) if _sgr_ok else None), round(d["gross_growth"], 0),
         round(d["net_prod"], 0), round(d["feed"], 0),
         (None if d.get("rates_unknown") else round(d["sfr"], 4)),
-        (round(d["bio_fcr"], 2) if _fcr_ok else None),
-        (round(d["econ_fcr"], 2) if _fcr_ok else None),
+        # ...and only over a DENOMINATOR the row can show. Bio_FCR divides by
+        # Gross_Growth and Econ_FCR by Net_Production, both printed to the
+        # whole kg; one that prints as 0 cannot support a ratio. A 1-day first
+        # week that opened on its own close divided 196 kg of feed by float
+        # residue and printed Bio_FCR 1.39e14 (2024-11-30 PR, B39).
+        (round(d["bio_fcr"], 2)
+         if _fcr_ok and abs(d.get("gross_growth") or 0.0) >= _FCR_MIN_GROWTH_KG
+         else None),
+        (round(d["econ_fcr"], 2)
+         if _fcr_ok and abs(d.get("net_prod") or 0.0) >= _FCR_MIN_GROWTH_KG
+         else None),
         round(d["mort_count"], 0), round(d["mort_bio"], 1),
-        round(d["harv_count"], 0), round(d["harv_gross"], 1),
+        round(d.get("harv_count_shown", d["harv_count"]), 0), round(d["harv_gross"], 1),
         round(d["harv_hog"], 1), round(d["harv_avg_hog"], 1),
         round(d["cull_count"], 0), round(d["cull_bio"], 1),
         round(d["input_count"], 0), round(d["xfer_in"], 0), round(d["xfer_out"], 0),
@@ -2652,6 +2890,7 @@ def write_weekly_report(
     fw_transfer_basis=None,
     fw_projected=None,
     split_fw=None,
+    pr_openings=None,
 ) -> None:
     """Per-(week, batch) open/close production ledger (matches reference format).
 
@@ -2667,7 +2906,7 @@ def write_weekly_report(
         realized_biology=realized_biology, window_openings=window_openings,
         window_culls=window_culls, fw_openings=fw_openings,
         fw_transfer_basis=fw_transfer_basis, fw_projected=fw_projected,
-        split_fw=split_fw)
+        split_fw=split_fw, pr_openings=pr_openings)
 
     # WEEK-MAJOR. _build_batch_week_ledger returns rows BATCH-major (all of
     # B41's weeks, then all of B42's), which is fine for reading one batch's
@@ -2728,6 +2967,7 @@ def write_monthly_report(
     fw_transfer_basis=None,
     fw_projected=None,
     split_fw=None,
+    pr_openings=None,
 ) -> None:
     """Per-(month, batch) open/close production ledger (matches reference format).
 
@@ -2756,7 +2996,7 @@ def write_monthly_report(
         window_openings=window_openings,
         window_culls=window_culls, fw_openings=fw_openings,
         fw_transfer_basis=fw_transfer_basis, fw_projected=fw_projected,
-        split_fw=split_fw)
+        split_fw=split_fw, pr_openings=pr_openings)
 
     # Roll the weekly ledger up to calendar months, splitting any week that
     # straddles a month boundary into its true month. CONTINUOUS flows (growth,
@@ -2777,7 +3017,8 @@ def write_monthly_report(
     FLOW_KEYS = ("gross_growth", "net_prod", "feed", "mort_count", "mort_bio",
                  "harv_count", "harv_gross", "harv_hog", "cull_count", "cull_bio",
                  "input_count", "xfer_in", "xfer_out", "count_check", "bio_check")
-    HARVEST_KEYS = ("harv_count", "harv_gross", "harv_hog")
+    HARVEST_KEYS = ("harv_count", "harv_gross", "harv_hog", "harv_count_shown")
+    FLOW_KEYS = FLOW_KEYS + ("harv_count_shown",)
 
     def _wk_date(w):
         # Week-start date for proration. Some ledger rows (e.g. harvest-only)
@@ -2828,7 +3069,14 @@ def write_monthly_report(
                       f"week {w.get('week')!r} (batch {b}) — its flows are "
                       f"missing from the monthly totals")
                 continue
-            split_c = calendar_day_month_split(wkd, clip_start=report_start)
+            # The row's own day count (7, or 1-6 for a freshwater projection
+            # row in its partial first week -- see the weekly ledger's _wdays):
+            # the month's days are the calendar days its rows covered, so the
+            # monthly SGR/SFR divisor is no longer a 7-day week counted for a
+            # 1-day one (d1 2024-12 read 37 days in a 31-day month).
+            _w_days = float(w.get("days") or 7.0)
+            split_c = calendar_day_month_split(wkd, days=int(round(_w_days)),
+                                               clip_start=report_start)
             # harvest: whole to its ISO Monday's month, but never to a month
             # before the report opens (see iso_week_month_split's clip note).
             split_w = iso_week_month_split(wkd, clip_start=report_start)
@@ -2875,17 +3123,13 @@ def write_monthly_report(
                 if split_i is not None:
                     a["close_count"] += (cum_i + fi) * dc_i
                     a["close_bio"] += (cum_i + fi) * db_i
-                a["days"] += fc * 7.0
+                a["days"] += fc * _w_days
                 # Avg_Density is not a prorated flow either: accumulate the
                 # month's biomass and water and divide once, so the month reads
                 # as total-biomass-over-total-water rather than a mean of weekly
                 # means. A boundary week contributes to BOTH months it spans.
                 a["dens_bio"] = a.get("dens_bio", 0.0) + (w.get("dens_bio") or 0.0)
                 a["dens_vol"] = a.get("dens_vol", 0.0) + (w.get("dens_vol") or 0.0)
-                _wpk = w.get("peak_density")
-                if _wpk is not None:
-                    a["peak_density"] = (_wpk if a.get("peak_density") is None
-                                         else max(a["peak_density"], _wpk))
                 # A week carrying a held freshwater part makes every month it
                 # touches unable to report a rate (see _rate_is_meaningful).
                 if w.get("rates_unknown"):
@@ -2950,6 +3194,7 @@ def write_monthly_report(
             a["bio_check"] += ((pb.open_bio_kg - _old_ob) + pb.growth_kg
                                - (pb.mort_bio_kg + pb.harv_gross_kg + pb.cull_bio_kg))
             a["harv_count"] += pb.harv_count
+            a["harv_count_shown"] = a.get("harv_count_shown", 0.0) + pb.harv_count
             a["harv_gross"] += pb.harv_gross_kg
             a["harv_hog"] += pb.harv_gross_kg * (hog_yield or 0.0)
             a["feed"] += pb.feed_kg
@@ -2971,6 +3216,7 @@ def write_monthly_report(
             a["open_count"], a["open_bio"] = pb.open_count, pb.open_bio_kg
             a["close_count"] = a["close_bio"] = 0.0
             a["harv_count"], a["harv_gross"] = pb.harv_count, pb.harv_gross_kg
+            a["harv_count_shown"] = pb.harv_count
             a["harv_hog"] = pb.harv_gross_kg * (hog_yield or 0.0)
             a["feed"], a["gross_growth"] = pb.feed_kg, pb.growth_kg
             a["mort_count"], a["mort_bio"] = pb.mort_count, pb.mort_bio_kg
@@ -3008,6 +3254,7 @@ def write_monthly_report(
             "econ_fcr": (f / net_prod) if net_prod > 0 else 0.0,
             "mort_count": a["mort_count"], "mort_bio": a["mort_bio"],
             "harv_count": harv_count, "harv_gross": a["harv_gross"],
+            "harv_count_shown": a.get("harv_count_shown", harv_count),
             "harv_hog": a["harv_hog"],
             "harv_avg_hog": (a["harv_hog"] * 1000.0 / harv_count) if harv_count > 0 else 0.0,
             "cull_count": a["cull_count"], "cull_bio": a["cull_bio"],
@@ -3019,9 +3266,15 @@ def write_monthly_report(
                          mo, a.get("days") or 7.0,
                          a.get("dens_bio") or 0.0, a.get("dens_vol") or 0.0))
 
+    # The Avg_Density tail says what the column holds: the month's total
+    # biomass over the total water it occupied (dens_bio / dens_vol below).
+    # It used to say "the max of the month's weekly peaks", a leftover from
+    # before 2026-09-07 that contradicted the legend it was appended to --
+    # 138 of 140 a1 month rows are the average, 5 happen to equal the max.
     legends = [f"{sheet_name} - populated by RunForecast",
-               _LEDGER_DENSITY_LEGEND + " Monthly = the max of the month's "
-               "weekly peaks (a boundary week counts in both months).",
+               _LEDGER_DENSITY_LEGEND + " Monthly = the month's total biomass "
+               "over the total water it occupied (a boundary week counts in "
+               "both months).",
                _MONTHLY_CHECK_LEGEND]
     head = ["Scenario", "Month", "Batch"] + _LEDGER_COLS
     _write_ledger_sheet(wb, sheet_name, legends, head, _entries,
@@ -3551,10 +3804,15 @@ def write_reconciliation_report(
     from .time_grid import iso_week_label
     harv_count: dict[tuple[str, str], float] = defaultdict(float)
     harv_biomass: dict[tuple[str, str], float] = defaultdict(float)
+    # Printed Harvest_Count: the whole fish HarvestPlan shows (the ledgers
+    # print the same), while the balance below keeps the fractional flow.
+    harv_shown: dict[tuple[str, str], float] = defaultdict(float)
+    _whole_rr = whole_harvest_counts(list(harvest_events or []))
     for ev in (harvest_events or []):
         wk = iso_week_label(ev.event_date)
         harv_count[(ev.batch_id, wk)] += ev.count
         harv_biomass[(ev.batch_id, wk)] += ev.count * ev.avg_wt_g / 1000.0
+        harv_shown[(ev.batch_id, wk)] += _whole_rr.get(id(ev), ev.count)
 
     # Per-(batch, week) input count + biomass from TranOG events.
     tin_count: dict[tuple[str, str], float] = defaultdict(float)
@@ -3639,7 +3897,13 @@ def write_reconciliation_report(
             else:
                 # Fallback (no recorded biology): coarse weekly-SGR estimate on the
                 # at-week-open biomass; only the NON-starve biomass grows / dies.
-                mort = max(0.0, prev_count + in_c - st_c) * (m_pct / 100.0)
+                # Fish harvested PRE-biology never reach the week's mortality
+                # (the biomass side subtracts hv_b for the same reason): without
+                # `- hv_c` a batch harvested out whole in week 1 (B41, 8/31 PR
+                # with no manual window) was charged 3 deaths on fish already
+                # sold, and read Count_Delta +3 -- the only non-zero delta in
+                # 7,748 rows.
+                mort = max(0.0, prev_count - hv_c + in_c - st_c) * (m_pct / 100.0)
                 sgr = sgr_pct_day.get((batch, wk), 0.0)
                 growth_factor = (1.0 + sgr / 100.0) ** 7
                 grow_bio = max(0.0, bio_full_growth - st_b)
@@ -3664,7 +3928,8 @@ def write_reconciliation_report(
                 round(prev_count, 0),
                 round(mort, 0) if mort > 0 else None,
                 round(cull, 0) if cull > 0 else None,
-                round(hv_c, 0) if hv_c > 0 else None,
+                (round(harv_shown.get((batch, wk), hv_c), 0) if hv_c > 0
+                 else None),
                 round(in_c, 0) if in_c > 0 else None,
                 round(expected_c, 0),
                 round(actual_c, 0),
@@ -3702,16 +3967,37 @@ def write_tank_continuity_audit(
     initial_state,
     realized_biology=None,
     sheet_name: str = "TankContinuityAudit",
+    audit_touched_empty_tanks: bool = True,
 ) -> None:
     """Per-(tank, week, batch) reconciliation.
+
+    `audit_touched_empty_tanks` (default True, the shipped sheet): also audit a
+    tank empty at both ends of a week that fish passed through (see below).
+    lns_placement.drift_count passes False: that count is a PLANNER accept
+    gate, and widening the scope it judges is an engine decision (prepared as
+    a patch for the operator), not a report fix.
 
     Formula: open - mortality - harvest_out - transfer_out + transfer_in
              - grade_out + grade_in + tranog_in = expected_close
     Compares to BatchLocations actual close. Flags any drift > tolerance.
 
     Open for first week = PR-hydrated initial tank count (in-flight).
-    Batch transitions in a tank: when tank batch changes week-over-week,
-    each batch gets its own row showing its arrival/departure path.
+
+    ONE ROW PER (tank, week). The balance is per TANK, so a row can hold two
+    batches: on a week the occupant changes, the departing batch's opening,
+    harvest and transfer-out and the arriving batch's ins and close share the
+    row. Its Batch cell then names BOTH, departing first ("B54->B56"); it used
+    to print only the arriving batch, so B54's 25,504-fish harvest from tank 31
+    in 2028-W07 read as B56's (8/31 PR). The docstring promised a row per batch
+    on a changeover; the code never did that, and the per-tank proof does not
+    need it.
+
+    A tank that is empty at BOTH the open and the close of a week still gets a
+    row when any event touched it that week -- a same-week staging point (fish
+    moved in and forwarded on). It used to be skipped before its events were
+    looked at, so its in/out legs were in no row and the facility summary
+    could not see a leak there (8/31 PR, 2027-W37 tank 62: 14,814 in, 14,813
+    out, no row).
     """
     if sheet_name in wb.sheetnames:
         del wb[sheet_name]
@@ -3781,10 +4067,15 @@ def write_tank_continuity_audit(
     # Per-(tank, week) event aggregates — counts AND biomass (kg).
     harvest_out: dict[tuple[int, str], float] = defaultdict(float)
     harvest_out_kg: dict[tuple[int, str], float] = defaultdict(float)
+    # Printed Harvest_Out: the whole fish HarvestPlan shows for the tank-week;
+    # the balance keeps the fractional flow.
+    harvest_out_shown: dict[tuple[int, str], float] = defaultdict(float)
+    _whole_tca = whole_harvest_counts(list(harvest_events or []))
     for ev in (harvest_events or []):
         wk = iso_week_label(ev.event_date)
         harvest_out[(ev.source_tank_id, wk)] += ev.count
         harvest_out_kg[(ev.source_tank_id, wk)] += ev.count * ev.avg_wt_g / 1000.0
+        harvest_out_shown[(ev.source_tank_id, wk)] += _whole_tca.get(id(ev), ev.count)
 
     transfer_out: dict[tuple[int, str], float] = defaultdict(float)
     transfer_out_kg: dict[tuple[int, str], float] = defaultdict(float)
@@ -3889,14 +4180,53 @@ def write_tank_continuity_audit(
     # weekly-vs-daily growth approximation (reported, not asserted).
     _fac_dc_signed = _fac_dc_abs = 0.0
     _fac_db_signed = _fac_db_abs = 0.0
-    for tid in all_tanks:
+    # (tank, week) keys ANY event touched: a tank empty at both ends of a week
+    # is still audited when fish passed through it (see docstring).
+    _touched: set = set()
+    for _agg in (harvest_out, transfer_out, transfer_in, grade_out, grade_in,
+                 tranog_in):
+        _touched.update(k for k, v in _agg.items() if v)
+    if not audit_touched_empty_tanks:
+        # The pre-2026-09-12 scope, kept for the LNS accept gate (docstring).
+        _touched = set()
+    # Batches whose events touched each (tank, week) -- names a staging row.
+    # (Label only: an event without a batch id adds nothing.)
+    _touched_batches: dict = defaultdict(set)
+
+    def _tb_add(tank, wk_, ev_):
+        _b = getattr(ev_, "batch_id", None)
+        if _b:
+            _touched_batches[(tank, wk_)].add(_b)
+    for ev in (harvest_events or []):
+        _tb_add(ev.source_tank_id, iso_week_label(ev.event_date), ev)
+    for ev in (transfer_events or []):
+        _wk_ = iso_week_label(ev.event_date)
+        if hasattr(ev, "pickup_tank_id"):
+            for _t in (ev.source_tank_id, ev.pickup_tank_id, ev.retention_tank_id):
+                _tb_add(_t, _wk_, ev)
+            continue
+        if (getattr(ev, "count_transferred", None) or 0) <= 0:
+            continue
+        _tb_add(ev.source_tank_id, _wk_, ev)
+        for d in ev.destinations:
+            _tb_add(d.tank_id, _wk_, ev)
+    for ev in (grade_events or []):
+        _wk_ = iso_week_label(ev.event_date)
+        for _t in list(ev.source_tank_ids) + [d.tank_id for d in ev.destinations]:
+            _tb_add(_t, _wk_, ev)
+    for ev in (tranog_events or []):
+        _wk_ = iso_week_label(ev.event_date)
+        for d in ev.destinations:
+            _tb_add(d.tank_id, _wk_, ev)
+    _wk_set = set(weeks)
+    for tid in sorted(set(all_tanks) | {t for (t, w) in _touched if w in _wk_set}):
         prev_batch, prev_count = pr_tank.get(tid, (None, 0.0))
         prev_biomass = pr_tank_bio.get(tid, 0.0)
         for wk in weeks:
             cur = tank_wk_state.get((tid, wk))
             cur_batch, cur_count = cur if cur else (None, 0.0)
             cur_biomass = tank_wk_bio.get((tid, wk), 0.0)
-            if prev_count == 0 and cur_count == 0:
+            if prev_count == 0 and cur_count == 0 and (tid, wk) not in _touched:
                 continue
             # STARVE (in-place purge) this week: no growth, no mortality.
             is_starve = tank_wk_starve.get((tid, wk), False)
@@ -3996,12 +4326,23 @@ def write_tank_continuity_audit(
             _fac_db_signed += delta_bio
             _fac_db_abs += abs(delta_bio)
 
-            display_batch = cur_batch or (prev_batch if prev_count > 0 else "")
+            # A changeover row holds TWO batches' flows (see docstring): name
+            # both, departing first, so no flow reads as the wrong batch's.
+            _dep = prev_batch if prev_count > 0 else None
+            if _dep and cur_batch and _dep != cur_batch:
+                display_batch = f"{_dep}->{cur_batch}"
+            else:
+                display_batch = cur_batch or _dep or ""
+            if not display_batch and (tid, wk) in _touched:
+                # Same-week staging tank: name the batch(es) that passed.
+                display_batch = "->".join(sorted_batches(
+                    _touched_batches.get((tid, wk), ()))) or ""
             ws.append([
                 wk, tid, display_batch,
                 round(prev_count, 0),
                 round(mort, 0) if mort > 0 else None,
-                round(h_out, 0) if h_out > 0 else None,
+                (round(harvest_out_shown.get((tid, wk), h_out), 0) if h_out > 0
+                 else None),
                 round(t_out, 0) if t_out > 0 else None,
                 round(t_in, 0) if t_in > 0 else None,
                 round(g_out, 0) if g_out > 0 else None,
@@ -4012,8 +4353,18 @@ def write_tank_continuity_audit(
                 round(delta_count, 0),
                 flag,
                 round(prev_biomass, 0),
-                round(growth_kg, 0) if growth_kg > 0 else None,
-                round(mort_kg, 0) if mort_kg > 0 else None,
+                # Growth_kg prints whenever it is not zero, NEGATIVE included:
+                # it is the recorded net growth + mortality mass, and a tank
+                # whose fish lost weight that week has a negative one. Printing
+                # it only when > 0 dropped that term, so the row could not be
+                # re-added from its own columns (c 2026-W49 tank 32:
+                # Expected_Close_kg -1,341 over printed flows summing to 0).
+                round(growth_kg, 0) if abs(growth_kg) >= 0.5 else None,
+                # Mort_kg the same way: the recorded mortality of a tank-week
+                # can come out NEGATIVE (c 2026-W49 tank 32: -19 kg), and
+                # hiding it left that row 19 kg short of re-adding. Shown, not
+                # absorbed -- a negative mortality is itself worth seeing.
+                round(mort_kg, 0) if abs(mort_kg) >= 0.5 else None,
                 round(h_out_kg, 0) if h_out_kg > 0 else None,
                 round(t_out_kg, 0) if t_out_kg > 0 else None,
                 round(t_in_kg, 0) if t_in_kg > 0 else None,
@@ -4062,6 +4413,7 @@ def write_facility_map(
     tables=None,
     biology_states_by_batch=None,
     sheet_name: str = "FacilityMap",
+    control=None,
 ) -> None:
     """Tank × Week matrix showing which batch occupies each tank each week.
 
@@ -4072,8 +4424,15 @@ def write_facility_map(
     Below the tank grid: two per-SYSTEM × week summaries — total planned feed
     (kg/day) and total biomass (kg) per system — each with a FACILITY total row
     so the operator can read system loads and check them against the caps.
+    Both FACILITY rows include the FW (hatchery) row, so each is the Advisory's
+    FW-inclusive facility figure (Total_Feed / Total_Biomass). `control` gives
+    the purge-mode date for the red over-cap marking (R8); None judges every
+    STARVE tank as a harvest-prep tank.
     """
     from openpyxl.styles import Font, PatternFill
+    from .sixn import is_purge_mode as _is_purge_mode
+    from .tiers import (effective_density_cap as _eff_cap,
+                        HARVEST_PREP_DENSITY_CAP as _PREP_CAP)
 
     if sheet_name in wb.sheetnames:
         del wb[sheet_name]
@@ -4139,13 +4498,13 @@ def write_facility_map(
                 bid, wt_g, dens, _stage = cell
                 bnum = bid[1:] if bid and bid[:1] == "B" else bid
                 row.append(f"{bnum} {wt_g / 1000.0:.1f}/{dens:.0f}")
-                _paint.append((len(row), bid, dens, _stage))
+                _paint.append((len(row), bid, dens, _stage, wk))
             else:
                 row.append("")
         ws.append(row)
         _r = ws.max_row
         _cap = float(getattr(t, "max_density_kg_m3", 0) or 0)
-        for _c, _bid, _dens, _stage in _paint:
+        for _c, _bid, _dens, _stage, _wkl in _paint:
             _cell = ws.cell(row=_r, column=_c)
             _f = _batch_fill.get(_bid)
             if _f is not None:
@@ -4153,11 +4512,18 @@ def write_facility_map(
             # Over its own tank's cap: red bold text ON the batch colour, so
             # the cohort stays identifiable while the breach still shouts.
             #
-            # STARVE is EXEMPT (rule R8): a 6N purge tank is deliberately packed
-            # off-feed and has no density cap, so flagging it red would raise an
-            # alarm on the one place a high number is CORRECT. Marking them made
-            # this grid show 124 breaches where the run reports 55.
-            if _cap and _dens > _cap and _stage != "STARVE":
+            # Judged by R8 (tiers.effective_density_cap) with the harvest-prep
+            # cap, exactly as run.py's density audit judges it: a tank
+            # preparing for harvest (STARVE / a 6N purge tank) is held to
+            # HARVEST_PREP_DENSITY_CAP (150), not exempted -- the operator's
+            # 2026-09-08 ruling that harvest prep is a RAISED cap. The old
+            # `_stage != "STARVE"` test predated that ruling and left 86 real
+            # breaches unmarked on the 2025-07-31 PR (tank 61 at 185 kg/m3).
+            _jcap = _eff_cap(_cap, t.system_id, _stage,
+                             _is_purge_mode(control, wk_start.get(_wkl))
+                             if control is not None else True,
+                             harvest_prep_cap=_PREP_CAP)
+            if _cap and _dens > _jcap:
                 _cell.font = Font(bold=True, color="9C0006")
 
     # ---- Per-system summaries below the tank grid ----
@@ -4175,10 +4541,17 @@ def write_facility_map(
     # own row and folded into the BIOMASS block's FACILITY total so that total is
     # FW-inclusive, matching the engine's cap basis and the Advisory.
     fw_bio: dict[str, float] = defaultdict(float)
+    # ...and its FEED per day, the same term the Advisory's Total_Feed and the
+    # engine's facility feed cap add (s.feed_kg_day of FW/EGG states). The feed
+    # block's FACILITY row used to be seawater-only while the biomass block's,
+    # right under it, was FW-inclusive: one label, two bases, and the feed
+    # FACILITY read 1.8-4.8 t/day under the Advisory in every a1 week.
+    fw_feed: dict[str, float] = defaultdict(float)
     for states in (biology_states_by_batch or {}).values():
         for s in states:
             if s.stage in ("FW", "EGG"):
                 fw_bio[s.week_label] += s.biomass_kg
+                fw_feed[s.week_label] += getattr(s, "feed_kg_day", 0.0) or 0.0
 
     def _sys_label(sysid):
         return sysid[2:] if sysid.startswith("OG") else sysid
@@ -4197,8 +4570,9 @@ def write_facility_map(
                   + [fmt(sum(data.get((s, w), 0.0) for s in systems)
                          + (extra[1].get(w, 0.0) if extra else 0.0)) for w in weeks])
 
-    _block("TOTAL PLANNED FEED PER DAY (kg/day) — per system (STARVE/6N-purge = 0)",
-           sys_feed, lambda v: round(v, 0))
+    _block("TOTAL PLANNED FEED PER DAY (kg/day) — per system (STARVE/6N-purge = 0); "
+           "FW = hatchery, FACILITY = total vs the facility feed cap",
+           sys_feed, lambda v: round(v, 0), extra=("FW (hatchery)", fw_feed))
     _block("BIOMASS (kg) — per system per week; FW = hatchery, FACILITY = total vs cap",
            sys_bio, lambda v: round(v, 0), extra=("FW (hatchery)", fw_bio))
 
@@ -4429,7 +4803,18 @@ def write_validation_log(
         elif w.startswith("HARVEST FLOOR"):
             # Measured on the REALIZED plan (analysis.realized_plan_audit), not
             # on a mid-plan pass. This is the answer to "which weeks are short?"
+            # A week with NO harvest at all is named in the same category.
             cat = "WARNING - Harvest floor (realized plan)"
+        elif w.startswith("PR NOT HYDRATED"):
+            # ProductionReport fish that no tank received (a group without a
+            # Bnn id, a batch roll-up its Unit rows do not hold): the opening
+            # then differs from the PR's own total (production_report.
+            # pr_structure_warnings). Detection only.
+            cat = "WARNING - PR fish not hydrated"
+        elif w.startswith("PLAN ENDS EARLY"):
+            # The realized plan stopped before horizon_weeks with fish still
+            # in the tanks (run.py). Detection only.
+            cat = "WARNING - Plan ends before the horizon"
         elif w.startswith("HARVEST CEILING"):
             cat = "WARNING - Harvest ceiling (realized plan)"
         elif w.startswith("HANDLING BUDGET"):
