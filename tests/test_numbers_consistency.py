@@ -158,13 +158,14 @@ def test_counts_02_tca_audits_a_tank_empty_at_both_ends_of_its_week():
     assert summ[1] == -1, "the facility proof must see the staging tank's leak"
 
 
-def test_counts_02_lns_accept_gate_keeps_its_validated_scope():
-    """The staging-tank rows are a REPORT fix. lns_placement.drift_count is a
-    PLANNER accept gate built on the same writer; if it saw the new rows, a
-    staging-tank drift would start rejecting LNS moves it accepted before --
-    a plan change, which this sandbox may not make. Tank 62 here leaks 114 fish
-    (in 14,814, out 14,700, close 0): the shipped sheet flags it TANK_DRIFT,
-    the gate still counts 0, exactly as at 892ce71."""
+def test_counts_02_lns_accept_gate_sees_staging_tanks():
+    """Engine change 5 of 7 (counts-02, operator-approved one at a time): the
+    LNS placement accept gate (lns_placement.drift_count) audits exactly what
+    the shipped TankContinuityAudit does, staging tanks included. Tank 62 here
+    leaks 114 fish (in 14,814, out 14,700, close 0): the shipped sheet flags it
+    TANK_DRIFT, and the gate now counts it too -- a move that leaves such a
+    leak is rejected. Before this change the gate counted 0 (its pre-2026-09-12
+    scope ignored a tank empty at both ends of a week)."""
     from forecast import lns_placement
     locs = [_loc(M1, "B52", 16, 14_814.0), _loc(M2, "B52", 46, 14_700.0)]
     ev = [_xfer(M2, "B52", 16, [(62, 14_814.0, 1000.0)]),
@@ -180,9 +181,9 @@ def test_counts_02_lns_accept_gate_keeps_its_validated_scope():
     placement = SimpleNamespace(batch_locations=locs, harvest_events=[],
                                 transfer_events=ev, grade_events=[],
                                 tranog_events=[])
-    assert lns_placement.drift_count(placement, [], init) == 0, (
-        "the LNS accept gate now sees staging-tank rows: that changes what the "
-        "planner accepts and is an engine decision, not a report fix")
+    assert lns_placement.drift_count(placement, [], init) == 1, (
+        "the LNS accept gate must see the staging-tank leak the shipped sheet "
+        "flags (counts-02): a move that leaves one must be rejected")
 
 
 # ---- counts-04 / calendar-07: TransferTemplate entry = the TranOG fish ---------

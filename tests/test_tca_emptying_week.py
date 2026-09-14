@@ -8,9 +8,9 @@ non-empty tanks -- has no row for it. TankContinuityAudit took its weeks from
 BatchLocations alone, so the week was skipped and that last harvest was in no
 audit row: the conservation proof never saw those fish leave.
 
-It now also audits every week an event touched. The LNS placement accept gate
-(lns_placement.drift_count, audit_touched_empty_tanks=False) keeps the scope it
-was validated on.
+It now also audits every week an event touched. The shipped sheet and, since
+engine change 5 (counts-02), the LNS placement accept gate both use that
+scope; audit_touched_empty_tanks=False still gives the pre-2026-09-12 scope.
 """
 from __future__ import annotations
 
@@ -62,9 +62,9 @@ def test_the_week_the_facility_empties_is_audited():
     assert not r["Flag"]
 
 
-def test_the_lns_accept_gate_keeps_its_validated_scope():
+def test_the_old_scope_switch_leaves_the_emptying_week_out():
     """NEGATIVE CONTROL for the scope switch: with audit_touched_empty_tanks
-    False (lns_placement.drift_count) the event-only week is not added."""
+    False (the pre-2026-09-12 scope) the event-only week is not added."""
     rows = {(r["Week"], r["Tank"]) for r in _rows(audit_touched_empty_tanks=False)}
     assert (W2, 63) not in rows
     assert (W1, 63) in rows
