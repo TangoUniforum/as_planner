@@ -308,9 +308,21 @@ def test_split_auto_carries_the_fish_no_worse_than_the_manual_route(w1_auto, w1_
     Carrying the same fish the operator's way (a week-1 fw_to_og into tanks
     24 + 14) measured 1,511 / 518 / 544 against auto's 1,550 / 529 / 538. So
     the automatic path must be no worse than the manual route, within the
-    measured discontinuity band (12%, +3 for the small counts)."""
+    measured discontinuity band.
+
+    The band is 40% (+3 for the small counts), set by the operator
+    (2026-09-14) from a measurement: numbers-audit finding E1 (a short first
+    week walked for its own days) makes B43 0.4% lighter in 2026-W37 -- one
+    day less growth -- and the planner then picks different moves on both
+    routes. Density warnings / system-feed breaches (manual, auto): before
+    85 / 47 and 91 / 40; after 77 / 38 and 101 / 51 (auto 1.31x and 1.34x the
+    manual route). The sums hardly moved (176 / 87 -> 178 / 89), the extra
+    breaches sit a year and more out in both directions, no tank is filled
+    into a full one on either route, and the automatic route's worst tank
+    fell 106 -> 98 kg/m3. The old 12% band was narrower than the planner's
+    own swing."""
     a, m = _breaches(w1_auto), _breaches(w1_manual)
-    worse = {k: (m[k], a[k]) for k in a if a[k] > m[k] * 1.12 + 3}
+    worse = {k: (m[k], a[k]) for k in a if a[k] > m[k] * 1.40 + 3}
     assert not worse, f"auto breaches more than the manual route on {worse} (manual, auto)"
 
 
@@ -398,8 +410,8 @@ def test_split_window_crossing_guard(tmp_path, copy_config):
 
 def test_split_after_a_one_week_window_is_placed_once(w1_auto):
     """A one-week manual window shifts the planner to a TUESDAY start, and the
-    ragged first planner week's day loop runs to week_start + 7 -- onto the
-    Monday B49 enters. An ordinary arrival has no Phase-C row the week before
+    ragged first planner week's day loop ran to week_start + 7 -- onto the
+    Monday B49 enters (since numbers-audit finding E1 it stops at that Monday). An ordinary arrival has no Phase-C row the week before
     it enters seawater; a split batch does, so it was topped up TWICE (484,514
     fish placed for 242,257, a FW mass-balance breach and 4 TANK_DRIFT rows)."""
     sw, _fw = _pr_b49()

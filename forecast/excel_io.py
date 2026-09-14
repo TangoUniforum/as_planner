@@ -1232,6 +1232,16 @@ def write_harvest_plan_report(
         ws.column_dimensions[get_column_letter(c)].width = 11
 
 
+def _row_days(r) -> float:
+    """The days of biology the row's week covered (the engine's
+    BatchLocationRow.days: 1-6 for a partial first planner week, else 7).
+    A realized feed RATE times this is the week's feed."""
+    try:
+        return float(getattr(r, "days", 7.0) or 7.0)
+    except (TypeError, ValueError):
+        return 7.0
+
+
 def _row_feed_kg_day(r, batches, tables):
     """Realized feed/day (kg) for one BatchLocation row — 0 for STARVE (6N
     depuration), empty, or when tables is absent.
@@ -1616,7 +1626,7 @@ def _feed_by_type_week(batch_locations, biology_states_by_batch, tables,
         wk_start.setdefault(r.week_label, r.week_start)
         if getattr(r, "stage", "") == "STARVE":
             continue  # off-feed depuration tank-week
-        fkg = _row_feed_kg_day(r, batches, tables) * 7.0
+        fkg = _row_feed_kg_day(r, batches, tables) * _row_days(r)
         if fkg:
             ftw[(_feed_type_for_size(tables, r.avg_wt_g), r.week_label)] += fkg
     for (bid, wk, ftype), kg in (sixn_move_in_feed or {}).items():
@@ -1663,7 +1673,7 @@ def _feed_by_batch_type_week(batch_locations, biology_states_by_batch, tables,
         wk_start.setdefault(r.week_label, r.week_start)
         if getattr(r, "stage", "") == "STARVE":
             continue  # off-feed depuration tank-week
-        fkg = _row_feed_kg_day(r, batches, tables) * 7.0
+        fkg = _row_feed_kg_day(r, batches, tables) * _row_days(r)
         if fkg:
             fbtw[(r.batch_id, _feed_type_for_size(tables, r.avg_wt_g),
                   r.week_label)] += fkg
@@ -2116,12 +2126,13 @@ def _build_batch_week_ledger(
         # tank the same as a big one. Water is derived per row as bio/density
         # (BatchLocations carries no volume). Rows with no density contribute
         # nothing, so a batch with no tanks keeps 0 water and reads blank.
+        e["days"] = max(e.get("days", 0.0), _row_days(r))
         _d = getattr(r, "density_kg_m3", None)
         if _d is not None and float(_d) > 0:
             e["dens_bio"] += float(r.biomass_kg or 0.0)
             e["dens_vol"] += float(r.biomass_kg or 0.0) / float(_d)
         # STARVE tank-weeks (6N depuration) eat nothing (helper returns 0).
-        feed[key] += _row_feed_kg_day(r, batches, tables) * 7.0
+        feed[key] += _row_feed_kg_day(r, batches, tables) * _row_days(r)
     # 6N purge move-in fish ate 4 pre-transfer days in their source tank (now
     # shown in 6N = STARVE, excluded above) — add that real feed back so the
     # ledger Feed column matches the FeedForecast / YearlySummary totals.
@@ -2613,10 +2624,11 @@ def _build_batch_week_ledger(
             # (no tank row; close from the biology) is calendar-true: its first
             # week runs [forecast start, next Monday), 1-6 days. Its rates are
             # per day of THAT (d1 2024-W48: 1 day; dividing its growth by 7
-            # understated SGR 7x). Seawater rows keep 7: the planner walks a
-            # full 7 days in its first week too (engine question, see
-            # engine_patches), and their rates must match that walk.
-            _wdays = 7.0
+            # understated SGR 7x). A seawater (tank) row takes the days the
+            # planner walked for it (BatchLocationRow.days), so its rates
+            # match that walk.
+            _wdays = (float(rl[(b, wk)].get("days") or 7.0)
+                      if (b, wk) in rl else 7.0)
             if (b, wk) not in rl and _s_st is not None \
                     and _s_st.stage in ("FW", "EGG") and ws_date is not None \
                     and hasattr(ws_date, "weekday") and ws_date.weekday() != 0:

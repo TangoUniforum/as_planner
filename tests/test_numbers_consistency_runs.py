@@ -264,3 +264,35 @@ def test_runs_the_2026_02_28_plan_walks_the_whole_horizon(runs):
         f"no fish harvested after the last tank week {last} "
         f"({left:,.0f} fish still in tanks then): the plan stopped early")
     assert abs(later - left) <= 1, (last, left, later)
+
+
+@pytest.mark.parametrize("close", CLOSES)
+def test_runs_the_first_planner_week_is_walked_for_its_own_days(runs, close):
+    """E1 (engine change 6 of 7, taken one at a time).
+
+    A report that does not close on a Sunday starts the planner mid-week: the
+    first week runs from the report start to the next Monday (2025-07-31: 3
+    days; 2026-02-28: 1 day) -- the calendar, the biology projection and the
+    weekly labels all say so. The realized walk ran that week for 7 days
+    anyway, so the days from the next Monday on were walked twice: growth,
+    mortality and feed, the first-week feed read as a full week's.
+
+    Measured as a RATE, not a pinned number: the facility's feed per day of
+    its first week is the same as in the week after it (feed moves a few % a
+    week). Walking the partial week for 7 days made it 7/days times larger."""
+    s = runs[close]["sheets"]
+    rs = _report_start(runs[close])
+    days0 = (7 - rs.weekday()) % 7 or 7
+    assert days0 < 7                    # both corpus PRs start mid-week
+    tot = [r for r in _table(s["WeeklyReport"], lambda r: r[0] == "Scenario")
+           if r["Batch"] == "TOTAL"]
+    w0, w1 = tot[0], tot[1]
+    d0 = w0["Week_Start"].date() if isinstance(w0["Week_Start"], dt.datetime) else w0["Week_Start"]
+    assert d0 == rs, (w0["Week"], d0, rs)
+    per_day0 = _n(w0["Feed (kg)"]) / days0
+    per_day1 = _n(w1["Feed (kg)"]) / 7.0
+    assert per_day1 > 0
+    assert abs(per_day0 / per_day1 - 1.0) <= 0.15, (
+        f"{w0['Week']} ({days0} days) fed {per_day0:,.0f} kg/day vs "
+        f"{per_day1:,.0f} kg/day in {w1['Week']}: the first week was not walked "
+        f"for its own {days0} days")

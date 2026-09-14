@@ -546,6 +546,10 @@ class BatchLocationRow:
     # a same-batch top-up overwrites it (see _freeze_6n_dest), so a value that
     # moves forward while the tank stays occupied IS the clock reset.
     purge_fill_date: "date | None" = None
+    # The calendar days of biology this row's week covered
+    # (1-6 for a partial first planner week, else 7). The report writers turn
+    # the realized feed RATE into a week's feed and a weekly SGR with it.
+    days: float = 7.0
 
 
 @dataclass
@@ -4511,7 +4515,16 @@ def phase_d_emit_events(
                 from .time_grid import week_range as _wr_hz
                 week_ranges[label] = _wr_hz(_hz_labels.index(label), _hz_fs)
             continue
-        week_ranges[label] = (wload.week_start, wload.week_start + timedelta(days=7))
+        # A week runs to the NEXT MONDAY (numbers-audit finding E1). The first
+        # planner week starts on forecast_start (or the day after a manual
+        # window) and is 1-6 days long when that is not a Monday (time_grid:
+        # week 0 = [forecast_start, next Monday)); every later week starts on
+        # a Monday and is 7 days. `week_start + 7` walked a partial week for 7
+        # days, so the days from the next Monday to week_start+6 were walked
+        # twice (in week 0 and again in week 1): growth, mortality and feed.
+        _ws0 = wload.week_start
+        _to_mon = (7 - _ws0.weekday()) % 7
+        week_ranges[label] = (_ws0, _ws0 + timedelta(days=_to_mon or 7))
 
     # HANDLING MORTALITY (operator, 2026-08-21). Armed once, on the state every
     # event applies to, so every Transfer pays it without ~30 construction
@@ -6603,6 +6616,7 @@ def phase_d_emit_events(
                 purge_fill_date=(
                     getattr(state, "sixn_fill_date", {}) or {}
                 ).get(tank.tank_id),
+                days=float((ws_we[1] - ws_we[0]).days) if ws_we is not None else 7.0,
             ))
 
         prev_assignment = this_assignment

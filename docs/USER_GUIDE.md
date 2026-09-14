@@ -1206,6 +1206,12 @@ without the check, 85 harvest weeks compared, **0 differ, 0.0 fish**.
 >   ProductionReport's own fish count (4,967,628 on the 8/31 PR — including
 >   B49's 250,225 freshwater fish, which the ledger used to leave out). Each
 >   week opens where the previous one closed.
+> * **A short first week.** A report that does not close on a Sunday starts the
+>   forecast mid-week, so its first week runs only from the report start to the
+>   next Monday (a 2025-07-31 report: 3 days). That week's growth, mortality
+>   and feed cover those days only, and its SGR and SFR are per day of them.
+>   The plan used to walk that week for a full 7 days, walking the first days
+>   of the next week twice (numbers-audit finding E1).
 > * **`Input_Count`** is **eggs stocked, and nothing else**. Over the horizon it
 >   adds up to the eggs stocked in it (6,840,000 on the 8/31 PR; it used to read
 >   10.8 M because every smolt was counted again when it entered seawater).
