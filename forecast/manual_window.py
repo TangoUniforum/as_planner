@@ -23,6 +23,7 @@ from .biology import advance_tank_one_day
 from .placement import BatchLocationRow
 from .state import STAGE_STARVE
 from .time_grid import forecast_week_labels
+from .time_grid import week_end as _tg_week_end
 
 
 def _freeze_purge_6n(state, control, week_date) -> dict:
@@ -84,10 +85,11 @@ def _snapshot_week(state, week_label, week_start):
 
 
 def advance_facility_one_week(state, batch_by_id, tables, week_start_date,
-                              week_label):
-    """Advance every occupied tank 7 days of continuous biology.
+                              week_label, days: int = 7):
+    """Advance every occupied tank `days` days of continuous biology (the
+    week's own calendar days: 1-6 for a short first week, else 7).
 
-    Mirrors Phase D's per-week biology block exactly: for each of the 7 days,
+    Mirrors Phase D's per-week biology block exactly: for each day,
     apply `advance_tank_one_day` (growth + mortality, no events) to each
     occupied tank, accumulating the REALIZED biomass delta and mortality count
     per (tank, batch) — the same ground-truth the continuity audit reconciles
@@ -96,7 +98,8 @@ def advance_facility_one_week(state, batch_by_id, tables, week_start_date,
     """
     realized: dict[tuple[int, str, str], list[float]] = {}
     day = week_start_date
-    for _ in range(7):
+    # The week's own calendar days (calendar-08).
+    for _ in range(int(days)):
         for tank in state.tanks_by_id.values():
             if tank.is_empty:
                 continue
@@ -446,11 +449,22 @@ def advance_facility_window(state, batch_by_id, tables, forecast_start,
                     f"{_ceil:,.0f} (max_harvest_per_week + relief). The "
                     f"window executed your script anyway — check the week "
                     f"is actually processable.")
+        # The window weeks sit on the SAME grid as every other week of the
+        # report (numbers-audit finding calendar-08; time_grid: week 0 =
+        # [forecast_start, next Monday), then Mondays), not on 7-day blocks
+        # from the forecast start. On the 8/31 PR the window ran Tue
+        # 09-01..09-07 and Tue 09-08..09-14 while the freshwater projection
+        # and the Daily Harvest Schedule used Tue 09-01..Sun 09-06 and Mon
+        # 09-07..Sun 09-13 under the same labels, and the planner re-opened on
+        # a Tuesday. Now window week 1 runs to the next Monday, the planner
+        # re-opens on a Monday, and one label means one set of days everywhere.
+        _we = _tg_week_end(i, forecast_start)
         wk_realized = advance_facility_one_week(
-            state, batch_by_id, tables, week_start, labels[i])
+            state, batch_by_id, tables, week_start, labels[i],
+            days=(_we - week_start).days)
         realized.update(wk_realized)
         batch_locations.extend(_snapshot_week(state, labels[i], week_start))
-        week_start = week_start + timedelta(days=7)
+        week_start = _we
     # Handoff: undo the purge hold on the RETURNED state so the auto pipeline
     # starts from its expected condition and runs its OWN 6N rotation — the hold
     # is a manual-window concern only and must not propagate downstream. The

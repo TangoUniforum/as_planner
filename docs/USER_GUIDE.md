@@ -370,6 +370,13 @@ for this ProductionReport only, in `scenario/manual_events/<PR closing date>.yam
 reads the file for the PR you uploaded. (An old shared
 `scenario/manual_events.yaml` is read only until the first per-PR file exists.)
 
+**Which days a window week covers.** The window runs on the same calendar as the
+rest of the report: its first week runs from the report start to the next Monday
+(on the 8/31 PR, Tuesday 09-01 to Sunday 09-06), every later week Monday to Sunday,
+and the planner takes over on a Monday. Until 2026-09 the window ran 7-day blocks
+from the report start instead (Tuesday to Monday), so its weeks were one day off
+from the freshwater projection and the Daily Harvest Schedule under the same labels.
+
 **You drive it by clicking the facility, not by filling a table.** The editor
 shows a **projected facility grid** — columns are weeks, rows are tanks, and
 **each cell is labelled by the batch it holds** so you can read it directly. A

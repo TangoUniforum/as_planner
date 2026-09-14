@@ -961,7 +961,6 @@ def validate_manual_events(state, events: list[ManualEvent], *,
     (index, ok, messages) tuple per event in input order; applies to a COPY so
     the caller's state is never mutated.
     """
-    from datetime import timedelta as _td
     scratch = copy.deepcopy(state)
     faithful = (batch_by_id is not None and tables is not None
                 and forecast_start is not None and control is not None)
@@ -1035,6 +1034,7 @@ def validate_manual_events(state, events: list[ManualEvent], *,
     msgs_by_idx: dict[int, list[str]] = {}
     if faithful:
         _max_week = max((e.week or 1) for e in events) if events else 0
+        from .time_grid import week_end as _tg_week_end
         week_start = forecast_start
         for wk in range(1, _max_week + 1):
             lbl = labels[wk - 1]
@@ -1042,9 +1042,12 @@ def validate_manual_events(state, events: list[ManualEvent], *,
                 if (ev.week or 1) != wk:
                     continue
                 msgs_by_idx[i] = _apply_one(ev, i, lbl, week_start)
-            # Advance biology one week so the next week's events see grown fish.
-            advance_facility_one_week(scratch, batch_by_id, tables, week_start, lbl)
-            week_start = week_start + _td(days=7)
+            # Advance biology one week so the next week's events see grown fish:
+            # the same calendar days the window itself walks (calendar-08).
+            _we = _tg_week_end(wk - 1, forecast_start)
+            advance_facility_one_week(scratch, batch_by_id, tables, week_start, lbl,
+                                      days=(_we - week_start).days)
+            week_start = _we
     else:
         # Legacy single pass in list order on the frozen week-0 state.
         for i, ev in enumerate(events, 1):

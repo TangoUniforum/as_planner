@@ -14,6 +14,7 @@ config/ and scenario/ are never written, and costs.yaml is never copied.
 from __future__ import annotations
 
 import contextlib
+import datetime as dt
 import io
 import re
 import shutil
@@ -399,19 +400,50 @@ def test_second_fw_to_og_refused_end_to_end(tmp_path, copy_config):
     assert r.ica_head[2].startswith("OK")
 
 
+def _b49_tran_og(date_text):
+    def edit(scn):
+        import yaml
+        p = scn / "batches.yaml"
+        d = yaml.safe_load(p.read_text(encoding="utf-8"))
+        hit = [b for b in d["batches"] if b.get("batch_id") == "B49"]
+        assert len(hit) == 1
+        hit[0]["tran_og_date"] = date_text
+        p.write_text(yaml.safe_dump(d, sort_keys=False), encoding="utf-8")
+    return edit
+
+
 def test_split_window_crossing_guard(tmp_path, copy_config):
-    """The shipped week-1+2 window minus its fw_to_og opens the planner at
-    2026-W38 -- on B49's own entry week. The window does not auto-transfer, so
-    the existing guard must refuse the run, naming B49 (the auto path never
-    handles fish inside a manual window)."""
+    """A window that ends AFTER a split batch's transfer date must be refused,
+    naming the batch: the window does not auto-transfer, and the auto path
+    never handles fish inside a manual window. The shipped week-1+2 window
+    minus its fw_to_og ends Sunday 2026-09-13 (calendar-08); B49 moved to
+    Monday 09-07 -- inside the window's second week -- is crossed."""
     with pytest.raises(ValueError, match="B49"):
-        run_pr(tmp_path, copy_config, events="no_fw_to_og")
+        run_pr(tmp_path, copy_config, events="no_fw_to_og",
+               edit_scenario=_b49_tran_og("2026-09-07"))
+
+
+def test_split_window_ending_on_the_transfer_date_hands_it_to_the_planner(tmp_path, copy_config):
+    """calendar-08. The same window with B49 on its scenario date, Monday
+    2026-09-14. The window's weeks run Tue 09-01..Sun 09-06 and Mon 09-07..Sun
+    09-13, so the planner takes over on Monday 09-14 -- B49's own date, not a
+    date inside the window -- and the automatic path moves B49 once, that
+    week. (On 7-day blocks from the report start the window ran to Monday
+    09-14, the planner took over on Tuesday 09-15 and the run was refused.)"""
+    sw, _fw = _pr_b49()
+    r = run_pr(tmp_path, copy_config, events="no_fw_to_og")
+    b49 = [t for t in r.tog if t[0] == "B49"]
+    assert len(b49) == 1 and b49[0][1] == "2026-W38", b49
+    assert b49[0][2] == pytest.approx(290_000 - sw, abs=1)
+    assert r.drift == 0
+    assert not any("BREACH" in h for h in r.ica_head), r.ica_head
 
 
 def test_split_after_a_one_week_window_is_placed_once(w1_auto):
-    """A one-week manual window shifts the planner to a TUESDAY start, and the
-    ragged first planner week's day loop ran to week_start + 7 -- onto the
-    Monday B49 enters (since numbers-audit finding E1 it stops at that Monday). An ordinary arrival has no Phase-C row the week before
+    """A one-week manual window used to shift the planner to a TUESDAY start
+    (since calendar-08 it re-opens on the Monday), and the ragged first planner
+    week's day loop ran to week_start + 7 -- onto the Monday B49 enters (since
+    numbers-audit finding E1 it stops at that Monday). An ordinary arrival has no Phase-C row the week before
     it enters seawater; a split batch does, so it was topped up TWICE (484,514
     fish placed for 242,257, a FW mass-balance breach and 4 TANK_DRIFT rows)."""
     sw, _fw = _pr_b49()
@@ -421,6 +453,32 @@ def test_split_after_a_one_week_window_is_placed_once(w1_auto):
     assert b49[0][2] == pytest.approx(290_000 - sw, abs=1)
     assert r.drift == 0
     assert not any("BREACH" in h for h in r.ica_head), r.ica_head
+
+
+def test_a_manual_window_sits_on_the_report_calendar(w1_auto):
+    """calendar-08 (engine change 7 of 7, taken one at a time).
+
+    The 8/31 PR opens on Tuesday 2026-09-01. Every other part of the report
+    (the freshwater projection, the Daily Harvest Schedule, the week labels)
+    runs week 2026-W36 from that Tuesday to Sunday 09-06 and every later week
+    Monday to Sunday. The manual window walked 7-day blocks from the forecast
+    start instead (Tue 09-01..Mon 09-07), so the planner re-opened on Tuesday
+    09-08 and every later week started on a Tuesday. Now the window's week
+    runs to the next Monday and every week after the first starts on a
+    Monday, the same days under the same label everywhere."""
+    wb = openpyxl.load_workbook(r_path := w1_auto.path, read_only=True, data_only=True)
+    rows = _rows(wb["BatchLocations"])
+    wb.close()
+    hi = next(i for i, r in enumerate(rows) if r and r[0] == "Week" and "Batch" in r)
+    starts = {}
+    for r in rows[hi + 1:]:
+        if r and r[0] and r[1]:
+            d = r[1].date() if hasattr(r[1], "date") else r[1]
+            starts.setdefault(str(r[0]), d)
+    weeks = sorted(starts)
+    assert starts[weeks[0]] == dt.date(2026, 9, 1), (r_path, weeks[0], starts[weeks[0]])
+    off = {w: starts[w] for w in weeks[1:] if starts[w].weekday() != 0}
+    assert not off, f"weeks that do not start on a Monday: {dict(list(off.items())[:5])}"
 
 
 # ---- the split corpus: every historical split places its FW part -----------------
