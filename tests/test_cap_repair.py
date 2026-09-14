@@ -27,7 +27,7 @@ from datetime import date
 
 import pytest
 
-from forecast.models import BiologyTables
+from forecast.models import BatchInput, BiologyTables
 from forecast.placement import _repair_over_cap_systems
 from forecast.state import STAGE_STARVE, FacilityState, TankState
 
@@ -36,7 +36,10 @@ TODAY = date(2027, 3, 1)
 WL = "2027-W09"
 
 # Flat 1 %/day SGR and no FCR model -> realized_feed_kg_day = biomass * 0.01 *
-# 1.2, i.e. feed is a fixed multiple of biomass. That keeps the fixtures
+# 1.2 for a batch with a scenario entry (correction 1.0, an FCR model the
+# tables do not have -> FCR 1.2). A batch with NO entry is not fed at all since
+# feed-05, so _run gives every batch on the tanks an entry (_meta). Feed is
+# then a fixed multiple of biomass. That keeps the fixtures
 # readable: a feed cap is just a biomass cap in disguise, and a test that wants
 # to bind on FEED sets a low feed cap, not a different fish size.
 TABLES = BiologyTables([100.0, 10000.0], [1.0, 1.0], [1.0, 1.0],
@@ -59,12 +62,26 @@ def _caps(**per_system):
     return lookup
 
 
+def _meta(state):
+    """A scenario entry for every batch on the tanks (feed-05: a batch with
+    no entry is not fed). Correction 1.0 and an FCR model the test tables do
+    not have, so feed stays biomass * FEED_PER_KG."""
+    ids = sorted({t.batch_id for t in state.tanks_by_id.values()
+                  if not t.is_empty and t.batch_id})
+    return {b: BatchInput(batch_id=b, input_date=date(2025, 1, 6),
+                          input_count=500000, tran_sf_date=None,
+                          tran_og_date=None, tran_og_count=None,
+                          tran_og_avg_wt_g=None, tran_og_cv=10.0,
+                          fcr_model="none", fw_correction=1.0,
+                          sgr_correction=1.0) for b in ids}
+
+
 def _run(state, cap_lookup, tanks_by_system, *, budget=4, systems=None,
          reserved=frozenset(), min_transfer=0.0, min_keep=0.0):
     events, warnings = [], []
     moves = _repair_over_cap_systems(
         state, WL, TODAY, events, warnings,
-        cap_lookup=cap_lookup, batch_meta={}, tables=TABLES,
+        cap_lookup=cap_lookup, batch_meta=_meta(state), tables=TABLES,
         og_systems=set(systems if systems is not None else tanks_by_system),
         og_tanks_by_system=tanks_by_system, budget=budget,
         reserved=reserved, min_transfer=min_transfer, min_keep=min_keep,

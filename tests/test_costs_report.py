@@ -81,7 +81,12 @@ def _inputs(odd=False):
                               feed_type=GROWER, week_label="2026-W41",
                               week_start=_monday("2026-W41")))
     return dict(batch_locations=locs, states_by_batch={"B3": fw},
-                tables=_tables(odd), batch_by_id={},
+                tables=_tables(odd),
+                # The tank batches have scenario entries (feed-05: a batch with
+                # none is not fed). Dated long before the report so no egg
+                # cost falls in it; FCR_118 is FCR 1.2 here, as before.
+                batch_by_id={b: _batch(b, dt.date(2025, 1, 6), 500_000)
+                             for b in ("B1", "B2")},
                 batches=[_batch("B0", dt.date(2026, 8, 15), 50_000),
                          _batch("B3", dt.date(2026, 10, 7), 100_000),
                          _batch("B9", dt.date(2027, 6, 1), 70_000)],

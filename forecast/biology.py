@@ -231,6 +231,15 @@ def realized_feed_kg_day(
     """
     if biomass_kg <= 0 or avg_wt_g <= 0:
         return 0.0
+    if batch is None:
+        # NO SCENARIO ENTRY, NO FEED (numbers-audit finding feed-05): a
+        # batch with no Batches-sheet metadata is not advanced by the biology
+        # (placement skips it: no growth, no mortality), so it must not be
+        # FED either. It used to be fed at the curve SGR x correction 1.0 x an
+        # invented FCR of 1.2 -- 3.89 kt of feed with no growth behind it on
+        # the 2025-07-31 PR run on today's registry (B34, B36) -- and that
+        # phantom feed reached the planner's per-system feed loads.
+        return 0.0
     # Feed follows the SAME rate growth does, week factor included: this is
     # biomass x SGR/100 x FCR, so an operator week at 90% feeds 90% and FCR is
     # unchanged (operator decision 2026-08-19 — "they ate less, so they grew

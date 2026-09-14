@@ -383,7 +383,7 @@ def hydrate_facility_state(
             warns.append(
                 f"PR: batch {r.batch_id} has no Batches-sheet metadata — its "
                 f"tank(s) hydrate but biology will NOT advance them "
-                f"(no growth/mortality)")
+                f"(no growth, no mortality and no feed)")
         cv = b.tran_og_cv if b else 16.0
         stage = STAGE_FW if tank.type == "FW" else STAGE_SW
         tank.assign(

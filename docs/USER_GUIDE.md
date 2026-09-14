@@ -1135,6 +1135,13 @@ without the check, 85 harvest weeks compared, **0 differ, 0.0 fish**.
 > Two detection-only categories (2026-09-12) say when the forecast's opening
 > or horizon is not what you would assume:
 >
+> * `PR: batch … has no Batches-sheet metadata` (a hydration warning) — a
+>   batch the ProductionReport holds that is not in your scenario (Configure →
+>   Batches). Its fish are loaded into their tanks but sit still for the whole
+>   run: **no growth, no mortality and no feed** (they used to be fed on a
+>   made-up FCR while never growing — phantom feed in the feed reports and the
+>   per-system feed loads). Add the batch in Configure → Batches to have it
+>   grown, fed and harvested.
 > * `WARNING - PR fish not hydrated` — ProductionReport fish that no tank
 >   received: a fish group without a Bnn batch id (e.g. `35A`), or a batch whose
 >   roll-up row holds fish its Unit rows do not, plus one line comparing the
