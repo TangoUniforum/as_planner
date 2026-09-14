@@ -684,6 +684,21 @@ pairs **61/67, 63/69, 65/71**:
   count fidelity at harvest. Spending a sister on one batch's overflow burns the slot
   that separation needs — that was a real defect, fixed 2026-08-20. The harvest limit
   applies to the pair's **combined** drain.
+- **The rotation repairs itself when it starts in the wrong shape.** Fish purge ~2
+  weeks, so a pair is never drained in the rotation right after its fill — that would
+  be a 1-week purge (**`DEPURATION HOLD`** in the ValidationLog: the tank waits for its
+  pair's next rotation). Three starting shapes are handled, each with its own line:
+  - **6N empty** at the forecast start (e.g. a manual window drained it): a **seed
+    week** fills the resting pair with no harvest, and the rotation starts from there.
+  - **All three pairs stocked** (no resting pair): the pair drained is refilled in
+    place until a pair empties, then the rotation **RE-ENTERS** the 3-pair cycle.
+  - **Only one pair purging** (the PR hands over one stocked pair and two empty ones,
+    e.g. the 8/31 PR without its manual events): the front pair is always the one
+    filled the week before, so the hold would refuse it week after week and 6N would
+    only drain its 3-week overdue tanks. Instead, a **seed week** fills the spare empty
+    pair (no harvest that week — the front pair could not be drained anyway) and next
+    week the front pair drains at its full 2-week purge. ValidationLog: **`WARNING - 6N
+    Pipeline`** "6N SHALLOW-QUEUE SEED — front pair … was filled < 8 days ago …".
 - **Make-room routes through 6N too.** When a TranOG arrival needs an empty OG tank, the
   freed tank's fish are **moved into 6N to purge** — freeing the tank *and* staging them
   for harvest — never harvested in place. If 6N has no room, the run **warns** (a real

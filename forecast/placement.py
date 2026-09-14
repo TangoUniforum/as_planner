@@ -1665,6 +1665,29 @@ def _transit_entry_to_pair(
     return added
 
 
+def _sixn_pair_too_young(state, pair, week_start_date) -> bool:
+    """Every occupied tank of `pair` was filled fewer
+    than SIXN_DRAIN_GUARD_MIN_DAYS ago (so the depuration hold would refuse
+    its drain). A tank with no recorded fill (PR-hydrated) is old enough."""
+    fd = getattr(state, "sixn_fill_date", {}) or {}
+    occ = [t for t in pair
+           if state.tanks_by_id.get(t) is not None
+           and not state.tanks_by_id[t].is_empty]
+    if not occ:
+        return False
+    return all(fd.get(t) is not None
+               and (week_start_date - fd[t]).days < SIXN_DRAIN_GUARD_MIN_DAYS
+               for t in occ)
+
+
+def _sixn_spare_empty_pair(state, pair_queue, resting_pair):
+    """An empty 6N pair that is neither the resting
+    pair nor in the purge queue, or None."""
+    return next((p for p in SIXN_PAIRS
+                 if p != resting_pair and p not in pair_queue
+                 and pair_combined_count(state, p) == 0), None)
+
+
 def _run_sixn_purge_week(
     state: FacilityState,
     pair_queue: list[tuple[int, int]],
@@ -1717,6 +1740,32 @@ def _run_sixn_purge_week(
         new_resting = next((p for p in SIXN_PAIRS
                             if p != fill_pair and pair_combined_count(state, p) == 0),
                            None)
+    elif (refill and resting_pair is not None
+          and _sixn_pair_too_young(state, pair_queue[0], week_start_date)
+          and _sixn_spare_empty_pair(state, pair_queue, resting_pair) is not None):
+        # SHALLOW-QUEUE SEED (numbers-audit finding biomass-01, operator-
+        # approved 2026-09-13; tests: test_sixn_shallow_queue_seed.py).
+        # A SHALLOW queue: one purging pair where the
+        # rotation needs two (2 purging + 1 fallow). It happens when the PR
+        # hands over only ONE stocked 6N pair and two empty ones (the 8/31 PR
+        # with no manual events: 63/69 stocked, 61/67 and 65/71 empty). The
+        # empty-queue bootstrap above never fires (the queue is not empty), so
+        # week 1 drains 63/69 and fills 61/67, and from then on the pair at the
+        # front is ALWAYS the one filled last week: the depuration hold refuses
+        # it (a 1-week purge) week after week, the third pair is never used,
+        # 6N harvest happens only on the 3-week overdue drains, and the plan
+        # balloons to 4x the biomass cap with 40 empty harvest weeks. Seed the
+        # spare empty pair this week instead (no harvest -- the front pair is
+        # too young to drain anyway), so the queue regains its second purging
+        # pair and the front drains at its full 2-week purge next week.
+        harvest_pair = ()
+        fill_pair = _sixn_spare_empty_pair(state, pair_queue, resting_pair)
+        new_resting = resting_pair
+        warnings.append(
+            f"{week_label}: 6N SHALLOW-QUEUE SEED — front pair {pair_queue[0]} "
+            f"was filled < {SIXN_DRAIN_GUARD_MIN_DAYS} days ago (its drain would "
+            f"be a 1-week purge), so the spare empty pair {fill_pair} is filled "
+            f"this week to restore the 2-purging + 1-fallow rotation")
     else:
         harvest_pair = pair_queue.pop(0)
         # RE-ENTRY to the 3-pair fallow rotation. When the forecast opens with
