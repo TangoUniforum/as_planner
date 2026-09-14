@@ -1141,8 +1141,11 @@ without the check, 85 harvest weeks compared, **0 differ, 0.0 fish**.
 >   PR's facility closing count with the fish hydrated. The forecast's opening
 >   then differs from the PR's own total by those fish.
 > * `WARNING - Plan ends before the horizon` — the realized plan stopped
->   before `horizon_weeks` with fish still in the tanks (the planner walks only
->   weeks its projection has load for), naming the last week and the fish left.
+>   before `horizon_weeks` with fish still in the tanks, naming the last week
+>   and the fish left. The planner walks **every** week of the horizon — also
+>   the weeks after the projection runs out of batches (an old PR with no future
+>   stocking), where the fish still in the tanks are grown and harvested on what
+>   is actually there — so this line is a safety net and should not appear.
 >
 > The older `WARNING - Harvest Scheduler` entries remain, but they now say
 > plainly that they are a **demand-stage** observation and point here for the

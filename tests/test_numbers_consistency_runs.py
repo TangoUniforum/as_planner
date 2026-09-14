@@ -7,7 +7,8 @@ invariants, not pinned numbers, so a config change that moves the plan cannot
 break them, only a writer that stops agreeing with another:
 
   2026-02-28 (a Sunday report start; batch roll-ups with no Unit rows; the
-             realized plan stops before the horizon)
+             realized plan used to stop 11 weeks before the horizon --
+             it now walks every horizon week, calendar-09)
   2025-07-31 (a 3-day first week; the planner leaves empty harvest weeks)
 
 Every mutable input is a TEMP copy; costs.yaml is never copied.
@@ -237,16 +238,29 @@ def test_runs_detection_lines_match_the_facts(runs, close):
     assert got == want
 
 
-def test_runs_the_2026_02_28_plan_that_stops_early_says_so(runs):
-    """Stated as a fact about THIS corpus PR on today's config: its plan
-    stopped 11 weeks early on 2026-09-12. If a config change lets it run the
-    full horizon the check above still holds; this one then documents it."""
+def test_runs_the_2026_02_28_plan_walks_the_whole_horizon(runs):
+    """calendar-09 (engine change 2 of 7, taken one at a time).
+
+    This corpus PR's projection runs out of batches 11 weeks before the end of
+    the horizon (an era registry with no future stocking). The realized plan
+    used to walk only the weeks the projection had load for, so it STOPPED at
+    2027-W29 with 7,128 fish / 37,762 kg left in tank 63 -- never harvested.
+    It now walks every horizon week and harvests them (2027-W30).
+
+    Measured on the tanks themselves, not on the week list: BatchLocations
+    lists only non-empty tanks, so an emptied facility has no rows after its
+    last full week either way. The proof is that every fish still in a tank
+    in that last week is harvested after it -- and that on this PR there are
+    such fish (the case the fix is for). Without calendar-09 none are."""
     s = runs["2026-02-28"]["sheets"]
+    early = [d for c, d in _vlog(s) if c == "WARNING - Plan ends before the horizon"]
+    assert not early, early
     bl = _table(s["BatchLocations"], lambda r: r[0] == "Week" and "Batch" in r)
-    wks = sorted({str(r["Week"]) for r in bl})
-    ctl_rows = [str(r[0]) for r in s["RunConfig"] if r and r[0]]
-    hz = next((int(re.search(r"horizon_weeks:\s*(\d+)", t).group(1))
-               for t in ctl_rows if re.search(r"horizon_weeks:\s*(\d+)", t)), None)
-    if hz is None or len(wks) >= hz:
-        pytest.skip("the plan covers its whole horizon on this config")
-    assert any(c == "WARNING - Plan ends before the horizon" for c, _d in _vlog(s))
+    last = max(str(r["Week"]) for r in bl)
+    left = sum(_n(r["Count (fish)"]) for r in bl if str(r["Week"]) == last)
+    hp = _table(s["HarvestPlan"], lambda r: r[0] == "Week" and "Batch" in r)
+    later = sum(_n(r["Count (fish)"]) for r in hp if str(r["Week"]) > last)
+    assert left > 0 and later > 0, (
+        f"no fish harvested after the last tank week {last} "
+        f"({left:,.0f} fish still in tanks then): the plan stopped early")
+    assert abs(later - left) <= 1, (last, left, later)

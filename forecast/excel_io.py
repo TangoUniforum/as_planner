@@ -4218,6 +4218,14 @@ def write_tank_continuity_audit(
         _wk_ = iso_week_label(ev.event_date)
         for d in ev.destinations:
             _tb_add(d.tank_id, _wk_, ev)
+    if audit_touched_empty_tanks:
+        # A week the facility ENDS empty (its last fish harvested) has no
+        # BatchLocations rows, so it used to be skipped and its events were in
+        # no row -- on the 2026-02-28 era run, the 2027-W30 harvest of B48's
+        # last 7,128 fish from tank 63 (the realized walk reaches every horizon
+        # week since calendar-09). Audit every week an event touched as well;
+        # the opening carries over from the week before, the close is empty.
+        weeks = sorted(set(weeks) | {w for (_t, w) in _touched})
     _wk_set = set(weeks)
     for tid in sorted(set(all_tanks) | {t for (t, w) in _touched if w in _wk_set}):
         prev_batch, prev_count = pr_tank.get(tid, (None, 0.0))

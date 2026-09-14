@@ -4374,6 +4374,20 @@ def phase_d_emit_events(
     for a in tank_assignments:
         active_by_week.setdefault(a.week_label, set()).add(a.batch_id)
     sorted_weeks = sorted(active_by_week.keys())
+    # WALK THE WHOLE HORIZON (numbers-audit finding calendar-09): walk
+    # EVERY week of the horizon, not only the weeks some tank assignment names.
+    # Once the projection runs out of batches (an era registry with no future
+    # stocking) the realized plan used to simply stop -- 11 of 85 weeks on the
+    # 2026-02-28 PR, with 7,128 fish / 37,762 kg still in tank 63. The extra
+    # weeks carry no plan assignment; the realized layer still runs their
+    # biology and harvest controller on the fish actually in the tanks.
+    from .time_grid import forecast_week_labels as _fwl_hz
+    # The PLANNER's start (control.forecast_start is already advanced past
+    # a manual override window; initial_state.today is not).
+    _hz_fs = (control.forecast_start.date()
+              if hasattr(control.forecast_start, 'date') else control.forecast_start)
+    _hz_labels = _fwl_hz(_hz_fs, control.horizon_weeks)
+    sorted_weeks = sorted(set(sorted_weeks) | set(_hz_labels))
 
     # Tank config lookup.
     tank_cfg_by_id: dict[int, TankConfig] = {t.tank_id: t for t in facility.tanks}
@@ -4490,6 +4504,12 @@ def phase_d_emit_events(
     for label in sorted_weeks:
         wload = next((l for l in load_table if l.week_label == label), None)
         if wload is None:
+            # WHOLE HORIZON (calendar-09): a horizon week the projection has no
+            # load row for still has its calendar range (time_grid), so its
+            # day loop runs instead of the week being skipped.
+            if label in _hz_labels:
+                from .time_grid import week_range as _wr_hz
+                week_ranges[label] = _wr_hz(_hz_labels.index(label), _hz_fs)
             continue
         week_ranges[label] = (wload.week_start, wload.week_start + timedelta(days=7))
 

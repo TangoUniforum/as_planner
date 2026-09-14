@@ -1297,10 +1297,13 @@ def main(
         # is judged (and named) too -- not only weeks that had an event.
         plan_weeks=sorted({r.week_label for r in placement.batch_locations}))
 
-    # PLAN ENDS EARLY (detection only). The realized loop walks the weeks the
-    # projection has load for, so once the projection runs out of batches the
-    # plan simply stops -- 11 of 85 horizon weeks on the 2026-02-28 era run,
-    # with 7,128 fish / 37,762 kg still in tank 63 and no line anywhere. Named
+    # PLAN ENDS EARLY (detection only -- a SAFETY NET). The realized loop used to
+    # walk only the weeks the projection has load for, so once the projection
+    # ran out of batches the plan simply stopped -- 11 of 85 horizon weeks on
+    # the 2026-02-28 era run, with 7,128 fish / 37,762 kg still in tank 63. It
+    # now walks every horizon week (placement.phase_d_emit_events, calendar-09),
+    # so this should not fire; if it ever does, something cut the walk short.
+    # Named
     # here when the last realized week is before the horizon's last week AND
     # fish are still in tanks then. Nothing below feeds the planner.
     _plan_end_notes: list = []
@@ -1311,7 +1314,17 @@ def main(
             _last = _bl_wks[-1]
             _left = [r for r in placement.batch_locations
                      if r.week_label == _last and (r.count or 0) > 0]
-            if _left:
+            # Fish still in the tanks at the END of the realized walk. The rows
+            # above list only non-empty tanks, so a facility that empties before
+            # the horizon (its last fish harvested) also has no rows after its
+            # last full week -- that is a plan that ran to the end, not one that
+            # stopped. Only fish left standing when the walk ended prove it was
+            # cut short (2026-02-28 era run: 7,128 fish in tank 63 without
+            # calendar-09; harvested in 2027-W30 with it).
+            _fish_at_end = sum(
+                (t.count or 0) for t in getattr(final_state, 'tanks_by_id', {}).values()
+                if not t.is_empty)
+            if _left and _fish_at_end > 0:
                 _missing = sum(1 for w in _hz if w > _last)
                 _plan_end_notes.append(
                     f"PLAN ENDS EARLY - the realized plan stops at {_last}, "
@@ -1319,10 +1332,9 @@ def main(
                     f"{_hz[-1]} (horizon_weeks={control.horizon_weeks}), with "
                     f"{sum(r.count for r in _left):,.0f} fish "
                     f"({sum(r.biomass_kg for r in _left):,.0f} kg) still in "
-                    f"{len({r.tank_id for r in _left})} tank(s). The planner "
-                    f"walks only weeks its projection has load for, so no "
-                    f"sheet covers the remaining weeks and those fish are "
-                    f"never harvested in this run.")
+                    f"{len({r.tank_id for r in _left})} tank(s). No sheet "
+                    f"covers the remaining weeks and those fish are never "
+                    f"harvested in this run.")
     except Exception as _pe_err:                                   # noqa: BLE001
         _plan_end_notes = [f"PLAN ENDS EARLY - check failed: {_pe_err!r}"]
     for _m in _plan_end_notes:
