@@ -1642,6 +1642,20 @@ obvious moves backfire:
 - More `rebalance_*` budget had **no effect** on the severe peaks: the rebalancer
   can only move fish into a tank with room, and at peak there are none.
 
+**A batch's own tank change never takes a tank into the severe band (2026-09).**
+When the plan moves a batch onto a new set of tanks, no move takes a destination
+past **1.3× its density cap** — the severe line above (a tank preparing for
+harvest keeps its exemption). It used to fill to an even share of the fish,
+whatever the tanks' volume, and when one planned tank was still held by another
+batch it put the whole rest into the batch's other tank. On the 2024-11-30 report
+that put 99,904 fish, 200 kg/m³, in a 1,720 m³ tank for two weeks. Below the line
+the moves are as before (bounding at the cap itself was measured and not chosen:
+it changed the 8/31 and 9.10 plans from their first week and cost 39–89 t HOG).
+Fish that fit nowhere in the batch's plan now **stay in their tank** until next
+week's plan moves them, and the ValidationLog says so: **`DENSITY CAP - n fish of
+batch B stay in TANK: no tank in the batch's plan can take them without passing
+1.3x its density cap; retained in place`**.
+
 **When no knob helps, it's not a tuning problem.** On config(7) the severe
 batches (B45, B52, B51, B61, B47, B49 at 1.3–1.4×) all peak **mid-grow-out**
 (+28–44 weeks from entry) — a *capacity collision*: too much biomass wanting

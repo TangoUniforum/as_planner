@@ -136,6 +136,13 @@ def density_exempt(system_id: str, stage: str, purge_mode: bool = True) -> bool:
 # as fine. Judge harvest prep against THIS number, never against +inf.
 HARVEST_PREP_DENSITY_CAP = 150.0
 
+# A tank at/above this fraction of its density cap is "severe" (USER_GUIDE
+# §7.1): the only band worth acting on. Below it is the normal between-check
+# overshoot of running near cap. tuning.py grades density with it, and the
+# assignment-diff emitter (placement._emit_transfers_for_batch_diff) never
+# moves fish into a tank past it (operator, 2026-09-14: "Severe-only cap").
+DENSITY_SEVERE_RATIO = 1.3
+
 
 def effective_density_cap(cap_kg_m3: float, system_id: str, stage: str,
                           purge_mode: bool = True,

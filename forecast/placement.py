@@ -84,6 +84,7 @@ from .sixn import (
 from .state import FacilityState, TankState, STAGE_STARVE
 from .tiers import effective_density_cap as _eff_density_cap
 from .tiers import HARVEST_PREP_DENSITY_CAP
+from .tiers import DENSITY_SEVERE_RATIO
 from .time_grid import (
     forecast_week_labels,
     iso_week_label,
@@ -2330,6 +2331,7 @@ def _emit_transfers_for_batch_diff(
     warnings: list[str],
     min_keep: float = 0.0,
     moves_left=None,
+    purge: bool = True,
 ) -> None:
     """Rebalance a batch's fish across its new tank set via Transfer events.
 
@@ -2360,6 +2362,24 @@ def _emit_transfers_for_batch_diff(
     that Transfer.apply refused, while the entry tank's own OUTBOUND leg
     succeeded — stranding a sub-min remnant in the entry tank (the OG1S-16 /
     OG1N-15 operator finding).
+
+    SEVERE DENSITY BOUND (2026-09-14). The even-split target is a fish COUNT,
+    so the pairing filled a destination past its density cap whenever the
+    plan's tank set was too small for the fish, and when a planned
+    destination was still held by another batch (its leg refused) the
+    residual router moved the rest into the batch's other tank WHOLE
+    (2024-11-30 PR: OG3S-36 at 193-200 kg/m3 for two weeks, 99,904 fish in a
+    1,720 m3 tank capped at 85). No move here now takes a destination past
+    DENSITY_SEVERE_RATIO (1.3) x its cap -- the "severe" line of USER_GUIDE
+    §7.1 and tuning.py; the cap from `_eff_density_cap`, the same sizing rule
+    as `_sixn_fill_capacity_fish`, so a harvest-prep / purge tank stays
+    unbounded. The operator chose this line over the cap itself (measured:
+    bounding at 1.0 x cap changed the 8/31 and 9.10 plans from week 0, lost
+    39-89 t HOG there and aborted one corpus run on a full entry tier; at
+    1.3 x the 8/31 plan is unchanged). Below the line the moves are exactly
+    as before. Fish with no room anywhere in the batch's plan stay in the
+    source, like a refused move, and next week's plan reconciles them
+    (`purge`: is 6N in purge mode this week).
     """
     sources = sorted(prev_tanks - this_tanks)
     dests = sorted(this_tanks - prev_tanks)
@@ -2468,6 +2488,21 @@ def _emit_transfers_for_batch_diff(
         return move_allowed(src_tank.system_id, dst.system_id,
                             src_tank.avg_wt_g)[0]
 
+    def _room_fish(dst_id, wt_g) -> float:
+        """Fish of weight `wt_g` the destination can still take before it
+        reaches DENSITY_SEVERE_RATIO x its density cap -- unbounded for a
+        harvest-prep / purge tank (as every sizing caller of
+        `_eff_density_cap` keeps it) or a tank with no cap."""
+        dst = state.tanks_by_id.get(dst_id)
+        if dst is None or wt_g <= 0:
+            return 0.0
+        cap = _eff_density_cap(dst.max_density_kg_m3, dst.system_id, dst.stage, purge)
+        if cap == float("inf") or cap <= 0:
+            return float("inf")
+        held_kg = (dst.count * dst.avg_wt_g / 1000.0) if not dst.is_empty else 0.0
+        limit_kg = dst.volume_m3 * cap * DENSITY_SEVERE_RATIO
+        return max(0.0, (limit_kg - held_kg) * 1000.0 / wt_g)
+
     def _pair_surpluses(over_list: list[list], budgeted: bool) -> None:
         i = 0
         while i < len(over_list):
@@ -2486,6 +2521,12 @@ def _emit_transfers_for_batch_diff(
                 i += 1; continue   # no legal deficit for this source; residual below
             take = min(over_list[i][1], unders[j][1])
             dst_id = unders[j][0]
+            # SEVERE DENSITY BOUND: never past 1.3 x the destination's cap.
+            room = _room_fish(dst_id, src_tank.avg_wt_g)
+            if room <= 0.5:
+                unders[j][1] = 0.0          # full under its cap: no longer a deficit
+                continue
+            take = min(take, room)
             # REMNANT FLOOR guard (2): a partial drain must leave the source empty
             # or >= min_keep — the take is REDUCED so the padded floor stays (the
             # deficit stays open for another surplus tank). The min() deliberately
@@ -2561,25 +2602,48 @@ def _emit_transfers_for_batch_diff(
             continue
         candidates.sort(key=lambda t: t.count)
         dest_id = candidates[0].tank_id
-        ev = Transfer(
-            batch_id=batch_id, event_date=event_date, source_tank_id=s,
-            destinations=[TankAllocation(
-                tank_id=dest_id, count=tank.count,
-                avg_wt_g=tank.avg_wt_g, cv_pct=tank.cv_pct,
-            )],
-            leaves_source_empty=True,
-            channel="_emit_transfers_for_batch_diff",
-        )
-        ev_warns = ev.apply(state)
-        warnings.extend(ev_warns)
-        transfer_events.append(ev)
+        _refused = False
+        for cand in candidates:
+            if tank.is_empty:
+                break
+            # SEVERE DENSITY BOUND: the residual goes only where there is room
+            # below 1.3 x the destination's cap -- whole into the first
+            # candidate that can hold it (exactly as before), else as much as
+            # fits, tank by tank.
+            room = _room_fish(cand.tank_id, tank.avg_wt_g)
+            if room <= 0.5:
+                continue
+            dest_id = cand.tank_id
+            whole = room >= tank.count - 0.5
+            ev = Transfer(
+                batch_id=batch_id, event_date=event_date, source_tank_id=s,
+                destinations=[TankAllocation(
+                    tank_id=dest_id, count=tank.count if whole else room,
+                    avg_wt_g=tank.avg_wt_g, cv_pct=tank.cv_pct,
+                )],
+                leaves_source_empty=whole,
+                channel="_emit_transfers_for_batch_diff",
+            )
+            ev_warns = ev.apply(state)
+            warnings.extend(ev_warns)
+            transfer_events.append(ev)
+            if (getattr(ev, "count_transferred", None) or 0) <= 0:
+                _refused = True
+                break
         # If the transfer was refused (INV-4 above 1 kg etc.), the fish
         # stay in the source. Continuity rule: only Events drain tanks.
-        if not tank.is_empty:
+        if not tank.is_empty and _refused:
             warnings.append(
                 f"{event_date}: residual {tank.count:.0f} fish in "
                 f"{tank.location_id} (batch {batch_id}) could not be routed "
                 f"to this-tank #{dest_id} (likely INV-4); retained in place"
+            )
+        elif not tank.is_empty:
+            warnings.append(
+                f"{event_date}: DENSITY CAP - {tank.count:.0f} fish of batch "
+                f"{batch_id} stay in {tank.location_id}: no tank in the batch's "
+                f"plan can take them without passing {DENSITY_SEVERE_RATIO:g}x "
+                f"its density cap; retained in place"
             )
     return  # All cases handled by rebalance.
 
@@ -5545,6 +5609,7 @@ def phase_d_emit_events(
                     # Only the EVENING half consults this; source drains are
                     # essential and never blocked (see the function's docstring).
                     moves_left=_moves_left_quality,
+                    purge=purge_this_week,
                 )
             # Even-out pass: fix PR/residual over-concentration by
             # leveling fish across each batch's tanks where a tank is

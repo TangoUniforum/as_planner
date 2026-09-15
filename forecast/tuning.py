@@ -74,7 +74,8 @@ def grid_for(quick: bool) -> list:
 
 # A peak density at/above this fraction of cap is "severe" — the only band worth
 # acting on. Below it is the normal between-check overshoot of running near cap.
-SEVERE_RATIO = 1.3
+# One definition (tiers.py): the planner's move bound uses the same line.
+from .tiers import DENSITY_SEVERE_RATIO as SEVERE_RATIO
 # Batches at/above this ratio are listed in the per-variant detail.
 DETAIL_RATIO = 1.2
 
