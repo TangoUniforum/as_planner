@@ -501,10 +501,14 @@ def test_manual_past_date_split_is_offered_week_1_at_the_pr_state(tables, contro
     lk = _build_fw_lookup(ev, [_fw("B49", 250_225.0, 92_333.0)], control, PR_CLOSE,
                           tables, {"B49": past})
     assert lk[("B49", "2026-W36")] == pytest.approx((250_225.0, 369.0, 16.0), rel=1e-3)
-    # a future date keeps the projected FW state (no fallback involved)
+    # a future date keeps the projected FW weeks (no fallback involved): week 2
+    # is offered too. Each week offers the fish at its START
+    # (manual_window.fw_week_start_states), so week 1 is the PR's own count and
+    # week 2 carries a week of freshwater losses.
     lk = _build_fw_lookup(ev, [_fw("B49", 250_225.0, 92_333.0)], control, PR_CLOSE,
                           tables, {"B49": _b49()})
-    assert lk[("B49", "2026-W36")][0] < 250_225.0
+    assert lk[("B49", "2026-W36")][0] == pytest.approx(250_225.0)
+    assert lk[("B49", "2026-W37")][0] < 250_225.0
 
 
 def test_the_fallback_never_offers_eggs(tables, control):

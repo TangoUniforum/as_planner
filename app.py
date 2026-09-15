@@ -2428,7 +2428,8 @@ def _mw_fw_avail(ctx, window_labels, scripted=None):
     from collections import defaultdict
     from types import SimpleNamespace
     from forecast.biology import project_in_flight_fw_batch
-    from forecast.manual_window import pr_fw_week1_fallback, week1_label
+    from forecast.manual_window import (
+        fw_week_start_states, pr_fw_week1_fallback, week1_label)
     fw_records = ctx.get("fw_records") or []
     if not fw_records or ctx.get("control") is None:
         return {}
@@ -2457,8 +2458,11 @@ def _mw_fw_avail(ctx, window_labels, scripted=None):
             _skipped.append(bid)
             continue
         cv = b_meta.tran_og_cv or 16.0
-        wk = {s.week_label: (s.close_count, s.close_avg_weight_g, cv)
-              for s in states if s.stage == "FW" and s.week_label in win}
+        # The fish at the START of each freshwater week -- the run's own rule
+        # (manual_window.fw_week_start_states), so the editor offers exactly
+        # what the run moves.
+        wk = {wl: st for wl, st in fw_week_start_states(states, cv).items()
+              if wl in win}
         # PAST-DATE FALLBACK -- the run's own rule (operator decision 5,
         # manual_window.pr_fw_week1_fallback): a cohort whose transfer date
         # had already passed at the PR close (an overdue batch, a past-date

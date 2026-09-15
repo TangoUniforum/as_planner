@@ -329,9 +329,15 @@ def test_the_editor_offers_a_past_date_batch_in_week_1_like_the_run(tables, cont
         assert list(avail[b]) == ["2026-W36"], avail[b]           # week 1 only
         assert avail[b]["2026-W36"] == pytest.approx(run[(b, "2026-W36")])
         assert avail[b]["2026-W36"][0] == pytest.approx(n)        # the PR's count
-    # a batch still in freshwater keeps its projected weeks (no fallback)
+    # a batch still in freshwater keeps its projected weeks (no fallback):
+    # week 2 is offered too, and each week offers the fish at its START
+    # (manual_window.fw_week_start_states) -- week 1 the PR's own count,
+    # week 2 less (a week of freshwater losses). Until 2026-09-15 week 1
+    # offered the week's CLOSE, grown a week the fish then grew again.
     assert set(avail["B51"]) == {"2026-W36", "2026-W37"}
-    assert avail["B51"]["2026-W36"][0] < 200_000.0
+    assert avail["B51"]["2026-W36"][0] == pytest.approx(200_000.0)
+    assert avail["B51"]["2026-W37"][0] < 200_000.0
+    assert avail["B51"]["2026-W36"] == pytest.approx(run[("B51", "2026-W36")])
 
 
 # ---- end to end: the 8/31 PR ------------------------------------------------------

@@ -156,14 +156,37 @@ def _build_fw_lookup(events, fw_records, control, pr_closing, tables, batch_by_i
         states, _, _ = project_in_flight_fw_batch(
             b_meta, tables, control, a["count"], avg_wt, pr_closing)
         cv = b_meta.tran_og_cv or 16.0
-        for s in states:
-            if s.stage == "FW":
-                lookup[(bid, s.week_label)] = (s.close_count, s.close_avg_weight_g, cv)
+        for wl, st in fw_week_start_states(states, cv).items():
+            lookup[(bid, wl)] = st
         if wk1 is not None and (bid, wk1) not in lookup:
             fb = pr_fw_week1_fallback(states, wk1, a["count"], avg_wt, cv)
             if fb is not None:
                 lookup[(bid, wk1)] = fb
     return lookup
+
+
+def fw_week_start_states(states, cv) -> dict:
+    """{week_label: (count, avg_wt_g, cv)} -- a freshwater cohort's state at
+    the START of each of its freshwater weeks: the fish an fw_to_og scripted
+    in that week moves. ONE rule for the run (_build_fw_lookup) and the editor
+    (app._mw_fw_avail).
+
+    START, not close: the manual event deposits the cohort in seawater at the
+    week's start, and the window then grows it through that week there. The
+    lookup used to hand over the week's CLOSE -- the fish after a whole
+    freshwater week of growth -- so that week was grown twice, once in
+    freshwater and again in seawater (8/31 PR: 8,431 kg on B49 that never
+    grew, the count unchanged; its 2026-W36 ledger row read Bio_FCR 12.70).
+    `open_count` is the week's opening balance (before its losses) and
+    `open_avg_weight_pre_g` its weight before the first day's growth
+    (`open_avg_weight_g` is AFTER that day's growth -- not the start)."""
+    out = {}
+    for s in states:
+        if s.stage != "FW":
+            continue
+        wt = getattr(s, "open_avg_weight_pre_g", 0.0) or s.open_avg_weight_g
+        out[s.week_label] = (s.open_count, wt, cv)
+    return out
 
 
 def week1_label(control):

@@ -616,6 +616,15 @@ uploaded PR."*
   batch, a 6N or OG3+ tank, or an off-feed tank is refused. The batch must still
   be **in freshwater** at the event's week (you can't FW→OG a batch that's
   already crossed to seawater).
+- **An `fw_to_og` moves the fish as they are at the START of its week** — the
+  week the fish enter seawater and start growing there. In week 1 that is the
+  ProductionReport's own freshwater count and weight; in a later week, the
+  previous week's closing count and weight. The editor offers the same figures.
+  Until 2026-09 it moved the week's **close** — the fish after a whole freshwater
+  week of growth — and the window then grew them through that week again in
+  seawater: on the 8/31 PR, 8.4 t on B49 that never grew (its 2026-W36 ledger row
+  read Bio_FCR 12.70). No audit could see it, because every audit counts the
+  arrival as it is handed over.
 - **One `fw_to_og` per batch.** An `fw_to_og` moves the batch's **whole**
   freshwater part — its count is a cull-down target, not a tranche — so a
   second one for the same batch is refused: the editor stops offering a cohort
