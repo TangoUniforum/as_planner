@@ -64,10 +64,17 @@ def _freeze_purge_6n(state, control, week_date) -> dict:
     return frozen
 
 
-def _snapshot_week(state, week_label, week_start):
+def _snapshot_week(state, week_label, week_start, days: float = 7.0):
     """End-of-week per-tank BatchLocationRows for every occupied tank — the same
     shape Phase D emits (placement.py), so the prefix weeks stitch seamlessly
     into the BatchLocations output + the (event-stream-driven) continuity audit.
+
+    `days` = the calendar days the week covers (BatchLocationRow.days): the
+    report writers turn the realized feed RATE into the week's feed with it.
+    Since the window's weeks sit on the report calendar (calendar-08) its first
+    week can be 1-6 days; left at the default 7 it booked a 6-day week's feed
+    as 7 days (8/31 PR, 2026-W36: every seawater batch's feed per kg of growth
+    read 7/6 of the week after it).
     """
     rows = []
     for tank in state.tanks_by_id.values():
@@ -79,7 +86,7 @@ def _snapshot_week(state, week_label, week_start):
             location_id=tank.location_id, system_id=tank.system_id,
             count=tank.count, avg_wt_g=tank.avg_wt_g,
             biomass_kg=tank.biomass_kg, density_kg_m3=tank.density_kg_m3,
-            stage=tank.stage,
+            stage=tank.stage, days=float(days),
         ))
     return rows
 
@@ -416,7 +423,8 @@ def advance_facility_window(state, batch_by_id, tables, forecast_start,
         # what you acted on) and only empties the tank from week i+1 onward.
         # (batch_locations below stays the end-of-week/closing snapshot the run
         # stitches into the output + audits — that ordering is unchanged.)
-        opening_locations.extend(_snapshot_week(state, labels[i], week_start))
+        _wdays = (_tg_week_end(i, forecast_start) - week_start).days
+        opening_locations.extend(_snapshot_week(state, labels[i], week_start, _wdays))
         # Operations next — they still date into THIS week for the continuity
         # audit — then biology, then the closing snapshot.
         hv: list = []
@@ -486,7 +494,7 @@ def advance_facility_window(state, batch_by_id, tables, forecast_start,
             state, batch_by_id, tables, week_start, labels[i],
             days=(_we - week_start).days)
         realized.update(wk_realized)
-        batch_locations.extend(_snapshot_week(state, labels[i], week_start))
+        batch_locations.extend(_snapshot_week(state, labels[i], week_start, _wdays))
         week_start = _we
     # Handoff: undo the purge hold on the RETURNED state so the auto pipeline
     # starts from its expected condition and runs its OWN 6N rotation — the hold

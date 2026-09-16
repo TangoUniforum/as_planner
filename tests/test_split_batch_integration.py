@@ -481,6 +481,24 @@ def test_a_manual_window_sits_on_the_report_calendar(w1_auto):
     assert not off, f"weeks that do not start on a Monday: {dict(list(off.items())[:5])}"
 
 
+
+def test_a_short_window_week_is_fed_for_its_own_days(w1_auto):
+    """The window's first week is short when the report does not close on a
+    Sunday (8/31: Tue 09-01..Sun 09-06, 6 days; calendar-08). Its biology walks
+    those 6 days, but its BatchLocations rows carried no length, so the report
+    writers booked the week's feed as 7 days of the realized rate: 2026-W36 fed
+    1/6 more than it ate (facility feed per kg of growth 1.37 against 1.18 the
+    week after; 23.8 t on the 8/31 PR with its events). Measured as a RATE:
+    the facility's feed per day of the short week matches the next week's."""
+    tot = {d["Week"]: d for d in w1_auto.weekly if d["Batch"] == "TOTAL"}
+    w0, w1 = tot["2026-W36"], tot["2026-W37"]
+    per_day0 = _n(w0, "Feed (kg)") / 6.0
+    per_day1 = _n(w1, "Feed (kg)") / 7.0
+    assert per_day1 > 0
+    assert abs(per_day0 / per_day1 - 1.0) <= 0.10, (
+        f"2026-W36 (6 days) fed {per_day0:,.0f} kg/day vs {per_day1:,.0f} kg/day "
+        f"in 2026-W37: the short window week was fed for 7 days")
+
 # ---- the split corpus: every historical split places its FW part -----------------
 
 CORPUS = ROOT / "pr_corpus"

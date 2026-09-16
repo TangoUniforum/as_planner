@@ -1227,7 +1227,11 @@ without the check, 85 harvest weeks compared, **0 differ, 0.0 fish**.
 >   next Monday (a 2025-07-31 report: 3 days). That week's growth, mortality
 >   and feed cover those days only, and its SGR and SFR are per day of them.
 >   The plan used to walk that week for a full 7 days, walking the first days
->   of the next week twice (numbers-audit finding E1).
+>   of the next week twice (numbers-audit finding E1). The same holds when
+>   that first week is a manual override window week (§3.5): it is fed for its
+>   own days too. Until 2026-09 a short window week was walked for its days
+>   but its feed was booked for 7 (8/31 PR, 2026-W36: 23.8 t too much feed,
+>   feed per kg of growth 1.37 against 1.18 the week after).
 > * **`Input_Count`** is **eggs stocked, and nothing else**. Over the horizon it
 >   adds up to the eggs stocked in it (6,840,000 on the 8/31 PR; it used to read
 >   10.8 M because every smolt was counted again when it entered seawater).
