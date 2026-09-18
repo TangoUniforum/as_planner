@@ -2531,9 +2531,14 @@ def _mw_fw_load(ctx, window_labels):
     return dict(out)
 
 
-def _mw_grid(state, rows, labels, color_by, batch_filter=None, moves=None):
+def _mw_grid(state, rows, labels, color_by, batch_filter=None, moves=None,
+             last="density"):
     """Colour-styled DataFrame of the projected facility (index = tank, columns =
-    weeks, cell text = "batch · avg-weight · density") for a CLICKABLE st.dataframe.
+    weeks, cell text = "batch · avg-weight · <last>") for a CLICKABLE st.dataframe.
+    `last` picks that third number: 'density' (kg/m3, the default) or 'count'
+    (fish in THOUSANDS, e.g. 45k) — operator ask 2026-09-18, to read stocking
+    levels straight off the grid. The COLOUR is unchanged either way: in fill
+    mode the background still shades by density-vs-cap.
     The per-cell weight + density let you read grow-out state at a glance to decide
     moves without clicking every tank. color_by 'fill'
     shades by density-vs-cap (green→red); 'batch' gives each batch its own colour.
@@ -2641,9 +2646,12 @@ def _mw_grid(state, rows, labels, color_by, batch_filter=None, moves=None):
                 # a source), ⇠ when they arrived (close view of a destination).
                 arrow = (f"  ⇢{_uniq(outs)}" if outs
                          else f"  ⇠{_uniq(ins)}" if ins else "")
+                _tail = (f"{r.density_kg_m3:.0f}" if last != "count" else
+                         (f"{r.count / 1000:.1f}k" if r.count < 10_000
+                          else f"{r.count / 1000:.0f}k"))
                 trow.append(
                     f"{r.batch_id} · {r.avg_wt_g / 1000:.2f}kg · "
-                    f"{r.density_kg_m3:.0f}{arrow}")
+                    f"{_tail}{arrow}")
                 if color_by == "batch":
                     # background already encodes the batch; keep a dark bold font.
                     bg, fg = bcolor.get(r.batch_id, "#cccccc"), "#1f1f1f"
@@ -3948,6 +3956,15 @@ def _manual_window_editor(uploaded):
                      "a distinct colour per batch, to see which tanks hold which "
                      "fish and how a batch moves across the weeks.")
             _cb = "batch" if _cmode.startswith("Batch") else "fill"
+            _resend_widget("mw_cell_last")
+            _lmode = st.radio(
+                "Last number in each cell",
+                ["Density (kg/m³)", "Count (thousands)"], horizontal=True,
+                key="mw_cell_last",
+                help="The third value in every cell: the tank's density, or how "
+                     "many fish it holds in thousands (45k = 45,000). The cell "
+                     "colour still shades by density either way.")
+            _last = "count" if _lmode.startswith("Count") else "density"
             _when = (
                 "**week-open** (start of the week, before that week's growth and "
                 "before your scripted events) — what's in the tank when you act"
@@ -3962,7 +3979,9 @@ def _manual_window_editor(uploaded):
                  "green roomy, amber near cap, red over — and the **batch id is bold "
                  "in its own colour** so you can follow a cohort across tanks. ")
                 + "Columns are weeks, rows are tanks (⛔6N = depuration), and each cell "
-                  "shows **batch · avg weight · density** at " + _when + ". "
+                  "shows **batch · avg weight · "
+                + ("count in thousands**" if _last == "count" else "density**")
+                + " at " + _when + ". "
                   "A **move lights up both ends in its week**: the tank that holds "
                   "the fish in this view is solid with an arrow (**⇢** leaving / "
                   "**⇠** arrived), and the counterpart tank shows a faint **ghost "
@@ -3988,7 +4007,8 @@ def _manual_window_editor(uploaded):
             # by side so a cell click shows the options right next to the grid instead
             # of below a tall, internally-scrolling table.
             styler, ylabels, tank_by_y = _mw_grid(
-                state, rows, labels, color_by=_cb, batch_filter=_bf, moves=moves)
+                state, rows, labels, color_by=_cb, batch_filter=_bf, moves=moves,
+                last=_last)
             if _bf and not ylabels:
                 st.caption("No tanks hold the selected batch(es) in this window.")
             gnonce = st.session_state.get("mw_grid_nonce2", 0)

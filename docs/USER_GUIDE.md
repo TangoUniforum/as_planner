@@ -386,7 +386,12 @@ green roomy, amber near cap, red over) — or **Batch** — a distinct colour pe
 batch, so you can see which tanks hold the same cohort and how a batch moves
 across the weeks. Rows tagged **⛔6N** are depuration.
 
-Each cell shows **batch · average weight · density**. A **"Show tank state at"**
+Each cell shows **batch · average weight · density**. A **"Last number in
+each cell"** toggle swaps that third value between **Density (kg/m³)** and
+**Count (thousands)** — `45k` means 45,000 fish, and a small tank keeps a decimal
+(`7.1k`) — so you can read either stocking density or fish numbers straight off
+the grid. It changes the *number only*: the cell colour still shades by
+density-versus-cap in Fill mode. A **"Show tank state at"**
 toggle picks *when* in the week that snapshot is taken. **Week open** (the
 default) is the **start-of-week** state — before that week's growth *and* before
 your scripted events run — i.e. exactly what's in the tank at the moment you
