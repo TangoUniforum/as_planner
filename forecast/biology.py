@@ -415,6 +415,82 @@ def count_split_means(
     return (max(0.0, upper_mean), max(0.0, lower_mean))
 
 
+def count_split_cvs(
+    avg_wt_g: float, cv_pct: float, upper_fraction: float,
+    grade_efficiency: float = 1.0,
+) -> tuple[float, float]:
+    """Post-sort CV of each leg when the heaviest `upper_fraction` is taken.
+
+    THE POINT OF GRADING IS THAT THE SPREAD FALLS, and until 2026-09-18 the
+    planner could not see it: `count_split_means` moved the two legs' MEANS
+    apart and every call site then stamped BOTH legs with the PARENT's CV. On
+    the 9.16 PR that showed as 16% on all 736 TransferPlan rows, including
+    after every one of the 178 grade events.
+
+    It is not cosmetic. Harvest eligibility reads the CV (`frac_above`), so a
+    graded leg was judged with a spread twice its real one: for a median split
+    of a 4,000 g tank at CV 16%, the big leg's true CV is 8.6%, and the model's
+    16% says 3.47% of that leg is still under a 3,200 g gate where the truth is
+    0.03% — a hundred-fold overstatement of the unripe tail, re-applied every
+    time a batch is graded.
+
+    The maths. For N(mu, sigma) split at z = Phi^-1(1-p), the conditional
+    variances of the two parts are the standard truncated-normal ones:
+
+        lambda_U = phi(z)/p            Var_U = sigma^2 (1 + z*lambda_U - lambda_U^2)
+        lambda_L = phi(z)/(1-p)        Var_L = sigma^2 (1 - z*lambda_L - lambda_L^2)
+
+    An IMPERFECT grader (efficiency e < 1) sends fish near the cut line both
+    ways, so each leg is WIDER than a clean split would give. We keep total
+    variance intact by decomposition -- within + between must still equal
+    sigma^2 -- and the means already shrank toward mu by e (`apply_grade_
+    efficiency`), which multiplies the between-group term by e^2:
+
+        W = p*Var_U + (1-p)*Var_L                 (within, perfect split)
+        B = sigma^2 - W                           (between, perfect split)
+        W_new = sigma^2 - e^2 * B = W + (1 - e^2) * B
+
+    and W_new is shared between the legs in proportion to their perfect-split
+    variances. At e = 1 this is exactly the truncated-normal answer; at e -> 0
+    the means collapse to mu and both legs carry the parent's full sigma, which
+    is the right answer for a grader that sorts nothing. Total variance is
+    conserved for every e in between, which is what the tests pin.
+
+    Returns CV PERCENTAGES (same unit as `cv_pct`), never negative. Degenerate
+    inputs return the parent CV unchanged, matching `count_split_means`.
+
+    NOT for a split that does not SORT: halving a tank by count leaves both
+    halves with the parent distribution. Only call this where fish went over a
+    grader.
+    """
+    if avg_wt_g <= 0 or cv_pct <= 0:
+        return (cv_pct, cv_pct)
+    if upper_fraction <= 1e-9 or upper_fraction >= 1 - 1e-9:
+        return (cv_pct, cv_pct)
+    p = float(upper_fraction)
+    sigma = avg_wt_g * cv_pct / 100.0
+    var = sigma * sigma
+    nd = NormalDist()
+    z = nd.inv_cdf(1.0 - p)
+    phi_z = math.exp(-0.5 * z * z) / math.sqrt(2 * math.pi)
+    lam_u = phi_z / p
+    lam_l = phi_z / (1.0 - p)
+    var_u = var * max(0.0, 1.0 + z * lam_u - lam_u * lam_u)
+    var_l = var * max(0.0, 1.0 - z * lam_l - lam_l * lam_l)
+    e = grade_efficiency if (0.0 < grade_efficiency < 1.0) else 1.0
+    if e < 1.0:
+        w = p * var_u + (1.0 - p) * var_l
+        if w > 0:
+            scale = (var - e * e * (var - w)) / w
+            var_u *= scale
+            var_l *= scale
+    upper_mean, lower_mean = count_split_means(
+        avg_wt_g, cv_pct, p, grade_efficiency=grade_efficiency)
+    cv_u = (100.0 * math.sqrt(var_u) / upper_mean) if upper_mean > 0 else cv_pct
+    cv_l = (100.0 * math.sqrt(var_l) / lower_mean) if lower_mean > 0 else cv_pct
+    return (max(0.0, cv_u), max(0.0, cv_l))
+
+
 def compute_size_class_split(
     batch_id: str,
     tran_og_date,

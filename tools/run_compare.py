@@ -94,6 +94,11 @@ def _production(wb_path, og_m3: float) -> dict:
             feed += float(d.get("Feed (t)") or 0)
             mean_b.append(float(d.get("Mean_Biomass (t)") or 0))
         weeks, events = set(), {"Transfer": 0, "Grade": 0, "TranOG": 0}
+        # Type=Grade covers two different JOBS (operator 2026-09-18: "grading
+        # and splits are both options"): fish over the sorter, and a tank
+        # halved by count with no sorter. Counted apart, because they are not
+        # the same work and the second was 68 of 77 on the 9.16 PR.
+        sorts = splits = 0
         for d in _opt._table(
                 wb["TransferPlan"],
                 lambda r: r and r[0] == "Week" and len(r) > 2 and r[2] == "Type",
@@ -101,6 +106,11 @@ def _production(wb_path, og_m3: float) -> dict:
             t = str(d.get("Type") or "").strip()
             if t in events:
                 events[t] += 1
+            if t == "Grade":
+                if str(d.get("Channel") or "").strip() == "density_split":
+                    splits += 1
+                else:
+                    sorts += 1
         for d in _opt._table(
                 wb["HarvestPlan"],
                 lambda r: r and r[0] == "Week",
@@ -115,6 +125,7 @@ def _production(wb_path, og_m3: float) -> dict:
             "prod_to_capacity": ((gross / yrs) / mean_standing)
                                 if (yrs and mean_standing) else None,
             "move_events": events["Transfer"], "grade_events": events["Grade"],
+            "sort_events": sorts, "split_events": splits,
             "moves_per_1000t_hog": (events["Transfer"] / (hog / 1000.0)) if hog else None,
         }
     finally:

@@ -442,6 +442,19 @@ class Grade:
     source_tank_ids: list[int]
     destinations: list[TankAllocation]
 
+    # WHICH JOB THIS IS (operator 2026-09-18: "grading and splits are both
+    # options"). Both are real operations and the plan must say which one it is
+    # asking for, because they are different work on the floor:
+    #   "grade"  fish go over the SORTER — legs leave with different mean
+    #            weights and NARROWER spreads (biology.count_split_cvs)
+    #   "split"  the tank is divided by COUNT with no sorter — both halves keep
+    #            the parent's mean AND the parent's spread; this is the density
+    #            relief path, and it was being reported as a grade. On the 9.16
+    #            PR that was 68 of 77 "Grade" events.
+    # DIAGNOSTIC ONLY: apply() treats both identically (the destinations carry
+    # whatever weights and CVs the caller computed).
+    kind: str = "grade"
+
     # Why apply() refused the whole event. DIAGNOSTIC ONLY; None when it
     # applied. Same optional-metadata pattern as Transfer/Harvest above.
     refusal_reason: Optional[str] = None
@@ -666,6 +679,13 @@ class GradedHarvest:
     retention_count: float
     retention_avg_wt_g: float
     cv_pct: float = 0.0
+    # Per-leg size spread after the sort (2026-09-18). A grader NARROWS each
+    # leg's distribution; carrying the parent cv_pct on both legs told the
+    # planner the spread never changed, and harvest eligibility reads it. None
+    # keeps the old behaviour (both legs = cv_pct), so every existing caller
+    # and every stored event is unchanged until it passes these.
+    pickup_cv_pct: Optional[float] = None
+    retention_cv_pct: Optional[float] = None
     # Pre-growth pickup weight (g). When the pickup is grown a few SW days before
     # the mid-week transfer (6N purge move-in), pickup_avg_wt_g carries the GROWN
     # weight but the SOURCE held the fish at this pre-growth weight. The continuity
@@ -677,6 +697,14 @@ class GradedHarvest:
     # applied. Same optional-metadata pattern as Transfer/Harvest above.
     refusal_reason: Optional[str] = None
     refusal_detail: Optional[str] = None
+
+    @property
+    def _pickup_cv(self) -> float:
+        return self.cv_pct if self.pickup_cv_pct is None else float(self.pickup_cv_pct)
+
+    @property
+    def _retention_cv(self) -> float:
+        return self.cv_pct if self.retention_cv_pct is None else float(self.retention_cv_pct)
 
     def apply(self, state: FacilityState) -> list[str]:
         warns: list[str] = []
@@ -738,7 +766,7 @@ class GradedHarvest:
                 batch_id=self.batch_id,
                 count=self.pickup_count,
                 avg_wt_g=self.pickup_avg_wt_g,
-                cv_pct=self.cv_pct,
+                cv_pct=self._pickup_cv,
                 stage=stage,
             )
         else:
@@ -758,7 +786,8 @@ class GradedHarvest:
         if self.retention_tank_id == self.source_tank_id:
             src.assign(
                 batch_id=self.batch_id, count=self.retention_count,
-                avg_wt_g=self.retention_avg_wt_g, cv_pct=self.cv_pct, stage=stage,
+                avg_wt_g=self.retention_avg_wt_g, cv_pct=self._retention_cv,
+                stage=stage,
             )
             return warns
 
@@ -768,7 +797,7 @@ class GradedHarvest:
                 batch_id=self.batch_id,
                 count=self.retention_count,
                 avg_wt_g=self.retention_avg_wt_g,
-                cv_pct=self.cv_pct,
+                cv_pct=self._retention_cv,
                 stage=stage,
             )
         else:

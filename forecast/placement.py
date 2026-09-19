@@ -59,6 +59,7 @@ from .caps import (
 )
 from .biology import (
     _fcr_model_key, _feed_type_for_size, _interp, count_split_means,
+    count_split_cvs,
     realized_feed_kg_day, sgr_pct_per_day, upper_truncated_split,
 )
 from .events import Grade, GradedHarvest, Harvest, OG12_SYSTEMS, OG12_MOVE_LOCK_WT_G, TankAllocation, Transfer, TranOGEntry
@@ -1380,10 +1381,15 @@ def _try_graded_move_in(
     # the run. `count_split_means` conserves by construction and is IDENTICAL to
     # the threshold split whenever the cap does not bite, so an uncapped graded
     # split is unchanged.
+    _frac_moved = (big_count / chosen.count) if chosen.count > 0 else 0.0
+    _eff = float(getattr(control, "grade_efficiency", 1.0))
     big_avg, small_avg = count_split_means(
-        chosen.avg_wt_g, cv,
-        (big_count / chosen.count) if chosen.count > 0 else 0.0,
-        grade_efficiency=float(getattr(control, "grade_efficiency", 1.0)))
+        chosen.avg_wt_g, cv, _frac_moved, grade_efficiency=_eff)
+    # The sort narrows BOTH legs (biology.count_split_cvs). Before 2026-09-18
+    # both carried the parent cv, so the planner judged a graded leg's harvest
+    # eligibility on twice its real spread.
+    big_cv, small_cv = count_split_cvs(
+        chosen.avg_wt_g, cv, _frac_moved, grade_efficiency=_eff)
 
     # Retention destination. retain_in_source (grade-to-min top-up): the small tail
     # STAYS in the SOURCE tank — same batch, no extra tank needed. Otherwise (make-
@@ -1428,6 +1434,8 @@ def _try_graded_move_in(
         retention_count=small_count,
         retention_avg_wt_g=small_avg,
         cv_pct=cv,
+        pickup_cv_pct=big_cv,
+        retention_cv_pct=small_cv,
     )
     _pk = state.tanks_by_id.get(pair[0])
     _pk_pre = _pk.count if (_pk is not None and not _pk.is_empty) else 0.0
@@ -1636,9 +1644,12 @@ def _transit_entry_to_pair(
             # count_split_means' signature default of 1.0 -- a PERFECT grader --
             # while the operator ships 0.85, so this split priced its legs
             # further apart than reality and editing the knob moved nothing here.
+            _fm = (big / _es.count) if _es.count > 0 else 0.0
+            _eff = float(getattr(control, "grade_efficiency", 1.0))
             big_avg, small_avg = count_split_means(
-                _es.avg_wt_g, cv, (big / _es.count) if _es.count > 0 else 0.0,
-                grade_efficiency=float(getattr(control, "grade_efficiency", 1.0)))
+                _es.avg_wt_g, cv, _fm, grade_efficiency=_eff)
+            big_cv, small_cv = count_split_cvs(
+                _es.avg_wt_g, cv, _fm, grade_efficiency=_eff)
             _e_batch, _e_loc = _es.batch_id, _es.location_id
             if was_res:
                 state.reserved_tanks.discard(hop.tank_id)
@@ -1647,9 +1658,9 @@ def _transit_entry_to_pair(
                 source_tank_ids=[_es.tank_id],
                 destinations=[
                     TankAllocation(tank_id=_es.tank_id, count=small,
-                                   avg_wt_g=small_avg, cv_pct=cv),
+                                   avg_wt_g=small_avg, cv_pct=small_cv),
                     TankAllocation(tank_id=hop.tank_id, count=big,
-                                   avg_wt_g=big_avg, cv_pct=cv),
+                                   avg_wt_g=big_avg, cv_pct=big_cv),
                 ],
             )
             warnings.extend(g.apply(state))
@@ -5482,11 +5493,16 @@ def phase_d_emit_events(
                                 # grade_efficiency, as above -- this took the
                                 # 1.0 signature default (perfect grader) while
                                 # the operator ships 0.85.
+                                _fm3 = ((_big / _gs.count)
+                                        if _gs.count > 0 else 0.0)
+                                _eff3 = float(getattr(
+                                    control, "grade_efficiency", 1.0))
                                 _bavg, _savg = count_split_means(
-                                    _gs.avg_wt_g, _cvg,
-                                    (_big / _gs.count) if _gs.count > 0 else 0.0,
-                                    grade_efficiency=float(
-                                        getattr(control, "grade_efficiency", 1.0)))
+                                    _gs.avg_wt_g, _cvg, _fm3,
+                                    grade_efficiency=_eff3)
+                                _bcv, _scv = count_split_cvs(
+                                    _gs.avg_wt_g, _cvg, _fm3,
+                                    grade_efficiency=_eff3)
                                 _g_batch, _g_loc = _gs.batch_id, _gs.location_id
                                 _gev = Grade(
                                     batch_id=_g_batch,
@@ -5495,10 +5511,10 @@ def phase_d_emit_events(
                                     destinations=[
                                         TankAllocation(
                                             tank_id=_gs.tank_id, count=_small,
-                                            avg_wt_g=_savg, cv_pct=_cvg),
+                                            avg_wt_g=_savg, cv_pct=_scv),
                                         TankAllocation(
                                             tank_id=_dst.tank_id, count=_big,
-                                            avg_wt_g=_bavg, cv_pct=_cvg),
+                                            avg_wt_g=_bavg, cv_pct=_bcv),
                                     ],
                                 )
                                 warnings.extend(_gev.apply(state))
@@ -6622,6 +6638,9 @@ def phase_d_emit_events(
             ev = Grade(
                 batch_id=tank.batch_id,
                 event_date=grade_date,
+                # No sorter here: the tank is halved by COUNT, both halves keep
+                # the parent mean and spread. Reported as a split, not a grade.
+                kind="split",
                 source_tank_ids=[tank.tank_id],
                 destinations=[
                     TankAllocation(

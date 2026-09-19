@@ -552,10 +552,12 @@ def write_transfer_plan_output(
                "run. Type=Transfer rows are real tank-to-tank moves (one row "
                "= one move; same-week duplicate legs are merged). Type=TranOG "
                "is one row per destination tank and From_Tank reads 'FW'. "
-               "Type=Grade is either a planner size grade (Channel "
-               "grade_event: one row per destination tank, the source tank "
-               "among them) or a graded harvest (Channel graded_harvest: a "
-               "pickup row and a retention row). Grade: A = big size class, "
+               "Type=Grade covers three different jobs, told apart by "
+               "Channel: grade_event = fish over the SORTER (legs leave at "
+               "different weights and narrower CVs); density_split = the tank "
+               "is halved by COUNT with no sorter, both halves keeping the "
+               "parent weight and CV; graded_harvest = a sorted pickup row "
+               "plus a retention row. Grade: A = big size class, "
                "B = small on a row that carries one class (TranOG arrivals, "
                "including a split batch's automatic top-up); 'pickup' / "
                "'retention' on graded-harvest rows; blank otherwise (planner "
@@ -588,11 +590,13 @@ def write_transfer_plan_output(
             wk = iso_week_label(ev.event_date)
             rows.append((ev.event_date, wk, ev.batch_id, str(ev.source_tank_id),
                          ev.pickup_tank_id, ev.pickup_count,
-                         ev.pickup_avg_wt_g / 1000.0, "pickup", ev.cv_pct, "Grade",
+                         ev.pickup_avg_wt_g / 1000.0, "pickup",
+                         getattr(ev, "_pickup_cv", ev.cv_pct), "Grade",
                          "graded_harvest"))
             rows.append((ev.event_date, wk, ev.batch_id, str(ev.source_tank_id),
                          ev.retention_tank_id, ev.retention_count,
-                         ev.retention_avg_wt_g / 1000.0, "retention", ev.cv_pct,
+                         ev.retention_avg_wt_g / 1000.0, "retention",
+                         getattr(ev, "_retention_cv", ev.cv_pct),
                          "Grade", "graded_harvest"))
             continue
         ct = getattr(ev, "count_transferred", None)
@@ -612,7 +616,9 @@ def write_transfer_plan_output(
             rows.append((
                 ev.event_date, wk, ev.batch_id, src_str, dest.tank_id,
                 dest.count, dest.avg_wt_g / 1000.0,
-                _grade(dest), dest.cv_pct, "Grade", "grade_event",
+                _grade(dest), dest.cv_pct, "Grade",
+                ("density_split" if getattr(ev, "kind", "grade") == "split"
+                 else "grade_event"),
             ))
     # Merge same-week duplicate Transfer legs + drop sub-half-fish legs (see
     # docstring). Keyed on (date, week, batch, src, dst, grade); first row of
@@ -5489,7 +5495,10 @@ def write_run_comparison(wb, records, *, pr_name="", generated=None,
         # PR, the arm with the most transfer rows (686 vs 534) had the lowest
         # moves-per-fish. A crew rigs for the row, not for the fish.
         ("row", "Move events (transfer rows)", "jobs · ↓", "low", g_prod("move_events"), f_int),
-        ("row", "Grade events", "jobs · ↓", "low", g_prod("grade_events"), f_int),
+        ("row", "Grade events — size sorts", "jobs · ↓ · over the sorter", "low",
+         g_prod("sort_events"), f_int),
+        ("row", "Grade events — density splits", "jobs · ↓ · no sorter", "low",
+         g_prod("split_events"), f_int),
         ("row", "Moves per 1,000 t HOG", "jobs/kt · ↓", "low", g_prod("moves_per_1000t_hog"), f_1),
         ("sect", "RUN"),
         ("row", "Wall time", "seconds", None, lambda r: r.get("elapsed"), f_sec),
