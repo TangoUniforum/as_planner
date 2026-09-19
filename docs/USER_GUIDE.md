@@ -526,6 +526,20 @@ grid — is one of these):
   weight. Count conserved exactly.
 - **`harvest`** — directly harvest `Count` fish from `From tank` (blank = the
   whole tank), recorded as a real harvest in that week.
+> **Three different jobs share `Type=Grade` on the TransferPlan — read the
+> `Channel` column** (2026-09-18, operator: *"grading and splits are both
+> options"*). **`grade_event`** and **`graded_harvest`** are real sorts: fish go
+> over the **sorter**, the legs leave at different mean weights, and each leg's
+> **CV is narrower than the tank it came from** (`biology.count_split_cvs`) — at
+> the shipped `grade_efficiency` 0.85 a median split of a 4,000 g tank reads
+> 10.6% / 13.2% instead of 16%. **`density_split`** is *not* a grade: the density
+> path halves a tank by **count** with no sorter, so both halves keep the parent
+> weight **and** the parent CV. The distinction is worth checking on any plan you
+> read — on the 9.16 PR, **162 of 178 `Grade` rows are density splits**, needing
+> no grader at all. Before 2026-09-18 every leg carried the parent's CV, which
+> also mattered for **harvest eligibility** (it reads the CV): a graded leg was
+> judged on twice its real spread.
+
 - **`graded_harvest`** — a **size-sorted grade**: take the **biggest `Count`
   fish** from `From tank` and move them to the **first `To tank`** (the pickup),
   keeping the smaller remainder growing (in the source, or an optional
@@ -2036,6 +2050,21 @@ you choose a *whole* plan — never a splice.
   **Conserves** · **Fully placed** · **No empty week** · **Under cap**. A plan that
   fails *Conserves* or *Fully placed* can't win a lens; the rest are flags you weigh.
   **Use this plan** loads that method's plan into the report tabs + download.
+- **PRODUCTION rows, at the top of the `RunComparison` sheet** (2026-09-18): the
+  **harvest tonnage (HOG)** the plan ships, over the horizon and per year;
+  **tank-year productivity** (kg HOG per m³ of grow-out water per year — the lens
+  that matters when tanks, not biomass, are the binding resource); the
+  **production-to-capacity ratio** (annual live production ÷ mean standing
+  biomass, which the RAS literature puts at **2–3** for a healthy facility — this
+  facility measures 2.43–2.49); and **feed**. Before this the sheet scored
+  placement, caps, steadiness and balance across 30 rows and never stated the
+  tonnage.
+- **Handling counted in JOBS** beside the older moves-per-fish: **move events**
+  (TransferPlan `Transfer` rows), **grade events split into size sorts and
+  density splits**, and **jobs per 1,000 t HOG**. Moves-per-fish divides by the
+  fish moved, so a plan that moves small groups often can score better than one
+  that moves whole tanks rarely — on the 9.16 PR the arm with the most transfer
+  rows (686 vs 534) read *best* on moves-per-fish. A crew rigs for the row.
 - **New comparison metrics** (also rows in the `RunComparison` sheet): **tank footprint**
   (occupied grow-out tanks/week), **tanks per batch** (distinct tanks a batch passes
   through FW→OG — a count view of transfers), **between-system** biomass/feed spread
