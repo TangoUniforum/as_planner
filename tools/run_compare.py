@@ -42,6 +42,85 @@ from forecast.excel_io import write_run_comparison  # noqa: E402
 from forecast.window_weeks import manual_window_weeks  # noqa: E402
 
 
+def _growout_m3(config_dir) -> float:
+    """Total GROW-OUT water (m3) from the run's own facility.yaml — the
+    denominator of the per-tank-year lens. 0.0 when the file cannot be read,
+    which makes the lens blank rather than wrong."""
+    try:
+        import yaml
+        d = yaml.safe_load((Path(config_dir) / "facility.yaml").read_text(encoding="utf-8"))
+        tanks = d["tanks"] if isinstance(d, dict) and "tanks" in d else d
+        if isinstance(tanks, dict):
+            tanks = list(tanks.values())
+        return float(sum(float(t.get("volume_m3", 0) or 0) for t in tanks
+                         if str(t.get("type") or "").upper() == "OG"))
+    except Exception:                                            # noqa: BLE001
+        return 0.0
+
+
+def _production(wb_path, og_m3: float) -> dict:
+    """What the plan SHIPS, and what it costs in handling events.
+
+    The comparison sheet scored placement, caps, steadiness and balance but
+    never the tonnage the plan produces, and it counted handling as moves per
+    FISH (forecast.optimize._transfers_by_type sums Count (fish)) — which ranks
+    a plan that moves whole tanks rarely as WORSE than one that moves small
+    groups often. Both gaps were measured on the 9.16 PR (2026-09-18): the
+    highest-handling arm read best on moves/fish while running 686 transfer
+    ROWS against the baseline's 534.
+
+    So this adds, read straight from the method's own workbook:
+      hog_t, feed_t           YearlySummary totals
+      hog_t_per_yr            annualised over the plan's own horizon
+      kg_hog_per_m3_yr        tonnage per m3 of GROW-OUT water per year — the
+                              tank-year (rotation) lens: the right objective
+                              when tanks, not biomass, are the binding resource
+      prod_to_capacity        annual live production / mean standing biomass;
+                              the RAS literature puts a healthy facility at 2-3
+      move_events/grade_events  TransferPlan ROWS — one row is one job the crew
+                              rigs for, which is what handling actually costs
+      moves_per_1000t_hog     handling normalised by what it produced
+    """
+    wb = openpyxl.load_workbook(str(wb_path), data_only=True)
+    try:
+        hog = gross = feed = 0.0
+        mean_b = []
+        for d in _opt._table(
+                wb["YearlySummary"],
+                lambda r: r and r[0] == "Year",
+                lambda r: str(r[0]).strip().isdigit()):
+            hog += float(d.get("Harvest_HOG (t)") or 0)
+            gross += float(d.get("Harvest_Gross (t)") or 0)
+            feed += float(d.get("Feed (t)") or 0)
+            mean_b.append(float(d.get("Mean_Biomass (t)") or 0))
+        weeks, events = set(), {"Transfer": 0, "Grade": 0, "TranOG": 0}
+        for d in _opt._table(
+                wb["TransferPlan"],
+                lambda r: r and r[0] == "Week" and len(r) > 2 and r[2] == "Type",
+                lambda r: _opt._is_week(r[0])):
+            t = str(d.get("Type") or "").strip()
+            if t in events:
+                events[t] += 1
+        for d in _opt._table(
+                wb["HarvestPlan"],
+                lambda r: r and r[0] == "Week",
+                lambda r: _opt._is_week(r[0])):
+            weeks.add(str(d.get("Week")))
+        yrs = (len(weeks) / 52.1775) if weeks else 0.0
+        mean_standing = (sum(mean_b) / len(mean_b)) if mean_b else 0.0
+        return {
+            "hog_t": hog, "feed_t": feed,
+            "hog_t_per_yr": (hog / yrs) if yrs else None,
+            "kg_hog_per_m3_yr": (hog / yrs * 1000.0 / og_m3) if (yrs and og_m3) else None,
+            "prod_to_capacity": ((gross / yrs) / mean_standing)
+                                if (yrs and mean_standing) else None,
+            "move_events": events["Transfer"], "grade_events": events["Grade"],
+            "moves_per_1000t_hog": (events["Transfer"] / (hog / 1000.0)) if hog else None,
+        }
+    finally:
+        wb.close()
+
+
 def _per_week_floors(wb) -> dict:
     """{week_label: min_harvest_per_week} from the workbook's own RunConfig
     snapshot. Empty dict when the workbook carries no snapshot (older outputs,
@@ -235,6 +314,7 @@ def run_compare(input_path, *, config_dir=None, scenario_dir=None,
     roster = _methods.get_roster(method_keys)
 
     # Harvest rules from the SAME config every method reads.
+    _og_m3 = _growout_m3(config_dir)
     with open(config_dir / "control.yaml") as f:
         cfg = yaml.safe_load(f) or {}
     min_harvest = float(cfg.get("min_harvest_per_week", 0) or 0)
@@ -271,12 +351,14 @@ def run_compare(input_path, *, config_dir=None, scenario_dir=None,
         rec["placement"] = {"unplaced_batches": verdict["unplaced_batches"],
                             "unplaced_fish": verdict["unplaced_fish"]}
         rec["harvest"] = _harvest_extras(str(wb_path), min_harvest)
+        rec["production"] = _production(wb_path, _og_m3)
         extra = (f" ({verdict['unplaced_batches']} batch(es) / "
                  f"{verdict['unplaced_fish']:,} fish unplaced)"
                  if verdict["gate"] == "PARTIAL" else "")
         print(f"    conservation {verdict['gate']}{extra}, "
-              f"peak {metrics.overall_peak_biomass:,.0f} kg, "
-              f"transfers/fish {metrics.transfers_per_fish:.3f}")
+              f"{rec['production']['hog_t']:,.0f} t HOG, "
+              f"{rec['production']['move_events']:,} moves, "
+              f"peak {metrics.overall_peak_biomass:,.0f} kg")
 
     def _written(wb_path):
         # run.main coerces the output extension to the workbook's content type

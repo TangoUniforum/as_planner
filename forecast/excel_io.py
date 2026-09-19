@@ -5416,6 +5416,9 @@ def write_run_comparison(wb, records, *, pr_name="", generated=None,
         return lambda rec: (rec["metrics"].within_system.get(field)
                             if rec.get("metrics") is not None else None)
 
+    def g_prod(field):
+        return lambda rec: (rec.get("production") or {}).get(field)
+
     f_kg = lambda v: f"{v:,.0f}"
     f_int = lambda v: f"{v:,.0f}"
     f_pct = lambda v: f"{v:.1f}%"
@@ -5428,6 +5431,17 @@ def write_run_comparison(wb, records, *, pr_name="", generated=None,
     # metric row = (label, unit_dir, direction, getter, fmt)
     #   direction: "low" lower-is-better, "high" higher-is-better, None neutral
     SPEC = [
+        # PRODUCTION FIRST. The sheet used to open on placement and never state
+        # the tonnage at all, so the one number every reader arrives with a
+        # question about was the one thing it did not answer (2026-09-18).
+        ("sect", "PRODUCTION (what the plan ships)"),
+        ("row", "Harvest tonnage (HOG)", "t over the horizon · ↑", "high", g_prod("hog_t"), f_1),
+        ("row", "Harvest tonnage (HOG)", "t per year · ↑", "high", g_prod("hog_t_per_yr"), f_1),
+        ("row", "Tank-year productivity", "kg HOG / m³ grow-out / yr · ↑", "high",
+         g_prod("kg_hog_per_m3_yr"), f_1),
+        ("row", "Production : capacity", "×  · ↑ · RAS norm 2–3", "high",
+         g_prod("prod_to_capacity"), f_ratio),
+        ("row", "Feed", "t over the horizon · ↓", "low", g_prod("feed_t"), f_1),
         ("sect", "REALIZED PLACEMENT (are all stocked fish in tanks?)"),
         ("row", "Batches not placed in tanks", "count · ↓ · 0 = complete", "low", g_place("unplaced_batches"), f_int),
         ("row", "Fish not placed in tanks", "stocked fish · ↓", "low", g_place("unplaced_fish"), f_int),
@@ -5469,6 +5483,14 @@ def write_run_comparison(wb, records, *, pr_name="", generated=None,
         ("sect", "COST / HANDLING"),
         ("row", "Mean daily feed", "kg/day · ↓", "low", g_metric("feed_load"), f_kg),
         ("row", "Transfers per fish", "moves/fish · ↓", "low", g_metric("transfers_per_fish"), f_ratio),
+        # ... and the same handling counted as JOBS. Transfers-per-fish divides
+        # by the fish moved, so a plan that moves small groups often can read
+        # BETTER than one that moves whole tanks rarely — measured on the 9.16
+        # PR, the arm with the most transfer rows (686 vs 534) had the lowest
+        # moves-per-fish. A crew rigs for the row, not for the fish.
+        ("row", "Move events (transfer rows)", "jobs · ↓", "low", g_prod("move_events"), f_int),
+        ("row", "Grade events", "jobs · ↓", "low", g_prod("grade_events"), f_int),
+        ("row", "Moves per 1,000 t HOG", "jobs/kt · ↓", "low", g_prod("moves_per_1000t_hog"), f_1),
         ("sect", "RUN"),
         ("row", "Wall time", "seconds", None, lambda r: r.get("elapsed"), f_sec),
     ]
