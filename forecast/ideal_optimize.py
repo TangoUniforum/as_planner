@@ -108,6 +108,48 @@ NEIGHBOUR_STEP = 5_000
 MAX_STABILITY_CANDIDATES = 10
 
 
+def _cell_to_record(c: "Cell") -> dict:
+    """A Cell as plain JSON.
+
+    `gates` is a tuple of ideal_engine.Gate (name/status/detail), so it is
+    written as a list of dicts and rebuilt on the way back. JSON cannot hold
+    the dataclass and a cached cell that lost its gates would report a plan as
+    ungated rather than as it ran.
+    """
+    import dataclasses
+    d = dataclasses.asdict(c)
+    d["gates"] = [{"name": g.name, "status": g.status, "detail": g.detail}
+                  for g in (c.gates or ())]
+    return d
+
+
+def _cell_from_record(d: dict) -> "Cell":
+    import dataclasses
+
+    from .ideal_engine import Gate
+    fields = {f.name for f in dataclasses.fields(Cell)}
+    kw = {k: v for k, v in d.items() if k in fields}
+    kw["gates"] = tuple(Gate(name=g["name"], status=g["status"],
+                             detail=g["detail"])
+                        for g in (kw.get("gates") or ()))
+    return Cell(**kw)
+
+
+def _cache_knobs(kw: dict) -> dict:
+    """Everything besides (cadence, size, cap, horizon, method) that changes
+    what a cell measures. Left out of this, a cached verdict could answer for a
+    different what-if: density_overrides and system_overrides are exactly the
+    knobs an Ideal what-if moves."""
+    out = {}
+    for name in ("overrides", "method_overrides", "density_overrides",
+                 "system_overrides"):
+        v = kw.get(name)
+        if v:
+            out.update({f"{name}.{k}": v[k] for k in sorted(v)})
+    return out
+
+
+
 @dataclass(frozen=True)
 class Cell:
     """One rhythm at one biomass cap, run once. Totals are for the one steady
@@ -591,7 +633,8 @@ def optimize(cadences: Sequence[int], sizes: Sequence[int], cap_kg: float,
              system_overrides: Optional[dict] = None,
              control=None,
              horizon_weeks: int = ideal.HORIZON_WEEKS,
-             costs: Optional[dict] = None) -> Result:
+             costs: Optional[dict] = None,
+             cache_path=None) -> Result:
     """Run every (cadence, size, cap) cell and pick the best within every
     limit.
 
@@ -683,8 +726,53 @@ def optimize(cadences: Sequence[int], sizes: Sequence[int], cap_kg: float,
         done[i] = cell
         _tick(cell)
 
-    note = _run_wave(jobs, project_dir, kw, workers, _record, "the grid")
-    ran_cells = tuple(done[i] for i in range(len(jobs)))
+    # ---- OPT-IN CELL CACHE (Ideal tab only; None = exactly as before) ------
+    # A cell is a 156-week engine run and a sweep repeats most of the previous
+    # one. The entry is keyed by a fingerprint of the engine modules, the
+    # config/scenario files, the method and its knobs and the horizon, so a
+    # changed engine MISSES rather than answering with a verdict the current
+    # code would not give -- the 2026-09-20 grading and 6N commits both moved
+    # plan numbers without touching cadence, size or cap.
+    _cache = _hits = None
+    if cache_path is not None:
+        from .ideal_cache import (CellCache, cell_key, engine_fingerprint,
+                                  inputs_fingerprint)
+        _cache = CellCache(cache_path).load()
+        _eng = engine_fingerprint()
+        _inp = inputs_fingerprint(Path(project_dir) / "config",
+                                  Path(project_dir) / "scenario")
+        _knobs = _cache_knobs(kw)
+        _keys = {i: cell_key(j[0], j[1], j[2], horizon_weeks=horizon_weeks,
+                             method=method, knobs=_knobs, engine=_eng,
+                             inputs=_inp)
+                 for i, j in enumerate(jobs)}
+        _hits = {}
+        for i, k in _keys.items():
+            rec = _cache.get(k)
+            if rec is not None:
+                _hits[i] = _cell_from_record(rec)
+        if _hits:
+            for i, c in _hits.items():
+                _record(i, c)          # ticks progress like a real run
+            jobs = [j for i, j in enumerate(jobs) if i not in _hits]
+
+    if jobs:
+        _pending = [i for i in range(count["total"]) if not _hits or i not in _hits]
+
+        def _record_ran(k, cell):
+            _record(_pending[k], cell)
+            if _cache is not None and cell.error is None:
+                _cache.put(_keys[_pending[k]], _cell_to_record(cell),
+                           meta={"cadence_days": cell.cadence_days,
+                                 "batch_size": cell.batch_size,
+                                 "cap_kg": cell.cap_kg,
+                                 "horizon_weeks": horizon_weeks})
+        note = _run_wave(jobs, project_dir, kw, workers, _record_ran, "the grid")
+    else:
+        note = None
+    # count["total"], not len(jobs): the cache removes hits from `jobs`, so a
+    # fully-cached sweep would otherwise build a result of ZERO cells.
+    ran_cells = tuple(done[i] for i in range(count["total"]))
     cells = tuple(require_price(c, objective) for c in ran_cells)
     b = best(cells, objective)
 
