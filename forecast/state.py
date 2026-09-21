@@ -147,6 +147,22 @@ class FacilityState:
         # PR-hydrated fish already purging at forecast start) are treated as
         # old enough — the hold can only be judged on fills we witnessed.
         self.sixn_fill_date: dict[int, date] = {}
+        # 6N tanks CLOSED to ordinary production placement this week.
+        #
+        # 6N is a depuration system while purge mode runs, and from
+        # control.sixn_production_start its MAIN tanks (61/63/65) become
+        # ordinary production tanks (sixn.py design §5) while the SISTERS
+        # (67/69/71) stay purge-only -- they are physically purge-only
+        # (operator, 2026-09-20). placement.py re-computes this every week
+        # (`sixn_closed_tanks`) and every placement pass reads it, so the
+        # mains open up on the configured date instead of staying excluded
+        # by 20 hard-coded system tests that never looked at the mode.
+        #
+        # Defaults to ALL 6N tanks closed: a caller that never sets it -- a
+        # test building a FacilityState by hand, a helper called outside the
+        # weekly loop -- behaves exactly as the code did before.
+        from .sixn import SIXN_ALL_TANKS   # local: sixn imports state
+        self.sixn_closed_tanks: frozenset = SIXN_ALL_TANKS
 
     # ---- Builders ----
     @classmethod

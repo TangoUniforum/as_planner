@@ -75,6 +75,7 @@ from .models import (
     TankConfig,
 )
 from .sixn import (
+    SIXN_ALL_TANKS,
     SIXN_MAIN_TANKS,
     SIXN_SISTER_TANKS,
     SIXN_PAIRS,
@@ -99,6 +100,25 @@ from .time_grid import (
 # grow-out system, NOT pipeline-owned, so it is a valid move-in source
 # for the 6N purge pipeline (and is allocatable by Phase A/B/C).
 _SIXN_SYSTEMS = frozenset({"OG6N"})
+
+
+def sixn_closed_tanks(control, today) -> frozenset:
+    """The 6N tanks ordinary production placement may not use on `today`.
+
+    6N is a depuration system while purge mode runs, so every 6N tank is
+    closed. From `control.sixn_production_start` the MAIN tanks (61/63/65)
+    become ordinary production tanks (sixn.py design §5) and only the SISTERS
+    stay closed -- they are physically purge-only (operator, 2026-09-20).
+
+    This exists because the system-level test it replaces
+    (`system_id not in _SIXN_SYSTEMS`) appeared at 20 placement sites and not
+    one of them looked at the mode, so the mains stayed excluded from every
+    spread, balance, reserve and consolidate pass for ever. Measured on the
+    9.16 PR with the production date forced early: 6N reached 13% occupancy
+    against 94% for the grow-out tanks, while 23 tank-weeks breached density
+    elsewhere and 10,320 m3 of 6N water sat empty.
+    """
+    return SIXN_ALL_TANKS if is_purge_mode(control, today) else SIXN_SISTER_TANKS
 
 # 6N PURGE-mode move-in modeling. Operationally a cohort is TRANSFERRED into a
 # 6N depuration tank mid-week (~Friday) and then held OFF-FEED for the rest of
@@ -1221,7 +1241,7 @@ def _pick_fifo_move_in_batches(
         prod_tanks = [
             t for t in state.tanks_by_id.values()
             if t.batch_id == b.batch_id and not t.is_empty
-            and t.system_id not in _SIXN_SYSTEMS
+            and t.tank_id not in state.sixn_closed_tanks
             and t.system_id not in OG12_SYSTEMS   # R5: no harvest/6N staging from entry tier
             and t.avg_wt_g >= min_wt
         ]
@@ -1312,7 +1332,7 @@ def _try_graded_move_in(
         cands = [
             t for t in state.tanks_by_id.values()
             if t.batch_id == b.batch_id and not t.is_empty
-            and t.system_id not in _SIXN_SYSTEMS
+            and t.tank_id not in state.sixn_closed_tanks
             and t.system_id not in OG12_SYSTEMS   # R5: no graded 6N staging from entry tier
             and t.avg_wt_g < min_hv  # not eligible for regular move-in
         ]
@@ -1400,7 +1420,7 @@ def _try_graded_move_in(
         retention = next(
             (t for t in sorted(state.tanks_by_id.values(), key=lambda x: x.tank_id)
              if t.is_empty and t.type == "OG"
-             and t.system_id not in _SIXN_SYSTEMS
+             and t.tank_id not in state.sixn_closed_tanks
              and t.system_id not in OG12_SYSTEMS
              and t.tank_id not in reserved),
             None,
@@ -1539,7 +1559,7 @@ def _transit_entry_to_pair(
         frees = [t for t in sorted(state.tanks_by_id.values(),
                                    key=lambda x: x.tank_id)
                  if t.is_empty and t.type == "OG"
-                 and t.system_id not in _SIXN_SYSTEMS
+                 and t.tank_id not in state.sixn_closed_tanks
                  and t.system_id not in OG12_SYSTEMS]
         for t in frees:
             if t.tank_id not in reserved:
@@ -2018,7 +2038,7 @@ def _run_sixn_purge_week(
         src_tanks = [
             t for t in state.tanks_by_id.values()
             if t.batch_id == move_in_batch and not t.is_empty
-            and t.system_id not in _SIXN_SYSTEMS
+            and t.tank_id not in state.sixn_closed_tanks
             and t.system_id not in OG12_SYSTEMS   # R5: no 6N staging from entry tier
             and t.avg_wt_g >= control.min_harvest_weight_g
         ]
@@ -2703,7 +2723,7 @@ def _consolidate_harvest_prep(
     for t in state.tanks_by_id.values():
         if (not t.is_empty and t.type == "OG"
                 and t.stage == STAGE_STARVE
-                and t.system_id not in _SIXN_SYSTEMS      # R7
+                and t.tank_id not in state.sixn_closed_tanks      # R7
                 and t.system_id not in OG12_SYSTEMS       # R5
                 and t.avg_wt_g > 0):
             groups.setdefault(t.batch_id, []).append(t)
@@ -2832,7 +2852,7 @@ def _consolidate_growout_to_free_tanks(
     for t in state.tanks_by_id.values():
         if (not t.is_empty and t.type == "OG"
                 and t.system_id not in OG12_SYSTEMS
-                and t.system_id != "OG6N"
+                and t.tank_id not in state.sixn_closed_tanks
                 and t.stage != STAGE_STARVE
                 and t.max_density_kg_m3 > 0 and t.avg_wt_g > 0):
             bybatch.setdefault(t.batch_id, []).append(t)
@@ -2921,7 +2941,8 @@ def _even_out_density(
                 and t.avg_wt_g < OG12_MOVE_LOCK_WT_G]
     og12_all = [t for t in tanks if t.system_id in OG12_SYSTEMS]
     og36 = [t for t in tanks
-            if t.system_id not in OG12_SYSTEMS and t.system_id != "OG6N"]
+            if t.system_id not in OG12_SYSTEMS
+            and t.tank_id not in state.sixn_closed_tanks]
 
     def _equalize(group):
         """Move fish between tanks in `group` to equalize counts; emits
@@ -3018,7 +3039,7 @@ def _even_out_density(
     _empty_go = [t for t in state.tanks_by_id.values()
                  if t.is_empty and t.type == "OG"
                  and t.system_id not in OG12_SYSTEMS
-                 and t.system_id != "OG6N"
+                 and t.tank_id not in state.sixn_closed_tanks
                  and t.max_density_kg_m3 > 0
                  and t.tank_id not in getattr(state, "reserved_tanks", ())]
     for src in og12_over:
@@ -3977,7 +3998,7 @@ def _consolidate_remnants(
     remnants = sorted(
         [t for t in state.tanks_by_id.values()
          if not t.is_empty and t.type == "OG"
-         and t.system_id not in _SIXN_SYSTEMS
+         and t.tank_id not in state.sixn_closed_tanks
          and t.stage != STAGE_STARVE
          and t.avg_wt_g > 0
          and 0 < t.count < min_keep * _REMNANT_SWEEP_PAD],
@@ -3991,7 +4012,7 @@ def _consolidate_remnants(
         for d in state.tanks_by_id.values():
             if (d.tank_id == src.tank_id or d.is_empty
                     or d.batch_id != src.batch_id or d.type != "OG"
-                    or d.system_id in _SIXN_SYSTEMS
+                    or d.tank_id in state.sixn_closed_tanks
                     or d.stage == STAGE_STARVE
                     or d.max_density_kg_m3 <= 0):
                 continue
@@ -4135,7 +4156,11 @@ def _freeze_6n_dest(state: FacilityState, dest_tank_id: int,
     chokepoint.
     """
     t = state.tanks_by_id.get(dest_tank_id)
-    if t is not None and not t.is_empty and t.system_id in _SIXN_SYSTEMS:
+    # Only a tank that is a DEPURATION tank right now gets frozen. In purge mode
+    # that is every 6N tank; from the production date the mains are ordinary
+    # production tanks and filling one must not put it off feed (the sisters
+    # stay purge-only and still freeze).
+    if t is not None and not t.is_empty and t.tank_id in state.sixn_closed_tanks:
         t.stage = STAGE_STARVE
         if fill_date is not None:
             getattr(state, "sixn_fill_date", {})[dest_tank_id] = fill_date
@@ -4699,6 +4724,14 @@ def phase_d_emit_events(
         ws_we = week_ranges.get(week_label)
         week_start_date = ws_we[0] if ws_we else _as_date(control.forecast_start)
 
+        # WHICH 6N TANKS ARE DEPURATION TANKS THIS WEEK. Every placement pass
+        # below reads state.sixn_closed_tanks instead of testing the OG6N
+        # SYSTEM, so the mains open to ordinary production on the operator's
+        # configured date and the sisters never do. Set once per week, here,
+        # because the answer is the same for the whole week and every pass
+        # already has `state`.
+        state.sixn_closed_tanks = sixn_closed_tanks(control, week_start_date)
+
         # ---------------- ANTICIPATORY HANDLING RESERVE ------------------
         # `_moves_left` above answers "what is left of the budget RIGHT NOW".
         # That is blind in one direction: the week's ESSENTIAL passes (the
@@ -4836,7 +4869,7 @@ def phase_d_emit_events(
                     facility, control, _pn)
             _empty_entry = _free_grow = _vacatable = 0
             for _t in state.tanks_by_id.values():
-                if _t.type != "OG" or _t.system_id in _SIXN_SYSTEMS:
+                if _t.type != "OG" or _t.tank_id in state.sixn_closed_tanks:
                     continue
                 if _t.system_id in OG12_SYSTEMS:
                     if _t.is_empty:
@@ -5242,7 +5275,7 @@ def phase_d_emit_events(
                             (t for t in sorted(state.tanks_by_id.values(),
                                                key=lambda x: x.tank_id)
                              if t.is_empty and t.type == "OG"
-                             and t.system_id not in _SIXN_SYSTEMS
+                             and t.tank_id not in state.sixn_closed_tanks
                              and t.system_id not in OG12_SYSTEMS
                              and t.tank_id not in _reserved_og),
                             None)
@@ -5885,7 +5918,7 @@ def phase_d_emit_events(
                 _avail = sum(
                     1 for t in state.tanks_by_id.values()
                     if t.is_empty and t.type == "OG"
-                    and t.system_id not in _SIXN_SYSTEMS
+                    and t.tank_id not in state.sixn_closed_tanks
                     and _reserved_for.get(t.tank_id, _wk) == _wk
                 )
                 _deficit_wk = _need_wk - _avail
@@ -5893,7 +5926,7 @@ def phase_d_emit_events(
                     _cands = [
                         t for t in state.tanks_by_id.values()
                         if not t.is_empty and t.type == "OG"
-                        and t.system_id not in _SIXN_SYSTEMS
+                        and t.tank_id not in state.sixn_closed_tanks
                         and t.system_id not in OG12_SYSTEMS  # R5: never purge entry-tier tanks into 6N
                         and t.stage != STAGE_STARVE
                         and t.avg_wt_g >= _min_hv_wt
@@ -5977,7 +6010,7 @@ def phase_d_emit_events(
                         if _held >= _need_wk:
                             break
                         if (t.is_empty and t.type == "OG"
-                                and t.system_id not in _SIXN_SYSTEMS
+                                and t.tank_id not in state.sixn_closed_tanks
                                 and t.tank_id not in _reserved_for):
                             _persist_tank_reserve(
                                 t.tank_id, week_label, _wk,
@@ -5990,13 +6023,13 @@ def phase_d_emit_events(
                     _held += sum(
                         1 for t in state.tanks_by_id.values()
                         if t.is_empty and t.type == "OG"
-                        and t.system_id not in _SIXN_SYSTEMS
+                        and t.tank_id not in state.sixn_closed_tanks
                         and t.tank_id not in _reserved_for)
                 _deficit_wk = _need_wk - _held
                 while _deficit_wk > 0:
                     _cands = [t for t in state.tanks_by_id.values()
                               if not t.is_empty and t.type == "OG"
-                              and t.system_id not in _SIXN_SYSTEMS
+                              and t.tank_id not in state.sixn_closed_tanks
                               and t.system_id not in OG12_SYSTEMS
                               and t.avg_wt_g >= _min_hv_wt
                               and (t.stage != STAGE_STARVE
@@ -6124,7 +6157,7 @@ def phase_d_emit_events(
                                          key=lambda x: x.tank_id):
                             if (_d.is_empty or _d.batch_id != _se.batch_id
                                     or _d.type != "OG"
-                                    or _d.system_id in _SIXN_SYSTEMS
+                                    or _d.tank_id in state.sixn_closed_tanks
                                     or _d.system_id in OG12_SYSTEMS
                                     or _d.stage == STAGE_STARVE
                                     or _d.max_density_kg_m3 <= 0):
@@ -6180,7 +6213,7 @@ def phase_d_emit_events(
                     _free_grow = sorted(
                         [t for t in state.tanks_by_id.values()
                          if t.is_empty and t.type == "OG"
-                         and t.system_id not in _SIXN_SYSTEMS
+                         and t.tank_id not in state.sixn_closed_tanks
                          and t.system_id not in OG12_SYSTEMS],
                         key=lambda t: (t.tank_id not in _reserved_og, t.tank_id))
                     if not _free_grow:
@@ -6188,7 +6221,7 @@ def phase_d_emit_events(
                         # sources only; R5 keeps entry tanks out of this pool).
                         _cands = [t for t in state.tanks_by_id.values()
                                   if not t.is_empty and t.type == "OG"
-                                  and t.system_id not in _SIXN_SYSTEMS
+                                  and t.tank_id not in state.sixn_closed_tanks
                                   and t.system_id not in OG12_SYSTEMS
                                   and t.stage != STAGE_STARVE  # purge-pipeline-owned
                                   and t.avg_wt_g >= _min_hv_wt]
@@ -6201,7 +6234,7 @@ def phase_d_emit_events(
                             # else can free a slot.
                             _cands = [t for t in state.tanks_by_id.values()
                                       if not t.is_empty and t.type == "OG"
-                                      and t.system_id not in _SIXN_SYSTEMS
+                                      and t.tank_id not in state.sixn_closed_tanks
                                       and t.system_id not in OG12_SYSTEMS
                                       and t.stage == STAGE_STARVE
                                       and t.avg_wt_g >= _min_hv_wt]
@@ -6577,6 +6610,17 @@ def phase_d_emit_events(
         grade_dest_pool = sorted(
             [t for t in state.tanks_by_id.values()
              if t.is_empty and t.type == "OG"
+             # LEFT SYSTEM-SCOPED ON PURPOSE. Making this pool mode-aware
+             # like the others changed the PURGE-era plan (first divergence
+             # 2026-W38, in OG1/2 tanks that hold no 6N fish at all), even
+             # though the set it selects is provably identical in purge mode
+             # -- verified by probe: state.sixn_closed_tanks is every 6N tank
+             # in every pre-2028 week. The passes interact, so opening one
+             # more destination pool re-orders work elsewhere
+             # ([[planner_mode_discontinuity]]). Grade-splits into 6N in
+             # production mode are worth having, but not at the price of
+             # moving a plan that is in use; revisit with a negative control
+             # of its own.
              and t.system_id != "OG6N"
              and t.tank_id not in _reserved_og],  # held for imminent TranOG
             key=lambda t: t.tank_id,
