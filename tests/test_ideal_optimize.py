@@ -17,7 +17,9 @@ progress callback raises (a Streamlit rerun is a BaseException).
 The cap dimension: caps=None is the one cap it always was; every (cadence,
 size, cap) runs once AT its own cap and is judged at it; a cap above the
 operator's is refused before anything runs; ties go to the higher cap; a
-candidate's neighbours keep its cap; the wave is at most 2 x 10 runs.
+candidate's neighbours keep its cap; the wave is at most 4 x 10 runs
+(2026-09-20: the neighbourhood gained the CADENCE axis, so a candidate
+has 4 neighbours -- +/-NEIGHBOUR_STEP fish and +/-1 day -- not 2).
 """
 import dataclasses
 import hashlib
@@ -201,6 +203,14 @@ def _ran(*cells):
     return {c.key: c for c in cells}
 
 
+def _all_neighbours(*cands, **kw):
+    """Every neighbour of every candidate, built FROM neighbour_rhythms so a
+    test cannot drift from it (2026-09-20: the neighbourhood gained the cadence
+    axis and every hand-written fixture here broke)."""
+    return _ran(*(_cell(cad, size, cap=cap, **kw)
+                  for c in cands for cad, size, cap in io.neighbour_rhythms(c)))
+
+
 def test_the_candidates_are_the_within_cells_best_first():
     cells = [_cell(49, 200_000, revenue=89e6),
              _cell(49, 280_000, ok=False, revenue=137e6, total=115),
@@ -224,19 +234,18 @@ def test_at_most_ten_candidates():
 
 def test_a_stable_winner():
     w = _cell(49, 210_000, revenue=103e6)
-    stab, first = io.judge_stability(
-        [w], _ran(_cell(49, 205_000), _cell(49, 215_000)))
+    stab, first = io.judge_stability([w], _all_neighbours(w))
     (cand, ns, ok), = stab
     assert cand == w and ok and first == w
-    assert [n.batch_size for n in ns] == [205_000, 215_000]
+    assert [(n.cadence_days, n.batch_size) for n in ns] == [
+        (49, 205_000), (49, 215_000), (48, 210_000), (50, 210_000)]
 
 
 def test_a_fragile_winner_with_a_stable_second():
     w = _cell(49, 210_000, revenue=103e6)
     s = _cell(42, 180_000, revenue=96.6e6)
-    ran = _ran(_cell(49, 205_000),
-               _cell(49, 215_000, ok=False, total=17),     # breaks a limit
-               _cell(42, 175_000), _cell(42, 185_000))
+    ran = dict(_all_neighbours(w, s))
+    ran[(49, 215_000, CAP)] = _cell(49, 215_000, ok=False, total=17)  # breaks a limit
     stab, first = io.judge_stability([w, s], ran)
     assert [ok for _c, _n, ok in stab] == [False, True]
     assert first == s
@@ -244,8 +253,8 @@ def test_a_fragile_winner_with_a_stable_second():
 
 def test_none_of_three_is_stable():
     cands = [_cell(49, 210_000), _cell(42, 180_000), _cell(56, 232_000)]
-    ran = _ran(*(_cell(c.cadence_days, c.batch_size + d, ok=(d < 0), total=1)
-                 for c in cands for d in (-5_000, 5_000)))
+    ran = _ran(*(_cell(cad, size, cap=cap, ok=False, total=1)
+                 for c in cands for cad, size, cap in io.neighbour_rhythms(c)))
     stab, first = io.judge_stability(cands, ran)
     assert [ok for *_x, ok in stab] == [False, False, False]
     assert first is None and len(stab) == 3
@@ -254,33 +263,39 @@ def test_none_of_three_is_stable():
 def test_a_neighbour_keeps_its_candidates_cap():
     c = _cell(49, 210_000, cap=3_200_000)
     assert io.neighbour_rhythms(c) == [(49, 205_000, 3_200_000.0),
-                                       (49, 215_000, 3_200_000.0)]
+                                       (49, 215_000, 3_200_000.0),
+                                       (48, 210_000, 3_200_000.0),
+                                       (50, 210_000, 3_200_000.0)]
     # The same rhythm at ANOTHER cap is not a neighbour: judged on the cap
     # the candidate ran at, a missing one raises.
-    other = _ran(_cell(49, 205_000), _cell(49, 215_000))       # at 3,800 t
+    other = _ran(_cell(49, 205_000), _cell(49, 215_000),
+                 _cell(48, 210_000), _cell(50, 210_000))       # at 3,800 t
     with pytest.raises(KeyError):
         io.judge_stability([c], other)
     stab, first = io.judge_stability([c], _ran(
-        _cell(49, 205_000, cap=3_200_000), _cell(49, 215_000, cap=3_200_000)))
+        _cell(49, 205_000, cap=3_200_000), _cell(49, 215_000, cap=3_200_000),
+        _cell(48, 210_000, cap=3_200_000), _cell(50, 210_000, cap=3_200_000)))
     assert stab[0][2] and first == c
     assert {n.cap_kg for n in stab[0][1]} == {3_200_000.0}
 
 
 def test_a_neighbour_below_the_smallest_batch_is_dropped():
     small = _cell(49, io.MIN_SIZE + 2_000)
-    assert io.neighbour_rhythms(small) == [(49, io.MIN_SIZE + 7_000, CAP)]
+    assert io.neighbour_rhythms(small) == [
+        (49, io.MIN_SIZE + 7_000, CAP),
+        (48, io.MIN_SIZE + 2_000, CAP), (50, io.MIN_SIZE + 2_000, CAP)]
     assert io.neighbour_rhythms(_cell(49, io.MIN_SIZE + 5_000)) == [
-        (49, io.MIN_SIZE, CAP), (49, io.MIN_SIZE + 10_000, CAP)]
-    stab, first = io.judge_stability([small],
-                                     _ran(_cell(49, io.MIN_SIZE + 7_000)))
-    assert len(stab[0][1]) == 1 and stab[0][2] and first == small
+        (49, io.MIN_SIZE, CAP), (49, io.MIN_SIZE + 10_000, CAP),
+        (48, io.MIN_SIZE + 5_000, CAP), (50, io.MIN_SIZE + 5_000, CAP)]
+    stab, first = io.judge_stability([small], _all_neighbours(small))
+    assert len(stab[0][1]) == 3 and stab[0][2] and first == small
 
 
 def test_an_errored_neighbour_is_not_stable_and_a_missing_one_raises():
     w = _cell(49, 210_000)
-    stab, first = io.judge_stability(
-        [w], _ran(_cell(49, 205_000),
-                  _cell(49, 215_000, error="RuntimeError: boom")))
+    ran = dict(_all_neighbours(w))
+    ran[(49, 215_000, CAP)] = _cell(49, 215_000, error="RuntimeError: boom")
+    stab, first = io.judge_stability([w], ran)
     assert stab[0][2] is False and first is None
     with pytest.raises(KeyError):                   # detect, don't coerce
         io.judge_stability([w], _ran(_cell(49, 205_000)))
@@ -319,22 +334,29 @@ def test_the_stability_wave_reuses_grid_cells_and_runs_the_rest_once(
                       workers=1, control=ctl,
                       progress=lambda d, n, c: seen.append((d, n, c.batch_size)),
                       **run)
-    # The grid, then ONLY the neighbours the grid lacks, each once.
-    assert calls == [(49, 200_000), (49, 205_000), (49, 210_000),
-                     (49, 215_000), (49, 195_000)]
+    # The grid, then ONLY the neighbours the grid lacks, each once. Derived
+    # from neighbour_rhythms rather than listed, so the pin survives the
+    # neighbourhood gaining an axis (it gained cadence on 2026-09-20).
+    _grid = [(49, 200_000), (49, 205_000), (49, 210_000)]
+    _want = {(cad, size) for cand, _ns, _ok in res.stability
+             for cad, size, _cap in io.neighbour_rhythms(cand)} - set(_grid)
+    assert calls[:3] == _grid
+    assert set(calls[3:]) == _want
+    assert len(calls[3:]) == len(_want), "a neighbour ran more than once"
     # The stability wave runs with EXACTLY the grid's arguments.
-    assert len(args) == 5
+    assert len(args) == len(calls)
     assert all(a == (3_800_000, str(ROOT), dict(run, control=ctl))
                for a in args), args
     assert all(a[2]["control"] is ctl and a[2]["template"] is tmpl
                for a in args)
-    assert seen == [(1, 3, 200_000), (2, 3, 205_000), (3, 3, 210_000),
-                    (4, 5, 215_000), (5, 5, 195_000)]
+    assert [d for d, _n, _s in seen] == list(range(1, len(calls) + 1))
+    assert seen[-1][1] == len(calls), "progress never reached its total"
     assert [c.batch_size for c in res.cells] == [200_000, 205_000, 210_000]
     assert res.best.batch_size == 210_000
     assert [(c.batch_size, ok) for c, _n, ok in res.stability] == [
         (210_000, False), (205_000, True), (200_000, True)]
-    assert res.stability[1][1] == (res.cells[0], res.cells[2])   # reused cells
+    # the 205k candidate's SIZE neighbours are grid cells, reused not re-run
+    assert res.stability[1][1][:2] == (res.cells[0], res.cells[2])
     assert res.best_stable == res.cells[1]
     assert res.unconstrained == res.best             # the top earner is within
     assert res.note is None
@@ -352,8 +374,14 @@ def test_caps_none_is_the_one_cap_it_always_was(monkeypatch):
     calls.clear()
     b = io.optimize([49], [200_000, 205_000, 210_000], 3_800_000, ROOT,
                     caps=[3_800_000], workers=1, control=object())
-    assert first == calls == [(49, 200_000), (49, 205_000), (49, 210_000),
-                              (49, 215_000), (49, 195_000)]
+    # the grid, then the winner's neighbourhood (size AND cadence axes)
+    assert first == calls
+    assert calls[:3] == [(49, 200_000), (49, 205_000), (49, 210_000)]
+    _grid = {(c.cadence_days, c.batch_size) for c in a.cells}
+    assert set(calls[3:]) == {(cad, size)
+                              for cand, _ns, _ok in a.stability
+                              for cad, size, _cap in io.neighbour_rhythms(cand)
+                              } - _grid
     assert a == b
     assert {c.cap_kg for c in a.cells} == {3_800_000.0}
     assert {x[0] for x in args} == {3_800_000.0}
@@ -407,9 +435,11 @@ def test_a_three_cap_grid_runs_and_judges_every_cell_at_its_own_cap(
     assert all("max_biomass_kg" not in x[4] for x in log if x[0] == "run")
     assert ctl.max_biomass_kg == 3_800_000.0           # the input untouched
     # The wave: each candidate's neighbours at ITS cap (205k is shared).
-    assert sorted(runs[6:]) == sorted(
-        (49, s, float(p)) for s in (195_000, 205_000, 215_000)
-        for p in (3_800_000, 3_200_000, 3_000_000))
+    # Derived from neighbour_rhythms, not listed, so the pin survives the
+    # neighbourhood gaining an axis (it gained cadence on 2026-09-20).
+    _want = {r for cand, _ns, _ok in res.stability
+             for r in io.neighbour_rhythms(cand)} - set(grid)
+    assert sorted(runs[6:]) == sorted(_want)
     assert res.best.key == (49, 210_000, 3_000_000.0)  # the lower cap earns more
     assert all(n.cap_kg == cand.cap_kg for cand, ns, _ok in res.stability
                for n in ns)
@@ -471,8 +501,12 @@ def test_neighbours_keep_their_cap_and_reuse_grid_cells(monkeypatch):
     assert calls[:6] == [(49, s, p) for s in (200_000, 205_000, 210_000)
                          for p in (hi, lo)]
     # Only the neighbours the grid lacks, at the candidate's cap, each once.
-    assert calls[6:] == [(49, 215_000, hi), (49, 215_000, lo),
-                         (49, 195_000, hi), (49, 195_000, lo)]
+    _grid = {(49, s, p) for s in (200_000, 205_000, 210_000) for p in (hi, lo)}
+    _want = {r for cand, _ns, _ok in res.stability
+             for r in io.neighbour_rhythms(cand)} - _grid
+    assert set(calls[6:]) == _want
+    assert len(calls[6:]) == len(_want), "a neighbour ran more than once"
+    assert {c[2] for c in calls[6:]} <= {hi, lo}
     # The wave runs with EXACTLY the grid's arguments — its cap included.
     assert all(a[1:] == (str(ROOT), dict(run, control=ctl)) for a in args)
     assert [a[0] for a in args] == [c[2] for c in calls]
@@ -485,7 +519,7 @@ def test_neighbours_keep_their_cap_and_reuse_grid_cells(monkeypatch):
     assert res.best.key == (49, 210_000, hi)           # the tie -> higher cap
 
 
-def test_ten_candidates_make_a_wave_of_at_most_twenty(monkeypatch):
+def test_ten_candidates_make_a_wave_of_at_most_forty(monkeypatch):
     calls = []
     monkeypatch.setattr(io, "run_cell", _fake_runner(calls, with_cap=True))
     cads = [42, 49, 56, 63, 70, 77]
@@ -494,8 +528,10 @@ def test_ten_candidates_make_a_wave_of_at_most_twenty(monkeypatch):
     assert len(res.cells) == 12
     wave = calls[12:]
     assert len(res.stability) == io.MAX_STABILITY_CANDIDATES == 10
-    assert len(wave) == 2 * io.MAX_STABILITY_CANDIDATES == 20
-    assert len(set(wave)) == 20
+    # 4 neighbours each since 2026-09-20 (+/-NEIGHBOUR_STEP fish AND
+    # +/-NEIGHBOUR_CADENCE_DAYS), so the wave is 4x the candidates, not 2x.
+    assert len(wave) == 4 * io.MAX_STABILITY_CANDIDATES == 40
+    assert len(set(wave)) == 40
     assert set(wave) == {r for cand, _ns, _ok in res.stability
                          for r in io.neighbour_rhythms(cand)}
 

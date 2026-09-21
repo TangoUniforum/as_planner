@@ -103,8 +103,12 @@ BREACH_WORDS = {
     "over_cap": ("week over the biomass cap", "weeks over the biomass cap")}
 # The stability check: the top MAX_STABILITY_CANDIDATES within-limits cells,
 # each re-judged at its batch size +/- NEIGHBOUR_STEP fish (same cadence, same
-# cap) — at most 2 x 10 = 20 extra runs, in one wave after the grid.
+# cap) — at most 4 x 10 = 40 extra runs, in one wave after the grid
+# (2 size neighbours + 2 cadence neighbours per candidate).
 NEIGHBOUR_STEP = 5_000
+# One DAY of cadence: the other axis a real batch misses by. Added
+# 2026-09-20 — see neighbour_rhythms for the measurement.
+NEIGHBOUR_CADENCE_DAYS = 1
 MAX_STABILITY_CANDIDATES = 10
 
 
@@ -518,12 +522,30 @@ def table_order(cells: Sequence[Cell], objective: str) -> list:
 
 
 def neighbour_rhythms(cell: Cell) -> list:
-    """The (cadence, size, cap_kg) cells a candidate is re-judged at: the
-    same cadence AND the same cap, with the batch NEIGHBOUR_STEP fish smaller
-    and larger, dropping one below MIN_SIZE."""
-    return [(cell.cadence_days, s, float(cell.cap_kg))
-            for s in (cell.batch_size - NEIGHBOUR_STEP,
-                      cell.batch_size + NEIGHBOUR_STEP) if s >= MIN_SIZE]
+    """The (cadence, size, cap_kg) cells a candidate is re-judged at: the same
+    CAP, one operational step away in each axis — NEIGHBOUR_STEP fish per batch
+    and NEIGHBOUR_CADENCE_DAYS of cadence — dropping any below MIN_SIZE or
+    MIN_CADENCE.
+
+    THE CADENCE AXIS WAS MISSING until 2026-09-20, and it is the one that
+    decides. Measured on the live config, perturbing each zero-breach winner by
+    +/-1 day and +/-10,000 fish: 42 d x 225k @ 3,000 t was legal at EXACTLY ONE
+    POINT — every neighbour breached — while a size-only check called it
+    stable. The same scan found 49 d x 210k legal at 4,973 t, 18% above the
+    cell a 25k-step grid had named the winner. A rhythm the facility cannot
+    hold to the day is not a plan, and a size-only neighbourhood cannot say so.
+
+    The cap is deliberately NOT perturbed: it is a decision the operator makes
+    and holds, while cadence and batch size are what execution misses by.
+    """
+    out = [(cell.cadence_days, s, float(cell.cap_kg))
+           for s in (cell.batch_size - NEIGHBOUR_STEP,
+                     cell.batch_size + NEIGHBOUR_STEP) if s >= MIN_SIZE]
+    out += [(d, cell.batch_size, float(cell.cap_kg))
+            for d in (cell.cadence_days - NEIGHBOUR_CADENCE_DAYS,
+                      cell.cadence_days + NEIGHBOUR_CADENCE_DAYS)
+            if d >= MIN_CADENCE]
+    return out
 
 
 def stability_candidates(cells: Sequence[Cell], objective: str) -> list:
@@ -668,7 +690,7 @@ def optimize(cadences: Sequence[int], sizes: Sequence[int], cap_kg: float,
     `ignoring_limits(cells)`. When there is a best, the stability check runs
     the neighbours of `stability_candidates` (same cadence, same cap) that
     are not grid cells (a grid cell with exactly that cadence, size and cap
-    is reused, not re-run) in ONE extra wave of at most 2 x
+    is reused, not re-run) in ONE extra wave of at most 4 x
     MAX_STABILITY_CANDIDATES runs, through the same pool path with the same
     arguments; `progress` keeps counting (its total grows by the wave).
     `Result.stability` / `best_stable` come from `judge_stability`.

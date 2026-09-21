@@ -360,7 +360,7 @@ if at.button(key="ideal_opt_use").disabled:
 # fresh boxes — step 3's own re-fill would otherwise drop the cap.
 at = page("fragile_stable2", _ideal_tr_seeds={"old": 1}, ideal_tr_hmax=12345,
           _keep_ideal_tr_hmax=12345)
-one(at, "warning", "**Fragile:**", "at ±5,000 fish per batch (same cap)",
+one(at, "warning", "**Fragile:**", "at ±5,000 fish per batch or ±1 day of cadence (same cap)",
     "49 d × 215,000 @ 3,800 t breaks the limits (1 system-week over feed)",
     "Best stable plan: **42 d × 180,000 @ 3,200 t**")
 one(at, "info", "The limits cost nothing")

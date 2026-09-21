@@ -7186,9 +7186,12 @@ def _ideal_opt_cost(res):
 def _ideal_opt_stability(res, stale, tr_seeds=None):
     """The winner's stability line and the Use button(s).
 
-    Stable = its neighbours at +/- NEIGHBOUR_STEP fish per batch (same
-    cadence, same cap) are also within every limit
-    (forecast.ideal_optimize). A fragile winner is said LOUDLY; when a lower
+    Stable = its neighbours one operational step away in EACH axis -- +/-
+    NEIGHBOUR_STEP fish per batch and +/- NEIGHBOUR_CADENCE_DAYS of cadence,
+    at the same cap -- are also within every limit
+    (forecast.ideal_optimize). The cadence axis was added 2026-09-20: a
+    size-only check called a rhythm stable that was legal at exactly one
+    point, every cadence neighbour breaching. A fragile winner is said LOUDLY; when a lower
     candidate is stable, the primary button loads that one and a secondary
     still loads the winner. Each Use button hands over the rhythm AND the cap
     it ran at (`_ideal_opt_use`, with step 3's `tr_seeds`). Every Use button
@@ -7203,14 +7206,15 @@ def _ideal_opt_stability(res, stale, tr_seeds=None):
                    + f" at {b.cap_t:,.0f} t"
                    + (" are" if len(ns) > 1 else " is")
                    + " also within every limit — a check at "
-                     f"±{_io.NEIGHBOUR_STEP:,} fish per batch, same cadence "
-                     "and cap; not a test against growth-model error or a "
-                     "different cadence or cap.")
+                     f"±{_io.NEIGHBOUR_STEP:,} fish per batch AND "
+                     f"±{_io.NEIGHBOUR_CADENCE_DAYS} day of cadence, same "
+                     "cap; not a test against growth-model error or a "
+                     "different cap.")
     elif ok is False:
         bad = [n for n in res.stability[0][1]
                if not (n.error is None and n.within_limits)]
-        msg = (f"**Fragile:** at ±{_io.NEIGHBOUR_STEP:,} fish per batch "
-               f"(same cap), "
+        msg = (f"**Fragile:** at ±{_io.NEIGHBOUR_STEP:,} fish per batch or "
+               f"±{_io.NEIGHBOUR_CADENCE_DAYS} day of cadence (same cap), "
                + "; ".join(
                    f"{n.label} could not run ({n.error})" if n.error else
                    f"{n.label} breaks the limits ({_ideal_breach_text(n)})"
