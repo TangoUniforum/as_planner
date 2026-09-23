@@ -38,3 +38,6 @@ fw_calibration_history.jsonl
 # Operating costs — commercially sensitive, kept out of git (2026-09-11)
 config/costs.yaml
 config/costs.yaml.tmp-*
+
+# tools/knob_corpus writes its last per-PR table here (diagnostic, not input)
+knob_corpus_last.json
