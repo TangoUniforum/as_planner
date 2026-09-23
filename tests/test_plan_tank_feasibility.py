@@ -92,13 +92,21 @@ def test_only_the_named_week_is_relieved():
     assert w2.tanks_needed_at_density_cap == 5
 
 
-def test_registered_as_a_comparable_method():
+def test_it_is_a_knob_and_no_longer_a_method():
+    """The `controller-feasible` ARM was removed 2026-09-21: its only override,
+    plan_tank_feasibility, is already true in the operator's config, so the arm
+    WAS the baseline -- byte-identical plans on 17 of 17 corpus PRs
+    (tools/knob_corpus --method controller-feasible --identical). The FEATURE is
+    untouched and still reached by the knob, which is what this file tests."""
+    import dataclasses
+
     from forecast.methods import REGISTRY
-    m = REGISTRY["controller-feasible"]
-    assert m.overrides["plan_tank_feasibility"] is True
-    # the ONE variable vs `controller` must be the feasibility pass
-    assert m.overrides["hybrid_follow"] == "off"
-    assert m.family == "Controller"
+    from forecast.models import ControlParams
+    assert "controller-feasible" not in REGISTRY
+    fields = {f.name: f for f in dataclasses.fields(ControlParams)}
+    assert "plan_tank_feasibility" in fields, "the knob must survive the arm"
+    assert fields["plan_tank_feasibility"].default is False, (
+        "off by default: the operator's config turns it on, not the dataclass")
 
 
 # ---- Determinism (2026-09-08) ----

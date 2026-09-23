@@ -49,12 +49,12 @@ _DEFAULT_METHOD = "controller-hybrid"
 # Operator-facing runtime hints: the "typically ~N s" text in the ▶ Run
 # forecast spinner, the Compare engines caption and progress bar, and the
 # Analyze phase-1 progress bar. Display strings, not a measurement record.
-# Separate note, measured 2026-09-11: the four arms at stock on the 8.31.26 PR
-# at the live 85-week horizon took 13-16 s per run, one after another with no
-# other forecast or test run alongside (docs/FULL_SWEEP_DESIGN.md). The hints were not
-# changed to match.
-_TYPICAL = {"controller": "~30 s", "controller-hybrid": "~40 s",
-            "controller-lns": "~30 s", "controller-feasible": "~30 s"}
+# Separate note, measured 2026-09-11: the arms at stock on the 8.31.26 PR at the
+# live 85-week horizon took 13-16 s per run, one after another with no other
+# forecast or test run alongside (docs/FULL_SWEEP_DESIGN.md). The hints were not
+# changed to match. (controller-lns and controller-feasible were removed
+# 2026-09-21 -- byte-identical plans to controller on 17 of 17 corpus PRs.)
+_TYPICAL = {"controller": "~30 s", "controller-hybrid": "~40 s"}
 # Pseudo-method: run the controller pipeline on the given config EXACTLY as-is,
 # with NO registry pins layered on top. Optimize's sweep measures variants that
 # way (variant knobs onto the live config, nothing else), so its verification

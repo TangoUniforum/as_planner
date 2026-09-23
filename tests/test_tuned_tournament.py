@@ -36,7 +36,9 @@ def test_every_method_declares_its_spaces():
 
 
 def test_controller_family_gets_the_full_optimizer_space():
-    for key in ("controller", "controller-lns", "controller-hybrid"):
+    # Every shipped arm, derived: naming one that gets deleted breaks the test
+    # rather than the invariant (controller-lns, removed 2026-09-21).
+    for key in M.DEFAULT_ROSTER:
         m = M.REGISTRY[key]
         assert [lbl for lbl, _ in m.knob_grid] == [
             lbl for lbl, _ in O.OPT_FULL_GRID]
@@ -96,7 +98,7 @@ def test_probe_grid_skips_pin_valued_candidates():
 
 
 def test_search_grid_merges_pins_under_every_row():
-    m = M.REGISTRY["controller-lns"]
+    m = M.REGISTRY[M.DEFAULT_ROSTER[0]]
     grid = T.search_grid(m)
     assert len(grid) == len(m.knob_grid)
     base = dict(grid[0][1])

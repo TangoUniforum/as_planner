@@ -299,47 +299,6 @@ register(Method(
           "steady-harvest contract rule.",
 ))
 register(Method(
-    key="controller-lns",
-    label="Controller — greedy + LNS",
-    family="Controller",
-    engine="controller",
-    # Same reason as `controller` above: isolate the LNS variable from the hybrid.
-    overrides={"placement_method": "lns", "hybrid_follow": "off"},
-    knob_grid=CONTROLLER_KNOB_GRID,
-    knob_space=CONTROLLER_KNOB_SPACE,
-    blurb="Controller with a large-neighborhood-search pass that RE-LABELS "
-          "which grow-out tank each occupancy segment sits in, moving load off "
-          "the hottest systems (audit-gated). It emits no extra Transfers, so "
-          "unlike a real move it costs neither handling mortality nor handling "
-          "budget — its transfer count is comparable with the plain controller.",
-))
-register(Method(
-    key="controller-feasible",
-    label="Controller — plan-feasible tanks",
-    family="Controller",
-    engine="controller",
-    # hybrid_follow pinned off for the same reason as `controller`: keep this
-    # arm's ONE variable the feasibility pass, not the hybrid.
-    overrides={"hybrid_follow": "off", "plan_tank_feasibility": True},
-    knob_grid=CONTROLLER_KNOB_GRID,
-    knob_space=CONTROLLER_KNOB_SPACE,
-    blurb="Controller whose CANVAS plans within the tanks that exist. The "
-          "canvas already detects, weeks ahead, that OG tank demand exceeds "
-          "placeable supply, then plans past it — the detection is handed to "
-          "the assignment planner and only ever appended to, never read. The "
-          "excess is not need: each SW week's tank count is raised to that "
-          "batch's own peak over the next 6 weeks, per batch, with nothing "
-          "arbitrating the sum. This arm hands those forward reservations "
-          "back — deepest slack first, never below a batch's need that week — "
-          "until each week fits. MEASURED ON 3 PRs, IT DOES NOT WIN: the "
-          "tank-supply shortfall goes to zero and transfer legs, ceiling "
-          "breaches and worst density mostly improve (199 -> 110 kg/m3 on "
-          "8/19), but tonnage slips on all three, refusals RISE, and 1-3 "
-          "weeks go over the handling budget. Kept in the lobby because it "
-          "isolates a real planning question on YOUR PR, not because it is "
-          "the better plan.",
-))
-register(Method(
     key="controller-hybrid",
     label="Controller — hybrid (L1-guided harvest)",
     family="Controller",
@@ -421,19 +380,25 @@ register(Method(
 # the zero-harvest-week blind spot fixed (34ecbaf) the plain controller was shown
 # to breach the never-an-empty-week rule on 5 of 6 real PRs, while the hybrid
 # breaches it on none. The old exclusion note here predated that measurement.
-# `controller-feasible` joins the DEFAULT roster, not just the registry: a
-# method the app's board and the tuned tournament never run is not "available",
-# it is invisible. It is off-by-default at the KNOB level (plan_tank_feasibility
-# false), so its presence here costs one more arm per tournament and changes no
-# plan anyone adopts unless they pick it.
-DEFAULT_ROSTER = ["controller", "controller-hybrid", "controller-lns",
-                  "controller-feasible"]
+# REMOVED 2026-09-21: `controller-lns` and `controller-feasible`. Both produced
+# a BYTE-IDENTICAL plan to `controller` on every corpus PR that runs -- 17 of 17,
+# measured by tools/knob_corpus --method <key> --identical. The board was showing
+# one plan three times, and every tournament paid for two arms that decide
+# nothing.
+#   * controller-feasible was inert BY CONSTRUCTION: its only override,
+#     plan_tank_feasibility, is already true in the operator's config, so the
+#     arm WAS the baseline.
+#   * controller-lns runs its LNS pass and finds nothing to do. Not a defect --
+#     it relocates a WHOLE occupancy segment, so it needs a tank free for every
+#     week of a 29-week span, and grow-out runs 94% occupied. See
+#     forecast/lns_placement.py; the `placement_method: lns` knob still works
+#     for anyone who wants to run it.
+DEFAULT_ROSTER = ["controller", "controller-hybrid"]
 
 # Everything registered. Kept as a distinct name from DEFAULT_ROSTER because
 # callers reference it by name; it is equal to DEFAULT_ROSTER now that the
 # Global family is gone.
-FULL_ROSTER = ["controller", "controller-hybrid", "controller-lns",
-               "controller-feasible"]
+FULL_ROSTER = ["controller", "controller-hybrid"]
 
 
 def get_roster(keys: "Optional[list[str]]" = None) -> "list[Method]":

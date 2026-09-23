@@ -100,7 +100,9 @@ def test_comparison_arms_are_pinned_off_not_inheriting_the_hybrid(base):
     — reporting "no difference" for a real effect. That mistake has already
     been made once on this project (grade-to-min, 2026-08-03)."""
     from forecast import methods as M
-    for key in ("controller", "controller-lns"):
+    # Derived, not named: controller-lns was removed 2026-09-21 and this test
+    # went with it. The invariant is about every NON-hybrid controller arm.
+    for key in [k for k in M.DEFAULT_ROSTER if "hybrid" not in k]:
         eff = control_from_dict({**base, **(M.REGISTRY[key].overrides or {})})
         assert eff.hybrid_follow == "off", (
             f"{key} must pin hybrid_follow off — control.yaml enables it globally"
