@@ -518,12 +518,44 @@ window is fully traceable — it is not a silent pre-run mutation.
 > the manual inputs produce, so the auto pipeline correctly builds on lighter,
 > purged 6N fish.
 
-**The five event types** (every operation you script — by click or in the raw
+**The six event types** (every operation you script — by click or in the raw
 grid — is one of these):
 
 - **`og_transfer`** — move/split OG fish from `From tank` into one or more
   `To tanks` (same batch). Pure relocation; the destination inherits the source
   weight. Count conserved exactly.
+- **`graded_transfer`** (added 2026-10) — send a **whole OG tank or part of
+  one** into **two or more** OG grow-out tanks at a count **you** name per
+  tank (the click panel: *Graded / split transfer (OG→OG)*). Two choices:
+  - **Graded** (Mode `grade`, the default) — the fish go over the grader. List
+    the destinations **biggest class first**: the first tank gets the biggest
+    fish, the last the smallest. Each tank gets its own mean weight and a
+    narrower CV (`biology.count_split_classes`, the K-way version of the
+    two-way grade split, with the same `grade_efficiency`).
+    **Not graded** (Mode `split`) — divided by count, every tank keeps the
+    source's weight and CV.
+  - **Whole tank** (Count blank) — everything goes; the source tank may be
+    one of the destinations and then keeps that class. **Part of the tank**
+    (Count = fish to take out) — that many fish are pumped out as a **random
+    share** of the tank and only they are graded or split; the fish left behind
+    keep the tank's weight and CV and are not graded. The source cannot be a
+    destination in a partial transfer.
+  - One destination may be left without a count: it takes the rest (in the
+    click panel it is always the **last** one you pick).
+  - **It all has to add up.** The panel shows a before/after table (count, % of
+    the fish moved, average weight, biomass, CV, the tank's resulting count and
+    density vs its cap) and a balance line, and will not add the event unless
+    fish and biomass balance to 0.5 fish / 0.5 kg. The run checks it again on a
+    copy of the facility first and refuses the **whole** event — nothing moves
+    — if any destination would be refused or the tanks involved would not
+    balance. The ValidationLog's `MANUAL EVENT OK` line gives the fish and kg
+    of the tanks involved before and after.
+  - Destinations: OG grow-out tanks only (no freshwater, no 6N — use
+    `og_to_6n` / `graded_harvest` for 6N), empty or holding the same batch, and
+    the usual tier rules (no backward moves into OG1/2; ≥ 1 kg entry-tier fish
+    only forward). On the TransferPlan it appears as ordinary `Transfer` rows,
+    one per destination, with Channel `manual:graded_transfer:grade` or
+    `…:split` and each row's own weight and CV.
 - **`harvest`** — directly harvest `Count` fish from `From tank` (blank = the
   whole tank), recorded as a real harvest in that week.
 > **Three different jobs share `Type=Grade` on the TransferPlan — read the
@@ -613,12 +645,12 @@ editor + timeline.
 | Column | Meaning |
 |---|---|
 | **Week** | 1-based forecast week the event fires in (start of that week) |
-| **Type** | one of the five event types above |
+| **Type** | one of the six event types above |
 | **Batch** | the FW batch id — **only** for `fw_to_og` |
-| **From tank** | source tank id — for `og_transfer` / `harvest` / `graded_harvest` / `og_to_6n` |
-| **To tanks** | destination tank id(s), comma-separated; use `tank:count` to send an explicit count to a tank, or a bare `tank` to split the row's Count evenly across the bare tanks. For `graded_harvest` the **first** tank is the graded-fish pickup (a 6N pickup parks them to purge by default; Mode `harvest` drains it that week) and an optional **second** is the retention tank for the smaller fish |
-| **Count / target** | `harvest` = fish to harvest (blank = whole tank); `graded_harvest` = the number of **biggest** fish to grade out; `og_transfer` / `og_to_6n` = split across To tanks; `fw_to_og` = the **target** count entering seawater (the engine culls down to it) |
-| **Mode** | `graded_harvest` only: `stage` (the 6N-pickup default) = the graded fish are **parked in the 6N pickup to purge** (frozen off-feed, harvested later); `harvest` = they are **harvested in the scripted week** |
+| **From tank** | source tank id — for `og_transfer` / `graded_transfer` / `harvest` / `graded_harvest` / `og_to_6n` |
+| **To tanks** | destination tank id(s), comma-separated; use `tank:count` to send an explicit count to a tank, or a bare `tank` to split the row's Count evenly across the bare tanks. For `graded_harvest` the **first** tank is the graded-fish pickup (a 6N pickup parks them to purge by default; Mode `harvest` drains it that week) and an optional **second** is the retention tank for the smaller fish. For `graded_transfer` list them **biggest class first**, each as `tank:count`, with at most one bare tank taking the rest |
+| **Count / target** | `harvest` = fish to harvest (blank = whole tank); `graded_harvest` = the number of **biggest** fish to grade out; `og_transfer` / `og_to_6n` = split across To tanks; `fw_to_og` = the **target** count entering seawater (the engine culls down to it); `graded_transfer` = fish to take out of the tank (blank = the whole tank) |
+| **Mode** | `graded_transfer`: `grade` (over the grader, the default) or `split` (by count, no sorting). `graded_harvest`: `stage` (the 6N-pickup default) = the graded fish are **parked in the 6N pickup to purge** (frozen off-feed, harvested later); `harvest` = they are **harvested in the scripted week** |
 | **Notes** | free text |
 
 **Reject-at-entry validation.** As you edit, each event is dry-run against your

@@ -2072,6 +2072,9 @@ def _manual_events_to_df_rows(events):
         mode = ""
         if e.type == "graded_harvest":
             mode = "stage" if is_staged_graded(e) else "harvest"
+        elif e.type == "graded_transfer":
+            from forecast.manual_events import graded_transfer_mode
+            mode = graded_transfer_mode(e.mode) or str(e.mode or "")
         rows.append({"week": e.week, "type": e.type, "batch": e.batch or "",
                      "from_tank": e.from_tank, "to_tanks": to_tanks,
                      "count": count, "mode": mode, "notes": e.notes})
@@ -2149,6 +2152,16 @@ def _rows_to_manual_events(rows):
             dests = [ManualDest(tank=t, size_class=s) for t, c, s in specs]
             out.append(ManualEvent(type=typ, week=week, batch=batch, count=count,
                                    destinations=dests, notes=notes))
+        elif typ == "graded_transfer":
+            # from_tank = source; to_tanks = destinations BIGGEST class first,
+            # `tank:count` each, one bare tank = the remainder; count = fish to
+            # take out (blank = the whole tank); mode grade | split.
+            _mode = str(r.get("mode") or "").strip().lower()
+            dests = [ManualDest(tank=t, count=c) for t, c, _s in specs]
+            out.append(ManualEvent(type=typ, week=week, from_tank=from_tank,
+                                   count=count, destinations=dests,
+                                   batch=batch, notes=notes,
+                                   mode=(_mode or "grade")))
         elif typ == "graded_harvest":
             # from_tank = source, count = biggest-N to harvest, to_tanks =
             # pickup[,retention] (retention defaults to the source). mode
@@ -3079,6 +3092,7 @@ def _mw_action_panel(state, ctx, rows, labels, sel, date_for):
     _resend_widget("mw_act")
     act = st.radio("What do you want to do here?",
                    ["Harvest", "Graded → 6N", "Move (OG→OG)",
+                    "Graded / split transfer (OG→OG)",
                     "Send to 6N depuration"],
                    horizontal=True, key="mw_act")
 
@@ -3225,6 +3239,17 @@ def _mw_action_panel(state, ctx, rows, labels, sel, date_for):
                                 count=(None if whole else total)))
             st.rerun()
 
+    elif act == "Graded / split transfer (OG→OG)":
+        # Same destination rule as Move (OG grow-out, empty or same batch,
+        # tier rules R2-R4) — see _mw_graded_transfer_panel.
+        move_dests = sorted(
+            (t.tank_id for t in other_og
+             if (t.tank_id not in occ_map or occ_map[t.tank_id][0] == r.batch_id)
+             and move_allowed(_src_sys, t.system_id, r.avg_wt_g)[0]),
+            key=lambda t: occ_map.get(t, (None, 0.0))[1])
+        _mw_graded_transfer_panel(state, ctx, rows, r, tid, wk, wlabel, sfx,
+                                  move_dests, dfmt)
+
     else:  # Send to 6N depuration
         if _entry_src:
             st.warning(f"Fish can't be staged to 6N from {loc} ({_src_sys}) — "
@@ -3248,6 +3273,184 @@ def _mw_action_panel(state, ctx, rows, labels, sel, date_for):
                                 destinations=_mw_split_dests(picks, total, whole),
                                 count=(None if whole else total)))
             st.rerun()
+
+
+def _mw_tank_cv(state, ctx, tid, batch_id):
+    """CV (%) for a tank's fish in the editor: the hydrated tank's own CV while
+    it still holds this batch, else any hydrated tank of the batch, else the
+    batch's PR CV — the same order the Graded → 6N readout uses."""
+    t = state.tanks_by_id.get(tid)
+    if t is not None and t.batch_id == batch_id and t.cv_pct:
+        return float(t.cv_pct)
+    cv = next((x.cv_pct for x in state.tanks_by_id.values()
+               if x.batch_id == batch_id and x.cv_pct), 0.0)
+    if not cv:
+        bm = (ctx.get("batch_by_id") or {}).get(batch_id)
+        cv = float(getattr(bm, "tran_og_cv", 0.0) or 0.0)
+    return float(cv)
+
+
+def _mw_graded_transfer_preview(state, rows, wlabel, r, plan, cv):
+    """The before/after table for a graded_transfer plan: one row per tank it
+    touches, with what that tank holds AFTER (a same-batch destination is
+    topped up), and a total row. Returns (DataFrame, d_fish, d_kg)."""
+    occ = {x.tank_id: x for x in rows if x.week_label == wlabel and x.count > 0}
+
+    def _row(tank, fish, pct, avg_g, kg, cv_, tank_n=None, dens=None, cap=None):
+        return {"Tank": tank, "Fish": fish, "% moved": pct,
+                "Avg wt (kg)": (avg_g / 1000.0) if avg_g is not None else None,
+                "Biomass (kg)": kg, "CV (%)": cv_, "Tank after (fish)": tank_n,
+                "Density after (kg/m³)": dens, "Cap": cap}
+
+    out = [_row(f"{_mw_loc(state, r.tank_id)} (before)", plan.before_count,
+                None, r.avg_wt_g, plan.before_biomass_kg, cv)]
+    for i, leg in enumerate(plan.legs, 1):
+        t = state.tanks_by_id.get(leg.tank)
+        cur = occ.get(leg.tank)
+        topup = cur is not None and leg.tank != r.tank_id
+        if topup:
+            tank_n = cur.count + leg.count
+            tank_kg = cur.count * cur.avg_wt_g / 1000.0 + leg.biomass_kg
+        else:
+            tank_n, tank_kg = leg.count, leg.biomass_kg
+        vol = getattr(t, "volume_m3", 0.0) or 0.0
+        cap = getattr(t, "max_density_kg_m3", 0.0) or None
+        out.append(_row(
+            f"→ {_mw_loc(state, leg.tank)} · class {i}"
+            + (" (stays in this tank)" if leg.tank == r.tank_id else "")
+            + (" (top-up)" if topup else ""),
+            leg.count, 100.0 * leg.share, leg.avg_wt_g, leg.biomass_kg,
+            leg.cv_pct, tank_n, (tank_kg / vol) if vol else None, cap))
+    if plan.partial:
+        t = state.tanks_by_id.get(r.tank_id)
+        vol = getattr(t, "volume_m3", 0.0) or 0.0
+        kg = plan.left_count * plan.left_avg_wt_g / 1000.0
+        out.append(_row(
+            f"{_mw_loc(state, r.tank_id)} · stays, not graded", plan.left_count,
+            None, plan.left_avg_wt_g, kg, plan.left_cv_pct, plan.left_count,
+            (kg / vol) if vol else None,
+            getattr(t, "max_density_kg_m3", 0.0) or None))
+    out.append(_row(
+        "Total after", plan.after_count, None,
+        (plan.after_biomass_kg * 1000.0 / plan.after_count)
+        if plan.after_count else None, plan.after_biomass_kg, None))
+    return (pd.DataFrame(out), plan.after_count - plan.before_count,
+            plan.after_biomass_kg - plan.before_biomass_kg)
+
+
+def _mw_graded_transfer_panel(state, ctx, rows, r, tid, wk, wlabel, sfx,
+                              move_dests, dfmt):
+    """Graded / split OG->OG transfer: whole tank or part of it, over the
+    grader or divided by count, at a count per destination tank. The preview
+    is computed by forecast.manual_events.plan_graded_transfer — the function
+    the run applies — so the table is what the run will do."""
+    from forecast.manual_events import (
+        MODE_GT_GRADE, MODE_GT_SPLIT, ManualDest, ManualEvent,
+        plan_graded_transfer)
+    st.caption(
+        "Send this tank's fish to **two or more** OG tanks at a count **you** "
+        "choose per tank. **Graded** = the fish go over the grader: the first "
+        "tank you pick gets the **biggest** fish, the last the smallest, and "
+        "each gets its own average weight and a narrower CV. **Not graded** = "
+        "divided by count, every tank keeps this tank's weight and CV. "
+        "**Part of the tank** pumps out only the number you give (a random "
+        "share — the fish left behind are not graded). Nothing can be added "
+        "unless fish and biomass balance before vs after.")
+    _resend_widget(f"mw_gt_mode_{sfx}")
+    _mode_lbl = st.radio(
+        "Grading", ["Graded (over the grader)", "Not graded (split by count)"],
+        horizontal=True, key=f"mw_gt_mode_{sfx}")
+    mode = MODE_GT_GRADE if _mode_lbl.startswith("Graded") else MODE_GT_SPLIT
+    _resend_widget(f"mw_gt_scope_{sfx}")
+    _scope = st.radio("How much", ["Whole tank", "Part of the tank"],
+                      horizontal=True, key=f"mw_gt_scope_{sfx}")
+    whole = _scope == "Whole tank"
+    n_out = None
+    if not whole:
+        n_out = st.number_input(
+            "Fish to take out of this tank", min_value=0.0,
+            max_value=float(r.count), value=float(int(r.count // 2)),
+            step=1000.0, key=f"mw_gt_out_{sfx}")
+    moved = float(r.count) if whole else float(n_out or 0.0)
+    # Whole tank: the tank itself may keep one class (graded back in place).
+    opts = list(move_dests) + ([tid] if whole else [])
+
+    def _fmt(t):
+        return (f"{_mw_loc(state, t)} · this tank (keeps a class)"
+                if t == tid else dfmt(t))
+    _resend_widget(f"mw_gt_dest_{sfx}", options=opts)
+    picks = st.multiselect(
+        "Destination tanks — in order, BIGGEST class first; the last one "
+        "takes whatever is left (· batch · density)",
+        options=opts, format_func=_fmt, key=f"mw_gt_dest_{sfx}")
+    dests = []
+    if len(picks) >= 2:
+        each = float(int(moved // len(picks)))
+        cols = st.columns(len(picks))
+        named = 0.0
+        for i, t in enumerate(picks):
+            if i == len(picks) - 1:
+                cols[i].metric(f"{_mw_loc(state, t)} (rest)",
+                               f"{moved - named:,.0f}")
+                dests.append((t, None))
+            else:
+                c = cols[i].number_input(
+                    f"{_mw_loc(state, t)} — fish", min_value=0.0,
+                    value=min(each, moved),
+                    step=1000.0, key=f"mw_gt_cnt_{sfx}_{t}")
+                named += float(c)
+                dests.append((t, float(c)))
+    elif picks:
+        st.caption("Pick at least two destinations (for one, use Move).")
+    plan = None
+    if len(dests) >= 2:
+        _eff = float(getattr(ctx.get("control"), "grade_efficiency", 1.0) or 1.0)
+        cv = _mw_tank_cv(state, ctx, tid, r.batch_id)
+        plan = plan_graded_transfer(
+            tid, float(r.count), float(r.avg_wt_g), cv, dests,
+            count=(None if whole else n_out), mode=mode, grade_efficiency=_eff)
+        for e in plan.errors:
+            st.error(e)
+        if not plan.errors:
+            df, d_n, d_kg = _mw_graded_transfer_preview(
+                state, rows, wlabel, r, plan, cv)
+            st.dataframe(
+                df, hide_index=True, use_container_width=True,
+                column_config={
+                    "Fish": st.column_config.NumberColumn(format="%,.0f"),
+                    "% moved": st.column_config.NumberColumn(format="%.1f"),
+                    "Avg wt (kg)": st.column_config.NumberColumn(format="%.3f"),
+                    "Biomass (kg)": st.column_config.NumberColumn(format="%,.1f"),
+                    "CV (%)": st.column_config.NumberColumn(format="%.1f"),
+                    "Tank after (fish)": st.column_config.NumberColumn(format="%,.0f"),
+                    "Density after (kg/m³)": st.column_config.NumberColumn(format="%.1f"),
+                    "Cap": st.column_config.NumberColumn(format="%.0f"),
+                })
+            ok_bal = abs(d_n) <= 0.5 and abs(d_kg) <= 0.5
+            (st.success if ok_bal else st.error)(
+                f"{'✅' if ok_bal else '❌'} Balance — fish {d_n:+,.1f} · "
+                f"biomass {d_kg:+,.1f} kg (before {plan.before_count:,.0f} fish "
+                f"/ {plan.before_biomass_kg:,.1f} kg)")
+            over = [x["Tank"] for x in df.to_dict("records")
+                    if x.get("Cap") and x.get("Density after (kg/m³)")
+                    and x["Density after (kg/m³)"] > x["Cap"]]
+            if over:
+                st.warning("⚠ Over the tank's density cap after the move: "
+                           + ", ".join(over)
+                           + " — allowed (same as Move), but check it.")
+            if mode == MODE_GT_GRADE:
+                st.caption(f"Grader efficiency {_eff:.2f} (grade_efficiency "
+                           f"in control.yaml) — the value the run uses. "
+                           f"Numbers are at this week's projected count; the "
+                           f"last tank absorbs any small difference at run time.")
+    if st.button(f"➕ Add graded / split transfer in {wlabel}", key="mw_gt_add",
+                 type="primary",
+                 disabled=(plan is None or bool(plan.errors))):
+        _mw_add(ManualEvent(
+            type="graded_transfer", week=wk, from_tank=tid,
+            destinations=[ManualDest(tank=int(t), count=c) for t, c in dests],
+            count=(None if whole else float(n_out)), mode=mode))
+        st.rerun()
 
 
 def _mw_fw_split_preview(ctx, bid, fw_count, fw_avg_wt_g, fw_cv, target, event_date):
@@ -3477,6 +3680,19 @@ def _mw_event_summary(state, ev, forecast_start=None):
     if ev.type == "og_transfer":
         return (f"{wk}: **Move** {_mw_move_amount(ev)} from "
                 f"{loc(ev.from_tank)} → {dests}")
+    if ev.type == "graded_transfer":
+        from forecast.manual_events import MODE_GT_SPLIT, graded_transfer_mode
+        split = graded_transfer_mode(ev.mode) == MODE_GT_SPLIT
+        amt = (f"{ev.count:,.0f} fish" if ev.count is not None
+               else "the whole tank")
+        legs = ", ".join(
+            f"{loc(d.tank)} {'rest' if d.count is None else format(d.count, ',.0f')}"
+            for d in ev.destinations) or "—"
+        if split:
+            return (f"{wk}: **Split (not graded)** {amt} from "
+                    f"{loc(ev.from_tank)} → {legs}")
+        return (f"{wk}: **Graded transfer** {amt} from {loc(ev.from_tank)} → "
+                f"{legs} (biggest first)")
     if ev.type == "og_to_6n":
         return (f"{wk}: **Send to 6N** {_mw_move_amount(ev)} from "
                 f"{loc(ev.from_tank)} → {dests}")
@@ -3532,10 +3748,10 @@ def _mw_timeline(state, events, bad, forecast_start=None):
 
 
 def _mw_raw_grid(state):
-    """Power-user fallback: the same five event types as a flat table. Seeds from
+    """Power-user fallback: the same six event types as a flat table. Seeds from
     and writes back to the shared working set (not the YAML directly)."""
     st.caption(
-        "The same five event types as a raw table — for bulk edits or unequal "
+        "The same six event types as a raw table — for bulk edits or unequal "
         "per-tank splits the click flow doesn't cover. **Apply to window** pushes "
         "these rows into the visual editor + timeline above.")
     st.caption(
@@ -3544,6 +3760,9 @@ def _mw_raw_grid(state):
         "count=biggest-N, to_tanks=pickup[,retention]; a 6N pickup defaults to "
         "mode `stage` (purge, harvested later) — set mode `harvest` to drain "
         "it in the scripted week · "
+        "**graded_transfer**: from_tank → to_tanks BIGGEST class first as "
+        "`tank:count`, one bare tank = the rest; count = fish to take out "
+        "(blank = whole tank); mode `grade` or `split` · "
         "**og_to_6n**: from_tank → 6N to_tanks · "
         "**fw_to_og**: batch + count=target → to_tanks (one per batch; it "
         "moves the whole freshwater part). "
@@ -3560,7 +3779,7 @@ def _mw_raw_grid(state):
                 help="1-based forecast week the event fires in"),
             "type": st.column_config.SelectboxColumn("Type",
                 options=["og_transfer", "harvest", "graded_harvest",
-                         "og_to_6n", "fw_to_og"]),
+                         "graded_transfer", "og_to_6n", "fw_to_og"]),
             "batch": st.column_config.TextColumn("Batch", help=(
                 "fw_to_og only: the freshwater batch to bring into seawater. "
                 "One fw_to_og per batch. It moves the batch's WHOLE freshwater "
@@ -3573,8 +3792,10 @@ def _mw_raw_grid(state):
                 help="comma-separated tank IDs; tank:count for an explicit amount"),
             "count": st.column_config.NumberColumn("Count / target", step=1000),
             "mode": st.column_config.SelectboxColumn("Mode",
-                options=["", "stage", "harvest"],
-                help="graded_harvest only. What decides the outcome is the "
+                options=["", "stage", "harvest", "grade", "split"],
+                help="graded_transfer: 'grade' (over the grader, the "
+                     "default) or 'split' (by count, no sorting). "
+                     "graded_harvest: what decides the outcome is the "
                      "PICKUP tank plus this field. Pickup is a 6N tank + mode "
                      "blank or 'stage' = park the biggest N there to purge, "
                      "harvested later (the default). Pickup is a 6N tank + "
@@ -8965,12 +9186,13 @@ script no harvest that week, that week harvests nothing. The planner takes
 over at week N+1 (the handoff) from exactly the state your scripted weeks
 produced.
 
-**The five things you can script:**
+**The six things you can script:**
 
 | Type | What it does |
 |---|---|
 | **harvest** | Take fish out of a grow-out or 6N tank. No count = the whole tank. |
 | **og_transfer** | Move / split fish between grow-out tanks. |
+| **graded_transfer** | Send a whole tank, or part of one, to two or more grow-out tanks at a count you set per tank — over the grader (biggest class to the first tank) or split by count with no sorting. Refused unless fish and biomass balance. |
 | **og_to_6n** | Send fish into a 6N tank to purge — they go off-feed immediately. |
 | **graded_harvest** | Size-sort a tank: the biggest N go to a pickup tank, the rest stay growing. |
 | **fw_to_og** | Bring a freshwater cohort into the entry tier, culling down to your target count. |
