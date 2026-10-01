@@ -23,6 +23,12 @@ Five event types are wired end-to-end: `og_transfer` (OG->OG move/split),
 TranOG with cull) and `graded_harvest` (size-sort a tank, harvest the biggest
 N, retain the rest growing). Each conserves count + biomass and reconciles in
 the tank-continuity + input-conservation audits.
+
+A sixth, `graded_transfer` (added 2026-10), moves a whole OG tank or part of
+one into two or more OG tanks at counts the operator names per tank, either
+sorted over the grader or split by count with no sorting; it is emitted as an
+ordinary Transfer whose legs carry their own weights, and refuses unless fish
+and biomass balance.
 """
 from __future__ import annotations
 
@@ -45,6 +51,9 @@ TYPE_HARVEST = "harvest"
 TYPE_FW_TO_OG = "fw_to_og"
 TYPE_OG_TO_6N = "og_to_6n"
 TYPE_GRADED_HARVEST = "graded_harvest"
+# OG->OG move of a whole tank or part of one into 2+ tanks at operator counts,
+# over the grader ("grade") or by count ("split"). See _apply_graded_transfer.
+TYPE_GRADED_TRANSFER = "graded_transfer"
 
 # graded_harvest timing (ManualEvent.mode) — which WEEK the graded fish are
 # harvested. With a 6N pickup the DEFAULT (any mode but MODE_HARVEST, incl. the
@@ -728,6 +737,324 @@ def _apply_graded_harvest(state, ev: ManualEvent, idx: int, event_date=None,
     return warns
 
 
+@dataclass
+class GradedTransferLeg:
+    """One destination of a graded_transfer: the size class it receives."""
+    tank: int
+    count: float
+    avg_wt_g: float
+    cv_pct: float
+    share: float          # fraction of the fish that went over the grader / were split
+
+    @property
+    def biomass_kg(self) -> float:
+        return self.count * self.avg_wt_g / 1000.0
+
+
+@dataclass
+class GradedTransferPlan:
+    """What a graded_transfer will do to one tank — computed BEFORE anything
+    moves, by the same function in the run and in the editor preview, so the
+    numbers the operator approves are the numbers the run applies.
+
+    `legs` are biggest-first. `left_*` is the part of a PARTIAL transfer that
+    never leaves the source (a random share of the tank: parent weight and CV).
+    `errors` non-empty = the event is refused and nothing moves.
+    """
+    mode: str                     # MODE_GT_GRADE | MODE_GT_SPLIT
+    source_tank: int
+    moved: float = 0.0            # fish taken out of the tank (whole: all of it)
+    legs: list = field(default_factory=list)
+    left_count: float = 0.0
+    left_avg_wt_g: float = 0.0
+    left_cv_pct: float = 0.0
+    before_count: float = 0.0
+    before_biomass_kg: float = 0.0
+    errors: list = field(default_factory=list)
+
+    @property
+    def partial(self) -> bool:
+        return self.left_count > 0.5
+
+    @property
+    def after_count(self) -> float:
+        return sum(l.count for l in self.legs) + self.left_count
+
+    @property
+    def after_biomass_kg(self) -> float:
+        return (sum(l.biomass_kg for l in self.legs)
+                + self.left_count * self.left_avg_wt_g / 1000.0)
+
+
+# graded_transfer modes (ManualEvent.mode). Anything else that is blank or the
+# legacy dataclass default "transfer" reads as a grade — the type is called a
+# graded transfer.
+MODE_GT_GRADE = "grade"
+MODE_GT_SPLIT = "split"
+GT_BALANCE_TOL_FISH = 0.5
+GT_BALANCE_TOL_KG = 0.5
+
+
+def graded_transfer_mode(ev_mode) -> Optional[str]:
+    m = (ev_mode or "").strip().lower()
+    if m in ("", "transfer", MODE_GT_GRADE):
+        return MODE_GT_GRADE
+    if m == MODE_GT_SPLIT:
+        return MODE_GT_SPLIT
+    return None
+
+
+def plan_graded_transfer(source_tank: int, src_count: float, src_avg_wt_g: float,
+                         src_cv_pct: float, dests, count=None, mode=MODE_GT_GRADE,
+                         grade_efficiency: float = 1.0) -> GradedTransferPlan:
+    """Pure arithmetic of a graded / split OG transfer (no state, no rules about
+    which tanks are legal — the applier checks those).
+
+    dests  — [(tank_id, count or None), ...] BIGGEST CLASS FIRST. At most one
+             None, which takes whatever the named counts leave.
+    count  — None = the WHOLE tank goes over the grader (the source may be one
+             of the destinations: it keeps that class). A number = PARTIAL:
+             that many fish are pumped out — a random share of the tank, so the
+             fish left behind keep the tank's weight and CV — and only those
+             go over the grader. The source may not be a destination then (it
+             would hold graded and ungraded fish in one tank).
+    mode   — "grade": the moved fish are sorted (count_split_classes, with the
+             imperfect-grader efficiency); "split": divided by count with no
+             sorter, every leg keeps the parent weight and CV.
+
+    Count is exact by construction (the legs ARE the operator's counts) and
+    biomass by the conservation of count_split_classes; both are re-checked
+    here anyway and a miss beyond 0.5 fish / 0.5 kg is an error, not a warning.
+    """
+    from .biology import count_split_classes
+    p = GradedTransferPlan(mode=mode, source_tank=source_tank,
+                           before_count=float(src_count),
+                           before_biomass_kg=float(src_count) * float(src_avg_wt_g) / 1000.0)
+    err = p.errors
+    if mode not in (MODE_GT_GRADE, MODE_GT_SPLIT):
+        err.append(f"mode must be '{MODE_GT_GRADE}' or '{MODE_GT_SPLIT}'")
+        return p
+    if src_count <= 0.5 or src_avg_wt_g <= 0:
+        err.append("the source tank holds no fish")
+        return p
+    dests = [(int(t), (None if c is None else float(c))) for t, c in dests]
+    if len(dests) < 2:
+        err.append("needs at least two destinations (size classes) — for a "
+                   "single destination use a plain move (og_transfer)")
+        return p
+    tanks = [t for t, _c in dests]
+    dup = sorted({t for t in tanks if tanks.count(t) > 1})
+    if dup:
+        err.append(f"tank(s) {dup} listed more than once")
+        return p
+    blanks = [t for t, c in dests if c is None]
+    if len(blanks) > 1:
+        err.append(f"only one destination may be left blank (the remainder); "
+                   f"{blanks} are all blank")
+        return p
+    bad = [t for t, c in dests if c is not None and c <= 0.5]
+    if bad:
+        err.append(f"destination count must be positive for tank(s) {bad}")
+        return p
+    explicit = sum(c for _t, c in dests if c is not None)
+    if count is not None:
+        count = float(count)
+        if count <= 0.5:
+            err.append("the number of fish to take out must be positive")
+            return p
+        if count >= src_count - GT_BALANCE_TOL_FISH:
+            err.append(f"taking {count:,.0f} of {src_count:,.0f} fish is the "
+                       f"whole tank — leave the count blank (whole tank)")
+            return p
+        if source_tank in tanks:
+            err.append("a PARTIAL transfer cannot send a class back into the "
+                       "source tank (it would mix graded and ungraded fish); "
+                       "pick another tank or grade the whole tank")
+            return p
+        moved = count
+    else:
+        moved = float(src_count)
+    if blanks:
+        rem = moved - explicit
+        if rem <= 0.5:
+            err.append(f"the named counts ({explicit:,.0f}) leave nothing for "
+                       f"the blank destination #{blanks[0]} out of "
+                       f"{moved:,.0f} fish")
+            return p
+        counts = [(c if c is not None else rem) for _t, c in dests]
+    else:
+        if abs(explicit - moved) > GT_BALANCE_TOL_FISH:
+            what = ("the number to take out" if count is not None
+                    else "the tank's population")
+            err.append(f"destination counts add up to {explicit:,.0f} but "
+                       f"{what} is {moved:,.0f} (difference "
+                       f"{explicit - moved:+,.0f}); leave one destination "
+                       f"blank to take the remainder")
+            return p
+        counts = [c for _t, c in dests]
+    tot = sum(counts)
+    fracs = [c / tot for c in counts]
+    cv = src_cv_pct or 16.0
+    if mode == MODE_GT_GRADE:
+        classes = count_split_classes(src_avg_wt_g, cv, fracs,
+                                      grade_efficiency=grade_efficiency)
+    else:
+        classes = [(src_avg_wt_g, cv)] * len(counts)
+    p.moved = moved
+    p.legs = [GradedTransferLeg(tank=t, count=c, avg_wt_g=m, cv_pct=v, share=f)
+              for (t, _c0), c, (m, v), f in zip(dests, counts, classes, fracs)]
+    if count is not None:
+        p.left_count = float(src_count) - moved
+        p.left_avg_wt_g = float(src_avg_wt_g)
+        p.left_cv_pct = cv
+    if abs(p.after_count - p.before_count) > GT_BALANCE_TOL_FISH:
+        err.append(f"fish do not balance: {p.before_count:,.1f} before, "
+                   f"{p.after_count:,.1f} after")
+    if abs(p.after_biomass_kg - p.before_biomass_kg) > GT_BALANCE_TOL_KG:
+        err.append(f"biomass does not balance: {p.before_biomass_kg:,.1f} kg "
+                   f"before, {p.after_biomass_kg:,.1f} kg after")
+    return p
+
+
+def _graded_transfer_dest_errors(state, src, ev) -> list[str]:
+    """Which destinations a graded_transfer may use: OG grow-out tanks only
+    (never FW, never 6N — 6N is reached through og_to_6n / graded_harvest),
+    empty or holding THIS batch, and legal under the tier rules (R2-R4,
+    judged on the source weight like every other move). The source itself is
+    always allowed (whole-tank grade: it keeps a class)."""
+    w: list[str] = []
+    for d in ev.destinations:
+        if d.tank == src.tank_id:
+            continue
+        t = state.tanks_by_id.get(d.tank)
+        if t is None:
+            w.append(f"unknown destination tank #{d.tank}")
+            continue
+        if t.type != "OG" or t.system_id == "OG6N":
+            w.append(f"destination {t.location_id} ({t.system_id}) is not an "
+                     f"OG grow-out tank — a graded transfer is OG→OG only "
+                     f"(6N is reached by og_to_6n / graded_harvest)")
+            continue
+        if not t.is_empty and t.batch_id != src.batch_id:
+            w.append(f"destination {t.location_id} holds a DIFFERENT batch "
+                     f"{t.batch_id} (INV-1)")
+            continue
+        ok, why = move_allowed(src.system_id, t.system_id, src.avg_wt_g)
+        if not ok:
+            w.append(f"move {src.location_id} -> {t.location_id} refused — {why}")
+    return w
+
+
+def _apply_graded_transfer(state, ev: ManualEvent, idx: int, event_date=None,
+                           out_events=None) -> list[str]:
+    """OG->OG transfer of a whole tank or part of one into 2+ tanks at
+    operator-chosen counts, sorted over the grader ("grade") or divided by
+    count ("split"). See plan_graded_transfer for the arithmetic.
+
+    Emitted as ONE events.Transfer whose destinations carry each class's own
+    weight and CV — the shape every consumer (TransferPlan, the tank-
+    continuity audit, the 6N release schedule) already reads; the audit debits
+    the source at the count-weighted mean of the destinations, which is the
+    parent weight because the split conserves biomass. When the whole tank is
+    graded and the source keeps a class, the source is then re-stamped with
+    that class's weight and CV.
+
+    ATOMIC: the move is rehearsed on a copy of the facility first, and refused
+    whole if any leg would be refused or if fish or biomass of the tanks
+    involved would not balance to 0.5 fish / 0.5 kg. A refusal leaves the
+    facility untouched.
+    """
+    tag = f"MANUAL graded_transfer #{idx}"
+    src = state.tanks_by_id.get(ev.from_tank)
+    if src is None:
+        return [f"{tag}: unknown source tank #{ev.from_tank}"]
+    if src.is_empty:
+        return [f"{tag}: source tank {src.location_id} is empty (nothing to move)"]
+    if src.type != "OG" or src.system_id == "OG6N":
+        return [f"{tag}: source {src.location_id} ({src.system_id}) is not an "
+                f"OG grow-out tank — fish in 6N leave only by harvest (R7); "
+                f"freshwater fish enter OG by fw_to_og"]
+    mode = graded_transfer_mode(ev.mode)
+    if mode is None:
+        return [f"{tag}: mode '{ev.mode}' — use '{MODE_GT_GRADE}' (over the "
+                f"grader) or '{MODE_GT_SPLIT}' (by count, no sorting)"]
+    warns: list[str] = []
+    if ev.batch and src.batch_id != ev.batch:
+        warns.append(
+            f"{tag}: source {src.location_id} holds batch {src.batch_id}, "
+            f"not the specified {ev.batch} — using actual batch {src.batch_id}")
+    derr = _graded_transfer_dest_errors(state, src, ev)
+    if derr:
+        return [f"{tag}: {m}" for m in derr]
+    plan = plan_graded_transfer(
+        src.tank_id, src.count, src.avg_wt_g, src.cv_pct,
+        [(d.tank, d.count) for d in ev.destinations], count=ev.count,
+        mode=mode, grade_efficiency=float(getattr(state, "grade_efficiency", 1.0)))
+    if plan.errors:
+        return [f"{tag}: {m}" for m in plan.errors]
+
+    batch_id = src.batch_id
+    keep = next((l for l in plan.legs if l.tank == src.tank_id), None)
+    out_legs = [l for l in plan.legs if l.tank != src.tank_id]
+    tr = Transfer(
+        batch_id=batch_id, event_date=(event_date or state.today),
+        source_tank_id=src.tank_id,
+        destinations=[TankAllocation(tank_id=l.tank, count=l.count,
+                                     avg_wt_g=l.avg_wt_g, cv_pct=l.cv_pct)
+                      for l in out_legs],
+        leaves_source_empty=(ev.count is None and keep is None),
+        channel=f"manual:graded_transfer:{mode}")
+    involved = [src.tank_id] + [l.tank for l in out_legs]
+
+    def _tot(st):
+        ts = [st.tanks_by_id[t] for t in involved]
+        return (sum(t.count for t in ts), sum(t.biomass_kg for t in ts))
+
+    def _run(st, t_ev):
+        before = _tot(st)
+        w = t_ev.apply(st)
+        s = st.tanks_by_id[src.tank_id]
+        if keep is not None and not s.is_empty:
+            s.avg_wt_g = keep.avg_wt_g
+            s.cv_pct = keep.cv_pct
+        after = _tot(st)
+        killed = sum(t_ev.handling_mort_by_tank.values())
+        killed_kg = sum(k * next(l.avg_wt_g for l in out_legs if l.tank == tid)
+                        for tid, k in t_ev.handling_mort_by_tank.items()) / 1000.0
+        return w, before, after, killed, killed_kg
+
+    # Rehearsal on a copy: refuse the WHOLE event on any refused leg or any
+    # imbalance, so the facility is never left half-graded.
+    rehearse = copy.deepcopy(tr)
+    w0, b0, a0, k0, kk0 = _run(copy.deepcopy(state), rehearse)
+    if rehearse.count_refused > 0.5 or rehearse.count_transferred <= 0:
+        return warns + [f"{tag}: refused — a destination would not accept its "
+                        f"fish, so nothing moved"] + [f"{tag}: {m}" for m in w0]
+    dc = a0[0] + k0 - b0[0]
+    db = a0[1] + kk0 - b0[1]
+    if abs(dc) > GT_BALANCE_TOL_FISH or abs(db) > GT_BALANCE_TOL_KG:
+        return warns + [f"{tag}: refused — the tanks involved would not "
+                        f"balance ({dc:+,.1f} fish, {db:+,.1f} kg)"]
+
+    w1, b1, a1, k1, kk1 = _run(state, tr)
+    warns.extend(f"{tag}: {m}" for m in w1)
+    _legs = ", ".join(f"#{l.tank} {l.count:,.0f}@{l.avg_wt_g / 1000:.2f}kg "
+                      f"CV {l.cv_pct:.1f}%" for l in plan.legs)
+    _left = (f"; {plan.left_count:,.0f}@{plan.left_avg_wt_g / 1000:.2f}kg stay "
+             f"ungraded in #{src.tank_id}" if plan.partial else "")
+    tr.manual_summary = (
+        f"{'graded' if mode == MODE_GT_GRADE else 'split (no sorting)'} "
+        f"{plan.moved:,.0f} of {plan.before_count:,.0f} fish of {batch_id} "
+        f"from tank #{src.tank_id}: {_legs}{_left}; tanks involved "
+        f"{b1[0]:,.0f} fish / {b1[1]:,.1f} kg before, {a1[0] + k1:,.0f} fish / "
+        f"{a1[1] + kk1:,.1f} kg after (difference {a1[0] + k1 - b1[0]:+,.1f} "
+        f"fish, {a1[1] + kk1 - b1[1]:+,.1f} kg)")
+    if out_events is not None:
+        out_events.append(tr)
+    print(f"    {tag}: {tr.manual_summary}")
+    return warns
+
+
 def _second_fw_to_og_reason(ev, consumed) -> Optional[str]:
     """Why a further fw_to_og for an already-transferred batch is refused, or
     None. An fw_to_og moves the batch's WHOLE freshwater part -- its count is a
@@ -794,6 +1121,9 @@ def apply_events_for_week(state, events, week, week_start, week_label=None,
             ew = _apply_graded_harvest(
                 state, ev, i, event_date=week_start,
                 out_transfers=transfers, out_harvests=harvests)
+        elif ev.type == TYPE_GRADED_TRANSFER:
+            ew = _apply_graded_transfer(
+                state, ev, i, event_date=week_start, out_events=transfers)
         elif ev.type == TYPE_FW_TO_OG:
             fw = (fw_lookup or {}).get((ev.batch, week_label))
             _again = _second_fw_to_og_reason(ev, consumed_fw)
@@ -863,6 +1193,9 @@ def _describe_applied_event(ev, idx, wk_name, transfers, harvests, tranogs,
                 f"week — script a later harvest of #{gh.pickup_tank_id}, or "
                 f"the planner takes it after the depuration hold); the smaller "
                 f"{gh.retention_count:,.0f} stay growing in {_ret}")
+    if ev.type == TYPE_GRADED_TRANSFER and transfers:
+        tr = transfers[-1]
+        return f"{head} {getattr(tr, 'manual_summary', '') or 'executed'}"
     if ev.type in (TYPE_OG_TRANSFER, TYPE_OG_TO_6N) and transfers:
         tr = transfers[-1]
         dests = [a.tank_id for a in getattr(tr, "destinations", []) or []]
@@ -919,10 +1252,11 @@ def _structural_rule_errors(scratch, ev) -> list[str]:
     say WHY before the operator saves."""
     w: list[str] = []
     src = scratch.tanks_by_id.get(ev.from_tank) if ev.from_tank else None
-    if ev.type == TYPE_OG_TRANSFER and src is not None and not src.is_empty:
+    if (ev.type in (TYPE_OG_TRANSFER, TYPE_GRADED_TRANSFER)
+            and src is not None and not src.is_empty):
         for d in ev.destinations:
             t = scratch.tanks_by_id.get(d.tank)
-            if t is None:
+            if t is None or t.tank_id == src.tank_id:
                 continue  # unknown-tank message comes from the apply layer
             ok, why = move_allowed(src.system_id, t.system_id, src.avg_wt_g)
             if not ok:
@@ -997,6 +1331,8 @@ def validate_manual_events(state, events: list[ManualEvent], *,
             # Applies to scratch (mutates it so later weeks see the post-split
             # state) but emits nothing — faithful reject-at-entry, like fw_to_og.
             return _apply_graded_harvest(scratch, ev, i, event_date=week_start)
+        if ev.type == TYPE_GRADED_TRANSFER:
+            return _apply_graded_transfer(scratch, ev, i, event_date=week_start)
         if ev.type == TYPE_FW_TO_OG:
             w = _validate_fw_to_og_structural(scratch, ev)
             if not faithful:
