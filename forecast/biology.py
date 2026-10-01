@@ -491,6 +491,92 @@ def count_split_cvs(
     return (max(0.0, cv_u), max(0.0, cv_l))
 
 
+def count_split_classes(
+    avg_wt_g: float, cv_pct: float, fractions_biggest_first,
+    grade_efficiency: float = 1.0,
+) -> list[tuple[float, float]]:
+    """(mean_g, cv_pct) of each size class when a tank goes over the grader and
+    is cut into K classes BY COUNT, biggest class first.
+
+    The K-way generalisation of `count_split_means` + `count_split_cvs` (the
+    manual graded_transfer uses it: the operator names a count per destination
+    tank, so the fractions are fixed and the weights follow). Class i holds the
+    fish between two cut points of N(mu, sigma); with a < b those cuts in
+    standard units and p = Phi(b) - Phi(a) the class's share:
+
+        mean = mu + sigma * (phi(a) - phi(b)) / p
+        var  = sigma^2 * (1 + (a*phi(a) - b*phi(b)) / p - ((phi(a) - phi(b)) / p)^2)
+
+    The open ends (a = -inf for the smallest class, b = +inf for the biggest)
+    contribute phi = 0 and a*phi(a) = 0. For K = 2 these are exactly the
+    expressions in count_split_means / count_split_cvs, and the result matches
+    them to rounding (tests pin it).
+
+    CONSERVES MASS: sum p_i * mean_i = mu, because the phi terms telescope to
+    phi(-inf) - phi(+inf) = 0. The imperfect-grader shrink (apply_grade_
+    efficiency, affine about mu) keeps that, and the variance is rebalanced
+    with the same within/between decomposition count_split_cvs uses, so total
+    variance is conserved for any efficiency.
+
+    `fractions_biggest_first` must sum to 1 (each class's count / the count
+    graded). Degenerate input (no weight, no spread, a single class) returns
+    the parent (mean, CV) for every class.
+    """
+    fr = [float(f) for f in fractions_biggest_first]
+    k = len(fr)
+    if k == 0:
+        return []
+    if any(f < 0 for f in fr) or abs(sum(fr) - 1.0) > 1e-6:
+        raise ValueError(f"class fractions must be >= 0 and sum to 1, got {fr}")
+    if avg_wt_g <= 0 or cv_pct <= 0 or k == 1:
+        return [(avg_wt_g, cv_pct)] * k
+    sigma = avg_wt_g * cv_pct / 100.0
+    var = sigma * sigma
+    nd = NormalDist()
+
+    def _phi(x):
+        return 0.0 if math.isinf(x) else math.exp(-0.5 * x * x) / math.sqrt(2 * math.pi)
+
+    def _xphi(x):
+        return 0.0 if math.isinf(x) else x * _phi(x)
+
+    # Cut points in standard units, from the top down. cum = share of fish at
+    # or above the class's LOWER cut.
+    means: list[float] = []
+    vars_: list[float] = []
+    cum = 0.0
+    b = math.inf
+    for i, p in enumerate(fr):
+        cum += p
+        if i == k - 1 or cum >= 1.0 - 1e-12:
+            a = -math.inf
+        else:
+            a = nd.inv_cdf(1.0 - cum)
+        if p <= 1e-12:
+            # An empty class carries no fish; give it the parent so a caller
+            # that multiplies by its zero count gets zero, never a NaN.
+            means.append(avg_wt_g)
+            vars_.append(var)
+        else:
+            d = (_phi(a) - _phi(b)) / p
+            means.append(avg_wt_g + sigma * d)
+            vars_.append(var * max(0.0, 1.0 + (_xphi(a) - _xphi(b)) / p - d * d))
+        b = a
+    e = grade_efficiency if (0.0 < grade_efficiency < 1.0) else 1.0
+    if e < 1.0:
+        w = sum(p * v for p, v in zip(fr, vars_))
+        if w > 0:
+            scale = (var - e * e * (var - w)) / w
+            vars_ = [v * scale for v in vars_]
+        means = [avg_wt_g + (m - avg_wt_g) * e for m in means]
+    out = []
+    for m, v in zip(means, vars_):
+        m = max(0.0, m)
+        cv = (100.0 * math.sqrt(v) / m) if m > 0 else cv_pct
+        out.append((m, max(0.0, cv)))
+    return out
+
+
 def compute_size_class_split(
     batch_id: str,
     tran_og_date,
