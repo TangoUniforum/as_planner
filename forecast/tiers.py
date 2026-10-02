@@ -83,11 +83,12 @@ def entry_exit_mode(control) -> str:
                  entry tanks until a TranOG arrival needs them (or density /
                  harvest routing moves it forward).
 
-    Missing / None reads as at_1kg. Anything else is REFUSED, loudly -- a typo
-    must not silently pick a placement rule."""
-    raw = getattr(control, "entry_tier_exit", ENTRY_EXIT_AT_1KG)
+    Missing / None reads as when_needed, the default (operator 2026-10-02:
+    "do both" -- the 1 kg exit was never the rule). Anything else is REFUSED,
+    loudly -- a typo must not silently pick a placement rule."""
+    raw = getattr(control, "entry_tier_exit", ENTRY_EXIT_WHEN_NEEDED)
     if raw is None:
-        return ENTRY_EXIT_AT_1KG
+        return ENTRY_EXIT_WHEN_NEEDED
     s = str(raw).strip().lower()
     if s in ENTRY_EXIT_MODES:
         return s

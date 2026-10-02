@@ -58,7 +58,8 @@ def _events_without_fw_to_og(txt: str) -> str:
 
 
 def run_pr(tmp: Path, copy_config, *, events="shipped", mode=None, pr=PR_0831,
-           scenario_src=None, horizon=None, edit_scenario=None):
+           scenario_src=None, horizon=None, edit_scenario=None,
+           balance_budget=None):
     cfg, scn = tmp / "config", tmp / "scenario"
     copy_config(ROOT / "config", cfg)
     shutil.copytree(scenario_src or (ROOT / "scenario"), scn)
@@ -68,6 +69,9 @@ def run_pr(tmp: Path, copy_config, *, events="shipped", mode=None, pr=PR_0831,
         txt = re.sub(r"(?m)^horizon_weeks:.*$", f"horizon_weeks: {horizon}", txt)
     if mode is not None:
         txt = txt.rstrip("\n") + f"\nsplit_batch_fw: '{mode}'\n"
+    if balance_budget is not None:
+        txt = re.sub(r"(?m)^rebalance_balance_budget:.*$",
+                     f"rebalance_balance_budget: {balance_budget}", txt)
     ctl.write_text(txt, encoding="utf-8")
     ev = scn / "manual_events" / EV_0831
     if events == "empty":
@@ -281,12 +285,24 @@ def _breaches(r):
                 sys_bio=r.sys_over[0], sys_feed=r.sys_over[1])
 
 
+# The load-leveling budget both routes are compared under. Operator 2026-10-02
+# ("do both"): entry_tier_exit when_needed became the default AND the system
+# load-leveler went back on at 8 moves/week. Measured on this comparison: with
+# when_needed and the leveler OFF (the committed config's 0) the automatic route
+# breached system feed 26 system-weeks to the manual route's 12 -- big fish now
+# stay in OG1/2 and, with no leveler, OG1/2 feed piles up on whichever route
+# loads it first; with the leveler at 8 both routes sit inside the band. Pinned
+# here, not read from config/, because the committed control.yaml still carries
+# the old 0 (the operator's live file holds 8 -- config/ is theirs to commit).
+OPERATOR_BALANCE = 8
+
+
 @pytest.fixture(scope="module")
 def w1_auto(tmp_path_factory, copy_config):
     """The shipped week-1 events without their fw_to_og: B49's FW part is
     moved by the automatic path (2026-W38)."""
     return run_pr(tmp_path_factory.mktemp("split_w1_auto"), copy_config,
-                  events="week1_no_fw_to_og")
+                  events="week1_no_fw_to_og", balance_budget=OPERATOR_BALANCE)
 
 
 @pytest.fixture(scope="module")
@@ -294,7 +310,7 @@ def w1_manual(tmp_path_factory, copy_config):
     """The same week-1 events WITH their fw_to_og: the operator's own route
     for the same fish (2026-W36, tanks 24 + 14)."""
     return run_pr(tmp_path_factory.mktemp("split_w1_manual"), copy_config,
-                  events="week1_only")
+                  events="week1_only", balance_budget=OPERATOR_BALANCE)
 
 
 def test_split_auto_carries_the_fish_no_worse_than_the_manual_route(w1_auto, w1_manual):

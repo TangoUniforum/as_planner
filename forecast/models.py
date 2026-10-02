@@ -403,7 +403,7 @@ class ControlParams:
     # only bans moves WITHIN OG1/2 (R3); a >= 1 kg batch keeps its entry tanks
     # (R6) and leaves only when a TranOG arrival needs them, density pushes it
     # forward, or harvest routing does.
-    entry_tier_exit: str = "at_1kg"         # "at_1kg" | "when_needed"
+    entry_tier_exit: str = "when_needed"    # "when_needed" (default, operator 2026-10-02) | "at_1kg"
 
 
 @dataclass

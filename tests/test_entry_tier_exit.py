@@ -7,8 +7,9 @@ forces fish out (R6). The coordinator's EVT_MIGRATE nevertheless swapped every
 OG1/2 tank of a >= 1 kg batch for OG3-6 the first week a grow-out tank was
 free, and on the 9.30 PR that left 4-7 of the 12 entry tanks idle for weeks.
 
-`at_1kg` (default) keeps that behaviour byte for byte; `when_needed` frees an
-entry tank only for a TranOG arrival, moving the biggest fish forward.
+`when_needed` (the default since 2026-10-02) frees an
+entry tank only for a TranOG arrival, moving the biggest fish forward;
+`at_1kg` keeps the historical behaviour byte for byte.
 """
 from __future__ import annotations
 
@@ -44,7 +45,7 @@ OG36_ALL = ("OG3N", "OG3S", "OG4N", "OG4S", "OG5N", "OG5S", "OG6N", "OG6S")
 # ---------- the setting ----------
 
 @pytest.mark.parametrize("raw,want", [
-    (None, ENTRY_EXIT_AT_1KG), ("at_1kg", ENTRY_EXIT_AT_1KG),
+    (None, ENTRY_EXIT_WHEN_NEEDED), ("at_1kg", ENTRY_EXIT_AT_1KG),
     (" When_Needed ", ENTRY_EXIT_WHEN_NEEDED), ("when_needed", ENTRY_EXIT_WHEN_NEEDED)])
 def test_mode_reads_the_two_values(raw, want):
     assert entry_exit_mode(SimpleNamespace(entry_tier_exit=raw)) == want
@@ -56,10 +57,12 @@ def test_a_typo_is_refused_not_guessed(raw):
         entry_exit_mode(SimpleNamespace(entry_tier_exit=raw))
 
 
-def test_default_is_the_historical_rule():
-    assert ControlParams.__dataclass_fields__["entry_tier_exit"].default         == ENTRY_EXIT_AT_1KG
-    assert entry_exit_mode(CONTROL) == ENTRY_EXIT_AT_1KG     # shipped config
-    assert entry_exit_mode(object()) == ENTRY_EXIT_AT_1KG       # key absent
+def test_default_is_the_operator_rule():
+    # Operator 2026-10-02 ("do both"): when_needed is the default; at_1kg is
+    # kept only to reproduce the historical plans.
+    assert ControlParams.__dataclass_fields__["entry_tier_exit"].default         == ENTRY_EXIT_WHEN_NEEDED
+    assert entry_exit_mode(CONTROL) == ENTRY_EXIT_WHEN_NEEDED     # shipped config
+    assert entry_exit_mode(object()) == ENTRY_EXIT_WHEN_NEEDED       # key absent
 
 
 def test_control_yaml_carries_it():

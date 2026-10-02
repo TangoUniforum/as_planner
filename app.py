@@ -1394,7 +1394,8 @@ _CONTROL_HELP = {
         "a freshwater intake needs it (the week before the arrival, biggest "
         "fish first). It also hands back every tank a finished batch still "
         "held. NOT TUNABLE (methods.UNTUNABLE_KNOBS): it picks a placement "
-        "rule, not a setting to score.",
+        "rule, not a setting to score. Default: 'when_needed' (operator, "
+        "2026-10-02).",
     "split_batch_fw":
         "What the plan does with a batch the ProductionReport holds partly in "
         "freshwater and partly in seawater — a 'split batch', e.g. B49 on the "
