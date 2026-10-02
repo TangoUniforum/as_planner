@@ -117,6 +117,11 @@ def main(
     from .scenario_io import load_batches as _load_scenario_batches
     control, tables, facility = load_config(config_dir)
     batches = _load_scenario_batches(scenario_dir)
+    # The scenario AS LOADED, for the BatchInputs report: FW auto-calibration
+    # rewrites fw_correction on these objects in place further down, and the
+    # report shows input and used side by side. Read by nothing else.
+    import copy as _copy_bi
+    _batches_input = [_copy_bi.copy(b) for b in batches]
     print(f"  Config:   Control + biology + facility from {config_dir}")
     print(f"  Scenario: {len(batches)} batches from {scenario_dir}")
 
@@ -1675,6 +1680,32 @@ def main(
                           batch_by_id=batch_by_id, batches=batches,
                           sixn_move_in_feed=getattr(placement, "sixn_move_in_feed", None),
                           report_start=report_start)
+    # BatchInputs (report only, 2026-10-02): per-batch scenario inputs beside
+    # what this run did with them. Appended after CostsAndProfit for the same
+    # reason that sheet is: no existing sheet's index or style ids move.
+    try:
+        from .batch_inputs_report import write_batch_inputs_sheet
+        from .time_grid import iso_week_label
+        _mfw = {}
+        for _ev in manual_events or []:
+            if _ev.type == "fw_to_og" and _ev.batch in transferred_fw:
+                _te = next((t for t in prefix_tranogs if t.batch_id == _ev.batch),
+                           None)
+                _mfw[_ev.batch] = (_ev.week, iso_week_label(_te.event_date)
+                                   if _te is not None else "")
+        write_batch_inputs_sheet(
+            wb, batches_input=_batches_input, batch_by_id_used=batch_by_id,
+            tranog_events=placement.tranog_events, control=control,
+            tables=tables, pr_closing=pr_closing, forecast_start=report_start,
+            horizon_weeks=_fw_proj_horizon, window_weeks=window_n,
+            pr_og={r.batch_id for r in og_records
+                   if r.batch_id and (r.closing_count or 0) > 0},
+            pr_fw={r.batch_id for r in fw_records
+                   if r.batch_id and (r.closing_count or 0) > 0},
+            calib_records=fw_calib_records, manual_fw_weeks=_mfw)
+    except Exception as _bi_err:  # noqa: BLE001 - a report must not sink a run
+        print(f"  NOTE: BatchInputs sheet skipped ({type(_bi_err).__name__}: "
+              f"{_bi_err}); the plan is unaffected.")
     wb.save(out_path)
     wb.close()
     print(f"\nSaved workbook {out_path}  ({elapsed:.2f}s, status={status}, "
