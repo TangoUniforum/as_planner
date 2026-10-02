@@ -890,6 +890,13 @@ def _build_facility_assignment_plan(
     # have come up short. Never emitted under "at_1kg" (byte-identical).
     EVT_ENTRY_MAKEROOM = 3.5
     EVT_ENTRY_PREROOM = 7
+    # when_needed only: a batch whose seawater facts simply STOP (no final
+    # need-0 week) never gets an EVT_RELEASE, and EVT_RELEASE only frees a
+    # COUNT, so its tanks stayed owned for the rest of the horizon -- grow-out
+    # tanks a make-room swap then cannot use. The week after its last
+    # seawater week the batch hands back every tank it still owns. Kept
+    # behind the knob so at_1kg stays byte-identical.
+    EVT_BATCH_END = 0.5
     _when_needed = entry_exit_mode(control) == ENTRY_EXIT_WHEN_NEEDED
 
     events: list[tuple] = []
@@ -1122,6 +1129,16 @@ def _build_facility_assignment_plan(
                 _arrival_need[_e[0]] = _arrival_need.get(_e[0], 0) + int(_e[3] or 0)
                 _arrivers.setdefault(_e[0], set()).add(_e[2])
         _hidx = {wl: i for i, wl in enumerate(horizon_labels)}
+        _last_sw: dict[str, str] = {}
+        for (_b, _wl), _f in batch_week_facts.items():
+            if _f.stage == "SW" and _wl > _last_sw.get(_b, ""):
+                _last_sw[_b] = _wl
+        for _b in sorted(_last_sw):
+            if _last_sw[_b] not in _hidx:
+                continue
+            _end_i = _hidx[_last_sw[_b]] + 1
+            if _end_i < len(horizon_labels):
+                events.append((horizon_labels[_end_i], EVT_BATCH_END, _b, 0, ()))
         for _awl in sorted(_arrival_need):
             _need = _arrival_need[_awl]
             if _need <= 0:
@@ -1348,6 +1365,15 @@ def _build_facility_assignment_plan(
                     f"MIGRATE: 0/{len(og12_held)} OG1/2 tank(s) swapped "
                     f"(OG3-6 pool full) — batch overstays the entry tier; "
                     f"retry next week")
+
+        elif etype == EVT_BATCH_END:
+            for tid in sorted(batch_set):
+                tank_owner[tid] = None
+            if batch_set:
+                notes.append(f"BATCH END: released {len(batch_set)} tank(s) "
+                             f"after the batch's last seawater week")
+            batch_set.clear()
+            continue
 
         elif etype in (EVT_ENTRY_PREROOM, EVT_ENTRY_MAKEROOM):
             # when_needed: free entry tanks for the arrival(s) `elig` names

@@ -88,7 +88,8 @@ def _life(bid, d):
 
 
 def _plan(mode, big_tanks=(11, 12, 13), big_need=3, fill_og36=False,
-          big_wt=1500.0, arrival=True, empty_entry=()):
+          big_wt=1500.0, arrival=True, empty_entry=(), big_last=None,
+          arrival_wk=ARRIVAL, big_need_last=None):
     """BIG (>= 1 kg) holds `big_tanks`; MID (sub-1 kg) holds every other
     entry tank; NEW arrives in ARRIVAL needing 2 entry tanks."""
     st = FacilityState.from_facility_config(FACILITY, START)
@@ -102,17 +103,20 @@ def _plan(mode, big_tanks=(11, 12, 13), big_need=3, fill_og36=False,
             st.tanks_by_id[t].assign("OLD", 20_000, 3000.0, 16.0, "SW")
     facts = {}
     for wl in WEEKS:
-        facts[("BIG", wl)] = _fact("BIG", wl, "SW", big_wt, big_need, OG36_ALL)
+        if big_last is None or wl <= big_last:
+            need = (big_need_last if (big_need_last is not None
+                                      and wl == big_last) else big_need)
+            facts[("BIG", wl)] = _fact("BIG", wl, "SW", big_wt, need, OG36_ALL)
         facts[("MID", wl)] = _fact("MID", wl, "SW", 600.0, len(mid_tanks),
                                    ENTRY_SYSTEMS)
         if fill_og36:
             facts[("OLD", wl)] = _fact("OLD", wl, "SW", 3000.0, len(OG36),
                                        OG36_ALL)
-        if wl < ARRIVAL or not arrival:
+        if wl < arrival_wk or not arrival:
             facts[("NEW", wl)] = _fact("NEW", wl, "FW", 200.0, 0, ())
         else:
             facts[("NEW", wl)] = _fact("NEW", wl, "SW", 300.0, 2, ENTRY_SYSTEMS,
-                                       tranog=(wl == ARRIVAL))
+                                       tranog=(wl == arrival_wk))
     lives = {"OLD": _life("OLD", date(2025, 1, 1)),
              "BIG": _life("BIG", date(2025, 6, 1)),
              "MID": _life("MID", date(2025, 9, 1)),
@@ -190,3 +194,17 @@ def test_no_grow_out_room_means_a_loud_bottleneck_not_a_bent_rule():
 def test_no_arrival_means_no_eviction_at_all():
     plan, _ = _plan(ENTRY_EXIT_WHEN_NEEDED, arrival=False)
     assert all(plan[("BIG", wl)] == {11, 12, 13} for wl in WEEKS)
+
+
+# ---------- a finished batch hands back every tank ----------
+
+def test_a_batch_whose_seawater_life_ends_releases_all_its_tanks():
+    # BIG's facts stop after W04 while it still owns 11/12/13: from W05 those
+    # tanks are free, so the W07 arrival takes two of them and the sub-1 kg
+    # batch is never moved. (EVT_RELEASE alone frees a COUNT and never fires
+    # when a batch simply ends -- the tanks stayed owned forever.)
+    plan, bots = _plan(ENTRY_EXIT_WHEN_NEEDED, big_last="2027-W04",
+                       arrival_wk="2027-W07")
+    assert plan[("NEW", "2027-W07")] <= {11, 12, 13}
+    assert all(plan[("MID", wl)] == set(OG12) - {11, 12, 13} for wl in WEEKS)
+    assert not [b for b in bots if b.kind == "assignment_tranog_unmet"]
