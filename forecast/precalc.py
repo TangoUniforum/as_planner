@@ -48,7 +48,8 @@ from .models import (
 )
 from .sixn import SIXN_PAIRS, in_transition_window, is_purge_mode
 from .state import FacilityState
-from .tiers import ENTRY_SPLIT_MAX_WT_G, ENTRY_SYSTEMS
+from .tiers import (ENTRY_EXIT_WHEN_NEEDED, ENTRY_SPLIT_MAX_WT_G, ENTRY_SYSTEMS,
+                    entry_exit_mode)
 from .time_grid import forecast_week_labels, parse_iso_label, week_start
 
 
@@ -881,6 +882,15 @@ def _build_facility_assignment_plan(
     EVT_TRANOG = 4
     EVT_RELEASE = 5
     EVT_ADD = 6
+    # entry_tier_exit == "when_needed" only (operator ruling 2026-10-02). A
+    # >= 1 kg batch keeps its OG1/2 tanks (R6) and is moved forward only to
+    # make room for a TranOG arrival: once the WEEK BEFORE the arrival (after
+    # that week's adds, so nothing re-claims the freed tanks) and again in the
+    # arrival week itself, just ahead of EVT_TRANOG, should the first pass
+    # have come up short. Never emitted under "at_1kg" (byte-identical).
+    EVT_ENTRY_MAKEROOM = 3.5
+    EVT_ENTRY_PREROOM = 7
+    _when_needed = entry_exit_mode(control) == ENTRY_EXIT_WHEN_NEEDED
 
     events: list[tuple] = []
     # (week_label, type_priority, batch_id, delta, eligibility_tuple)
@@ -1093,11 +1103,36 @@ def _build_facility_assignment_plan(
              if b == bid and batch_week_facts[(b, wl)].stage == "SW"),
             key=lambda x: x[0],
         )
+        if _when_needed:
+            break    # R6: no forced exit at 1 kg -- see EVT_ENTRY_MAKEROOM
         for wl, fact in bw:
             if fact.avg_wt_g >= _OG12_MOVE_LOCK_WT_G:
                 events.append((wl, EVT_MIGRATE, bid,
                                max(1, fact.tanks_needed_at_density_cap),
                                fact.eligible_systems))
+
+    if _when_needed:
+        # One make-room pair per ARRIVAL WEEK, sized for every arrival that
+        # week together (two arrivals each judging the free pool alone would
+        # count the same freed tank twice).
+        _arrival_need: dict[str, int] = {}
+        _arrivers: dict[str, set] = {}
+        for _e in events:
+            if _e[1] == EVT_TRANOG:
+                _arrival_need[_e[0]] = _arrival_need.get(_e[0], 0) + int(_e[3] or 0)
+                _arrivers.setdefault(_e[0], set()).add(_e[2])
+        _hidx = {wl: i for i, wl in enumerate(horizon_labels)}
+        for _awl in sorted(_arrival_need):
+            _need = _arrival_need[_awl]
+            if _need <= 0:
+                continue
+            _tag = (_awl, tuple(sorted(_arrivers[_awl])))
+            _i = _hidx.get(_awl)
+            if _i is not None and _i > 0:
+                events.append((horizon_labels[_i - 1], EVT_ENTRY_PREROOM,
+                               min(_arrivers[_awl]), _need, _tag))
+            events.append((_awl, EVT_ENTRY_MAKEROOM, min(_arrivers[_awl]),
+                           _need, _tag))
 
     # ---- Step 4: sort events chronologically by FIFO age ----
     # Rules:
@@ -1314,6 +1349,54 @@ def _build_facility_assignment_plan(
                     f"(OG3-6 pool full) — batch overstays the entry tier; "
                     f"retry next week")
 
+        elif etype in (EVT_ENTRY_PREROOM, EVT_ENTRY_MAKEROOM):
+            # when_needed: free entry tanks for the arrival(s) `elig` names
+            # by moving OG1/2 occupants FORWARD (R2, legal at any weight),
+            # 1:1 into a free OG3-6 tank -- biggest fish first (nearest
+            # their forward move anyway), so the >= 1 kg holders go before
+            # any sub-1 kg batch. Only as many tanks as the arrival is short.
+            _awl, _arr = elig
+            short = delta - len(_free_pool_in_systems(set(_OG12)))
+            if short > 0:
+                def _occ_wt(tid):
+                    f = batch_week_facts.get((tank_owner[tid], wl))
+                    return f.avg_wt_g if f is not None else 0.0
+                occupants = sorted(
+                    (t for t in all_og_tanks
+                     if tank_to_system.get(t) in _OG12
+                     and tank_owner[t] is not None
+                     and tank_owner[t] not in _arr),
+                    key=lambda t: (-_occ_wt(t), t))
+                moved = 0
+                for og12_tid in occupants:
+                    if moved >= short:
+                        break
+                    owner = tank_owner[og12_tid]
+                    claimed = None
+                    for sys in _route_systems(_OG36, owner):
+                        for t in og_tank_ids_by_system.get(sys, []):
+                            if tank_owner[t] is None:
+                                claimed = t
+                                break
+                        if claimed is not None:
+                            break
+                    if claimed is None:
+                        break    # OG3-6 full: EVT_TRANOG reports the shortfall
+                    owner_set = current_tanks.setdefault(owner, set())
+                    tank_owner[claimed] = owner
+                    owner_set.add(claimed)
+                    tank_owner[og12_tid] = None
+                    owner_set.discard(og12_tid)
+                    moved += 1
+                    assignment[(owner, wl)] = sorted(owner_set)
+                    notes_per_pair.setdefault((owner, wl), []).append(
+                        f"ENTRY MAKE-ROOM: OG1/2 tank #{og12_tid} -> "
+                        f"#{claimed} ({tank_to_system[claimed]}) to free an "
+                        f"entry tank for the {_awl} TranOG of "
+                        f"{', '.join(_arr)}")
+            # The arriving batch holds nothing yet: no snapshot for it here.
+            continue
+
         elif etype == EVT_TRANOG:
             # Hard placement: pick `delta` empty OG1/2 (entry-tier) tanks.
             # NO OG3+ cascade (R1): TranOG arrivals may enter ONLY the entry
@@ -1366,6 +1449,10 @@ def _build_facility_assignment_plan(
             eligible_held = sum(
                 1 for t in batch_set
                 if tank_to_system.get(t) in eligible_set
+                # when_needed: a >= 1 kg batch's kept OG1/2 tanks hold fish
+                # and count toward its target (R6) -- only NEW tanks must
+                # come from its eligible (OG3-6) systems.
+                or (_when_needed and tank_to_system.get(t) in _OG12)
             )
             shortfall = delta - eligible_held
             if shortfall > 0:

@@ -63,6 +63,7 @@ from .biology import (
     realized_feed_kg_day, sgr_pct_per_day, upper_truncated_split,
 )
 from .events import Grade, GradedHarvest, Harvest, OG12_SYSTEMS, OG12_MOVE_LOCK_WT_G, TankAllocation, Transfer, TranOGEntry
+from .tiers import ENTRY_EXIT_WHEN_NEEDED, entry_exit_mode
 from .tiers import move_allowed, sixn_exit_allowed
 from .harvest_scheduler import HarvestDemand
 from .models import (
@@ -846,9 +847,14 @@ def phase_a_precalc(
             #   be SPLIT internally between OG1/2 tanks (no intra-OG12
             #   Transfer with source >= 1 kg). The OG1/2 -> OG3+ exit
             #   move is allowed (cross-system).
+            # entry_tier_exit "when_needed" (operator ruling 2026-10-02)
+            # drops PART 1: a >= 1 kg batch stays eligible for the OG1/2
+            # tanks it already holds (R6). PART 2 still bars it from ADDING
+            # one (Phase C narrow freeze), so this only stops the forced exit.
             if is_tranog:
                 eligible = _OG12[:]
-            elif s.avg_weight_g >= OG12_MOVE_LOCK_WT_G:
+            elif (s.avg_weight_g >= OG12_MOVE_LOCK_WT_G
+                  and entry_exit_mode(control) != ENTRY_EXIT_WHEN_NEEDED):
                 eligible = [sys for sys in _OG_ALL if sys not in _OG12]
             else:
                 eligible = _OG_ALL[:]

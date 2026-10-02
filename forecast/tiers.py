@@ -68,6 +68,36 @@ def move_allowed(src_system: str, dst_system: str,
     return True, ""  # R2: entry -> growout, any weight
 
 
+ENTRY_EXIT_AT_1KG = "at_1kg"
+ENTRY_EXIT_WHEN_NEEDED = "when_needed"
+ENTRY_EXIT_MODES = (ENTRY_EXIT_AT_1KG, ENTRY_EXIT_WHEN_NEEDED)
+
+
+def entry_exit_mode(control) -> str:
+    """The resolved control.entry_tier_exit: "at_1kg" or "when_needed".
+
+    at_1kg       the planner swaps a batch's OG1/2 tanks for OG3-6 tanks the
+                 first week it averages >= 1 kg (historical behaviour).
+    when_needed  R3 + R6 as the operator states them (2026-10-02): 1 kg only
+                 bans moves WITHIN the entry tier; a >= 1 kg batch keeps its
+                 entry tanks until a TranOG arrival needs them (or density /
+                 harvest routing moves it forward).
+
+    Missing / None reads as at_1kg. Anything else is REFUSED, loudly -- a typo
+    must not silently pick a placement rule."""
+    raw = getattr(control, "entry_tier_exit", ENTRY_EXIT_AT_1KG)
+    if raw is None:
+        return ENTRY_EXIT_AT_1KG
+    s = str(raw).strip().lower()
+    if s in ENTRY_EXIT_MODES:
+        return s
+    raise ValueError(
+        f"control entry_tier_exit = {raw!r} is not a valid setting: use "
+        f"'at_1kg' (fish leave OG1/2 the week they reach 1 kg) or "
+        f"'when_needed' (fish >= 1 kg stay in their OG1/2 tanks until a "
+        f"freshwater intake needs the room).")
+
+
 def harvest_allowed(system_id: str) -> bool:
     """R5: harvest (and 6N staging) is forbidden FROM entry-tier tanks."""
     return system_id not in ENTRY_SYSTEMS

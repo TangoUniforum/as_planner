@@ -396,6 +396,14 @@ class ControlParams:
     # (the FW part is only warned about). The default lives HERE, in code: a
     # control.yaml written before the key existed runs "auto".
     split_batch_fw: str = "auto"            # "auto" | "off"
+    # WHEN FISH LEAVE THE ENTRY TIER (OG1/2) (operator ruling 2026-10-02,
+    # forecast/tiers.py entry_exit_mode). "at_1kg" = the planner's historical
+    # behaviour: the first week a batch averages >= 1 kg its OG1/2 tanks are
+    # swapped for free OG3-6 tanks. "when_needed" = the operator's rule: 1 kg
+    # only bans moves WITHIN OG1/2 (R3); a >= 1 kg batch keeps its entry tanks
+    # (R6) and leaves only when a TranOG arrival needs them, density pushes it
+    # forward, or harvest routing does.
+    entry_tier_exit: str = "at_1kg"         # "at_1kg" | "when_needed"
 
 
 @dataclass
