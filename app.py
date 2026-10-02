@@ -1381,6 +1381,20 @@ _CONTROL_HELP = {
         "NOT TUNABLE: like the purge lever it is arm IDENTITY "
         "(methods.UNTUNABLE_KNOBS), so a tuned run cannot settle it — "
         "'Controller — hybrid' pins it ON, the plain controller does not.",
+    "entry_tier_exit":
+        "When fish leave the entry tier (OG1/2). The rule (operator, "
+        "2026-10-02): at 1 kg fish can no longer move BETWEEN OG1/2 tanks — "
+        "from then on they can only move forward to OG3-6. Nothing says they "
+        "must leave. 'at_1kg' is the planner's historical behaviour: the "
+        "first week a batch averages 1 kg its OG1/2 tanks are swapped for "
+        "free OG3-6 tanks, and the emptied entry tanks wait for the next "
+        "freshwater intake (on the 9.30 PR: 4-7 of 12 idle for weeks). "
+        "'when_needed': a batch of 1 kg or more keeps its OG1/2 tanks and "
+        "grows forward into OG3-6; it moves out of an entry tank only when "
+        "a freshwater intake needs it (the week before the arrival, biggest "
+        "fish first). It also hands back every tank a finished batch still "
+        "held. NOT TUNABLE (methods.UNTUNABLE_KNOBS): it picks a placement "
+        "rule, not a setting to score.",
     "split_batch_fw":
         "What the plan does with a batch the ProductionReport holds partly in "
         "freshwater and partly in seawater — a 'split batch', e.g. B49 on the "
@@ -1481,12 +1495,14 @@ _CONTROL_LABEL = {
     "hybrid_purge_lever": "  ↳ guide lever: 6N staging (purge)",
     "hybrid_production_lever": "  ↳ guide lever: harvest cap (production)",
     "split_batch_fw": "Split FW/SW batch at PR close: auto / off",
+    "entry_tier_exit": "When fish leave OG1/2: at_1kg / when_needed",
 }
 
 # Control knobs with a FIXED set of values: Configure shows a list, never a
 # free-text box (a typo typed there was saved, and the next run stopped).
 _CONTROL_CHOICES = {
     "split_batch_fw": ("auto", "off"),
+    "entry_tier_exit": ("at_1kg", "when_needed"),
 }
 
 
@@ -1501,6 +1517,13 @@ def _control_choice_index(k, v):
         from forecast.split_batch import mode as _sb_mode
         try:
             return opts.index(_sb_mode(SimpleNamespace(split_batch_fw=v)))
+        except ValueError:
+            return None
+    if k == "entry_tier_exit":
+        from types import SimpleNamespace
+        from forecast.tiers import entry_exit_mode as _ee_mode
+        try:
+            return opts.index(_ee_mode(SimpleNamespace(entry_tier_exit=v)))
         except ValueError:
             return None
     return opts.index(v) if v in opts else None
@@ -1666,7 +1689,7 @@ _CONTROL_GROUPS = [
       "harvest_relief_pct", "min_harvest_per_week", "min_harvest_weight_g",
       "min_tank_control", "max_transfers_per_week", "min_transfer_count",
       "min_grade_count",
-      "tran_og_default_tanks", "density_target_pct",
+      "tran_og_default_tanks", "entry_tier_exit", "density_target_pct",
       "density_welfare_threshold_kg_m3", "default_hog_yield",
       "grade_efficiency", "handling_mortality_pct"]),
     ("📅 Horizon and scenario",

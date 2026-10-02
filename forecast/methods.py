@@ -128,6 +128,10 @@ UNTUNABLE_KNOBS = frozenset({
     # outside the plan forever. A search free to switch it would score a
     # lighter facility by forgetting fish the report says are there.
     "split_batch_fw",
+    # A PLACEMENT RULE, not a lever (operator ruling 2026-10-02): whether fish
+    # >= 1 kg must leave OG1/2. A search free to flip it would be choosing the
+    # facility's rules by score.
+    "entry_tier_exit",
     # DEFINES WHICH ARM YOU ARE RUNNING, so it is not the search's to set: a
     # space containing it could turn `controller` into `controller-hybrid` and
     # have the Compare board unknowingly compare a method with itself. The
