@@ -600,7 +600,13 @@ def test_run_py_has_exactly_the_two_hooks():
     call = text.index("write_costs_sheet(wb")
     save = text.index("wb.save(out_path)")
     assert ann < gate < call < save
-    # nothing but the call itself between it and the save
+    # Between the costs call and the save: only the report-only BatchInputs
+    # tab, which comes AFTER CostsAndProfit by design (2026-10-02). Nothing
+    # else may sit there, and it may not touch the costs hook.
     tail = "report_start=report_start)"
     between = text[call:save]
-    assert between[between.index(tail) + len(tail):].strip() == ""
+    rest = between[between.index(tail) + len(tail):]
+    code = [s.strip() for s in rest.splitlines()
+            if s.strip() and not s.strip().startswith("#")]
+    assert sum("write_batch_inputs_sheet(" in s for s in code) == 1
+    assert not any("costs" in s.lower() for s in code)
