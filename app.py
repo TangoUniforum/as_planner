@@ -2014,6 +2014,11 @@ def _hydrate_state_from_upload(uploaded):
     control.forecast_start = fs
     state = FacilityState.from_facility_config(facility, today=fs.date())
     hydrate_facility_state(state, og, batches)
+    # Same imperfect grader the run puts on its state (run.py). Without it the
+    # editor's projection fell back to a PERFECT cut (1.0), so the facility
+    # grid showed graded legs further apart than the run would.
+    state.grade_efficiency = float(
+        getattr(control, "grade_efficiency", 1.0) or 1.0)
     # Run-time context so the editor can validate events FAITHFULLY (per-week
     # biology + the FW projection for fw_to_og), matching forecast/run.py.
     ctx = {
@@ -4147,12 +4152,23 @@ def _manual_window_editor(uploaded):
                 view = 1
             else:
                 view = st.slider(
-                    "Weeks to project / act in", 1, cap_view,
+                    "Weeks to view", 1, cap_view,
                     min(max(default_view, 1), cap_view),
-                    help="How far ahead to project the facility and let you act. "
-                         "The saved window length stays implicit — it runs through "
-                         "your last scripted operation, then the planner takes over.")
+                    help="How far ahead the grid shows the facility for you to "
+                         "act in. VIEW ONLY — it is not sent to the run. The "
+                         "window the run executes is set by your last scripted "
+                         "week (shown below the slider).")
             n_weeks = max(view, max_ev, 1)
+            # The number that actually reaches the run (run.py: window_n = the
+            # last scripted week); the slider above only sets the view.
+            if max_ev:
+                st.caption(
+                    f"Scripted window: **{max_ev} week{'s' if max_ev != 1 else ''}** "
+                    f"(last event = week {max_ev}) — the planner takes over on "
+                    f"**{_week_start(max_ev, ctx['forecast_start'])}**.")
+            else:
+                st.caption("Scripted window: **none** — the planner runs every "
+                           "week from the forecast start.")
             _resend_widget("mw_view_at")
             _vmode = st.radio(
                 "Show tank state at", ["Week open", "Week close"],

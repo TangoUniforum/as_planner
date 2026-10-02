@@ -419,8 +419,10 @@ in that tank (batch, fish, weight, density) and offering **Harvest / Graded →
 6N / Move / Send to 6N** with real tank pickers — no tank numbers to
 memorise, no codes to type.
 The grid **re-draws as you script**, so you watch each operation ripple forward
-over the weeks. A **"Weeks to project / act in"** slider sets how far ahead to
-look. Below the map: a **📊 System rollup** toggle (see below), an **🐟 FW→OG
+over the weeks. A **"Weeks to view"** slider sets how far ahead to
+look — view only, it is not sent to the run. The line under it shows the
+**scripted window** the run will execute: it ends at your last scripted week,
+and the planner takes over the week after (date shown). Below the map: a **📊 System rollup** toggle (see below), an **🐟 FW→OG
 intake** picker (freshwater cohorts aren't tanks yet), a plain-English
 **timeline** of everything you've scripted (with delete), and a **Save window**
 button.
