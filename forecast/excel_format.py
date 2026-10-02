@@ -93,7 +93,8 @@ TAB_COLOURS = {
     "ReconciliationReport": TAB_AUDIT, "InputConservationAudit": TAB_AUDIT,
     "TankContinuityAudit": TAB_AUDIT, "SystemLimitsAudit": TAB_AUDIT,
     "Diagnostics": TAB_AUDIT,
-    "RunConfig": TAB_INPUT, "ProductionReport": TAB_INPUT,
+    "RunConfig": TAB_INPUT, "RunConfig YAML": TAB_INPUT,
+    "ProductionReport": TAB_INPUT,
     "TransferTemplate": TAB_INPUT,
 }
 
@@ -379,9 +380,15 @@ def apply_workbook_formatting(wb, skip=SKIP) -> int:
 
         if ws.title in skip:
             continue
-        if ws.title == "RunConfig":
-            _format_runconfig(ws)
-            done += 1
+        if ws.title in ("RunConfig", "RunConfig YAML"):
+            # The YAML record (the companion tab, or a pre-2026-10-02
+            # RunConfig) gets the monospace treatment. The READABLE RunConfig
+            # view styles itself (forecast.run_config_view) and must not be
+            # flattened into one 110-wide monospace column here.
+            from .config_snapshot import is_yaml_dump
+            if is_yaml_dump(ws):
+                _format_runconfig(ws)
+                done += 1
             continue
         if ws.max_row < 2 or ws.max_column < 2:
             continue

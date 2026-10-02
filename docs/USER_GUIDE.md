@@ -982,9 +982,10 @@ board are pinned `off` so you can always see them side by side.
 | **WeeklyReport Grouped / MonthlyReport Grouped** | the SAME rows with a **blank line between periods**, for reading and printing. **Do not filter these** — a blank row ends Excel's contiguous range, so a filter would silently cover only the first period | reading a period end-to-end |
 | **Diagnostics** | FW-calibration: per batch (in batch order), the target vs projected pre-cull avg weight at TranOG, the residual, and a back-solved `Suggested_FW_Correction` | tuning `fw_correction` (§7 step 2) |
 | **BiologyProjection** | the unharvested per-batch biology projection (growth, feed along the curve, ignoring harvest/caps) | model inputs — NOT the fed plan (see the Overview note) |
-| **RunConfig** | the exact config + scenario embedded in the output | reproducibility |
+| **RunConfig** | the run's config + scenario **as readable tables**: run identity (PR closing, forecast start, horizon, manual window, scenario, placement method, when written), then one section per file — control settings (Setting / Value / the meaning from this guide's settings tables), biology curves, facility tanks, batches (pointer to BatchInputs), limits (system defaults, weekly exceptions, per-week facility rows with one column per metric), and this PR's manual events (display only). Long tables start collapsed — click **+** in the left margin. Links at the top go to RunConfig YAML and BatchInputs | reading what the run used |
+| **RunConfig YAML** | the exact config + scenario files as YAML text, one labelled block per file — what **Configure → Import from workbook** restores. Always the last tab. Workbooks written before this tab existed keep the YAML in RunConfig itself, and still import | reproducibility |
 | **BatchInputs** | one row per batch, **in batch order**: what `scenario/batches.yaml` told the run — source (in OG / in freshwater / split at the PR close, scheduled, or pre-start), input date + eggs, Tran SF date, Tran OG date, TranOG count / target weight / CV, FCR model (and the `biology.yaml` curve it selects), FW correction **input and used** (after `auto_calibrate_fw`) with what calibration did, SGR correction — next to what the run did: OG entry week/date, **count into OG** (the batch's TranOG rows on the TransferPlan; reconciles with the InputConservationAudit's Realized_TranOG), average entry weight, entry tanks, and whether a manual `fw_to_og` scripted it. Below the table: the run settings that shape batch inputs and the biology models in force. Report only; appended after CostsAndProfit so no other tab moves | **what went in, per batch** |
-| **CostsAndProfit** | only when `config/costs.yaml` exists; after RunConfig (only BatchInputs follows it): per month (with a first row for any days before the report opens), per year and horizon — feed kg, eggs stocked, feed / shipping / oxygen / chemicals / eggs / fixed cost, total cost, HOG, revenue, **profit**, spend per kg HOG sold, unpriced feed kg; then **feed by type** with your item names. Row 2 says when feed had no price (profit then overstated). NOT COMPUTED (with the reason) when the file is invalid or empty | the cash-view P&L — §15 |
+| **CostsAndProfit** | only when `config/costs.yaml` exists; after RunConfig (only BatchInputs and RunConfig YAML follow it): per month (with a first row for any days before the report opens), per year and horizon — feed kg, eggs stocked, feed / shipping / oxygen / chemicals / eggs / fixed cost, total cost, HOG, revenue, **profit**, spend per kg HOG sold, unpriced feed kg; then **feed by type** with your item names. Row 2 says when feed had no price (profit then overstated). NOT COMPUTED (with the reason) when the file is invalid or empty | the cash-view P&L — §15 |
 
 > **`PR FW WEIGHT DERIVED`** (console WARN + ValidationLog). A freshwater batch
 > the ProductionReport gives a COUNT but no BIOMASS used to seed the projection
@@ -1834,7 +1835,7 @@ forecast with these knobs** button. Clicking it:
   correct, and
 - **loads the run into all the visualization tabs** — switch **Mode → Run forecast**
   to explore Overview / Per-Batch / Harvest / Yearly / Plan for the optimized forecast,
-  and **⬇ download** the workbook (27 report sheets, 28 with CostsAndProfit) for Excel.
+  and **⬇ download** the workbook (28 report sheets, 29 with CostsAndProfit) for Excel.
 
 To keep the knobs permanently, paste the snippet into **Configure → Control** (or
 `config/control.yaml`); every later run then uses them. The CLI prints the same
@@ -2214,7 +2215,7 @@ python -m tools.auto_optimize --emphasis "Minimize loads" --method combined `
 **Precalc** projection + demand (`precalc.py`, the static "canvas") → **Layer-2
 harvest plan** (`harvest_scheduler.py`) → **Phase-D realized engine** (`placement.py`
 `phase_d_emit_events` — the closed-loop controller + level-load) → **Reports**
-(`excel_io.py` and friends: 27 report sheets, 28 with CostsAndProfit, beside the
+(`excel_io.py` and friends: 28 report sheets, 29 with CostsAndProfit, beside the
 input's ProductionReport). Read one run top-to-bottom and the function
 names match the narration. The `config/` + `scenario/` dirs are the working config a
 direct run reads; load a different `config_template (N).xlsx` into them via
@@ -2224,9 +2225,9 @@ direct run reads; load a different `config_template (N).xlsx` into them via
 
 ## 10. Data flow — how it all ties together (and why no information is lost)
 
-There is **one pipeline** and **one output workbook** (27 report sheets beside the
-input's ProductionReport — 28 tabs, or 29 with CostsAndProfit, which is appended
-after RunConfig when `config/costs.yaml` exists; BatchInputs is always the last tab), and that workbook
+There is **one pipeline** and **one output workbook** (28 report sheets beside the
+input's ProductionReport — 29 tabs, or 30 with CostsAndProfit, which is appended
+after RunConfig when `config/costs.yaml` exists; BatchInputs and then RunConfig YAML are always the last two tabs), and that workbook
 is the **single source of truth**. Every visualization, export, report, and the
 optimizer's "apply" all derive from it — so nothing is lost between stages.
 
@@ -2457,15 +2458,15 @@ and prices, costs price a plan and change nothing it computes.
 **The promoted default** lives in `config/analysis_defaults.yaml`, alongside
 the rest of your config, and is **never written to an output workbook** — so it
 cannot be lost to a run. Note the flip side: it is *not* part of the workbook's
-`RunConfig` snapshot (which carries control/biology/facility/batches/limits
-only), so importing config from a workbook will not restore it — and **must
+`RunConfig` snapshot (the RunConfig and RunConfig YAML tabs, which carry
+control/biology/facility/batches/limits only), so importing config from a workbook will not restore it — and **must
 not**: a workbook you open from last month would otherwise silently re-point
 today's Quick run at a plan that won a tournament on a different PR. The same
 goes for `targets.yaml` and `economics.yaml`, the yardstick a run is *judged*
-against. The `RunConfig` sheet names all three omissions in its own header, so
+against. Both RunConfig tabs name all three omissions in their header, so
 the gap is visible in the workbook rather than inferred. `costs.yaml` (§15) is
 never carried in a workbook either, and an import never overwrites it; the
-RunConfig header does not list it, so that sheet stays exactly as it was. Promotion is **manual by design**:
+RunConfig header does not list it, so those tabs read the same with or without costs. Promotion is **manual by design**:
 the tool never changes its own defaults. Once promoted, the plan (method +
 knobs) is what **▶ Run forecast** runs, unless you pick another this session,
 and what the **⚡ Quick run** card at the top of Decide step 2 re-validates (one
@@ -3597,7 +3598,7 @@ opening cost for fish already in the water, which the forecast never fed.
 
 ### Where it shows
 
-- **The output workbook** — a **CostsAndProfit** sheet, after RunConfig (only BatchInputs follows it), written
+- **The output workbook** — a **CostsAndProfit** sheet, after RunConfig (only BatchInputs and RunConfig YAML follow it), written
   whenever `costs.yaml` exists. It has one row per month, then one per
   calendar year, then the whole horizon: feed kg, each cost, total cost, HOG
   harvested, revenue, profit, spend per kg HOG sold and any unpriced feed kg. A

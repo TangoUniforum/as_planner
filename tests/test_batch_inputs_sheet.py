@@ -186,7 +186,8 @@ def test_real_run_reconciles_with_transferplan_and_input_audit(tmp_path, copy_co
         assert main(str(inp), str(out), config_dir=str(cfg),
                     scenario_dir=str(scn), calib_log_path="") == 0
     wb = openpyxl.load_workbook(out, read_only=True, data_only=True)
-    assert wb.sheetnames[-1] == SHEET_NAME
+    # Last tab but the RunConfig YAML record, which always goes after it.
+    assert [n for n in wb.sheetnames if n != "RunConfig YAML"][-1] == SHEET_NAME
 
     bi = [tuple(r) for r in wb[SHEET_NAME].iter_rows(values_only=True)]
     hi = next(i for i, r in enumerate(bi) if r and r[0] == "Batch")

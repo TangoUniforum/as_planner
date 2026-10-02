@@ -78,11 +78,12 @@ INPUTS
       TransferTemplate, RealizationReport, BiologyProjection,
       Diagnostics (FW calibration), ReconciliationReport,
       InputConservationAudit, TankContinuityAudit, SystemLimitsAudit,
-      RunConfig — and, only when config/costs.yaml exists,
+      RunConfig (readable tables; the re-importable YAML is the last tab,
+      RunConfig YAML) — and, only when config/costs.yaml exists,
       CostsAndProfit (cash view), appended after RunConfig so every other
       sheet is byte-identical with or without costs; then BatchInputs (per
       batch: scenario inputs beside the run's TranOG and FW calibration),
-      appended last for the same reason.
+      appended after it for the same reason, and RunConfig YAML last.
       Advisory consolidates flagged issues by category (FW calibration
       residuals, bottlenecks, scheduler/placement warnings, density
       violations, invariant violations, PR concentration).

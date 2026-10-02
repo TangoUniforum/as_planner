@@ -1613,8 +1613,29 @@ def main(
     # run used into the output workbook, so the saved file is a complete,
     # re-importable record. Only when running from app config (YAML).
     from .config_snapshot import write_config_snapshot
-    write_config_snapshot(wb, config_dir=config_dir, scenario_dir=scenario_dir)
-    print(f"  Wrote RunConfig snapshot (config + scenario embedded in output)")
+    from datetime import datetime as _dt_rc
+    _run_info = [
+        ("PR closing", pr_closing, "ProductionReport closing date"),
+        ("Forecast start", report_start, "PR closing + 1 day"),
+        ("Horizon (weeks)", _fw_proj_horizon, "control.yaml horizon_weeks"),
+    ]
+    if window_n:
+        _run_info.append(("Manual override window (weeks)", window_n,
+                          "weeks 1..N run the operator's scripted events; "
+                          "the planner takes over after"))
+    _run_info += [
+        ("Scenario", control.scenario_name, "control.yaml scenario_name"),
+        ("Placement method", control.placement_method,
+         "control.yaml placement_method"),
+        ("Hybrid follow", getattr(control, "hybrid_follow", None),
+         "control.yaml hybrid_follow"),
+        ("Generated", _dt_rc.now().isoformat(timespec="seconds"),
+         "when this workbook was written"),
+    ]
+    write_config_snapshot(wb, config_dir=config_dir, scenario_dir=scenario_dir,
+                          run_info=_run_info, pr_closing=pr_closing)
+    print(f"  Wrote RunConfig (readable view) + RunConfig YAML (re-importable "
+          f"config + scenario)")
 
     # Run summary back to Control R8-R16 (DESIGN §1) — operator's
     # in-workbook signal that the run completed + a snapshot of scope.
@@ -1706,6 +1727,10 @@ def main(
     except Exception as _bi_err:  # noqa: BLE001 - a report must not sink a run
         print(f"  NOTE: BatchInputs sheet skipped ({type(_bi_err).__name__}: "
               f"{_bi_err}); the plan is unaffected.")
+    # The YAML record goes last: it is the machine copy import reads, and
+    # keeping it at the end leaves every other tab where it was.
+    from .config_snapshot import move_yaml_sheet_last
+    move_yaml_sheet_last(wb)
     wb.save(out_path)
     wb.close()
     print(f"\nSaved workbook {out_path}  ({elapsed:.2f}s, status={status}, "

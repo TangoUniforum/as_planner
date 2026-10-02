@@ -600,13 +600,15 @@ def test_run_py_has_exactly_the_two_hooks():
     call = text.index("write_costs_sheet(wb")
     save = text.index("wb.save(out_path)")
     assert ann < gate < call < save
-    # Between the costs call and the save: only the report-only BatchInputs
-    # tab, which comes AFTER CostsAndProfit by design (2026-10-02). Nothing
-    # else may sit there, and it may not touch the costs hook.
+    # Between the costs call and the save: only the two report-only appends
+    # that come AFTER CostsAndProfit by design (2026-10-02) -- the BatchInputs
+    # tab and moving the RunConfig YAML record last. Nothing else may sit
+    # there, and neither may touch the costs hook.
     tail = "report_start=report_start)"
     between = text[call:save]
     rest = between[between.index(tail) + len(tail):]
     code = [s.strip() for s in rest.splitlines()
             if s.strip() and not s.strip().startswith("#")]
     assert sum("write_batch_inputs_sheet(" in s for s in code) == 1
+    assert code[-1] == "move_yaml_sheet_last(wb)"
     assert not any("costs" in s.lower() for s in code)

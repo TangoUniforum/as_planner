@@ -3,8 +3,16 @@
 So a saved forecast workbook is a self-documenting, re-importable record:
 the exact biology/facility/control + batches/limits that produced it travel
 WITH the result. Stored as the raw YAML text (lossless, human-readable,
-trivially re-importable) in a single `RunConfig` sheet, one labelled block
-per file.
+trivially re-importable), one labelled block per file.
+
+TWO TABS SINCE 2026-10-02 (operator: "make the RunConfig output more visually
+pleasing"). `RunConfig` is now the READABLE view -- run identity, then one
+formatted table per file (forecast.run_config_view) -- and the lossless YAML
+moved, unchanged in format, to `RunConfig YAML`, written last in the workbook.
+`read_config_snapshot` reads `RunConfig YAML` first and falls back to the old
+single-sheet layout, so every workbook written before the split still imports.
+The readable view never carries a `# ===== key =====` block marker, so it can
+never be mistaken for a snapshot by the fallback.
 
 TWO DIFFERENT SHEETS ARE BOTH CALLED `RunConfig`. This module writes the
 re-importable YAML snapshot, the only kind still produced. The other kind is a
@@ -22,6 +30,10 @@ import re
 from pathlib import Path
 
 SNAPSHOT_SHEET = "RunConfig"
+# The lossless YAML companion of the readable `RunConfig` view. Named after its
+# sheet so a caller passing a non-default `sheet_name` gets its own companion.
+YAML_SUFFIX = " YAML"
+YAML_SHEET = SNAPSHOT_SHEET + YAML_SUFFIX
 
 # A1 markers — the sheet-kind discriminator. `KIND_STAMP_MARK` is the A1 text
 # the removed Global exporter wrote: read-only history now, and it must not
@@ -65,25 +77,80 @@ _MARK = "# ===== {key} ====="
 _MARK_RE = re.compile(r"^# ===== (.+?) =====$")
 
 
+def _excluded_line() -> str:
+    return ("NOT included (analysis overlays — they steer scoring, not the "
+            "run, and importing must not overwrite your current ones): "
+            + "; ".join(f"{k} ({why})" for k, why in _EXCLUDED))
+
+
 def write_config_snapshot(wb, config_dir=None, scenario_dir=None,
-                          sheet_name: str = SNAPSHOT_SHEET) -> None:
-    """Write the active config/scenario YAML into a `RunConfig` sheet.
+                          sheet_name: str = SNAPSHOT_SHEET, *,
+                          run_info=None, pr_closing=None) -> None:
+    """Write the active config/scenario into the workbook: the READABLE
+    `RunConfig` view (where the YAML-only sheet used to sit) plus the lossless
+    `RunConfig YAML` companion that import reads.
 
     Only files whose directory is provided AND present are written. The
-    analysis overlays in `_EXCLUDED` are never written; the sheet names them
-    and says why, so the omission is visible rather than inferred.
+    analysis overlays in `_EXCLUDED` are never written; both sheets name them
+    and say why, so the omission is visible rather than inferred.
+
+    `run_info` is an optional list of (label, value, meaning) rows for the
+    view's run-identity block; `pr_closing` selects this PR's manual-events
+    file for display. Neither changes what is re-importable.
     """
     dirs = {"config": config_dir, "scenario": scenario_dir}
-    if sheet_name in wb.sheetnames:
-        del wb[sheet_name]
-    ws = wb.create_sheet(sheet_name)
+    yaml_name = sheet_name + YAML_SUFFIX
+    for stale in (sheet_name, yaml_name):
+        if stale in wb.sheetnames:
+            del wb[stale]
+    view = wb.create_sheet(sheet_name)
+    _write_yaml_sheet(wb.create_sheet(yaml_name), dirs)
+    try:
+        from .run_config_view import write_readable_view
+        write_readable_view(view, dirs, files=_FILES, run_info=run_info,
+                            pr_closing=pr_closing, yaml_sheet=yaml_name,
+                            title=(f"{KIND_SNAPSHOT_MARK} — the exact config + "
+                                   "scenario this forecast ran from."),
+                            excluded_line=_excluded_line())
+    except Exception as exc:  # noqa: BLE001 - the YAML tab is the record
+        # A rendering bug must never cost the operator the importable record:
+        # fall back to a marked, near-empty view that points at the YAML tab.
+        wb.remove(view)
+        view = wb.create_sheet(sheet_name, wb.sheetnames.index(yaml_name))
+        view["A1"] = (f"{KIND_SNAPSHOT_MARK} — readable view unavailable "
+                      f"({type(exc).__name__}); the full config is on the "
+                      f"'{yaml_name}' tab.")
+        view["A3"] = _excluded_line()
+
+
+def move_yaml_sheet_last(wb, sheet_name: str = SNAPSHOT_SHEET) -> None:
+    """Put the YAML companion at the end of the workbook (it is the machine
+    record; the readable view keeps RunConfig's old place among the tabs)."""
+    name = sheet_name + YAML_SUFFIX
+    if name in wb.sheetnames:
+        idx = wb.sheetnames.index(name)
+        wb.move_sheet(name, offset=len(wb.sheetnames) - 1 - idx)
+
+
+def is_yaml_dump(ws) -> bool:
+    """True for a sheet laid out as `# ===== key =====` YAML blocks (the
+    companion tab, or a pre-2026-10-02 RunConfig)."""
+    for row in ws.iter_rows(min_col=1, max_col=1, values_only=True):
+        v = row[0] if row else None
+        if isinstance(v, str) and _MARK_RE.match(v):
+            return True
+    return False
+
+
+def _write_yaml_sheet(ws, dirs) -> None:
+    """The lossless record, in exactly the block format RunConfig used to
+    hold (so the pre-split reader parses it unchanged)."""
     ws.append([f"{KIND_SNAPSHOT_MARK} — the exact config + scenario this "
                "forecast ran from."])
     ws.append(["Re-importable: app Configure mode > 'Import from workbook', "
-               "or forecast.config_snapshot.import_config_snapshot()."])
-    ws.append(["NOT included (analysis overlays — they steer scoring, not the "
-               "run, and importing must not overwrite your current ones): "
-               + "; ".join(f"{k} ({why})" for k, why in _EXCLUDED)])
+               "or forecast.config_snapshot.import_config_snapshot(). The "
+               "readable view of the same files is the RunConfig tab."])
+    ws.append([_excluded_line()])
     ws.append([])
     for name, kind in _FILES:
         base = dirs.get(kind)
@@ -112,7 +179,7 @@ def run_config_kind(wb, sheet_name: str = SNAPSHOT_SHEET) -> str | None:
     a1 = wb[sheet_name]["A1"].value
     a1 = "" if a1 is None else str(a1)
     if a1.startswith(KIND_SNAPSHOT_MARK):
-        return "snapshot"
+        return "snapshot"   # the pre-split dump AND the readable view
     if a1.startswith(KIND_STAMP_MARK) or a1.startswith("RUN CONFIG —"):
         return "stamp"
     # Older workbooks predate the A1 marker: fall back to the content test.
@@ -127,6 +194,11 @@ def describe_run_config_sheet(wb, sheet_name: str = SNAPSHOT_SHEET) -> str:
                 f"config to import.")
     if kind == "snapshot":
         n = len(read_config_snapshot(wb, sheet_name))
+        if n == 0:
+            return (f"'{sheet_name}' is the readable config view, but its "
+                    f"'{sheet_name}{YAML_SUFFIX}' tab — the part an import "
+                    f"reads — is missing from this workbook, so there is "
+                    f"nothing to import.")
         return (f"'{sheet_name}' is a re-importable YAML config snapshot "
                 f"({n} file(s)).")
     if kind == "stamp":
@@ -141,7 +213,18 @@ def describe_run_config_sheet(wb, sheet_name: str = SNAPSHOT_SHEET) -> str:
 
 
 def read_config_snapshot(wb, sheet_name: str = SNAPSHOT_SHEET) -> dict[str, str]:
-    """Return {'config/control.yaml': <yaml text>, ...} from the snapshot."""
+    """Return {'config/control.yaml': <yaml text>, ...} from the snapshot.
+
+    Reads the `<sheet_name> YAML` companion first (2026-10-02 onward), then
+    the old single-sheet layout, so workbooks from before the split import.
+    """
+    blocks = _read_blocks(wb, sheet_name + YAML_SUFFIX)
+    if blocks:
+        return blocks
+    return _read_blocks(wb, sheet_name)
+
+
+def _read_blocks(wb, sheet_name: str) -> dict[str, str]:
     if sheet_name not in wb.sheetnames:
         return {}
     ws = wb[sheet_name]
