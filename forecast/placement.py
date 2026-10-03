@@ -1750,6 +1750,7 @@ def _run_sixn_purge_week(
     sixn_move_in_feed: Optional[dict] = None,
     grade_events=None,
     weekly_min: Optional[float] = None,
+    week_floor: Optional[float] = None,
 ) -> Optional[tuple[int, int]]:
     """Run one week of the 6N purge pipeline (3-pair fallow rotation).
 
@@ -1881,7 +1882,39 @@ def _run_sixn_purge_week(
             -_days_purging(tid) if _is_overdue(tid) else 0,   # longest first
             -_cnt(tid) if _big else 0,
             tid))
-    for tank_id in _drain_order:
+    def _drainable(tid):
+        """Occupied and past the depuration guard -- would drain this week."""
+        t = state.tanks_by_id.get(tid)
+        if t is None or t.is_empty:
+            return False
+        fd = _fill_dates.get(tid)
+        return fd is None or (week_start_date - fd).days >= SIXN_DRAIN_GUARD_MIN_DAYS
+
+    def _floor_wins(tid, pos):
+        """The floor this week's harvest is short of if `tid` is HELD, or None
+        when the hold may stand.
+
+        FLOOR BEATS THE CAP (operator, 2026-10-03: "floor should win"). The
+        limit hold must not leave a week under its floor: on the October plan
+        it held OG6N-69 (18,389 fish, 18,156 of room) and the week landed at
+        33,157 against a 51,500 floor -- 233 fish of cap bought with 18,343 of
+        floor. The hold stands when the week already meets the floor.
+        Otherwise, of the tanks still to drain this week that reach the floor,
+        the SMALLEST drains (the least overshoot -- and a tank that fits inside
+        the limit is always smaller than one that does not, so it wins and the
+        limit holds); ties go to the lower tank id. If none reaches the floor
+        alone, this one drains -- the most the week can get."""
+        floor = float(week_floor or 0.0)
+        if floor <= 0 or budget is None or budget.used >= floor - 0.5:
+            return None
+        cands = [tid] + [t for t in _drain_order[pos + 1:] if _drainable(t)]
+        cnt = {t: state.tanks_by_id[t].count for t in cands}
+        reach = [t for t in cands if budget.used + cnt[t] >= floor - 0.5]
+        if reach and min(reach, key=lambda t: (cnt[t], t)) != tid:
+            return None
+        return floor
+
+    for _pos, tank_id in enumerate(_drain_order):
         tank = state.tanks_by_id.get(tank_id)
         if tank is None or tank.is_empty:
             continue
@@ -1927,6 +1960,22 @@ def _run_sixn_purge_week(
                 f"{_days_purging(tank_id)}d, past the "
                 f"{_overdue_wks}-week limit; draining it ahead of the weekly "
                 f"processing budget rather than holding it again")
+        elif (budget is not None and math.isfinite(budget.cap)
+                and (budget.used > 0 or pair_drain_count > 0)
+                and tank.count > budget.remaining()
+                and _floor_wins(tank_id, _pos) is not None):
+            # FLOOR BEATS THE CAP (operator, 2026-10-03): this tank would
+            # breach the limit, but holding it leaves the week under its
+            # floor and no other tank still to drain this week reaches the
+            # floor inside the limit -- drain it, and say so.
+            _over = budget.used + tank.count - budget.cap
+            warnings.append(
+                f"{week_label}: FLOOR OVER LIMIT — draining 6N "
+                f"{tank.location_id} (batch {tank.batch_id}, "
+                f"{tank.count:.0f} fish) {_over:,.0f} fish past the weekly "
+                f"processing limit ({budget.cap:,.0f}): holding it would leave "
+                f"the week at {budget.used:,.0f}, under its "
+                f"{_floor_wins(tank_id, _pos):,.0f} floor")
         elif (budget is not None and math.isfinite(budget.cap)
                 and (budget.used > 0 or pair_drain_count > 0)
                 and tank.count > budget.remaining()):
@@ -5234,6 +5283,9 @@ def phase_d_emit_events(
                 tables=tables,
                 sixn_move_in_feed=sixn_move_in_feed,
                 grade_events=grade_events,
+                # THIS week's floor (the drain week) -- the limit hold may not
+                # leave it short (operator 2026-10-03: the floor wins).
+                week_floor=min_hv,
             )
             # DEPURATION HOLD, fill side: after this week's rotation the front
             # of the queue drains NEXT week — any make-room dump into its tanks
