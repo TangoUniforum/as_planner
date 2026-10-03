@@ -428,6 +428,10 @@ intake** picker (freshwater cohorts aren't tanks yet), a plain-English
 **timeline** of everything you've scripted (with delete), and a **Save window**
 button.
 
+**Before → after previews (every action).** Before you press **➕ Add**, the panel shows what the event will do, tank by tank, at the moment it runs in that week — after that week's earlier scripted events, before the week's growth: fish, average weight, biomass and density before → after for the source and every destination (a same-batch destination shows the top-up total, ⚠ when it ends over its density cap), and a **balance** line (fish and kg before = after, plus anything harvested). It is computed by the run's own event handlers on the run's own window replay, so it is the number the run will produce. A **harvest** also shows the week's scripted total so far + this one against that week's floor and processing limit. A **6N fill** (Send to 6N, Graded → 6N) shows how many fish the 6N tank will hold and the week it comes out — your scripted harvest of that tank, else the earliest week its 2-week depuration hold allows — with that week's limit: 6N tanks drain whole, so a tank holding more than that limit is flagged ⚠ (e.g. tank 63 filled to 55,357 in W44 against W46's 51,500). An **FW→OG intake** shows fish taken from freshwater → placed, culled to target and lost to handling. Previews warn, never block — the run's own refusals still apply and are shown in red.
+
+**🧮 Window harvest check.** Above the grid, a compact check of the whole scripted window: each window week's scripted harvest against the floor and limit in force that week, and every 6N tank you fill against the limit of the week it comes out. It opens by itself when something is over or under.
+
 **⚠ Most out of bounds — recommended actions.** At the top of the right-hand
 panel, a recommendations box reads the current projection against the caps and
 lists what's **most out of bounds**, ranked worst-first — per-system **feed**,
