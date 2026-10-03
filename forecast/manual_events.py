@@ -340,6 +340,25 @@ def _apply_harvest(state, ev: ManualEvent, idx: int,
     return warns
 
 
+def _record_6n_fill(state, tank_id, event_date) -> None:
+    """Stamp a scripted 6N fill in state.sixn_fill_date, the purge clock the
+    planner reads at the handoff (its depuration hold and its overdue rule).
+
+    Mirrors placement._freeze_6n_dest: the fill week's start, and a same-batch
+    top-up overwrites -- the latest fill wins, so a topped-up tank's whole
+    contents carry the newest clock (never a short purge for the newcomers).
+    Before 2026-10-03 the window stamped nothing, so every tank it filled read
+    "purged 1000000d" at the handoff: overdue, exempt from the weekly
+    processing limit, drained whole (operator's October plan: 55,301 fish
+    into a 51,500 week)."""
+    if event_date is None:
+        return
+    fd = getattr(state, "sixn_fill_date", None)
+    if fd is not None:
+        fd[tank_id] = (event_date.date() if hasattr(event_date, "date")
+                       else event_date)
+
+
 def _apply_og_to_6n(state, ev: ManualEvent, idx: int,
                     event_date=None, out_events=None) -> list[str]:
     """Move OG fish into a 6N depuration tank (normal-transfer mode).
@@ -412,6 +431,7 @@ def _apply_og_to_6n(state, ev: ManualEvent, idx: int,
             t = state.tanks_by_id.get(d.tank)
             if t is not None and not t.is_empty and t.batch_id == batch_id:
                 t.stage = STAGE_STARVE  # freeze: off-feed depuration
+                _record_6n_fill(state, d.tank, event_date)
         if out_events is not None:
             out_events.append(tr)
         print(f"    {tag}: moved {tr.count_transferred:,.0f} fish of batch "
@@ -717,6 +737,7 @@ def _apply_graded_harvest(state, ev: ManualEvent, idx: int, event_date=None,
         # like the plain og_to_6n move.
         if not pickup.is_empty:
             pickup.stage = STAGE_STARVE
+            _record_6n_fill(state, pickup_id, event_date)
         print(f"    {tag}: graded {n:,.0f} of {batch_id} in {src.location_id} -> "
               f"6N {pickup.location_id} top {big_count:,.0f}@{big_avg / 1000:.2f}kg "
               f"(depurating, off-feed), retained {small_count:,.0f}@"

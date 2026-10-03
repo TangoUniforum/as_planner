@@ -1850,9 +1850,22 @@ def _run_sixn_purge_week(
     # the largest-first rule if enabled, then tank_id — always deterministic.
     _overdue_wks = int(getattr(control, "sixn_overdue_drain_weeks", 0) or 0)
     _fill_dates = getattr(state, "sixn_fill_date", {})
+    # UNKNOWN FILL (fish already in 6N at the PR close -- the PR carries no 6N
+    # entry date): count the purge from the state's ORIGIN, the original
+    # forecast start, the earliest date the fish are provably in the tank. It
+    # used to read 10**6 days, so every unwitnessed tank was "overdue" at once
+    # and drained past the weekly processing limit -- on the 10.1.26 PR the
+    # manual window's own og_to_6n fills read "purged 1000000d" at the handoff
+    # and drained 55,301 into a 51,500 week (operator, 2026-10-03). A tank the
+    # window or the planner FILLED has a recorded date and never reaches this.
+    # Only the overdue rule reads it; the depuration guard below still treats an
+    # unrecorded tank as old enough.
+    _origin = getattr(state, "origin_date", None)
 
     def _days_purging(tid):
         d = _fill_dates.get(tid)
+        if d is None:
+            d = _origin
         return (week_start_date - d).days if d is not None else 10 ** 6
 
     def _is_overdue(tid):
@@ -4356,6 +4369,32 @@ def _make_room_into_6n(
     return True
 
 
+def _clone_for_execution(initial_state: FacilityState,
+                         facility: FacilityConfig) -> FacilityState:
+    """A fresh FacilityState holding initial_state's fish, for Phase D to walk.
+
+    The 6N purge clock (sixn_fill_date) and the hydration date (origin_date)
+    travel with the fish. A manual override window records its 6N fills in
+    initial_state.sixn_fill_date; this clone used to copy the tanks only, so
+    every window-filled tank reached the planner with no fill date and read
+    as purged for 1,000,000 days (operator's October plan, 2026-10-03).
+    """
+    state = FacilityState.from_facility_config(facility, today=initial_state.today)
+    for tid, t in initial_state.tanks_by_id.items():
+        st = state.tanks_by_id.get(tid)
+        if st is None:
+            continue
+        st.batch_id = t.batch_id
+        st.count = t.count
+        st.avg_wt_g = t.avg_wt_g
+        st.cv_pct = t.cv_pct
+        st.stage = t.stage
+        st.last_emptied_date = t.last_emptied_date
+    state.sixn_fill_date.update(getattr(initial_state, "sixn_fill_date", {}) or {})
+    state.origin_date = getattr(initial_state, "origin_date", initial_state.today)
+    return state
+
+
 def phase_d_emit_events(
     load_table: list[BatchWeekLoad],
     tank_assignments: list[TankAssignment],
@@ -4503,17 +4542,7 @@ def phase_d_emit_events(
     tank_cfg_by_id: dict[int, TankConfig] = {t.tank_id: t for t in facility.tanks}
 
     # Clone initial_state into a fresh FacilityState for execution.
-    state = FacilityState.from_facility_config(facility, today=initial_state.today)
-    for tid, t in initial_state.tanks_by_id.items():
-        st = state.tanks_by_id.get(tid)
-        if st is None:
-            continue
-        st.batch_id = t.batch_id
-        st.count = t.count
-        st.avg_wt_g = t.avg_wt_g
-        st.cv_pct = t.cv_pct
-        st.stage = t.stage
-        st.last_emptied_date = t.last_emptied_date
+    state = _clone_for_execution(initial_state, facility)
 
     # Previous-week tank → batch map (initial state).
     prev_assignment: dict[int, str] = {

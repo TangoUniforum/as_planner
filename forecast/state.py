@@ -127,6 +127,11 @@ class FacilityState:
 
     def __init__(self, today: date, tanks: list[TankState]) -> None:
         self.today: date = today
+        # The date this state was hydrated at (the ORIGINAL forecast start).
+        # Never advanced -- `today` walks day by day. The 6N overdue rule
+        # (placement._run_sixn_purge_week) reads it as the earliest provable
+        # start of a purge whose fill it never witnessed (PR-hydrated fish).
+        self.origin_date: date = today
         self.tanks_by_id: dict[int, TankState] = {t.tank_id: t for t in tanks}
         self._by_system: dict[str, list[TankState]] = {}
         for t in tanks:
