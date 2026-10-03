@@ -3140,6 +3140,210 @@ def _mw_lim_s(v):
     return f"{v:,.0f}" if v else "—"
 
 
+# ---- Limit-matching helpers (operator 2026-10-03: "give it a try") ----
+# The previews say WHEN an entry misses its week's floor / limit; these offer
+# the count that lands it. All numbers: forecast.limit_match, which solves on
+# the run's own window engine. A helper only PROPOSES — it writes a widget
+# value (Fill to limit) or edits one working-set entry (Apply), never the plan.
+
+def _mw_apply_pending():
+    """Write the widget values a helper button queued (Fill to limit) into
+    their keys BEFORE the widgets draw. Streamlit refuses a Session State write
+    to a key whose widget already drew in this run, so the button queues the
+    value and reruns; this lands it at the top of the next run."""
+    pend = st.session_state.pop("_mw_pending", None)
+    for k, v in (pend or {}).items():
+        st.session_state[k] = v
+
+
+def _mw_seed(key, default):
+    """Seed a keyed widget once instead of passing value=, so a helper can
+    later write the key without Streamlit's 'default value + Session State'
+    warning; re-sent each run so the value survives the st.stop() round trip
+    (see _resend_widget)."""
+    if key not in st.session_state:
+        st.session_state[key] = default
+    _resend_widget(key)
+
+
+def _mw_base_now(state, ctx, wk):
+    """(base, error) for a new week-`wk` event — _mw_preview_base on the
+    working set, or (None, reason) without a hydrated PR context (the panels
+    are also drawn by tests with a bare ctx)."""
+    if not ctx or ctx.get("forecast_start") is None or "tables" not in ctx:
+        return None, "no ProductionReport context"
+    return _mw_preview_base(state, ctx, _mw_events(), wk)
+
+
+def _mw_source_at(state, ctx, wk, tid):
+    """(count, avg_wt_g, batch) of tank `tid` at the moment a new week-`wk`
+    event runs (the preview's replay: earlier weeks + that week's earlier
+    entries). None when it can't be replayed."""
+    base, _err = _mw_base_now(state, ctx, wk)
+    if base is None:
+        return None
+    t = base[0].tanks_by_id.get(int(tid))
+    if t is None or t.is_empty:
+        return (0.0, 0.0, None)
+    return (float(t.count), float(t.avg_wt_g), t.batch_id)
+
+
+def _mw_fill_solve(state, ctx, tid, wk, dest6n, kind, extra=None):
+    """forecast.limit_match.fill_to_limit for a NEW 6N fill from `tid` into
+    `dest6n` in week `wk`: kind "og_to_6n" or "graded" (extra = (retention
+    tank, mode)). Cached by (working set, fill), so typing a count never
+    re-solves. Returns (Solve | None, error | None)."""
+    from forecast import limit_match as lm
+    from forecast.manual_events import ManualDest, ManualEvent
+    if not ctx or ctx.get("forecast_start") is None or "tables" not in ctx:
+        return None, None
+    events = _mw_events()
+    sig = _mw_sig(events, extra=f"fill1:{tid}:{wk}:{dest6n}:{kind}:{extra}")
+    cache = st.session_state.get("_mw_fill_cache") or {}
+    if sig in cache:
+        return cache[sig]
+    src = _mw_source_at(state, ctx, wk, tid)
+    if src is None or not src[0]:
+        res = (None, "the source tank can't be replayed at this week")
+    else:
+        if kind == "graded":
+            ret, mode = extra
+
+            def make(n):
+                return ManualEvent(type="graded_harvest", week=wk, from_tank=tid,
+                                   count=float(n), mode=mode,
+                                   destinations=[ManualDest(tank=int(dest6n)),
+                                                 ManualDest(tank=int(ret))])
+        else:
+            def make(n):
+                return ManualEvent(type="og_to_6n", week=wk, from_tank=tid,
+                                   count=float(n),
+                                   destinations=[ManualDest(tank=int(dest6n),
+                                                            count=float(n))])
+        try:
+            res = (lm.fill_to_limit(state, ctx, events, make, int(dest6n), wk,
+                                    src[0], _mw_facility_limits(),
+                                    graded=(kind == "graded")), None)
+        except Exception as e:  # noqa: BLE001 — a helper must never kill the panel
+            res = (None, f"{type(e).__name__}: {e}")
+    if len(cache) > 32:
+        cache = {}
+    cache[sig] = res
+    st.session_state["_mw_fill_cache"] = cache
+    return res
+
+
+def _mw_fill_caption(state, s, dest6n):
+    """The 'Room left' line for a 6N fill (Solve from _mw_fill_solve)."""
+    loc = _mw_loc(state, dest6n)
+    if s.measure == "week":
+        base = (f"{s.week_label}'s scripted harvest totals {s.before:,.0f} "
+                f"without this fill")
+    else:
+        base = (f"{loc} holds {s.before:,.0f} at {s.week_label} without this "
+                f"fill, after purge mortality")
+    if not s.ok and s.note:
+        return f"🎯 Room to {s.week_label}'s {s.target:,.0f} limit: **none** — {s.note}."
+    tail = f" ({s.note})" if s.note else ""
+    return (f"🎯 Room to **{s.week_label}**'s limit ({s.target:,.0f}): "
+            f"**{s.count:,.0f} fish** — {base}; with it: {s.after:,.0f}.{tail}")
+
+
+def _mw_fill_button(s, key, pending):
+    """'Fill to limit' — queues the solved count into the widget keys
+    (`pending` = {key: value}, the count filled in) and reruns."""
+    if s is None or not s.ok or s.count <= 0:
+        return
+    if st.button(f"🎯 Fill to limit — {s.count:,.0f} fish", key=key,
+                 help="Sets the count so this 6N tank (or, when its harvest is "
+                      "scripted, that week's harvest) lands on the processing "
+                      "limit of the week it comes out — through the purge "
+                      "mortality the run projects. Never above the limit."):
+        st.session_state["_mw_pending"] = pending
+        st.rerun()
+
+
+def _mw_density_room_caption(base_state, tids, avg_wt_g, label="",
+                             sending=None):
+    """'Room left' to each destination's density cap, in fish of `avg_wt_g`,
+    at the moment the move runs. `sending` = {tank: fish this move sends}."""
+    from forecast.limit_match import density_room_fish
+    if base_state is None or not tids or not avg_wt_g:
+        return
+    parts = []
+    for t in tids:
+        tk = base_state.tanks_by_id.get(int(t))
+        if tk is None:
+            continue
+        room = density_room_fish(tk, avg_wt_g)
+        if room is None:
+            continue
+        s = f"{tk.location_id} **{room:,.0f}**" if room >= 0 else \
+            f"{tk.location_id} **already {-room:,.0f} over**"
+        if sending and t in sending and sending[t] is not None:
+            s += (f" (you send {sending[t]:,.0f}"
+                  + (" ⚠" if room >= 0 and sending[t] > room + 0.5 else "") + ")")
+        parts.append(s)
+    if parts:
+        st.caption(f"↳ Room to density cap{label} at {avg_wt_g / 1000:.2f} kg: "
+                   + " · ".join(parts))
+
+
+def _mw_harvest_room_caption(ctx, wlabel, this_count):
+    """'Room left' for a harvest: what the week still needs to reach its
+    floor and what is left under its limit, counting this harvest."""
+    from forecast.limit_match import harvest_room
+    from forecast.manual_preview import resolve_limits
+    cache = st.session_state.get("_mw_proj_cache") or {}
+    hb = cache.get("harvest_by_week") or {}
+    floor, lim = resolve_limits(wlabel, _mw_facility_limits(), ctx.get("control"))
+    to_floor, to_lim = harvest_room(hb, wlabel, floor, lim, this_count)
+    so_far = float(hb.get(wlabel, 0.0))
+    bits = [f"{wlabel} scripted so far {so_far:,.0f} + this "
+            f"{float(this_count or 0):,.0f}"]
+    if floor:
+        bits.append("floor met" if not to_floor else f"**{to_floor:,.0f}** to the floor")
+    if lim:
+        bits.append(f"**{to_lim:,.0f}** left under the limit" if to_lim >= 0
+                    else f"**{-to_lim:,.0f} over** the limit")
+    st.caption("↳ " + " · ".join(bits))
+
+
+def _mw_count_at_harvest(state, ctx, events, tank_id, fill_wk):
+    """limit_match.count_at_harvest, cached by (events, tank, fill week).
+    None when it can't be projected."""
+    from forecast.limit_match import count_at_harvest
+    if not ctx or ctx.get("forecast_start") is None or "tables" not in ctx:
+        return None
+    sig = _mw_sig(events, extra=f"ath1:{tank_id}:{fill_wk}")
+    cache = st.session_state.get("_mw_ath_cache") or {}
+    if sig not in cache:
+        try:
+            cache[sig] = count_at_harvest(state, ctx, events, tank_id, fill_wk)
+        except Exception:  # noqa: BLE001
+            cache[sig] = None
+        if len(cache) > 64:
+            cache = {sig: cache[sig]}
+        st.session_state["_mw_ath_cache"] = cache
+    return cache[sig]
+
+
+def _mw_suggestions(state, ctx, events):
+    """forecast.limit_match.window_suggestions, cached by the working set.
+    (suggestions, error)."""
+    from forecast.limit_match import window_suggestions
+    sig = _mw_sig(events, extra="sugg1")
+    cache = st.session_state.get("_mw_sugg_cache")
+    if not (cache and cache.get("sig") == sig):
+        try:
+            cache = {"sig": sig, "s": window_suggestions(
+                state, ctx, events, _mw_facility_limits()), "err": None}
+        except Exception as e:  # noqa: BLE001
+            cache = {"sig": sig, "s": [], "err": f"{type(e).__name__}: {e}"}
+        st.session_state["_mw_sugg_cache"] = cache
+    return cache["s"], cache["err"], sig
+
+
 def _mw_event_preview(state, ctx, ev):
     """Before → after for the event about to be added, computed by the run's
     own event handlers on the facility as it stands at that point of the week
@@ -3238,23 +3442,31 @@ def _mw_event_preview(state, ctx, ev):
         else:
             st.caption("✓ " + msg)
     # 6N fills: what the tank will hold, and the limit of the week it comes out.
+    # Judged on the count AT that week (after purge mortality) — what the run
+    # drains — not the count at the moment of the fill.
     for s6 in p.sixn:
+        at_h = _mw_count_at_harvest(state, ctx, events + [ev], s6.tank_id, wk)
         when = (f"your scripted harvest in **{s6.harvest_week}**" if s6.scripted
                 else f"**{s6.harvest_week}** at the earliest (end of the "
                      f"depuration hold — "
                      + ("still in your window, so only if you script it"
                         if s6.in_window else "the planner takes it then or later")
                      + ")")
-        msg = (f"6N **{s6.location}** will hold **{s6.count_after:,.0f} fish** → "
-               f"comes out {when}; that week's limit **{_mw_lim_s(s6.limit)}** "
-               f"(floor {_mw_lim_s(s6.floor)}).")
-        if s6.over_limit:
-            st.warning(f"⚠ {msg} This tank alone is **{s6.count_after - s6.limit:,.0f} "
-                       f"over** {s6.harvest_week}'s {s6.limit:,.0f} limit — 6N tanks "
+        n_out = at_h[0] if at_h else s6.count_after
+        lbl_out = at_h[2] if at_h else s6.harvest_week
+        msg = (f"6N **{s6.location}** will hold **{s6.count_after:,.0f} fish** now"
+               + (f" → **{n_out:,.0f}** at **{lbl_out}** (after purge mortality)"
+                  if at_h else "")
+               + f" → comes out {when}; that week's limit "
+               f"**{_mw_lim_s(s6.limit)}** (floor {_mw_lim_s(s6.floor)}).")
+        if s6.limit and n_out > s6.limit + 0.5:
+            st.warning(f"⚠ {msg} This tank alone is **{n_out - s6.limit:,.0f} "
+                       f"over** {lbl_out}'s {s6.limit:,.0f} limit — 6N tanks "
                        f"drain whole, so its harvest will go over. Send fewer "
-                       f"fish here or spread them over another 6N tank.")
+                       f"fish here (🎯 Fill to limit) or spread them over "
+                       f"another 6N tank.")
         else:
-            room = (s6.limit - s6.count_after) if s6.limit else None
+            room = (s6.limit - n_out) if s6.limit else None
             st.caption("✓ " + msg + (f" Room left under the limit: {room:,.0f}."
                                      if room is not None else ""))
     return p
@@ -3273,6 +3485,22 @@ def _mw_window_strip(state, ctx, events, labels):
     fl = _mw_facility_limits()
     control = ctx.get("control")
     hb = cache.get("harvest_by_week") or {}
+    sugs, sugg_err, sugg_sig = _mw_suggestions(state, ctx, events)
+    from forecast.time_grid import week_label as _wl
+
+    def _short(sg):
+        if sg.proposed is None:
+            return "— (see below)"
+        return f"#{sg.entry_index + 1}: {_fmt_cnt(sg.current)} → {sg.proposed:,.0f}"
+
+    def _fmt_cnt(v):
+        return "whole tank" if v is None else f"{v:,.0f}"
+    by_week = {sg.week_label: sg for sg in sugs if sg.row == "week"}
+    by_fill = {}
+    for sg in sugs:
+        if sg.row == "6N" and sg.entry_index is not None:
+            _e = events[sg.entry_index]
+            by_fill[(_wl((_e.week or 1) - 1, ctx["forecast_start"]), sg.tank_id)] = sg
     wrows, n_bad = [], 0
     for lbl in labels[:max_ev]:
         floor, lim = resolve_limits(lbl, fl, control)
@@ -3284,27 +3512,42 @@ def _mw_window_strip(state, ctx, events, labels):
         else:
             stt = "✓"
         wrows.append({"Week": lbl, "Scripted harvest (fish)": round(n),
-                      "Floor": floor, "Limit": lim, "": stt})
+                      "Floor": floor, "Limit": lim, "": stt,
+                      "Suggested change": (_short(by_week[lbl])
+                                           if lbl in by_week and stt != "✓" else "")})
     fills = staged_6n_summary(events, cache.get("moves") or [],
                               cache.get("close") or [], labels,
                               ctx["forecast_start"], fl, control)
     frows = []
     for fl_lbl, tid, cnt, hl, scripted, lim in fills:
-        bad = bool(lim) and cnt > lim + 0.5
+        _fwk = labels.index(fl_lbl) + 1 if fl_lbl in labels else None
+        _ath = (_mw_count_at_harvest(state, ctx, events, tid, _fwk)
+                if _fwk else None)
+        if _ath is not None:
+            from forecast.manual_preview import resolve_limits as _rl
+            hl, scripted = _ath[2], _ath[3]
+            lim = _rl(hl, fl, control)[1]
+        at_h = _ath[0] if _ath is not None else cnt
+        bad = bool(lim) and at_h > lim + 0.5
         n_bad += int(bad)
         frows.append({"Filled": fl_lbl, "6N tank": _mw_loc(state, tid),
                       "Fish in tank (week close)": round(cnt),
+                      "At harvest week": round(at_h),
                       "Comes out": hl + ("" if scripted else " (earliest)"),
                       "Limit that week": lim,
-                      "": (f"⚠ {cnt - lim:,.0f} over — a whole-tank harvest "
-                           f"goes over" if bad else "✓")})
+                      "": (f"⚠ {at_h - lim:,.0f} over — a whole-tank harvest "
+                           f"goes over" if bad else "✓"),
+                      "Suggested change": (_short(by_fill[(fl_lbl, tid)])
+                                           if bad and (fl_lbl, tid) in by_fill else "")})
     head = (f"🧮 Window harvest check — {n_bad} week(s)/tank(s) need attention"
             if n_bad else "🧮 Window harvest check — all within floor / limit")
     with st.expander(head, expanded=bool(n_bad)):
         st.caption("Each scripted week's harvest against the floor and the "
                    "processing limit in force that week (scenario per-week rows, "
-                   "else Control), and every 6N tank you fill against the limit "
-                   "of the week it comes out of its depuration hold. 6N tanks "
+                   "else Control), and every 6N tank you fill — at its count IN "
+                   "the week it comes out of its depuration hold, after purge "
+                   "mortality (what the run drains) — against that week's "
+                   "limit. 6N tanks "
                    "drain whole, so a tank holding more than that week's limit "
                    "can't be harvested inside it.")
         num = st.column_config.NumberColumn(format="localized")
@@ -3316,7 +3559,40 @@ def _mw_window_strip(state, ctx, events, labels):
             st.dataframe(pd.DataFrame(frows), hide_index=True,
                          use_container_width=True,
                          column_config={"Fish in tank (week close)": num,
+                                        "At harvest week": num,
                                         "Limit that week": num})
+        _mw_suggestion_list(state, events, sugs, sugg_err, sugg_sig)
+
+
+def _mw_suggestion_list(state, events, sugs, err, sig):
+    """The strip's suggested changes, each with its own Apply. Apply edits ONE
+    working-set entry (the count) and reruns, so the strip re-evaluates;
+    nothing is saved until 💾 Save window, and nothing ever auto-applies."""
+    from forecast.limit_match import apply_suggestion
+    if err:
+        st.caption(f"Suggestions unavailable ({err}).")
+        return
+    if not sugs:
+        return
+    st.markdown("**Suggested changes** — the one count that lands each on "
+                "target, solved on the run's own window (purge mortality "
+                "included). Nothing changes until you click **Apply**.")
+    shown = set()
+    for i, sg in enumerate(sugs):
+        if sg.proposed is not None:
+            key = (sg.entry_index, round(sg.proposed))
+            if key in shown:
+                continue
+            shown.add(key)
+            c = st.columns([10, 2])
+            c[0].markdown(("📦 " if sg.row == "6N" else "📅 ") + sg.message)
+            if c[1].button("Apply", key=f"mw_sug_apply_{i}_{sig[:8]}",
+                           help="Writes this count into that entry of the "
+                                "working set (Save window keeps it)."):
+                _mw_set(apply_suggestion(_mw_events(), sg))
+                st.rerun()
+        else:
+            st.caption(("📦 " if sg.row == "6N" else "📅 ") + sg.message)
 
 
 def _mw_action_panel(state, ctx, rows, labels, sel, date_for):
@@ -3359,6 +3635,7 @@ def _mw_action_panel(state, ctx, rows, labels, sel, date_for):
     # staging is possible at all; its projected avg weight gates entry moves.
     _src_sys = state.tanks_by_id[tid].system_id
     _entry_src = is_entry(_src_sys)
+    _mw_apply_pending()
     _resend_widget("mw_act")
     act = st.radio("What do you want to do here?",
                    ["Harvest", "Graded → 6N", "Move (OG→OG)",
@@ -3372,11 +3649,17 @@ def _mw_action_panel(state, ctx, rows, labels, sel, date_for):
                        f"OG1/2 is the entry tier (rule R5): move them forward "
                        f"to OG3-6 first, then harvest from there.")
             return
-        whole = st.checkbox("Harvest the whole tank", value=True, key=f"mw_h_whole_{sfx}")
+        _mw_seed(f"mw_h_whole_{sfx}", True)
+        whole = st.checkbox("Harvest the whole tank", key=f"mw_h_whole_{sfx}")
         cnt = None
         if not whole:
+            _mw_seed(f"mw_h_cnt_{sfx}", float(r.count))
             cnt = st.number_input("Fish to harvest", min_value=0.0,
-                                  value=float(r.count), step=1000.0, key=f"mw_h_cnt_{sfx}")
+                                  step=1000.0, key=f"mw_h_cnt_{sfx}")
+        _src_now = _mw_source_at(state, ctx, wk, tid)
+        _mw_harvest_room_caption(
+            ctx, wlabel, (_src_now[0] if (whole and _src_now) else
+                          (float(r.count) if whole else float(cnt or 0.0))))
         _cand = ManualEvent(type="harvest", week=wk, from_tank=tid,
                             count=(None if whole else cnt))
         _mw_event_preview(state, ctx, _cand)
@@ -3419,9 +3702,10 @@ def _mw_action_panel(state, ctx, rows, labels, sel, date_for):
             return sorted(opts, key=lambda t: occ_map.get(t, (None, 0.0))[1])
         dest_6n = _dest_opts(sorted(SIXN_ALL_TANKS))   # mains 61/63/65 + sisters 67/69/71
         dest_og = _dest_opts([t.tank_id for t in other_og])
+        _mw_seed(f"mw_g6_cnt_{sfx}", float(int(r.count // 2)))
         n_big = st.number_input(
             "Fish to send to 6N (the biggest N)", min_value=0.0,
-            max_value=float(r.count), value=float(int(r.count // 2)), step=1000.0,
+            max_value=float(r.count), step=1000.0,
             key=f"mw_g6_cnt_{sfx}",
             help="The N largest fish are graded out at their (higher) mean weight; "
                  "the rest stay at their (lower) mean.")
@@ -3467,6 +3751,16 @@ def _mw_action_panel(state, ctx, rows, labels, sel, date_for):
             st.caption("⚠ No empty / same-batch OG tank for the smaller fish.")
         dests = ([ManualDest(tank=int(dest6n)), ManualDest(tank=int(ret_tank))]
                  if dest6n is not None and ret_tank is not None else [])
+        if dests:
+            _g6_mode = MODE_STAGE if _g6_staged else MODE_HARVEST
+            _fs, _ferr = _mw_fill_solve(state, ctx, tid, wk, int(dest6n), "graded",
+                                        (int(ret_tank), _g6_mode))
+            if _fs is not None:
+                st.caption(_mw_fill_caption(state, _fs, int(dest6n)))
+                _mw_fill_button(_fs, f"mw_g6_fill_{sfx}",
+                                {f"mw_g6_cnt_{sfx}": float(_fs.count)})
+            elif _ferr:
+                st.caption(f"🎯 Room to limit unavailable ({_ferr}).")
         _cand = ManualEvent(type="graded_harvest", week=wk, from_tank=tid,
                             count=n_big, destinations=dests,
                             mode=(MODE_STAGE if _g6_staged else MODE_HARVEST))
@@ -3500,13 +3794,22 @@ def _mw_action_panel(state, ctx, rows, labels, sel, date_for):
         picks = st.multiselect(
             "Destination grow-out tank(s) — empty or same batch (· batch · density)",
             options=move_dests, format_func=dfmt, key=f"mw_m_dest_{sfx}")
-        whole = st.checkbox("Move the whole tank (split evenly)", value=True,
+        _mw_seed(f"mw_m_whole_{sfx}", True)
+        whole = st.checkbox("Move the whole tank (split evenly)",
                             key=f"mw_m_whole_{sfx}")
         total = None
         if not whole:
+            _mw_seed(f"mw_m_total_{sfx}", float(r.count))
             total = st.number_input("Total fish to move (split evenly across dests)",
-                                    min_value=0.0, value=float(r.count), step=1000.0,
+                                    min_value=0.0, step=1000.0,
                                     key=f"mw_m_total_{sfx}")
+        if picks:
+            _base, _ = _mw_base_now(state, ctx, wk)
+            _src_now = _mw_source_at(state, ctx, wk, tid)
+            if _base is not None and _src_now and _src_now[0]:
+                _each = (_src_now[0] if whole else float(total or 0.0)) / len(picks)
+                _mw_density_room_caption(_base[0], picks, _src_now[1],
+                                         sending={t: _each for t in picks})
         _cand = ManualEvent(type="og_transfer", week=wk, from_tank=tid,
                             destinations=_mw_split_dests(picks, total, whole),
                             count=(None if whole else total))
@@ -3538,13 +3841,28 @@ def _mw_action_panel(state, ctx, rows, labels, sel, date_for):
         picks = st.multiselect(
             "6N depuration tank(s) — mains + sisters (· batch · density)",
             options=sorted(SIXN_ALL_TANKS), format_func=dfmt, key=f"mw_6_dest_{sfx}")
-        whole = st.checkbox("Move the whole tank (split evenly)", value=True,
+        _mw_seed(f"mw_6_whole_{sfx}", True)
+        whole = st.checkbox("Move the whole tank (split evenly)",
                             key=f"mw_6_whole_{sfx}")
         total = None
         if not whole:
+            _mw_seed(f"mw_6_total_{sfx}", float(r.count))
             total = st.number_input("Total fish to send (split evenly)",
-                                    min_value=0.0, value=float(r.count), step=1000.0,
+                                    min_value=0.0, step=1000.0,
                                     key=f"mw_6_total_{sfx}")
+        for _d6 in picks:
+            _fs, _ferr = _mw_fill_solve(state, ctx, tid, wk, int(_d6), "og_to_6n")
+            if _fs is not None:
+                st.caption(_mw_fill_caption(state, _fs, int(_d6)))
+                if len(picks) == 1:
+                    _mw_fill_button(_fs, f"mw_6_fill_{sfx}",
+                                    {f"mw_6_whole_{sfx}": False,
+                                     f"mw_6_total_{sfx}": float(_fs.count)})
+            elif _ferr:
+                st.caption(f"🎯 Room to limit unavailable ({_ferr}).")
+        if len(picks) > 1:
+            st.caption("🎯 Fill to limit works on one 6N tank at a time — pick "
+                       "one tank, or split the count yourself.")
         _cand = ManualEvent(type="og_to_6n", week=wk, from_tank=tid,
                             destinations=_mw_split_dests(picks, total, whole),
                             count=(None if whole else total))
@@ -3683,6 +4001,17 @@ def _mw_graded_transfer_panel(state, ctx, rows, r, tid, wk, wlabel, sfx,
                 dests.append((t, float(c)))
     elif picks:
         st.caption("Pick at least two destinations (for one, use Move).")
+    if len(dests) >= 2:
+        _base, _ = _mw_base_now(state, ctx, wk)
+        if _base is not None:
+            _named = sum(c for _t, c in dests if c is not None)
+            _send = {t: (c if c is not None else max(0.0, moved - _named))
+                     for t, c in dests if t != tid}
+            _mw_density_room_caption(
+                _base[0], [t for t, _c in dests if t != tid], float(r.avg_wt_g),
+                label=(" (this tank's average; graded classes differ — see the "
+                       "table)" if mode == MODE_GT_GRADE else ""),
+                sending=_send)
     plan = None
     if len(dests) >= 2:
         _eff = float(getattr(ctx.get("control"), "grade_efficiency", 1.0) or 1.0)
@@ -3904,6 +4233,17 @@ def _mw_fw_intake(state, ctx, rows, labels, date_for):
         "Tank(s) for the SMALLER grade", options=small_opts,
         format_func=dfmt, key=f"mw_fw_small_{sfx}")
 
+    if prev and (big_picks or small_picks):
+        _base, _ = _mw_base_now(state, ctx, wk)
+        if _base is not None:
+            if big_picks:
+                _mw_density_room_caption(
+                    _base[0], big_picks, prev[1], label=" (bigger grade)",
+                    sending={t: prev[0] / len(big_picks) for t in big_picks})
+            if small_picks:
+                _mw_density_room_caption(
+                    _base[0], small_picks, prev[3], label=" (smaller grade)",
+                    sending={t: prev[2] / len(small_picks) for t in small_picks})
     need_big = bool(prev and prev[0] > 0)
     need_small = bool(prev and prev[2] > 0)
     gaps = []
