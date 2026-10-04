@@ -92,10 +92,9 @@ def count_at_harvest(state, ctx, events, tank_id, fill_wk):
     not its count at the moment of the fill."""
     from .time_grid import week_label
     hw, scripted = harvest_week(tank_id, fill_wk, events)
-    sc, _w = project(state, ctx, events, hw - 1)
-    t = sc.tanks_by_id.get(int(tank_id))
-    n = float(t.count) if (t is not None and not t.is_empty) else 0.0
-    return n, hw, week_label(hw - 1, ctx["forecast_start"]), scripted
+    _sc, win = project(state, ctx, events, max(hw, window_length(events)))
+    return (_tank_at_open(ctx, win, tank_id, hw), hw,
+            week_label(hw - 1, ctx["forecast_start"]), scripted)
 
 
 @dataclass
@@ -170,22 +169,37 @@ def _solve_linear(metric: Callable[[float], float], target: float, n_max: float,
     return float(n), val, m0, val < target - 1.0
 
 
+def _tank_at_open(ctx, win, tank_id, wk) -> float:
+    """Fish in `tank_id` at the OPEN of window week `wk` (before that week's
+    events and growth) -- the projection's own opening snapshot."""
+    from .time_grid import week_label
+    lbl = week_label(wk - 1, ctx["forecast_start"])
+    return sum(float(r.count) for r in (win.get("opening_locations") or [])
+               if r.week_label == lbl and int(r.tank_id) == int(tank_id))
+
+
 def _metric_factory(state, ctx, build: Callable[[float], list], tank_id,
-                    hw: int, measure: str):
-    """metric(n) and refused(n) for the event list `build(n)`."""
+                    hw: int, measure: str, baseline_events: list):
+    """metric(n) and refused(n) for the event list `build(n)`.
+
+    Every projection runs the WHOLE scripted window (and on to week `hw` when
+    that is later): an edit's knock-on refusal can sit after the week being
+    matched -- cutting a whole-tank fill leaves fish behind that block a later
+    move into that tank. `refused(n)` = more run refusals than the operator's
+    CURRENT events (`baseline_events`) have, anywhere in the window."""
     cache: dict = {}
+
+    def _proj(evs):
+        n_weeks = max(hw, window_length(evs))
+        _sc, win = project(state, ctx, evs, n_weeks)
+        return win
 
     def run(n):
         n = float(n)
         if n not in cache:
-            evs = build(n)
-            if measure == "week":
-                _sc, win = project(state, ctx, evs, hw)
-                val = week_harvest(ctx, win, hw)
-            else:
-                sc, win = project(state, ctx, evs, hw - 1)
-                t = sc.tanks_by_id.get(tank_id)
-                val = float(t.count) if (t is not None and not t.is_empty) else 0.0
+            win = _proj(build(n))
+            val = (week_harvest(ctx, win, hw) if measure == "week"
+                   else _tank_at_open(ctx, win, tank_id, hw))
             cache[n] = (val, _refusals(win), win)
         return cache[n]
 
@@ -196,7 +210,7 @@ def _metric_factory(state, ctx, build: Callable[[float], list], tank_id,
 
     def refused(n):
         if "r" not in base_ref:
-            base_ref["r"] = run(0)[1]
+            base_ref["r"] = _refusals(_proj(list(baseline_events)))
         return run(n)[1] > base_ref["r"]
 
     return metric, refused, run
@@ -288,7 +302,8 @@ def fill_to_limit(state, ctx, events, make_event: Callable[[float], object],
     def build(n):
         return list(events) if n <= 0 else list(events) + [make_event(n)]
 
-    metric, refused, _run = _metric_factory(state, ctx, build, tank_id, hw, measure)
+    metric, refused, _run = _metric_factory(state, ctx, build, tank_id, hw,
+                                            measure, baseline_events=events)
     res = _solve_linear(metric, lim, n_max, refused)
     if res is None:
         return Solve(0.0, lim, "limit", lbl, hw, measure, tank_id, metric(0), None,
@@ -415,7 +430,8 @@ def solve_entry(state, ctx, events, idx, hw, measure, tank_id, target, kind,
             evs[idx] = with_count(ev, n, fill_tank)
         return evs
 
-    metric, refused, run = _metric_factory(state, ctx, build, tank_id, hw, measure)
+    metric, refused, run = _metric_factory(state, ctx, build, tank_id, hw,
+                                           measure, baseline_events=events)
     current_val = run(cur if cur is not None else n_max)[0]
     if kind == "limit":
         res = _solve_linear(metric, target, n_max, refused)
@@ -483,9 +499,8 @@ def window_suggestions(state, ctx, events, facility_limits=None):
             # rows' business -- judging the fill on the week's total flagged
             # tanks that fit on their own.
             measure = "tank"
-            s2, _w2 = project(state, ctx, events, hw - 1)
-            tk = s2.tanks_by_id.get(t)
-            val = float(tk.count) if (tk is not None and not tk.is_empty) else 0.0
+            _s2, w2 = project(state, ctx, events, max(hw, n))
+            val = _tank_at_open(ctx, w2, t, hw)
             if val <= lim + 0.5:
                 continue
             ev = events[last]

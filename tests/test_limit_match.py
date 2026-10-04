@@ -192,7 +192,14 @@ def test_window_suggestions_october(env):
     assert six[(61, "2026-W45")].entry_index == 14          # 52 -> 61, 13,000
     # Window weeks: over -> a fill of a tank harvested that week; under with
     # nothing to raise -> no proposal, a reason instead.
-    assert wk["2026-W42"].entry_index == 4 and wk["2026-W42"].current is None
+    # W42: cutting the W40 '45 -> 67 whole tank' would leave B42 in tank 45 and
+    # the W41 move 13 -> 45 (B46) would be REFUSED -- 13 stays full and B50's
+    # W42 intake into 13 fails. That knock-on refusal sits AFTER W42, so the
+    # helper must judge the whole window: it falls back to a partial harvest
+    # of 61 instead, and never proposes entry 4.
+    assert wk["2026-W42"].entry_index == 3 and wk["2026-W42"].current is None
+    assert 0 < wk["2026-W42"].proposed < 40000
+    assert all(s.entry_index != 4 for s in sugs if s.proposed is not None)
     assert wk["2026-W43"].entry_index == 7
     assert wk["2026-W45"].entry_index == 14 and wk["2026-W45"].same_as_6n
     for w in ("2026-W40", "2026-W41", "2026-W44"):
@@ -219,10 +226,14 @@ def test_applying_the_suggestions_top_down_lands_each_week_on_its_limit(env):
         cur = lm.apply_suggestion(cur, todo[0])
         rounds += 1
     assert not todo, [s.message for s in todo]
+    # No edit made the run refuse anything the operator's own window does not.
+    _s0, w0 = _window(env, evs, 6)
+    _s1, w1 = _window(env, cur, 6)
+    assert lm._refusals(w1) == lm._refusals(w0)
     assert {14, 17} <= edited
     assert all(evs[i].type in ("og_to_6n", "harvest", "graded_harvest") for i in edited)
     _sc, win = _window(env, cur, 6)
-    for w in (3, 4, 6):                       # W42, W43, W45
+    for w in (3, 4, 5, 6):                    # W42..W45
         assert 51499.0 <= _week_total(env, win, w) <= 51500.0 + 1e-6, w
     assert 51499.0 <= _tank_at_open(env, cur, 63, 7) <= 51500.0 + 1e-6
     for i, (a, b) in enumerate(zip(evs, cur)):
@@ -366,7 +377,7 @@ if at.exception:
     print("FAIL after apply: " + "; ".join(str(e)[:600] for e in at.exception)); raise SystemExit(1)
 after = _snap(at.session_state["mw_events"])
 changed = [i for i, (a, b) in enumerate(zip(before, after)) if a != b]
-if changed != [4] or after[4][1][0][1] is None or not (0 < after[4][1][0][1] < 9000):
+if changed != [7] or not (0 < after[7][1][0][1] < 28000):
     print("FAIL apply edited %r -> %r" % (changed, [after[i] for i in changed])); raise SystemExit(1)
 left = [b for b in at.button if (b.key or "").startswith("mw_sug_apply_")]
 if not left or set(b.key for b in left) & set(b.key for b in apply):
