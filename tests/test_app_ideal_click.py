@@ -1288,9 +1288,18 @@ def test_every_keyed_widget_drawn_without_a_value_is_re_sent():
         return (("lit", e.value) if isinstance(e, ast.Constant)
                 else ("expr", ast.dump(e)))
 
+    # _mw_seed(key, default) seeds a key once and then re-sends it (it calls
+    # _resend_widget itself -- asserted below), so it counts as a re-send.
+    _RESENDERS = ("_resend_widget", "_mw_seed")
+
     def is_resend(n):
         return (isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
-                and n.func.id == "_resend_widget" and bool(n.args))
+                and n.func.id in _RESENDERS and bool(n.args))
+
+    seed = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
+                and n.name == "_mw_seed")
+    assert any(isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+               and c.func.id == "_resend_widget" for c in ast.walk(seed)),         "_mw_seed no longer re-sends its key"
 
     keep = next(n for n in tree.body if isinstance(n, ast.Assign)
                 and any(getattr(t, "id", None) == "_IDEAL_KEEP"
