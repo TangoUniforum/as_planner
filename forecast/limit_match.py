@@ -35,7 +35,9 @@ from __future__ import annotations
 import contextlib
 import copy
 import io
+import json
 import math
+import threading
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
@@ -47,14 +49,56 @@ def _quiet(fn, *a, **k):
         return fn(*a, **k)
 
 
+# Projection memo, live only inside window_suggestions (see _memo_scope). The
+# solver re-projects the SAME event list many times -- the unedited baseline
+# once per entry it tries, plus repeated probe counts -- 21 of 59 projections
+# on the operator's October window (2026-10-04). A projection is a pure
+# function of (start state, ctx, events, weeks), and every caller here only
+# READS the result, so within one call an identical request returns the same
+# objects. Thread-local: each Streamlit session runs in its own thread.
+_MEMO = threading.local()
+
+
+def _events_key(events) -> str:
+    from .manual_events import manual_events_to_list
+    return json.dumps(manual_events_to_list(list(events)), sort_keys=True,
+                      default=str)
+
+
+@contextlib.contextmanager
+def _memo_scope():
+    """Turn the projection memo on for the duration (re-entrant: an inner
+    scope shares the outer one's memo and leaves it in place)."""
+    from . import manual_window as _mw
+    if getattr(_MEMO, "d", None) is not None:
+        yield
+        return
+    _MEMO.d = {}
+    _mw._FW_MEMO.d = {}          # the window's freshwater lookup, same scope
+    try:
+        yield
+    finally:
+        _MEMO.d = None
+        _mw._FW_MEMO.d = None
+
+
 def project(state, ctx, events, n_weeks):
-    """The run's window over `events` for `n_weeks` on a COPY of `state`."""
+    """The run's window over `events` for `n_weeks` on a COPY of `state`.
+    Callers only read the result (see _MEMO)."""
     from .manual_window import advance_facility_window
+    memo = getattr(_MEMO, "d", None)
+    key = None
+    if memo is not None:
+        key = (id(state), id(ctx), int(n_weeks), _events_key(events))
+        if key in memo:
+            return memo[key]
     sc = copy.deepcopy(state)
     win = _quiet(advance_facility_window, sc, ctx["batch_by_id"], ctx["tables"],
                  ctx["forecast_start"], n_weeks, events=list(events),
                  control=ctx.get("control"), pr_closing=ctx.get("pr_closing"),
                  fw_records=ctx.get("fw_records"))
+    if memo is not None:
+        memo[key] = (sc, win)
     return sc, win
 
 
@@ -86,6 +130,12 @@ def harvest_week(tank_id, fill_wk, events, hold_weeks=None):
 
 
 def count_at_harvest(state, ctx, events, tank_id, fill_wk):
+    """See _count_at_harvest (run inside the projection memo scope)."""
+    with _memo_scope():
+        return _count_at_harvest(state, ctx, events, tank_id, fill_wk)
+
+
+def _count_at_harvest(state, ctx, events, tank_id, fill_wk):
     """(fish, week index, week label, scripted?) -- what 6N `tank_id`, filled
     in window week `fill_wk`, holds at the OPEN of the week it comes out: the
     count the run drains, after purge mortality (and any later top-up) --
@@ -276,7 +326,13 @@ def _source_count_at(state, ctx, events, ev) -> float:
 
 # --------------------------------------------------------------- helpers ---
 
-def fill_to_limit(state, ctx, events, make_event: Callable[[float], object],
+def fill_to_limit(state, ctx, events, make_event, *a, **k):
+    """See _fill_to_limit (run inside the projection memo scope)."""
+    with _memo_scope():
+        return _fill_to_limit(state, ctx, events, make_event, *a, **k)
+
+
+def _fill_to_limit(state, ctx, events, make_event: Callable[[float], object],
                   tank_id: int, wk: int, source_count: float,
                   facility_limits=None, graded: bool = False) -> Optional[Solve]:
     """The count a NEW 6N fill into `tank_id` in window week `wk` should send so
@@ -456,6 +512,14 @@ def solve_entry(state, ctx, events, idx, hw, measure, tank_id, target, kind,
 
 
 def window_suggestions(state, ctx, events, facility_limits=None):
+    """See _window_suggestions -- run with the projection memo on, so the
+    solver never re-projects an identical event list (same answers, fewer
+    window replays)."""
+    with _memo_scope():
+        return _window_suggestions(state, ctx, events, facility_limits)
+
+
+def _window_suggestions(state, ctx, events, facility_limits=None):
     """For each scripted week whose harvest is off its floor/limit and each 6N
     fill that will hold more than its harvest week's limit: the one entry edit
     that lands it on target, or a reason no single entry can.

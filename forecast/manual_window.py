@@ -17,6 +17,7 @@ window) + the realized-biology capture the continuity audit needs. Operations
 """
 from __future__ import annotations
 
+import threading
 from datetime import timedelta
 
 from .biology import advance_tank_one_day
@@ -124,6 +125,23 @@ def advance_facility_one_week(state, batch_by_id, tables, week_start_date,
     return realized
 
 
+# Optional memo for _build_fw_lookup, OFF unless a caller switches it on for
+# its own thread (forecast.limit_match._memo_scope, which replays this window
+# dozens of times with the same freshwater inputs). It is never on in a run:
+# run.py never enters that scope, so the run builds its lookup exactly as
+# before. The lookup depends only on WHICH batches have an fw_to_og plus the
+# fixed PR / config objects, so within one scope a repeat is the same answer.
+_FW_MEMO = threading.local()
+
+
+def _fw_memo_key(fw_batches, fw_records, control, pr_closing, tables,
+                 batch_by_id):
+    """Everything _build_fw_lookup's answer depends on: the fw_to_og batch set
+    and the (unchanging within a scope) PR / config objects."""
+    return (frozenset(fw_batches), id(fw_records), id(control),
+            str(pr_closing), id(tables), id(batch_by_id))
+
+
 def _build_fw_lookup(events, fw_records, control, pr_closing, tables, batch_by_id):
     """Index (batch_id, week_label) -> (count, avg_wt_g, cv) for every FW batch
     referenced by an fw_to_og event, by projecting its in-flight FW trajectory.
@@ -146,6 +164,13 @@ def _build_fw_lookup(events, fw_records, control, pr_closing, tables, batch_by_i
                   if ev.type == TYPE_FW_TO_OG and ev.batch}
     if not fw_batches or not fw_records or control is None:
         return {}
+    memo = getattr(_FW_MEMO, "d", None)
+    mkey = None
+    if memo is not None:
+        mkey = _fw_memo_key(fw_batches, fw_records, control, pr_closing,
+                            tables, batch_by_id)
+        if mkey in memo:
+            return dict(memo[mkey])
     from .biology import project_in_flight_fw_batch
     agg = defaultdict(lambda: {"count": 0.0, "biomass_kg": 0.0})
     for r in fw_records:
@@ -169,6 +194,8 @@ def _build_fw_lookup(events, fw_records, control, pr_closing, tables, batch_by_i
             fb = pr_fw_week1_fallback(states, wk1, a["count"], avg_wt, cv)
             if fb is not None:
                 lookup[(bid, wk1)] = fb
+    if memo is not None:
+        memo[mkey] = dict(lookup)
     return lookup
 
 
