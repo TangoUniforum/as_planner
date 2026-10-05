@@ -1508,6 +1508,7 @@ def _transit_entry_to_pair(
     sixn_move_in_feed,
     avoid=frozenset(),
     weekly_min=None,
+    weekly_max=None,
 ) -> float:
     """Route market-ready ENTRY-tier fish into the 6N fill pair the legal way.
 
@@ -1581,7 +1582,11 @@ def _transit_entry_to_pair(
         ok = _make_room_into_6n(
             state, hop, week_start_date, fill_pair,
             transfer_events, warnings, week_label,
-            harvest_cap=getattr(control, "max_harvest_per_week", None),
+            # The processing limit of the week this pair DRAINS (the caller's
+            # weekly_max), not Control's flat default -- a per-week band must
+            # bind the fish that will be harvested in that week.
+            harvest_cap=(weekly_max if weekly_max
+                         else getattr(control, "max_harvest_per_week", None)),
             reason=f"6N rotation fill via entry forward-transit (from {src_loc})",
             sixn_move_in_feed=sixn_move_in_feed, tables=tables,
             batch_meta=batch_meta, is_purge=True, avoid=avoid)
@@ -1751,6 +1756,7 @@ def _run_sixn_purge_week(
     grade_events=None,
     weekly_min: Optional[float] = None,
     week_floor: Optional[float] = None,
+    weekly_max: Optional[float] = None,
 ) -> Optional[tuple[int, int]]:
     """Run one week of the 6N purge pipeline (3-pair fallow rotation).
 
@@ -2040,7 +2046,12 @@ def _run_sixn_purge_week(
     # processing limit — max_harvest_per_week is a constraint the harvest
     # respects, never a level to size up to. The same limit gates the DRAIN
     # (the hold above); the relief band exists only for exceptional drains.
-    max_h = float(control.max_harvest_per_week or 0) or min_h
+    # THE LIMIT IS PER WEEK TOO, and it is the DRAIN week's (`weekly_max`,
+    # passed by the caller like `weekly_min`). Reading only Control here let a
+    # 36,500 per-week cap size fills at 55,000 (operator, 2026-10-05: the
+    # March band was ignored for the first three weeks). None keeps Control.
+    max_h = (float(weekly_max) if weekly_max
+             else float(control.max_harvest_per_week or 0)) or min_h
     # NOTE (measured 2026-08-01, DO NOT RETRY without re-measuring): the floor
     # is judged at the DRAIN but sized HERE, and the fish carry ~lead weeks of
     # mortality between the two — so 12 of 19 sub-floor weeks land at exactly
@@ -2363,7 +2374,7 @@ def _run_sixn_purge_week(
             state, batch_meta, control, week_label, week_start_date,
             fill_pair, target, count_moved, transfer_events, grade_events,
             warnings, reserved, tables, sixn_move_in_feed,
-            avoid=_avoid_imminent, weekly_min=min_h)
+            avoid=_avoid_imminent, weekly_min=min_h, weekly_max=max_h)
 
     # GRADE-TO-MIN floor fill: when the whole-tank move-in + entry transit leave
     # the resting pair below the harvest FLOOR (min_h), peel just enough of the
@@ -5112,6 +5123,22 @@ def phase_d_emit_events(
         # precede it — summing to exactly X, no double-count.
         cur_idx = sorted_weeks.index(week_label)
         drain_idx = cur_idx + lead
+        # THE FILL'S BAND IS ITS DRAIN WEEK'S (operator 2026-10-05, "fix the
+        # fill week bug"). Fish staged now are harvested at drain_idx, so the
+        # per-week floor/limit that must bind them is that week's. Using this
+        # week's band let 2026's 51,500 rows size the fills that drained in
+        # 2026-W53/2027-W01 (26,000/55,000 weeks), and let February's 42,500
+        # cap size fills that drained in March's 36,500 weeks. Past the horizon
+        # tail the last horizon week's band stands in (those fish never drain
+        # inside the plan, so only continuity matters). This week's OWN drains,
+        # budget and limit hold keep this week's band (min_hv / weekly_max).
+        _fill_lbl = (sorted_weeks[drain_idx] if drain_idx < len(sorted_weeks)
+                     else sorted_weeks[-1])
+        fill_min = resolve_facility_cap(METRIC_MIN_HARVEST, _fill_lbl,
+                                        facility_limits, control)
+        _fill_max_v = resolve_facility_cap(METRIC_MAX_HARVEST, _fill_lbl,
+                                           facility_limits, control)
+        fill_max = _fill_max_v if _fill_max_v else float("inf")
         W = max(1, _ARRIVAL_SMOOTH_WEEKS)
         arrivals_kg = sum(
             arrivals_by_week.get(sorted_weeks[drain_idx + j], 0.0)
@@ -5123,8 +5150,8 @@ def phase_d_emit_events(
             growth_kg_week=fac_growth_kg,
             setpoint=setpoint,
             harvest_avg_wt_g=oldest_wt,
-            weekly_min=min_hv or 0.0,
-            weekly_max=weekly_max,
+            weekly_min=fill_min or 0.0,
+            weekly_max=fill_max,
             gain=_MOVE_IN_GAIN,
             arrivals_kg=arrivals_kg,
         )
@@ -5144,10 +5171,10 @@ def phase_d_emit_events(
                   f"excess={fac_bio - (bio_cap or 0):>9,.0f} "
                   f"growth={fac_growth_kg:>8,.0f} arrivals={arrivals_kg:>8,.0f} "
                   f"wt={oldest_wt:>6,.0f}g raw={_raw:>8,.0f} "
-                  f"min={(min_hv or 0):>7,.0f} max={weekly_max:>7,.0f} "
+                  f"min={(fill_min or 0):>7,.0f} max={fill_max:>7,.0f} "
                   f"-> {move_in_target:>7,.0f}"
-                  f"{'  <-- FLOOR BINDS' if _raw < (min_hv or 0) else ''}"
-                  f"{'  <-- CLIPPED' if _raw > weekly_max else ''}", flush=True)
+                  f"{'  <-- FLOOR BINDS' if _raw < (fill_min or 0) else ''}"
+                  f"{'  <-- CLIPPED' if _raw > fill_max else ''}", flush=True)
 
         # HYBRID lever 1 — PURGE weeks only. Fish moved in NOW drain at
         # `drain_idx`, so this week's move-in must deliver the guide's quantity
@@ -5159,7 +5186,7 @@ def phase_d_emit_events(
                 _dl = (sorted_weeks[drain_idx]
                        if drain_idx < len(sorted_weeks) else None)
                 move_in_target = harvest_guide.target(
-                    _dl, move_in_target, min_hv or 0.0, weekly_max,
+                    _dl, move_in_target, fill_min or 0.0, fill_max,
                     # Ceiling only when L1 also calls the DRAIN week a purge
                     # week. If L1 has flipped to production by calendar while
                     # we are still purging, its number describes a different
@@ -5234,13 +5261,22 @@ def phase_d_emit_events(
         # be met (the backlog was sized last week), and with a shared number we
         # would freeze more fish off-feed than the pipeline needs.
         _starve_weeks = max(1, math.ceil((purge_days or 7) / 7.0))
-        _entry_target = weekly_target
+        # The band of the week the staged tank SERVES (operator 2026-10-05,
+        # the fill-week fix): its floor/limit, not this week's, bound the entry.
+        _si = cur_idx + _starve_weeks
+        _serve_lbl = (sorted_weeks[_si] if _si < len(sorted_weeks)
+                      else sorted_weeks[-1])
+        serve_min = resolve_facility_cap(METRIC_MIN_HARVEST, _serve_lbl,
+                                         facility_limits, control)
+        _serve_max_v = resolve_facility_cap(METRIC_MAX_HARVEST, _serve_lbl,
+                                            facility_limits, control)
+        serve_max = _serve_max_v if _serve_max_v else float("inf")
+        _entry_target = min(serve_max, max(serve_min or 0.0, harvest_target or 0.0))
         if harvest_guide is not None and harvest_guide.production_lever:
-            _si = cur_idx + _starve_weeks
             if _si < len(sorted_weeks):
                 _sl = sorted_weeks[_si]
                 _entry_target = harvest_guide.target(
-                    _sl, weekly_target, min_hv or 0.0, weekly_max,
+                    _sl, _entry_target, serve_min or 0.0, serve_max,
                     allow_ceiling=((harvest_guide.mode_for(_sl) == "production")
                                    and not _over_cap))
 
@@ -5262,10 +5298,8 @@ def phase_d_emit_events(
                 # this week's -- see the drain_idx note above: "move-in drives
                 # harvest at week t+lead". Falls back to this week's floor at
                 # the horizon tail, then to the Control default.
-                weekly_min=((resolve_facility_cap(
-                    METRIC_MIN_HARVEST, sorted_weeks[drain_idx],
-                    facility_limits, control)
-                    if drain_idx < len(sorted_weeks) else None) or min_hv),
+                weekly_min=(fill_min or min_hv),
+                weekly_max=(_fill_max_v or None),
                 pair_queue=sixn_pair_queue,
                 week_label=week_label,
                 week_start_date=week_start_date,
@@ -5567,7 +5601,7 @@ def phase_d_emit_events(
                     # (no min_harvest_per_week rows past 2026-W53) but a rule
                     # the operator writes must mean the same thing everywhere.
                     _floor_p = min(_entry_target,
-                                   float(min_hv or control.min_harvest_per_week
+                                   float(serve_min or control.min_harvest_per_week
                                          or _entry_target)
                                    * _SIXN_FILL_MORTALITY_PAD)
                     if _entered < _floor_p:
