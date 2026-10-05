@@ -368,7 +368,7 @@ def test_the_run_results_view_draws_the_warning_above_the_tabs(tmp_path):
         "other": [_entry("PER-WEEK COVERAGE - biomass: a lookalike",
                          cat="WARNING - Hydration")],
         "want": ["2 metrics run past your dated per-week limits",
-                 "Control default after 2026-W53", "`biomass`",
+                 "Control default after W53 '26", "`biomass`",  # drawn week-first (2026-10-05)
                  "`feed_per_day`", "3,800,000", "34,000",
                  "Configure → Limits"],
     }

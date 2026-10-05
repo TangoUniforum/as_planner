@@ -37,6 +37,15 @@ from forecast import levers as _levers  # noqa: E402
 # ONE batch order for every list and picker (B9 < B10 < B100), shared with
 # the workbook writers.
 from forecast.batch_order import batch_sort_key, sorted_batches  # noqa: E402
+# Weeks are SHOWN week-first -- "W05 '27" -- everywhere the app draws one
+# (operator, 2026-10-05). Display only: the ISO label "2027-W05" stays the key
+# for limits.yaml, manual events, caches and sorting, and the Excel export
+# keeps it. One wrapper over Streamlit's drawing calls instead of ~150 call
+# sites, so engine messages printed verbatim are covered too; editors are not
+# wrapped (they return what they show). See forecast/week_display.py.
+from forecast import week_display as _week_display  # noqa: E402
+from forecast.time_grid import display_week  # noqa: E402
+_week_display.install(st)
 
 # The ONE method list. Board roster, run-mode label and the engine dispatch all
 # read this, so adding a method is a single register() call in forecast/methods.
@@ -5274,9 +5283,12 @@ def _edit_limits():
         "unaffected. "
         "The per-week system grid carries the first two only — a harvest or "
         "yield cap is a whole-facility number.")
+    # Column KEYS stay the ISO label (that is what limits.yaml stores and what
+    # the editor hands back on Save); only the header the operator reads is
+    # "W05 '27". An editor is not covered by forecast/week_display.
     wk_cfg = {wk: st.column_config.NumberColumn(
-        width="small",
-        help=f"The cap value for ISO week {wk} (unit = whatever the row's "
+        label=display_week(wk), width="small",
+        help=f"The cap value for week {display_week(wk)} (unit = whatever the row's "
              f"metric uses). Blank facility cell = fall back to the Control "
              f"default; blank system cell = use the system capacity above.")
         for wk in weeks}

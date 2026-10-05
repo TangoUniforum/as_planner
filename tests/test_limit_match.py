@@ -335,7 +335,7 @@ if at.exception:
 if at.exception:
     print("FAIL after pick: " + "; ".join(str(e)[:600] for e in at.exception)); raise SystemExit(1)
 caps = [c.value for c in at.caption if "Room to" in c.value]
-if not caps or "2026-W46" not in caps[0]:
+if not caps or "W46 '26" not in caps[0]:     # app shows weeks "W46 '26" (2026-10-05)
     print("FAIL no room caption %r" % caps); raise SystemExit(1)
 fill = [b for b in at.button if b.key == "mw_6_fill_53_5"]
 if not fill:
