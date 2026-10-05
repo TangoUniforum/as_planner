@@ -71,12 +71,17 @@ def test_the_fill_is_sized_by_the_DRAIN_weeks_floor():
     """placement.py's own note: "move-in drives harvest at week t+lead". The
     floor is a promise about the HARVEST week, so the fill two weeks earlier
     must be sized by the floor of the week it drains into."""
+    # Since 2026-10-05 the drain week is resolved ONCE, above the call, and
+    # both the floor and the limit of that week are passed (fill-week fix).
     src = _src(P.phase_d_emit_events)
+    assert "_fill_lbl = (sorted_weeks[drain_idx]" in src, (
+        "the fill must resolve the DRAIN week")
+    assert "resolve_facility_cap(METRIC_MIN_HARVEST, _fill_lbl" in src
+    assert "resolve_facility_cap(METRIC_MAX_HARVEST, _fill_lbl" in src
     i = src.index("_run_sixn_purge_week(")
-    call = src[i:i + 700]
-    assert "weekly_min=" in call
-    assert "drain_idx" in call, "the fill must resolve the DRAIN week's floor"
-    assert "METRIC_MIN_HARVEST" in call
+    call = src[i:i + 900]
+    assert "weekly_min=(fill_min" in call
+    assert "weekly_max=(_fill_max_v" in call
 
 
 # --------------------------------------------------------------------------- #
@@ -101,5 +106,7 @@ def test_falsy_weekly_min_falls_back_to_the_control_default():
 def test_the_production_era_stage_uses_the_resolved_floor():
     """Inert until sixn_production_start (2028-01-01) on today's scenario, but a
     rule the operator writes must mean the same thing everywhere."""
+    # The in-place stage serves _starve_weeks later, so it reads THAT week's
+    # resolved floor (serve_min) -- fill-week fix, 2026-10-05.
     src = _src(P.phase_d_emit_events)
-    assert "min_hv or control.min_harvest_per_week" in src
+    assert "serve_min or control.min_harvest_per_week" in src
