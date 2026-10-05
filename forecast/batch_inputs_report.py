@@ -154,9 +154,15 @@ def batch_input_rows(*, batches_input, batch_by_id_used, tranog_events,
         evs = sorted(by_batch_tranog.get(bid, []),
                      key=lambda e: (_d(e.event_date), e.batch_id))
         dests = [d for e in evs for d in e.destinations]
-        n_in = sum(float(d.count) for d in dests)
-        wt_in = (sum(float(d.count) * float(d.avg_wt_g) for d in dests) / n_in
-                 if n_in > 0 else None)
+        # Whole fish exactly as TransferPlan's TranOG rows print them (each
+        # event's legs rounded to sum to the event, excel_io.whole_parts), so
+        # this column ties to that sheet fish for fish.
+        from .excel_io import whole_parts
+        n_in = sum(sum(whole_parts([d.count for d in e.destinations]))
+                   for e in evs)
+        _n_raw = sum(float(d.count) for d in dests)
+        wt_in = (sum(float(d.count) * float(d.avg_wt_g) for d in dests) / _n_raw
+                 if _n_raw > 0 else None)
         weeks = []
         for e in evs:
             wk = iso_week_label(e.event_date)
@@ -197,7 +203,7 @@ def batch_input_rows(*, batches_input, batch_by_id_used, tranog_events,
             b.sgr_correction,
             entry_week,
             entry_date,
-            (round(n_in) if evs else None),
+            (int(n_in) if evs else None),
             (round(wt_in, 1) if wt_in is not None else None),
             ", ".join(str(t) for t in tanks),
             manual,

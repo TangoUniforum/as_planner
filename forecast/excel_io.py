@@ -573,14 +573,21 @@ def write_transfer_plan_output(
         # A/B grade convention; mixed/blank -> no grade.
         return {"big": "A", "small": "B"}.get(getattr(dest, "size_class", "") or "", "")
 
+    # Each row also carries its WHOLE fish (index 11): whole_parts over the
+    # legs of ONE event, so an event's rows add up to round(event total).
+    # Rounding each leg on its own let a two-tank TranOG of 289,917.2 fish
+    # print 144,959 + 144,959 = 289,918 -- one fish more than BatchInputs,
+    # Batch Plan and the InputConservationAudit report for the same arrival
+    # (operator, 2026-10-04: "fix the rounding errors").
     rows: list[tuple] = []
     for ev in tranog_events:
         wk = iso_week_label(ev.event_date)
-        for dest in ev.destinations:
+        _whole = whole_parts([d.count for d in ev.destinations])
+        for dest, _w in zip(ev.destinations, _whole):
             rows.append((
                 ev.event_date, wk, ev.batch_id, "FW", dest.tank_id,
                 dest.count, dest.avg_wt_g / 1000.0, _grade(dest), dest.cv_pct,
-                "TranOG", "",
+                "TranOG", "", _w,
             ))
     for ev in transfer_events:
         # GradedHarvest (Event 5) rides in transfer_events with a different shape
@@ -588,37 +595,40 @@ def write_transfer_plan_output(
         # instead of crashing on ev.destinations.
         if hasattr(ev, "pickup_tank_id"):
             wk = iso_week_label(ev.event_date)
+            _wp, _wr = whole_parts([ev.pickup_count, ev.retention_count])
             rows.append((ev.event_date, wk, ev.batch_id, str(ev.source_tank_id),
                          ev.pickup_tank_id, ev.pickup_count,
                          ev.pickup_avg_wt_g / 1000.0, "pickup",
                          getattr(ev, "_pickup_cv", ev.cv_pct), "Grade",
-                         "graded_harvest"))
+                         "graded_harvest", _wp))
             rows.append((ev.event_date, wk, ev.batch_id, str(ev.source_tank_id),
                          ev.retention_tank_id, ev.retention_count,
                          ev.retention_avg_wt_g / 1000.0, "retention",
                          getattr(ev, "_retention_cv", ev.cv_pct),
-                         "Grade", "graded_harvest"))
+                         "Grade", "graded_harvest", _wr))
             continue
         ct = getattr(ev, "count_transferred", None)
         if ct is not None and ct <= 0:
             continue  # rejected attempt — not part of the actionable plan
         wk = iso_week_label(ev.event_date)
-        for dest in ev.destinations:
+        _whole = whole_parts([d.count for d in ev.destinations])
+        for dest, _w in zip(ev.destinations, _whole):
             rows.append((
                 ev.event_date, wk, ev.batch_id, str(ev.source_tank_id), dest.tank_id,
                 dest.count, dest.avg_wt_g / 1000.0, _grade(dest), dest.cv_pct,
-                "Transfer", getattr(ev, "channel", None) or "",
+                "Transfer", getattr(ev, "channel", None) or "", _w,
             ))
     for ev in (grade_events or []):
         wk = iso_week_label(ev.event_date)
         src_str = ",".join(str(t) for t in ev.source_tank_ids)
-        for dest in ev.destinations:
+        _whole = whole_parts([d.count for d in ev.destinations])
+        for dest, _w in zip(ev.destinations, _whole):
             rows.append((
                 ev.event_date, wk, ev.batch_id, src_str, dest.tank_id,
                 dest.count, dest.avg_wt_g / 1000.0,
                 _grade(dest), dest.cv_pct, "Grade",
                 ("density_split" if getattr(ev, "kind", "grade") == "split"
-                 else "grade_event"),
+                 else "grade_event"), _w,
             ))
     # Merge same-week duplicate Transfer legs + drop sub-half-fish legs (see
     # docstring). Keyed on (date, week, batch, src, dst, grade); first row of
@@ -643,6 +653,7 @@ def write_transfer_plan_output(
             if tot > 0:
                 m[6] = (m[5] * m[6] + r[5] * r[6]) / tot
             m[5] = tot
+            m[11] = m[11] + r[11]
             # The merge key deliberately EXCLUDES the channel: one row is one
             # physical pumping event and the handling budget counts rows, so
             # splitting by channel would inflate the gate with moves nobody
@@ -660,7 +671,7 @@ def write_transfer_plan_output(
         ws.append([
             r[1], r[2], r[9],   # Week, Batch, Type
             r[3], r[4],         # From_Tank, To_Tank
-            round(r[5], 0),
+            round(r[11], 0),    # whole fish, summing to the event (see above)
             round(r[6], 3),
             r[7],
             round(r[8], 1) if r[8] else None,
@@ -1047,10 +1058,12 @@ def write_transfer_template(
     for ev in (tranog_events or []):
         if iso_week_label(ev.event_date) != tog_week.get(ev.batch_id):
             continue
-        for d in getattr(ev, "destinations", []) or []:
+        _ds = getattr(ev, "destinations", []) or []
+        _whole = whole_parts([getattr(d, "count", 0.0) for d in _ds])
+        for d, _n in zip(_ds, _whole):
             # Each destination's WHOLE fish as the TransferPlan TranOG row shows
-            # it (round(count)), so Entry_Count is the sum of those rows exactly.
-            _n = round(float(getattr(d, "count", 0.0) or 0.0), 0)
+            # it (whole_parts over the event's legs), so Entry_Count is the sum
+            # of those rows exactly.
             tog_cnt[ev.batch_id] += _n
             tog_wsum[ev.batch_id] += _n * float(getattr(d, "avg_wt_g", 0.0) or 0.0)
 
