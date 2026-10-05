@@ -129,6 +129,62 @@ def parse_iso_label(label: str) -> Optional[date]:
         return None
 
 
+# ---------------------------------------------------------------------------
+# DISPLAY labels (app only). The operator reads weeks as "W05 '27" -- week
+# first, then the year (2026-10-05). The ISO label above stays THE key: it
+# sorts, it is what limits.yaml / manual events / caches / the workbook carry,
+# and the Excel export keeps it ("the export file is okay"). These helpers only
+# change what a screen SHOWS, and parse_week_input takes either form back.
+# ---------------------------------------------------------------------------
+_ISO_FULL_RE = re.compile(r"^\s*(\d{4})-W(\d{1,2})\s*$")
+# An ISO label inside running text. Not part of a longer token on either side,
+# so file names ("2026-W40_x") and ranges written "2026-W40..W52" behave.
+_ISO_IN_TEXT_RE = re.compile(r"(?<![\w-])(\d{4})-W(\d{2})(?![\w])")
+_DISPLAY_RE = re.compile(r"^\s*W\s*(\d{1,2})\s*['’`]?\s*(\d{2}|\d{4})\s*$",
+                         re.IGNORECASE)
+
+
+def display_week(label) -> str:
+    """'2027-W05' -> "W05 '27". Anything that is not an ISO week label is
+    returned unchanged (str), so it is safe on mixed columns."""
+    m = _ISO_FULL_RE.match(str(label))
+    if not m:
+        return str(label)
+    return f"W{int(m.group(2)):02d} '{m.group(1)[2:]}"
+
+
+def display_weeks_in_text(text):
+    """Every ISO week label inside `text` rewritten for display. Non-strings
+    pass through untouched."""
+    if not isinstance(text, str) or "-W" not in text:
+        return text
+    return _ISO_IN_TEXT_RE.sub(
+        lambda m: f"W{int(m.group(2)):02d} '{m.group(1)[2:]}", text)
+
+
+def parse_week_input(text) -> Optional[str]:
+    """Operator-typed week -> ISO label, or None when it is not a real week.
+
+    Accepts the ISO form ('2027-W05', '2027-W5') and the display form
+    ("W05 '27", 'W5 27', "w05 '2027"). Two-digit years are 20xx. The week
+    must exist in that ISO year (W53 only in 53-week years)."""
+    s = str(text or "")
+    m = _ISO_FULL_RE.match(s)
+    if m:
+        y, w = int(m.group(1)), int(m.group(2))
+    else:
+        m = _DISPLAY_RE.match(s)
+        if not m:
+            return None
+        w, yy = int(m.group(1)), m.group(2)
+        y = int(yy) if len(yy) == 4 else 2000 + int(yy)
+    try:
+        date.fromisocalendar(y, w, 1)
+    except ValueError:
+        return None
+    return f"{y}-W{w:02d}"
+
+
 def label_for_date(d, forecast_start) -> str:
     """Canonical week label for a date inside the forecast (or before/after).
 
