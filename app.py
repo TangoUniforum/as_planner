@@ -2017,7 +2017,7 @@ def _hydrate_state_from_upload(uploaded):
     import io
     data = uploaded.getvalue()
     ck = ("_hydrated_" + hashlib.md5(data).hexdigest() + "_"
-          + _config_fingerprint())
+          + _mw_cfg_fp())
     if ck in st.session_state:
         return st.session_state[ck]
     from openpyxl import load_workbook
@@ -2282,6 +2282,26 @@ def _mw_loc(state, tid):
     return t.location_id if t else f"#{tid}"
 
 
+# ---- One config fingerprint per editor run ----
+# _config_fingerprint() content-hashes every config/ + scenario/ file (on
+# OneDrive). The editor asked for it 13-20 times per rerun -- once per cache
+# lookup (_mw_sig, _mw_facility_limits, the hydration key) -- which measured
+# 0.7-1.0 s of every ~1 s idle rerun (2026-10-04, Oct kit). Nothing the editor
+# does writes config/ before those lookups, so one fingerprint taken at the
+# start of the editor run is the same answer every lookup would get. Scoped to
+# the thread (each Streamlit session reruns in its own thread) and to the
+# _manual_window_editor call; anything outside it still hashes on demand.
+import threading as _threading  # noqa: E402
+_MW_RUN = _threading.local()
+
+
+def _mw_cfg_fp() -> str:
+    """The config fingerprint for this editor run (see _MW_RUN), else a fresh
+    one -- never a value from a previous run."""
+    fp = getattr(_MW_RUN, "fp", None)
+    return fp if fp is not None else _config_fingerprint()
+
+
 def _mw_sig(events, extra=""):
     """Cheap stable signature of the working set (+ context) for caching the
     heavy biology projection / validation across idle reruns.
@@ -2295,7 +2315,7 @@ def _mw_sig(events, extra=""):
     from forecast.manual_events import manual_events_to_list
     payload = json.dumps({"e": manual_events_to_list(events), "x": extra,
                           "pr": st.session_state.get("_mw_pr_key", ""),
-                          "cfg": _config_fingerprint()},
+                          "cfg": _mw_cfg_fp()},
                          sort_keys=True, default=str)
     return hashlib.md5(payload.encode()).hexdigest()
 
@@ -2555,11 +2575,30 @@ def _mw_fw_load(ctx, window_labels):
     are in freshwater) — NOT realized_feed_kg_day, which assumes seawater. FW fish
     are fed in the freshwater area, not from OG feed capacity, so the rollup shows
     this row neutral (uncapped) and only rolls it into the neutral TOTAL."""
-    from collections import defaultdict
-    from forecast.biology import project_in_flight_fw_batch
     fw_records = ctx.get("fw_records") or []
     if not fw_records or ctx.get("control") is None:
         return {}
+    # Pure in (PR, config, window weeks): cached per that key -- it re-projected
+    # every FW cohort on every rerun (~0.25-0.34 s, twice when the rollup is on).
+    key = (st.session_state.get("_mw_pr_key", ""), _mw_cfg_fp(),
+           tuple(window_labels))
+    hit = st.session_state.get("_mw_fwload_cache")
+    if not (hit and hit.get("key") == key):
+        hit = {"key": key}
+        hit["out"], hit["skipped"] = _mw_fw_load_compute(ctx, window_labels)
+        st.session_state["_mw_fwload_cache"] = hit
+    if hit["skipped"]:
+        st.caption(f"⚠ FW cohort(s) {', '.join(sorted(hit['skipped']))} could not be "
+                   f"projected — the FW row and facility totals UNDERSTATE "
+                   f"their load.")
+    return {k: dict(v) for k, v in hit["out"].items()}
+
+
+def _mw_fw_load_compute(ctx, window_labels):
+    """(load, skipped batch ids) -- the uncached body of _mw_fw_load."""
+    from collections import defaultdict
+    from forecast.biology import project_in_flight_fw_batch
+    fw_records = ctx.get("fw_records") or []
     agg = defaultdict(lambda: {"count": 0.0, "biomass_kg": 0.0})
     for r in fw_records:
         agg[r.batch_id]["count"] += r.closing_count
@@ -2587,11 +2626,7 @@ def _mw_fw_load(ctx, window_labels):
             rec["open_bio"] += s.open_biomass_kg or s.biomass_kg
             rec["close_bio"] += s.close_biomass_kg or s.biomass_kg
             rec["feed"] += s.feed_kg_day
-    if _skipped:
-        st.caption(f"⚠ FW cohort(s) {', '.join(sorted(_skipped))} could not be "
-                   f"projected — the FW row and facility totals UNDERSTATE "
-                   f"their load.")
-    return dict(out)
+    return {k: dict(v) for k, v in out.items()}, _skipped
 
 
 def _mw_grid(state, rows, labels, color_by, batch_filter=None, moves=None,
@@ -3103,7 +3138,7 @@ def _mw_facility_limits():
     """The scenario's per-week facility limits (harvest floor / processing
     limit rows), cached per config fingerprint. None if they can't be read —
     the previews then fall back to the Control defaults."""
-    key = "_mw_fl_" + _config_fingerprint()
+    key = "_mw_fl_" + _mw_cfg_fp()
     if key not in st.session_state:
         for k in [k for k in st.session_state
                   if isinstance(k, str) and k.startswith("_mw_fl_")]:
@@ -4698,6 +4733,16 @@ def _mw_copilot(uploaded, events, forecast_start=None, bad=None):
 
 
 def _manual_window_editor(uploaded):
+    """See _manual_window_editor_body. Takes the config fingerprint ONCE for
+    this run (_MW_RUN) and always clears it, so the next run re-reads disk."""
+    _MW_RUN.fp = _config_fingerprint()
+    try:
+        return _manual_window_editor_body(uploaded)
+    finally:
+        _MW_RUN.fp = None
+
+
+def _manual_window_editor_body(uploaded):
     """Run-mode editor: SEE the projected facility week by week, click a tank to
     act on it in context (harvest / move / 6N / FW→OG), validated against the
     uploaded PR, saved to scenario/manual_events/<PR closing>.yaml (which the
