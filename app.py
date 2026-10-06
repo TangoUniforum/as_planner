@@ -11895,8 +11895,9 @@ def _run_costs_tab(r, config_dir):
                 help="Sales over the horizon: every harvest priced on the "
                      "economics.yaml price bands (Configure → Targets & "
                      "prices; the same pricing Decide uses). Each "
-                     "week's harvest counts, whole, in the month its Monday "
-                     "falls in. — when economics.yaml sets no price bands.")
+                     "week's harvest counts on its Mon–Fri harvest days, each "
+                     "day in its own month. — when economics.yaml sets no "
+                     "price bands.")
     m[1].metric("Total cost", _run_money(t.get("total"), cur),
                 help="Feed (each model feed type at its price) + feed "
                      "shipping, oxygen and chemicals (per kg of ALL feed) + "
@@ -15615,22 +15616,26 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
             st.plotly_chart(fig, use_container_width=True)
 
             # Monthly rollup (sales planning): HOG tonnes + count per calendar
-            # month, derived from each event's ISO week by the workbook's own
-            # rule (analysis.week_to_month with the report's opening date): a
-            # first week whose Monday precedes the report is booked to the
-            # report's first month. A copy of the plain Monday rule here
-            # charted a 72 t "August" bar for a forecast opening 2026-09-01.
+            # month BY HARVEST DAY -- the workbook's own rule
+            # (analysis.week_month_split with the report's opening date): each
+            # week's harvest spread evenly over its Mon-Fri harvest days, none
+            # before the report opens, each day in its own month. A week that
+            # crosses a month end counts in both months by its days.
             from forecast import analysis as _ana_hm
 
-            def _wk_to_month(wk):
+            def _wk_split(wk):
                 try:
-                    return _ana_hm.week_to_month(str(wk), _run_rs)
+                    return _ana_hm.week_month_split(str(wk), _run_rs)
                 except Exception:
-                    return None
+                    return {}
 
-            hm = he_df.copy()
-            hm["Month"] = hm["Week"].map(_wk_to_month)
-            hm = hm.dropna(subset=["Month"])
+            _hm_parts = []
+            for _, _hr in he_df.iterrows():
+                for _m, _f in _wk_split(_hr["Week"]).items():
+                    _hm_parts.append({"Month": _m,
+                                      "HOG_kg": float(_hr["HOG_kg"]) * _f,
+                                      "Count": float(_hr["Count"]) * _f})
+            hm = pd.DataFrame(_hm_parts, columns=["Month", "HOG_kg", "Count"])
             if not hm.empty:
                 mo = hm.groupby("Month").agg(
                     HOG_t=("HOG_kg", lambda s: s.sum() / 1000.0),

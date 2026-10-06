@@ -428,6 +428,14 @@ def whole_parts(values) -> list[float]:
     return floors
 
 
+def whole_month_parts(count, split: dict) -> dict:
+    """{key: whole fish}: a whole count split by `split`'s fractions
+    (time_grid.harvest_month_split) with whole_parts, so a boundary week's
+    month parts are whole fish that sum exactly to the week's count."""
+    keys = sorted(split)
+    return dict(zip(keys, whole_parts([count * split[k] for k in keys])))
+
+
 def whole_harvest_counts(harvest_events) -> dict:
     """{id(event): whole fish} -- THE whole-fish count every harvest sheet shows.
 
@@ -1146,17 +1154,15 @@ def write_harvest_plan_report(
     batch — Units, Av Weight - Kg HOG, Biomass - Tons HOG — with monthly values
     and a year total. Blank cells for months with no harvest.
 
-    A week's harvest belongs WHOLE to the month of its ISO Monday
-    (time_grid.iso_week_month_split) -- the sales contract's own convention,
-    settled by the operator 2026-09-02. It previously prorated boundary weeks
-    across their Mon-Fri days, which describes when fish physically leave the
-    plant but is not how the month is counted; the two put up to 97 t of the
-    same harvest in different months, so a target set off this sheet was graded
-    against a different number. Totals are unaffected either way.
+    A week's harvest is counted BY HARVEST DAY (time_grid.harvest_month_split,
+    operator 2026-10-06): spread evenly over its Mon-Fri harvest days, none
+    before the report opens, each day in its own month -- the Daily Harvest
+    Schedule's days. (2026-09-02 to 2026-10-06 the whole week went to its ISO
+    Monday's month.) Totals are unaffected either way.
     """
     from collections import defaultdict
     from datetime import date as _date
-    from .time_grid import iso_week_month_split
+    from .time_grid import harvest_month_split
 
     if sheet_name in wb.sheetnames:
         del wb[sheet_name]
@@ -1176,17 +1182,18 @@ def write_harvest_plan_report(
         hog_yield = facility_limits_hog.get(iso_week_label(ev.event_date), default_hog_yield)
         hog_kg = ev.count * ev.avg_wt_g / 1000.0 * hog_yield
         _cnt = _whole.get(id(ev), ev.count)
-        # The week's harvest goes WHOLE to its ISO Monday's month — the sales
-        # contract convention, undivided. But an ISO week starts on a MONDAY,
-        # so the first week of a forecast opening the day after a month-end PR
-        # has its Monday in the PREVIOUS month: on the 2026-08-31 closing this
-        # matrix grew an August column carrying B41's 5,322 fish and 14 t, in a
-        # September forecast. `report_start` moves that week to the first month
-        # the report covers; the convention itself is unchanged.
-        for (yr, mo), frac in iso_week_month_split(
-                ev.event_date, clip_start=report_start).items():
+        # The week's harvest is split over its harvest days' months. No day
+        # before `report_start` is a harvest day, so the first week of a
+        # forecast opening the day after a month-end PR lands in the first
+        # month the report covers (on the 2026-08-31 closing the Monday rule
+        # once grew an August column carrying B41's 5,322 fish). Units split
+        # as whole fish (whole_month_parts) so each month's Units still sum
+        # to the HarvestPlan rows.
+        _split = harvest_month_split(ev.event_date, report_start)
+        _cnt_parts = whole_month_parts(_cnt, _split)
+        for (yr, mo), frac in _split.items():
             e = agg[(yr, ev.batch_id, mo)]
-            e["count"] += _cnt * frac
+            e["count"] += _cnt_parts[(yr, mo)]
             e["hog_kg"] += hog_kg * frac
             years.add(yr)
             batches_by_year[yr].add(ev.batch_id)
@@ -1313,8 +1320,9 @@ def write_yearly_summary(
     roll-up FeedForecastMonthly and CostsAndProfit use, so the three Year
     figures tie. It used to book a whole week in the year of its Monday, and
     2029-W53-type boundary weeks moved up to 182 t between years. Harvest is
-    counted in the year of each event's date (HarvestReport's Year column) in
-    the whole fish HarvestPlan shows (whole_harvest_counts). On a MID-MONTH
+    counted by harvest day (time_grid.harvest_month_split: Mon-Fri, so
+    2026-W53 is 4/5 in 2026 and 1/5 in 2027 -- HarvestReport's Year column)
+    in the whole fish HarvestPlan shows (whole_harvest_counts). On a MID-MONTH
     PR the elapsed part of its month (the PR's own harvest) is added to the
     closing year exactly as HarvestPlan Report and MonthlyReport add it, so the
     three agree on the year's harvest; feed and biomass stay forecast-only (a
@@ -1351,20 +1359,26 @@ def write_yearly_summary(
                                s.week_start.year if hasattr(s.week_start, "year") else None)
 
     # Harvest per year (HOG via per-week override or default), in the whole
-    # fish HarvestPlan/HarvestReport show, in the year of each event's date.
+    # fish HarvestPlan/HarvestReport show, each week split over its harvest
+    # days' years (time_grid.harvest_month_split).
     hog_overrides = hog_overrides or {}
     yr_hc: dict[int, float] = defaultdict(float)
     yr_gross: dict[int, float] = defaultdict(float)
     yr_hog: dict[int, float] = defaultdict(float)
     _whole = whole_harvest_counts(harvest_events)
+    from .time_grid import harvest_month_split
     for ev in harvest_events:
-        d = ev.event_date.date() if hasattr(ev.event_date, "date") else ev.event_date
-        y = d.year
         gross = ev.count * ev.avg_wt_g / 1000.0
         hy = hog_overrides.get(iso_week_label(ev.event_date), default_hog_yield)
-        yr_hc[y] += _whole.get(id(ev), ev.count)
-        yr_gross[y] += gross
-        yr_hog[y] += gross * hy
+        # by harvest day: 2026-W53 is 4/5 in 2026 and 1/5 in 2027
+        _ysplit: dict[int, float] = defaultdict(float)
+        for (yy, _mm), f in harvest_month_split(ev.event_date, report_start).items():
+            _ysplit[yy] += f
+        for y, c in whole_month_parts(_whole.get(id(ev), ev.count), _ysplit).items():
+            yr_hc[y] += c
+        for y, f in _ysplit.items():
+            yr_gross[y] += gross * f
+            yr_hog[y] += gross * hy * f
     # The elapsed part of a mid-month PR's month: added to its year exactly as
     # HarvestPlan Report adds it to its month (default HOG yield), so the two
     # sheets agree on the year's harvest. 9.10 PR before this: 2026 read
@@ -1409,8 +1423,8 @@ def write_yearly_summary(
     years = sorted(set(yr_hc) | set(yr_bio) | {y for y, v in yr_feed.items()
                                                if v > 0.5})
     ws.append(["YEARLY SUMMARY (facility-wide)"])
-    _note = ("Harvest: each event in the year of its date, in the whole fish "
-             "HarvestPlan shows. Feed: each week split by calendar day (as "
+    _note = ("Harvest: each week's harvest counted on its Mon-Fri harvest "
+             "days, in the whole fish HarvestPlan shows. Feed: each week split by calendar day (as "
              "FeedForecastMonthly and CostsAndProfit). Peak/Mean biomass and "
              "utilisation: each week in the year it starts.")
     if _pr_merged is not None:
@@ -1565,7 +1579,15 @@ def write_harvest_report(
 
     Columns: Year, Month, Week, Date, Tank, Batch, Count (fish),
     Gross Biomass (kg), HOG Biomass (kg), Avg Live Wt (kg).
+
+    Year and Month are the month the harvest days fall in
+    (time_grid.harvest_month_split, operator 2026-10-06). A week whose Mon-Fri
+    harvest days cross a month end is written as one row per month, its fish
+    and kg split by harvest days (whole fish that sum to the event), dated on
+    that part's first harvest day; a week inside one month keeps its single row
+    dated on its Monday.
     """
+    from .time_grid import harvest_month_split, harvest_schedule_days
     if sheet_name in wb.sheetnames:
         del wb[sheet_name]
     ws = wb.create_sheet(sheet_name)
@@ -1605,18 +1627,26 @@ def write_harvest_report(
         wk = iso_week_label(ev.event_date)
         hog_yield = facility_limits_hog.get(wk, default_hog_yield)
         gross = ev.count * ev.avg_wt_g / 1000.0
-        ws.append([
-            d.year,
-            d.replace(day=1),
-            wk,
-            d,
-            ev.source_tank_id,
-            ev.batch_id,
-            _hr_shown.get(id(ev), round(ev.count, 0)),
-            round(gross, 0),
-            round(gross * hog_yield, 0),
-            round(ev.avg_wt_g / 1000.0, 2),
-        ])
+        split = harvest_month_split(ev.event_date, report_start)
+        shown = _hr_shown.get(id(ev), round(ev.count, 0))
+        parts = whole_month_parts(shown, split)
+        days = harvest_schedule_days(ev.event_date, report_start)
+        for (yy, mm) in sorted(split):
+            f = split[(yy, mm)]
+            first = (d if len(split) == 1
+                     else min(x for x in days if (x.year, x.month) == (yy, mm)))
+            ws.append([
+                yy,
+                date(yy, mm, 1),
+                wk,
+                first,
+                ev.source_tank_id,
+                ev.batch_id,
+                parts[(yy, mm)],
+                round(gross * f, 0),
+                round(gross * hog_yield * f, 0),
+                round(ev.avg_wt_g / 1000.0, 2),
+            ])
     widths = {1: 7, 2: 12, 3: 10, 4: 12, 5: 7, 6: 8, 7: 13, 8: 18, 9: 17, 10: 16}
     for c, w in widths.items():
         ws.column_dimensions[get_column_letter(c)].width = w
@@ -3032,9 +3062,9 @@ def write_monthly_report(
     # Roll the weekly ledger up to calendar months, splitting any week that
     # straddles a month boundary into its true month. CONTINUOUS flows (growth,
     # feed, mortality, cull, input, transfers) happen every calendar day, so they
-    # split by CALENDAR-DAY fraction. HARVEST is counted by the sales contract's
-    # convention -- the whole week to its ISO Monday's month -- identical to the
-    # HarvestPlan Report, so the two sheets' monthly harvest tie out exactly.
+    # split by CALENDAR-DAY fraction. HARVEST is counted by HARVEST DAY (Mon-Fri,
+    # none before the report opens; time_grid.harvest_month_split) -- identical
+    # to the HarvestPlan Report, so the two sheets' monthly harvest tie out.
     # The two fractions still differ on boundary weeks, so the month-boundary
     # Open/Close is advanced by the harvest part and the non-harvest part
     # SEPARATELY, each at its own cumulative fraction. Close is therefore exactly
@@ -3043,7 +3073,7 @@ def write_monthly_report(
     # the daily flows attribute differently. That property comes from using each
     # flow's OWN fraction for both the flow and the open/close advance, not from
     # the particular fractions, so it survives the convention change.
-    from .time_grid import calendar_day_month_split, iso_week_month_split
+    from .time_grid import calendar_day_month_split, harvest_month_split
     from datetime import date as _date
     FLOW_KEYS = ("gross_growth", "net_prod", "feed", "mort_count", "mort_bio",
                  "harv_count", "harv_gross", "harv_hog", "cull_count", "cull_bio",
@@ -3108,9 +3138,12 @@ def write_monthly_report(
             _w_days = float(w.get("days") or 7.0)
             split_c = calendar_day_month_split(wkd, days=int(round(_w_days)),
                                                clip_start=report_start)
-            # harvest: whole to its ISO Monday's month, but never to a month
-            # before the report opens (see iso_week_month_split's clip note).
-            split_w = iso_week_month_split(wkd, clip_start=report_start)
+            # harvest: by harvest day (Mon-Fri, none before the report opens)
+            # -- time_grid.harvest_month_split, the rule every harvest total
+            # uses. The whole-fish column splits as whole fish.
+            split_w = harvest_month_split(wkd, report_start)
+            _shown_parts = whole_month_parts(w.get("harv_count_shown", 0.0),
+                                             split_w)
             oc, ob = w["open_count"], w["open_bio"]
             hc, hg = w["harv_count"], w["harv_gross"]
             # Egg month (see _egg_month): None = no eggs this week, or no
@@ -3166,6 +3199,9 @@ def write_monthly_report(
                 if w.get("rates_unknown"):
                     a["rates_unknown"] = True
                 for k in FLOW_KEYS:
+                    if k == "harv_count_shown":
+                        a[k] += _shown_parts.get((yr, mon), 0.0)
+                        continue
                     a[k] += w[k] * (fw if k in HARVEST_KEYS
                                     else (fi if k == "input_count" else fc))
                 cum_c += fc

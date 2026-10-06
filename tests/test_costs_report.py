@@ -384,12 +384,23 @@ def test_month_rows_wire_every_driver(tmp_path):
     assert {m: r["eggs_n"] for m, r in mo.items() if r["eggs_n"]} == {
         "2026-10": 100_000}
     assert mo["2026-10"]["eggs"] == pytest.approx(1000.0)
-    # Revenue and HOG: HarvestPlan rows booked by Monday, clipped.
+    # Revenue and HOG: HarvestPlan rows booked BY HARVEST DAY (Mon-Fri, none
+    # before the report opens on 09-01), written out by hand here:
+    #   W36 Mon 08-31: Tue-Fri all September           -> 09: 1
+    #   W40 Mon 09-28: Mon-Wed Sep, Thu-Fri Oct        -> 09: 3/5, 10: 2/5
+    #   W41, W45: inside one month                     -> 10: 1 / 11: 1
+    #   W49 Mon 11-30: Mon Nov, Tue-Fri Dec            -> 11: 1/5, 12: 4/5
     hrows = harvest_rows_from_ws(wb["HarvestPlan"])
     want = defaultdict(list)
-    for r, m in zip(hrows, ("2026-09", "2026-09", "2026-10", "2026-11",
-                            "2026-11")):
-        want[m].append(r)
+    for r, parts in zip(hrows, ({"2026-09": 1.0},
+                                {"2026-09": 0.6, "2026-10": 0.4},
+                                {"2026-10": 1.0},
+                                {"2026-11": 1.0},
+                                {"2026-11": 0.2, "2026-12": 0.8})):
+        for m, f in parts.items():
+            want[m].append(dict(r, month=m, count=r["count"] * f,
+                                gross_kg=r["gross_kg"] * f,
+                                hog_kg=r["hog_kg"] * f))
     econ = {**ECON, "price_bands": [dict(b, monthly={})
                                     for b in ECON["price_bands"]]}
     for m, r in mo.items():

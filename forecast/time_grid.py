@@ -250,8 +250,12 @@ def working_day_month_split(event_date, forecast_start=None) -> dict[tuple[int, 
 def iso_week_month_split(event_date, clip_start=None) -> dict[tuple[int, int], float]:
     """(year, month) -> 1.0 for the month of the ISO week's MONDAY.
 
-    THE HARVEST MONTH CONVENTION (operator decision, 2026-09-02). A week's
-    harvest belongs, whole and undivided, to the month its Monday falls in.
+    SUPERSEDED 2026-10-06 by `harvest_month_split` (the operator: "harvest
+    should be assigned to the month, year that the harvest day happens"); no
+    report counts harvest with this any more. Kept for the record and for
+    reading older workbooks. It WAS the harvest month convention from the
+    operator decision of 2026-09-02: a week's harvest belonged, whole and
+    undivided, to the month its Monday falls in.
 
     The alternative -- `working_day_month_split`, which prorates a boundary
     week across its Mon-Fri days -- is the more faithful description of when
@@ -306,6 +310,32 @@ def harvest_schedule_days(event_date, report_start=None) -> list[date]:
     return days
 
 
+def harvest_month_split(event_date, report_start=None) -> dict[tuple[int, int], float]:
+    """(year, month) -> fraction of a week's harvest in that month.
+
+    THE HARVEST MONTH CONVENTION (operator decision, 2026-10-06, replacing the
+    2026-09-02 ISO-Monday rule): "harvest should be assigned to the month, year
+    that the harvest day happens" -- plan on even harvests, Mon-Fri, as the
+    Daily Harvest Schedule lays them out. So a week's harvest is spread evenly
+    over EXACTLY the days `harvest_schedule_days` gives it (Mon-Fri, none before
+    the report opens) and each day is counted in its own month and year. A
+    week inside one month yields {month: 1.0}; 2026-W53 (Mon 28 Dec - Fri 1 Jan)
+    is 4/5 December 2026 and 1/5 January 2027.
+
+    Every monthly and yearly harvest total (HarvestPlan Report, MonthlyReport,
+    YearlySummary, HarvestReport, CostsAndProfit, the app) goes through this
+    one function, so they all agree with the Daily Harvest Schedule and with
+    each other. It moves which month a harvest is counted in, never the fish or
+    the weekly totals.
+    """
+    days = harvest_schedule_days(event_date, report_start)
+    frac = 1.0 / len(days)
+    out: dict[tuple[int, int], float] = {}
+    for x in days:
+        out[(x.year, x.month)] = out.get((x.year, x.month), 0.0) + frac
+    return out
+
+
 def calendar_day_month_split(week_start, days: int = 7,
                              clip_start=None) -> dict[tuple[int, int], float]:
     """(year, month) -> fraction of a weekly DAILY flow in that calendar month.
@@ -315,7 +345,7 @@ def calendar_day_month_split(week_start, days: int = 7,
     (default 7) and each day credited to its own month. A week wholly inside a
     month yields `{month: 1.0}`; a boundary week splits by calendar-day count
     (e.g. 3 days in July, 4 in August -> 3/7, 4/7). Contrast
-    `iso_week_month_split`, the harvest/sales convention.
+    `harvest_month_split`, the harvest/sales convention.
     """
     ws = _as_date(week_start)
     n = max(1, days)

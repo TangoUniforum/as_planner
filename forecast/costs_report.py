@@ -24,10 +24,10 @@ Where each driver comes from (all of it is already in the run):
                               from report_start to the end of the last
                               week the run reports.
   revenue, HOG kg             the HarvestPlan rows (analysis.harvest_rows_
-                              from_ws). Each week is booked whole in its
-                              MONDAY's month (time_grid.iso_week_month_split,
-                              clipped to report_start: the MonthlyReport
-                              sales convention) and each month is priced by
+                              from_ws). Each week is split over its harvest
+                              days' months (time_grid.harvest_month_split,
+                              from report_start: the rule every harvest
+                              total uses) and each month is priced by
                               analysis.revenue_for (the Analyze pricing).
 
 NEUTRALITY. run.main drops a stale copy of this sheet right after loading
@@ -233,14 +233,23 @@ def eggs_by_month(batches, start: dt.date, end: dt.date) -> dict:
 
 
 def harvest_by_month(rows, report_start: dt.date) -> dict:
-    """{"YYYY-MM": [harvest rows]}: each week whole in its Monday's month,
-    clipped to report_start (the MonthlyReport sales convention)."""
-    from .time_grid import iso_week_month_split
+    """{"YYYY-MM": [harvest rows]}: each week split over its harvest days'
+    months (time_grid.harvest_month_split, from report_start -- the rule every
+    harvest total uses). A boundary week's row appears in each of its months,
+    its count and kg scaled by that month's share (averages unchanged) and
+    tagged "month", so revenue_for prices it in that month and does not split
+    it again."""
+    from .time_grid import harvest_month_split
     out: dict = {}
     for r in rows:
-        (ym,) = iso_week_month_split(_monday(r["week"]),
-                                     clip_start=report_start)
-        out.setdefault(f"{ym[0]}-{ym[1]:02d}", []).append(r)
+        for (y, m), f in harvest_month_split(_monday(r["week"]),
+                                             report_start).items():
+            ym = f"{y}-{m:02d}"
+            part = dict(r, month=ym)
+            for k in ("count", "gross_kg", "hog_kg"):
+                if k in part:
+                    part[k] = r[k] * f
+            out.setdefault(ym, []).append(part)
     return out
 
 
@@ -328,9 +337,8 @@ def build_costs_rows(drivers: dict, costs: dict, economics: Optional[dict], *,
     if economics is not None:
         rev = {}
         for m, rows in harvest.items():
-            # clip_start: a month's price override prices the harvest this
-            # sheet books to that month (the first week belongs to the report's
-            # first month, not the month of its Monday).
+            # each row is already this month's share (tagged "month"), so a
+            # month's price override prices exactly the harvest booked to it.
             got = revenue_for(rows, economics, clip_start=drivers.get("start"))
             rev[m] = got["total"]
             unpriced_rev += got["unpriced_kg"]

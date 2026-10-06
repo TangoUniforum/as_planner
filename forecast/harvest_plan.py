@@ -58,9 +58,16 @@ class MonthRow:
     month: str                      # 'YYYY-MM'
     actual_kg: float                # what the last run landed
     target_kg: Optional[float]      # what you asked for, or None
-    weeks: tuple                    # ISO week labels falling in this month
+    weeks: tuple                    # ISO week labels with a harvest day in this month
     min_override: Optional[float]   # per-week band currently set, if uniform
     max_override: Optional[float]
+    # how many WEEKS of harvest the month holds: a boundary week counts by the
+    # share of its harvest days in the month (2026-W53 is 0.8 of December)
+    week_share: Optional[float] = None
+
+    @property
+    def n_weeks(self) -> float:
+        return self.week_share if self.week_share else float(len(self.weeks))
 
     @property
     def gap_kg(self) -> Optional[float]:
@@ -82,13 +89,11 @@ class MonthRow:
 
 
 def month_of(week_label: str, clip_start=None) -> Optional[str]:
-    """'2026-W44' -> '2026-11', by the ISO week's MONDAY.
+    """'2026-W44' -> '2026-11', by the ISO week's MONDAY -- a label only.
 
-    A week is attributed to the month its Monday falls in, matching
-    analysis.week_to_month, so this view and the targets gate agree about which
-    month a week belongs to. Disagreeing would put the gap in one month and the
-    lever in another. `clip_start` (the report's opening date) applies the
-    workbook's first-week rule, exactly as analysis.week_to_month does.
+    The table itself (build_rows) books a week to EVERY month holding one of
+    its harvest days (analysis.week_month_split), as the targets gate counts
+    harvest, so the gap and the lever land in the same month.
     """
     from .analysis import week_to_month
     return week_to_month(week_label, clip_start)
@@ -103,15 +108,17 @@ def build_rows(monthly_actual: dict, targets: Optional[dict],
     targets             analysis.load_targets() result, or None
     week_labels         every planner week in the run, in order
     facility_overrides  FacilityLimits.overrides — {(week, metric): value}
-    clip_start          the report's opening date (month_of); pass the SAME
-                        value harvest_by_period was given
+    clip_start          the report's opening date; pass the SAME value
+                        harvest_by_period was given
     """
+    from .analysis import week_month_split
     tmonthly = ((targets or {}).get("monthly") or {})
     weeks_by_month: dict[str, list] = {}
+    share_by_month: dict[str, float] = {}
     for wl in week_labels or ():
-        m = month_of(wl, clip_start)
-        if m:
+        for m, f in week_month_split(wl, clip_start).items():
             weeks_by_month.setdefault(m, []).append(wl)
+            share_by_month[m] = share_by_month.get(m, 0.0) + f
 
     months = sorted(set(monthly_actual) | set(tmonthly) | set(weeks_by_month))
     rows = []
@@ -139,6 +146,7 @@ def build_rows(monthly_actual: dict, targets: Optional[dict],
             weeks=wks,
             min_override=_uniform(METRIC_MIN),
             max_override=_uniform(METRIC_MAX),
+            week_share=share_by_month.get(m),
         ))
     return rows
 
@@ -150,7 +158,7 @@ def partial_months(rows: list[MonthRow], weeks_per_full_month: int = 4) -> set:
     as troughs is a real trap -- the 2026-08 and 2027-10 rows of an August run
     look like collapses and are just the horizon ending. Flagged, never hidden.
     """
-    return {r.month for r in rows if 0 < len(r.weeks) < weeks_per_full_month}
+    return {r.month for r in rows if 0 < r.n_weeks < weeks_per_full_month}
 
 
 def merge_overrides(existing: dict, edits: list[tuple]) -> tuple[dict, list]:
@@ -200,7 +208,7 @@ def suggest_band(row: MonthRow, avg_fish_kg: float) -> Optional[str]:
     gap = row.gap_kg or 0.0
     if abs(gap) < 1000:
         return None
-    fish = gap / avg_fish_kg / len(row.weeks)
+    fish = gap / avg_fish_kg / row.n_weeks
     if gap < 0:
         return (f"short {abs(gap) / 1000:,.0f} t — about "
                 f"{abs(fish):,.0f} more fish/week across {len(row.weeks)} "
@@ -252,7 +260,7 @@ def bands_for_targets(rows, avg_fish_kg: float, *, set_floors: bool = False,
             notes.append(f"{r.month}: within tolerance ({gap / 1000:+,.0f} t) "
                          f"— left alone")
             continue
-        per_week = r.target_kg / avg_fish_kg / len(r.weeks)
+        per_week = r.target_kg / avg_fish_kg / r.n_weeks
         if gap > 0:
             # over target: cap the weeks so the surplus defers
             edits.append((r.month, r.weeks, LEAVE, round(per_week)))

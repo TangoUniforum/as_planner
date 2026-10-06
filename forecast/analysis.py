@@ -144,10 +144,32 @@ def save_promoted_default(config_dir, method: str, overrides: dict,
 # --------------------------------------------------------------------------- #
 # Harvest readers — HarvestPlan rows -> period totals + revenue
 # --------------------------------------------------------------------------- #
+def week_month_split(week_label: str, clip_start=None) -> dict:
+    """{'YYYY-MM': fraction} of a week's harvest, BY HARVEST DAY.
+
+    The one month rule for harvest totals (operator, 2026-10-06): the week's
+    harvest is spread evenly over its Mon-Fri harvest days -- none before
+    `clip_start`, the date the report opens -- and each day counts in its own
+    month (time_grid.harvest_month_split, the Daily Harvest Schedule's days).
+    '2026-W31' (Mon 27 Jul - Fri 31 Jul) -> {'2026-07': 1.0};
+    '2026-W53' -> {'2026-12': 0.8, '2027-01': 0.2}. {} for a bad label."""
+    try:
+        y, w = int(str(week_label)[:4]), int(str(week_label)[6:8])
+        monday = _dt.date.fromisocalendar(y, w, 1)
+    except (ValueError, TypeError):
+        return {}
+    from .time_grid import harvest_month_split
+    return {"%04d-%02d" % k: f
+            for k, f in harvest_month_split(monday, clip_start).items()}
+
+
 def week_to_month(week_label: str, clip_start=None) -> Optional[str]:
-    """'2026-W31' -> '2026-07' (month of the ISO week's Monday — the SAME
-    convention as the app's monthly harvest table, so targets and the Harvest
-    tab can never disagree about which month a week belongs to).
+    """'2026-W31' -> '2026-07' (month of the ISO week's Monday).
+
+    A LABEL only, for places that need one month name per week. It is NOT how
+    harvest is counted: since 2026-10-06 every harvest total splits a week by
+    its harvest days (week_month_split), so a boundary week counts in both
+    months. Do not sum harvest with this.
 
     `clip_start` (the date the REPORT opens: PR closing + 1 day) applies the
     workbook's own first-week rule (time_grid.iso_week_month_split): a first
@@ -250,18 +272,16 @@ def harvest_rows_from_ws(ws) -> list[dict]:
 
 def harvest_by_period(rows: list[dict], basis: str = "hog",
                       clip_start=None) -> tuple[dict, dict]:
-    """({'YYYY-MM': kg}, {'YYYY': kg}) on the given basis ('hog'|'gross').
-    `clip_start` = the report's opening date (see week_to_month)."""
+    """({'YYYY-MM': kg}, {'YYYY': kg}) on the given basis ('hog'|'gross'),
+    each week split over its harvest days (week_month_split).
+    `clip_start` = the report's opening date."""
     key = "hog_kg" if basis == "hog" else "gross_kg"
     monthly: dict[str, float] = {}
     yearly: dict[str, float] = {}
     for r in rows:
-        m = week_to_month(r["week"], clip_start)
-        if m is None:
-            continue
-        monthly[m] = monthly.get(m, 0.0) + r[key]
-        y = m[:4]
-        yearly[y] = yearly.get(y, 0.0) + r[key]
+        for m, f in week_month_split(r["week"], clip_start).items():
+            monthly[m] = monthly.get(m, 0.0) + r[key] * f
+            yearly[m[:4]] = yearly.get(m[:4], 0.0) + r[key] * f
     return monthly, yearly
 
 
@@ -311,24 +331,27 @@ def full_periods(week_labels, clip_start=None) -> tuple[set, set]:
     plan. The horizon's first and last month are almost always partial -- a run
     starting 2026-08-24 holds one week of August -- and grading a whole-month
     target against a one-week slice reports a collapse that never happened.
-    `clip_start` (the report's opening date) books a first week whose Monday
-    precedes it to the first month the report covers, as week_to_month does.
+    A month needs every week holding one of its harvest days (a boundary week
+    counts toward both months, as week_month_split books it). `clip_start` (the
+    report's opening date) drops harvest days before the report opens.
     """
     weeks = {str(w) for w in (week_labels or ()) if w}
     if not weeks:
         return set(), set()
     months: dict = {}
     for wl in weeks:
-        m = week_to_month(wl, clip_start)
-        if m:
+        for m in week_month_split(wl, clip_start):
             months.setdefault(m, set()).add(wl)
+    cs = clip_start.date() if hasattr(clip_start, "date") else clip_start
     full_m = set()
     for m, have in months.items():
         y, mo = int(m[:4]), int(m[5:7])
+        # every ISO week with a harvest day (Mon-Fri) in the month -- the
+        # weeks week_month_split books to it -- must be in the plan
         need = set()
         d = _dt.date(y, mo, 1)
         while d.month == mo:
-            if d.weekday() == 0:                      # ISO weeks start Monday
+            if d.weekday() < 5 and (cs is None or d >= cs):
                 iy, iw, _ = d.isocalendar()
                 need.add("%04d-W%02d" % (iy, iw))
             d += _dt.timedelta(days=1)
@@ -992,9 +1015,9 @@ def revenue_for(rows: list[dict], economics: dict, clip_start=None) -> dict:
     bands with the size-biased lognormal (model_cv_pct), then priced per band
     — with the band's monthly price override when one exists for the event's
     month, else its default price. kg in no band (distribution tails outside
-    the ladder) is unpriced, reported loudly. `clip_start` (the report's
-    opening date) picks the event's month by the workbook's first-week rule
-    (week_to_month), so a month's override prices the harvest booked to it.
+    the ladder) is unpriced, reported loudly. A week's kg is split over its
+    harvest days' months (week_month_split; `clip_start` = the report's
+    opening date), so a month's override prices the harvest booked to it.
 
     Returns {total, priced_kg, unpriced_kg, currency, by_band}."""
     basis = economics.get("basis", "hog")
@@ -1010,18 +1033,22 @@ def revenue_for(rows: list[dict], economics: dict, clip_start=None) -> dict:
         w, kg = r[wt_key], r[kg_key]
         if kg <= 0 or w <= 0:
             continue
-        month = week_to_month(r["week"], clip_start)
+        # a row already booked to one month (costs_report.harvest_by_month
+        # tags its month shares) is priced there and not split again
+        split = ({r["month"]: 1.0} if r.get("month")
+                 else week_month_split(r["week"], clip_start)) or {None: 1.0}
         event_priced = 0.0
         for i, b in enumerate(bands):
             frac = biomass_band_fraction(w, cv, b["min_kg"], b["max_kg"])
             if frac <= 0:
                 continue
-            price = (b.get("monthly") or {}).get(month, b["price_per_kg"])
-            part = kg * frac
-            by_band[i]["kg"] += part
-            by_band[i]["revenue"] += part * price
-            total += part * price
-            event_priced += part
+            for month, mf in split.items():
+                price = (b.get("monthly") or {}).get(month, b["price_per_kg"])
+                part = kg * frac * mf
+                by_band[i]["kg"] += part
+                by_band[i]["revenue"] += part * price
+                total += part * price
+                event_priced += part
         priced += event_priced
         unpriced += max(0.0, kg - event_priced)
     return {"total": total, "priced_kg": priced, "unpriced_kg": unpriced,
