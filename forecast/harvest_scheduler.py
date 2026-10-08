@@ -45,6 +45,7 @@ from .caps import (
     METRIC_MAX_HARVEST,
     METRIC_MIN_HARVEST,
     apply_facility_buffer,
+    harvest_weight_g,
     resolve_facility_cap,
 )
 from .models import BatchInput, BatchWeekState, ControlParams
@@ -139,7 +140,7 @@ def project_biomass_under_min_only(
             if need <= 0:
                 break
             e = effective.get(b)
-            if e is None or e["avg_wt_g"] < control.min_harvest_weight_g:
+            if e is None or e["avg_wt_g"] < harvest_weight_g(label, facility_limits, control):
                 continue
             if e["count"] <= 0:
                 continue
@@ -260,7 +261,7 @@ def schedule_harvests(
         oldest_mature_avg_wt = 0.0
         for b in fifo_order:
             e = effective.get(b)
-            if e and e["avg_wt_g"] >= control.min_harvest_weight_g:
+            if e and e["avg_wt_g"] >= harvest_weight_g(label, facility_limits, control):
                 oldest_mature_avg_wt = e["avg_wt_g"]
                 break
 
@@ -290,7 +291,7 @@ def schedule_harvests(
             if b not in effective:
                 continue
             e = effective[b]
-            if e["avg_wt_g"] < control.min_harvest_weight_g:
+            if e["avg_wt_g"] < harvest_weight_g(label, facility_limits, control):
                 continue
             if e["count"] <= 0:
                 continue
@@ -336,7 +337,7 @@ def schedule_harvests(
             if need > 1.0:
                 warnings.append(
                     f"{label}: demand pass found no batch above the "
-                    f"{control.min_harvest_weight_g:,.0f} g harvest weight to "
+                    f"{harvest_weight_g(label, facility_limits, control):,.0f} g harvest weight to "
                     f"draw the remaining {need:,.0f} fish from"
                 )
 

@@ -34,6 +34,7 @@ from .caps import (
     METRIC_MIN_HARVEST,
     SystemLimits,
     apply_facility_buffer,
+    harvest_weight_g,
     resolve_facility_cap,
     resolve_system_cap,
 )
@@ -403,6 +404,7 @@ def _build_batch_week_facts(
     batches: list[BatchInput],
     control: ControlParams,
     facility: FacilityConfig,
+    facility_limits: Optional[FacilityLimits] = None,
 ) -> dict[tuple[str, str], BatchWeekFact]:
     """Compute per-(batch, week) precalc facts."""
     cv_by_batch = {b.batch_id: b.tran_og_cv for b in batches}
@@ -482,7 +484,9 @@ def _build_batch_week_facts(
                 )
 
             frac_above = (
-                _fraction_above(min_h_wt, s.avg_weight_g, cv)
+                _fraction_above(harvest_weight_g(s.week_label, facility_limits, control)
+                                if facility_limits is not None else min_h_wt,
+                                s.avg_weight_g, cv)
                 if s.stage == "SW" else 0.0
             )
 
@@ -1656,6 +1660,7 @@ def build_precalc_canvas(
     batch_lifecycles = _build_batch_lifecycles(batches, tables)
     batch_week_facts = _build_batch_week_facts(
         biology_states_by_batch, harvest_demands, splits, batches, control, facility,
+        facility_limits,
     )
     weekly_facility = _build_weekly_facility_facts(
         horizon_labels, forecast_start, control, facility_limits, batch_week_facts,

@@ -52,6 +52,7 @@ from .caps import (
     FacilityLimits,
     SystemLimits,
     carry_forward_cap_lookup,
+    control_for_week,
     predictive_move_in_count,
     resolve_facility_cap,
     resolve_system_cap,
@@ -4754,7 +4755,12 @@ def phase_d_emit_events(
     # essential moves never do (see ControlParams.max_transfers_per_week).
     _move_cap = int(getattr(control, "max_transfers_per_week", 0) or 0)
 
+    # Per-week harvest weight (limits.yaml `min_harvest_weight_g` rows): each
+    # week of the walk reads `control` as that week's copy. A week with no row
+    # gets the very same object, so a plan without rows is unchanged.
+    _base_control = control
     for week_label in sorted_weeks:
+        control = control_for_week(_base_control, facility_limits, week_label)
         # Moves emitted so far THIS week = applied Transfers appended since the
         # week opened (refused events have count_transferred 0 and don't count).
         _wk_ev0 = len(transfer_events)
@@ -6874,6 +6880,7 @@ def phase_d_emit_events(
         # force-empty) from next week's ceiling, so the multi-week harvest total
         # stays within cap x weeks. 0.0 in the common case.
         _carry_debt = _budget.overdraw
+    control = _base_control  # the walk is over: back to the run's own Control
 
     # Book handling mortality as MORTALITY on the destination tank-week.
     # The continuity audit derives transfer_in from count_transferred (GROSS),

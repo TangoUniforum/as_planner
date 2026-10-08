@@ -966,7 +966,9 @@ _CONTROL_HELP = {
         "3,500 g and still not be harvestable whole; the graded peel exists to "
         "take that tail. A business constant, not a tuning knob: lowering it "
         "lets EVERY tank in the facility go earlier, including ones that "
-        "genuinely hold small fish. Unit: grams.",
+        "genuinely hold small fish. This is the default for every week; a "
+        "single week can use a different weight in Limits → Facility limits, "
+        "row `min_harvest_weight_g`. Unit: grams.",
     "min_harvest_per_week":
         "The weekly harvest floor from the sales contracts: EVERY week must "
         "ship at least this many fish — never an empty week. This knob is a "
@@ -5124,7 +5126,7 @@ def _edit_limits():
     )
     from forecast.caps import (METRIC_BIOMASS, METRIC_FEED_DAY, METRIC_MAX_HARVEST,
                                METRIC_MIN_HARVEST, METRIC_HOG_YIELD, METRIC_SGR_OG,
-                               SYSTEM_MODES, SystemLimits)
+                               METRIC_MIN_HARVEST_WT, SYSTEM_MODES, SystemLimits)
     st.caption(
         "Capacity limits. A capacity is a fact about the facility, so it is "
         "stated **once** per system below and applies to every week of every "
@@ -5145,7 +5147,8 @@ def _edit_limits():
     sl_cur = {(r["week"], r["system"], r["metric"]): r["value"]
               for r in system_limits_to_list(sl)}
     fl_metrics = [METRIC_BIOMASS, METRIC_FEED_DAY, METRIC_MAX_HARVEST,
-                  METRIC_MIN_HARVEST, METRIC_HOG_YIELD, METRIC_SGR_OG]
+                  METRIC_MIN_HARVEST, METRIC_MIN_HARVEST_WT, METRIC_HOG_YIELD,
+                  METRIC_SGR_OG]
     sl_metrics = [METRIC_BIOMASS, METRIC_FEED_DAY]
     systems = _og_systems_app()
     # Weeks drive the EXCEPTION grid only; the defaults editor needs none, so
@@ -5274,6 +5277,11 @@ def _edit_limits():
         "`feed_per_day` = most feed per day (kg/day); "
         "`max_harvest_per_week` / `min_harvest_per_week` = that week's harvest "
         "ceiling / floor (fish); "
+        "`min_harvest_weight_g` = that week's harvest WEIGHT floor (g, live): "
+        "the lightest tank average the planner may harvest or stage for "
+        "harvest that week, in place of Control's Min harvest weight (blank = "
+        "the Control value). Set it on the staging weeks too — fish go to 6N "
+        "about two weeks before they are harvested; "
         "`hog_yield` = live-to-sold weight ratio for that week; "
         "`sgr_correction_og` = growth factor for the OG (seawater) tanks that "
         "week — 1.0 (or blank) is the modelled growth, 0.90 means you expect "

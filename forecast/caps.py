@@ -63,6 +63,11 @@ METRIC_HOG_YIELD = "hog_yield"
 # `og_sgr_factors` below rather than `resolve_facility_cap`: a cap treats 0 as
 # "unset", but 0 growth is a legitimate thing to ask for here.
 METRIC_SGR_OG = "sgr_correction_og"
+# Per-week harvest WEIGHT floor (g, live). NOT a cap and not a fish count: the
+# lightest tank average the planner may harvest or stage for harvest in that
+# week. Absent week = Control `min_harvest_weight_g`, so a limits file with no
+# such rows plans exactly as before. Resolved by `harvest_weight_g` below.
+METRIC_MIN_HARVEST_WT = "min_harvest_weight_g"
 
 # Operating modes a system-default may be qualified by. Today only 6N has
 # two; the dimension is general so a future mode (a system taken off-line
@@ -347,6 +352,37 @@ def coverage_gap_notes(facility_limits, control, week_labels):
                " and ".join(shape) or "%d week(s)" % g["n_missing"],
                _fmt_cap(g["default"])))
     return notes
+
+def harvest_weight_g(week_label: str, facility_limits, control: ControlParams) -> float:
+    """The harvest weight floor (g) in force in `week_label`.
+
+    A positive per-week `min_harvest_weight_g` row wins; otherwise the Control
+    value. Operator request 2026-10-08: hold heavier fish for most of the year
+    but let December harvest lighter ones to keep its tonnage.
+    """
+    base = float(control.min_harvest_weight_g or 0.0)
+    if facility_limits is None:
+        return base
+    v = getattr(facility_limits, "overrides", {}).get((week_label, METRIC_MIN_HARVEST_WT))
+    return float(v) if v is not None and float(v) > 0 else base
+
+
+def control_for_week(control: ControlParams, facility_limits, week_label: str) -> ControlParams:
+    """`control` as the planner should see it in `week_label`.
+
+    Returns `control` ITSELF when the week has no harvest-weight row (or the row
+    equals the Control value), so a run without such rows is untouched; else a
+    shallow copy whose `min_harvest_weight_g` is that week's value. Every other
+    field is shared.
+    """
+    w = harvest_weight_g(week_label, facility_limits, control)
+    if w == float(control.min_harvest_weight_g or 0.0):
+        return control
+    import copy
+    c = copy.copy(control)
+    c.min_harvest_weight_g = w
+    return c
+
 
 def og_sgr_factors(facility_limits) -> dict[str, float]:
     """`{week_label: factor}` for the per-week OG growth factor.

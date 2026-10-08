@@ -259,10 +259,23 @@ it **once** and it applies to every week of every horizon.
 | **Per-week system exceptions** (collapsed, advanced) | A cap for ONE unusual week — a shutdown, a trial, maintenance. Blank is the normal state. | Almost never. |
 
 The **Facility limits** grid below those three carries the per-week facility
-numbers. It holds **six** metrics, not the harvest ones alone: `biomass` and
+numbers. It holds **seven** metrics, not the harvest ones alone: `biomass` and
 `feed_per_day` (the whole-facility totals, which are *also* where a temporary
 derate against the Control design figure is expressed), `max_harvest_per_week`,
-`min_harvest_per_week`, `hog_yield`, and one entry that is not a cap at all:
+`min_harvest_per_week`, `min_harvest_weight_g`, `hog_yield`, and one entry that
+is not a cap at all (`sgr_correction_og`, below).
+
+> **`min_harvest_weight_g` — the per-week harvest WEIGHT floor (added
+> 2026-10-08).** Grams, live. In the weeks you give it, it replaces Control's
+> Min harvest weight: the lightest tank average the planner may harvest, or
+> stage into 6N for harvest, that week. Blank = the Control value, so a limits
+> file without these rows plans exactly as before. Use it when one stretch must
+> take lighter fish (e.g. December, to keep tonnage) without lowering the floor
+> for the whole run. It applies in the week the planner makes the decision, and
+> 6N fish are staged about two weeks before harvest, so **cover the staging
+> weeks too**. Manual window events are not filtered by it — what you script
+> runs as written. Not part of the coverage warning below (rows on a few weeks
+> are the normal use).
 
 > **`sgr_correction_og` — the per-week OG growth factor.** The weeks you know
 > the site will not achieve the modelled growth. `1.0` (or blank) is the model;
@@ -1165,7 +1178,8 @@ Three things keep it worth reading rather than noise:
   stopped, weeks *before* your first usually mean the rows start mid-horizon on
   purpose;
 - `sgr_correction_og` is **excluded**: it has no Control default to fall back
-  to, so coverage is not a question for it.
+  to, so coverage is not a question for it. `min_harvest_weight_g` is excluded
+  too: rows on a few weeks are its normal use, not a gap.
 
 **Also on the Run page (2026-09-12).** The **Run forecast** results show the
 same lines as one warning, directly above the result tabs: a headline, one
