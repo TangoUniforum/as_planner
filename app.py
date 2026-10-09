@@ -5643,6 +5643,10 @@ def _config_io_section():
         st.markdown("**Import — load config from a file**")
         st.caption("A filled config template, or a saved forecast workbook "
                    "(RunConfig snapshot). Overwrites current config/ + scenario/. "
+                   "A workbook written on or after 2026-10-09 also restores the "
+                   "manual events of its PR (your current ones for that PR are "
+                   "kept as a `.before-import` copy); an older workbook leaves "
+                   "your manual events as they are. "
                    "The analysis overlays are deliberately NOT carried in a "
                    "workbook and are never overwritten by an import: "
                    "`analysis_defaults.yaml` (your promoted Quick-run default), "
@@ -5671,8 +5675,14 @@ def _config_io_section():
                     restored = import_config_template(wb, CONFIG_DIR, SCENARIO_DIR)
                     src = "config template"
                 elif read_config_snapshot(wb):
+                    from forecast.config_snapshot import snapshot_has_manual_events
+                    _had_events = snapshot_has_manual_events(wb)
                     restored = import_config_snapshot(wb, CONFIG_DIR, SCENARIO_DIR)
                     src = "RunConfig snapshot"
+                    if not _had_events:
+                        src += (" — this workbook predates saved manual events, "
+                                "so your current manual events were left as "
+                                "they are")
                 else:
                     # Say WHICH RunConfig sheet this is. A Global method-stamp
                     # workbook has one — reporting a flat "not found" for it

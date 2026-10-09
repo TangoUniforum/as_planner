@@ -73,6 +73,16 @@ _EXCLUDED = [
     ("config/economics.yaml", "price bands — the yardstick, not an input"),
 ]
 
+# THIS PR'S MANUAL EVENTS travel with the run too (operator, 2026-10-09: "import
+# an output workbook, and that would set up the app the same as the settings
+# used to make the workbook"). Until then the readable view showed them for
+# reading only and no import restored them -- re-running an old scenario from its
+# workbook silently ran it with TODAY's manual events. Key:
+# scenario/manual_events/<PR closing>.yaml; a run with no events file writes an
+# empty block so an import restores "no manual events" faithfully.
+_EVENTS_KEY_RE = re.compile(r"^scenario/manual_events/\d{4}-\d{2}-\d{2}\.yaml$")
+EVENTS_BACKUP_SUFFIX = ".before-import"
+
 _MARK = "# ===== {key} ====="
 _MARK_RE = re.compile(r"^# ===== (.+?) =====$")
 
@@ -104,7 +114,7 @@ def write_config_snapshot(wb, config_dir=None, scenario_dir=None,
         if stale in wb.sheetnames:
             del wb[stale]
     view = wb.create_sheet(sheet_name)
-    _write_yaml_sheet(wb.create_sheet(yaml_name), dirs)
+    _write_yaml_sheet(wb.create_sheet(yaml_name), dirs, pr_closing=pr_closing)
     try:
         from .run_config_view import write_readable_view
         write_readable_view(view, dirs, files=_FILES, run_info=run_info,
@@ -142,7 +152,32 @@ def is_yaml_dump(ws) -> bool:
     return False
 
 
-def _write_yaml_sheet(ws, dirs) -> None:
+def _events_block(scenario_dir, pr_closing):
+    """(key, text) for this PR's manual events, or None when unknown.
+
+    The per-PR file's own text when it exists (lossless); else the events the
+    run actually loaded (the pre-migration shared file), re-serialised; else an
+    empty event list. None only when there is no scenario dir or no PR date.
+    """
+    if scenario_dir is None or pr_closing is None:
+        return None
+    try:
+        from .manual_events import (events_file_for, load_manual_events,
+                                    manual_events_to_list)
+        p = events_file_for(scenario_dir, pr_closing)
+        key = f"scenario/manual_events/{p.name}"
+        if p.exists():
+            return key, p.read_text(encoding="utf-8")
+        import yaml
+        evs = load_manual_events(scenario_dir, pr_closing)
+        return key, yaml.safe_dump({"events": manual_events_to_list(evs)},
+                                   sort_keys=False, allow_unicode=True,
+                                   default_flow_style=False)
+    except Exception:  # noqa: BLE001 - never cost the run its config record
+        return None
+
+
+def _write_yaml_sheet(ws, dirs, pr_closing=None) -> None:
     """The lossless record, in exactly the block format RunConfig used to
     hold (so the pre-split reader parses it unchanged)."""
     ws.append([f"{KIND_SNAPSHOT_MARK} — the exact config + scenario this "
@@ -162,6 +197,12 @@ def _write_yaml_sheet(ws, dirs) -> None:
             continue
         ws.append([_MARK.format(key=f"{kind}/{name}")])
         for line in p.read_text(encoding="utf-8").splitlines():
+            ws.append([line])
+        ws.append([])
+    ev = _events_block(dirs.get("scenario"), pr_closing)
+    if ev is not None:
+        ws.append([_MARK.format(key=ev[0])])
+        for line in ev[1].splitlines():
             ws.append([line])
         ws.append([])
     ws.column_dimensions["A"].width = 100
@@ -259,11 +300,27 @@ def import_config_snapshot(wb, config_dir, scenario_dir) -> list[str]:
     blocks = read_config_snapshot(wb)
     if not blocks:
         raise ValueError(describe_run_config_sheet(wb))
+    known = {f"{kind}/{name}" for name, kind in _FILES}
     written: list[str] = []
     for key, text in blocks.items():
+        # Only the files a snapshot writes -- a damaged or hand-edited workbook
+        # must not be able to write anywhere else on disk.
+        if key not in known and not _EVENTS_KEY_RE.match(key):
+            continue
         kind, _, name = key.partition("/")
         base = Path(config_dir) if kind == "config" else Path(scenario_dir)
-        base.mkdir(parents=True, exist_ok=True)
-        (base / name).write_text(text + "\n", encoding="utf-8")
+        target = base / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if _EVENTS_KEY_RE.match(key) and target.exists():
+            # Manual events are hand-scripted: keep the replaced file beside it.
+            backup = target.with_name(target.name + EVENTS_BACKUP_SUFFIX)
+            backup.write_bytes(target.read_bytes())
+        target.write_text(text + "\n", encoding="utf-8")
         written.append(key)
     return written
+
+
+def snapshot_has_manual_events(wb) -> bool:
+    """True when this workbook's snapshot carries its PR's manual events
+    (workbooks written before 2026-10-09 do not)."""
+    return any(_EVENTS_KEY_RE.match(k) for k in read_config_snapshot(wb))

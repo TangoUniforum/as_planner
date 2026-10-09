@@ -385,6 +385,12 @@ for this ProductionReport only, in `scenario/manual_events/<PR closing date>.yam
 (e.g. `2026-08-31.yaml`). A different PR gets its own file, and ▶ Run forecast
 reads the file for the PR you uploaded. (An old shared
 `scenario/manual_events.yaml` is read only until the first per-PR file exists.)
+**Every output workbook carries a copy** (since 2026-10-09, on its *RunConfig
+YAML* tab), so importing that workbook (**Configure → 📦 Template & import → 📥
+Import config**) puts the same events back, together with the rest of the run's
+settings — your current file for that PR is kept beside it as
+`<date>.yaml.before-import`. Workbooks written before 2026-10-09 do not carry
+them; importing one leaves your manual events as they are.
 
 **Which days a window week covers.** The window runs on the same calendar as the
 rest of the report: its first week runs from the report start to the next Monday
@@ -1063,8 +1069,8 @@ and early 2027 shifted) — re-check the weeks you care about after switching.
 | **WeeklyReport Grouped / MonthlyReport Grouped** | the SAME rows with a **blank line between periods**, for reading and printing. **Do not filter these** — a blank row ends Excel's contiguous range, so a filter would silently cover only the first period | reading a period end-to-end |
 | **Diagnostics** | FW-calibration: per batch (in batch order), the target vs projected pre-cull avg weight at TranOG, the residual, and a back-solved `Suggested_FW_Correction` | tuning `fw_correction` (§7 step 2) |
 | **BiologyProjection** | the unharvested per-batch biology projection (growth, feed along the curve, ignoring harvest/caps) | model inputs — NOT the fed plan (see the Overview note) |
-| **RunConfig** | the run's config + scenario **as readable tables**: run identity (PR closing, forecast start, horizon, manual window, scenario, placement method, hybrid follow, when written), then one section per file — control settings (Setting / Value / the meaning from this guide's settings tables), biology curves, facility tanks, batches (pointer to BatchInputs), limits (system defaults, weekly exceptions, per-week facility rows with one column per metric), and this PR's manual events (display only). Long tables start collapsed — click **+** in the left margin. Links at the top go to RunConfig YAML and BatchInputs | reading what the run used |
-| **RunConfig YAML** | the run's control, biology, facility, batches and limits files as YAML text, one labelled block per file — what **Configure → 📦 Template & import → 📥 Import config** restores. Manual events, `costs.yaml` and the analysis overlays (`targets.yaml`, `economics.yaml`, `analysis_defaults.yaml`) are **not** restored. Always the last tab. Workbooks written before this tab existed keep the YAML in RunConfig itself, and still import | reproducibility |
+| **RunConfig** | the run's config + scenario **as readable tables**: run identity (PR closing, forecast start, horizon, manual window, scenario, placement method, hybrid follow, when written), then one section per file — control settings (Setting / Value / the meaning from this guide's settings tables), biology curves, facility tanks, batches (pointer to BatchInputs), limits (system defaults, weekly exceptions, per-week facility rows with one column per metric), and this PR's manual events (also restored by an import, via RunConfig YAML). Long tables start collapsed — click **+** in the left margin. Links at the top go to RunConfig YAML and BatchInputs | reading what the run used |
+| **RunConfig YAML** | the run's control, biology, facility, batches and limits files, plus this PR's manual events (`scenario/manual_events/<date>.yaml`, since 2026-10-09), as YAML text, one labelled block per file — what **Configure → 📦 Template & import → 📥 Import config** restores (the replaced manual-events file is kept as `<date>.yaml.before-import`). `costs.yaml` and the analysis overlays (`targets.yaml`, `economics.yaml`, `analysis_defaults.yaml`) are **not** restored. Always the last tab. Workbooks written before this tab existed keep the YAML in RunConfig itself, and still import | reproducibility |
 | **BatchInputs** | one row per batch, **in batch order**: what `scenario/batches.yaml` told the run — source (in OG / in freshwater / split at the PR close, scheduled, or pre-start), input date + eggs, Tran SF date, Tran OG date, TranOG count / target weight / CV, FCR model (and the `biology.yaml` curve it selects), FW correction **input and used** (after `auto_calibrate_fw`) with what calibration did, SGR correction — next to what the run did: OG entry week/date, **count into OG** (the batch's TranOG rows on the TransferPlan; reconciles with the InputConservationAudit's Realized_TranOG), average entry weight, entry tanks, and whether a manual `fw_to_og` scripted it. Below the table: the run settings that shape batch inputs and the biology models in force. Report only; appended after CostsAndProfit so no other tab moves | **what went in, per batch** |
 | **CostsAndProfit** | only when `config/costs.yaml` exists; after RunConfig (only BatchInputs and RunConfig YAML follow it): per month (with a first row for any days before the report opens), per year and horizon — feed kg, eggs stocked, feed / shipping / oxygen / chemicals / eggs / fixed cost, total cost, HOG, revenue, **profit**, spend per kg HOG sold, unpriced feed kg; then **feed by type** with your item names. Row 2 says when feed had no price (profit then overstated). NOT COMPUTED (with the reason) when the file is invalid or empty | the cash-view P&L — §15 |
 
@@ -2547,9 +2553,9 @@ and prices, costs price a plan and change nothing it computes.
 **The promoted default** lives in `config/analysis_defaults.yaml`, alongside
 the rest of your config, and is **never written to an output workbook** — so it
 cannot be lost to a run. Note the flip side: it is *not* part of the workbook's
-`RunConfig` snapshot (the RunConfig and RunConfig YAML tabs restore
-control/biology/facility/batches/limits only — RunConfig also lists this PR's
-manual events for reading, but no import restores them), so importing config from a workbook will not restore it — and **must
+`RunConfig` snapshot (an import restores control/biology/facility/batches/limits
+and, from workbooks written since 2026-10-09, the PR's manual events — nothing
+else), so importing config from a workbook will not restore it — and **must
 not**: a workbook you open from last month would otherwise silently re-point
 today's Quick run at a plan that won a tournament on a different PR. The same
 goes for `targets.yaml` and `economics.yaml`, the yardstick a run is *judged*

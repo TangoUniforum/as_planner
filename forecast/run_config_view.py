@@ -395,8 +395,9 @@ def _render_manual_events(v, scenario_dir, pr_closing):
     except Exception:  # noqa: BLE001
         return
     v.section(f"MANUAL EVENTS — scenario/manual_events/{p.name}",
-              "The operator-scripted window for this PR (display only — the "
-              "YAML tab does not carry it, so an import never restores it).")
+              "The operator-scripted window for this PR. Also on the YAML "
+              "tab: an import restores it (the replaced file is kept as "
+              "*.yaml.before-import).")
     if not p.exists():
         v.put(["(no events file for this PR)"])
         return
