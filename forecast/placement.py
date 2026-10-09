@@ -2798,7 +2798,10 @@ def _emit_transfers_for_batch_diff(
             # leftover still drains WHOLE through the residual router below.
             if _small_move_blocked(take, src_tank, state.tanks_by_id.get(dst_id),
                                    min_move):
-                if unders[j][1] <= take + 0.5:
+                # Close the side that made the move small: a small DEFICIT or a
+                # destination nearly at its density room -> try the next
+                # destination; only a small SURPLUS closes the source.
+                if unders[j][1] <= take + 0.5 or room <= take + 0.5:
                     unders[j][1] = 0.0
                 else:
                     over_list[i][1] = 0.0
@@ -2860,8 +2863,52 @@ def _emit_transfers_for_batch_diff(
         candidates.sort(key=lambda t: t.count)
         dest_id = candidates[0].tank_id
         _refused = False
+        # MOVE-SIZE RULES: spread the residual over the batch's kept tanks
+        # WITHIN their density cap, in pieces >= min_move, before the
+        # historical whole-into-one-tank-up-to-1.3x-cap route below -- which,
+        # once the small legs were barred, put a whole drained tank into ONE
+        # destination for a week (114-120 kg/m3 on the 3.31 / 2.28 PRs).
+        if min_move > 0:
+            def _room_at_cap(cid, wt_g):
+                _d = state.tanks_by_id.get(cid)
+                if _d is None or wt_g <= 0:
+                    return 0.0
+                _c = _eff_density_cap(_d.max_density_kg_m3, _d.system_id, _d.stage, purge)
+                if _c == float("inf") or _c <= 0:
+                    return float("inf")
+                _held = (_d.count * _d.avg_wt_g / 1000.0) if not _d.is_empty else 0.0
+                return max(0.0, (_d.volume_m3 * _c - _held) * 1000.0 / wt_g)
+            for cand in sorted(candidates, key=lambda c: (-_room_at_cap(c.tank_id, tank.avg_wt_g), c.tank_id)):
+                if tank.is_empty:
+                    break
+                rem = tank.count
+                take = min(rem, _room_at_cap(cand.tank_id, tank.avg_wt_g))
+                if take < min_move - 0.5:
+                    continue
+                if 0.5 < rem - take < min_move - 0.5:
+                    # never strand a sub-minimum tail: finish the tank here if
+                    # the severe bound allows, else leave a legal remainder
+                    take = rem if _room_fish(cand.tank_id, tank.avg_wt_g) >= rem - 0.5 else rem - min_move
+                    if take < min_move - 0.5:
+                        continue
+                whole = take >= rem - 0.5
+                ev = Transfer(
+                    batch_id=batch_id, event_date=event_date, source_tank_id=s,
+                    destinations=[TankAllocation(
+                        tank_id=cand.tank_id, count=rem if whole else take,
+                        avg_wt_g=tank.avg_wt_g, cv_pct=tank.cv_pct,
+                    )],
+                    leaves_source_empty=whole,
+                    channel="_emit_transfers_for_batch_diff",
+                )
+                warnings.extend(ev.apply(state))
+                transfer_events.append(ev)
+                dest_id = cand.tank_id
+                if (getattr(ev, "count_transferred", None) or 0) <= 0:
+                    _refused = True
+                    break
         for cand in candidates:
-            if tank.is_empty:
+            if tank.is_empty or _refused:
                 break
             # SEVERE DENSITY BOUND: the residual goes only where there is room
             # below 1.3 x the destination's cap -- whole into the first
@@ -3135,6 +3182,9 @@ def _even_out_density(
     chronic_relief_pct: float = 0.80,
     headroom_pct: float = 0.90,
     min_move: float = 0.0,
+    grow_fn=None,
+    lookahead_days: int = 21,
+    min_keep: float = 0.0,
 ) -> None:
     """Even fish across a batch's tanks when any tank is over density cap.
 
@@ -3173,9 +3223,77 @@ def _even_out_density(
             if t.system_id not in OG12_SYSTEMS
             and t.tank_id not in state.sixn_closed_tanks]
 
-    def _equalize(group):
+    def _relieve_ahead(group):
+        """MOVE-SIZE RULES replacement for `_equalize`: relieve a tank BEFORE
+        it breaches, once, by enough. A tank whose density `lookahead_days`
+        ahead (its own growth curve) is over the cap sheds what keeps it under
+        the relief target for that long -- at least `min_move`, leaving at
+        least `min_keep` -- into the same-batch tank(s) with the most room at
+        THEIR projected weight; at most two destinations, each piece >=
+        `min_move`. Operator 2026-10-08: "it should know its coming and plan
+        ahead" -- one bigger move instead of a small trim every week."""
+        if len(group) < 2:
+            return
+
+        def _fwt(t):
+            w = grow_fn(t, lookahead_days) if grow_fn is not None else t.avg_wt_g
+            return w if w and w > 0 else t.avg_wt_g
+
+        def _cap_fish(t, wt):
+            return t.max_density_kg_m3 * t.volume_m3 * 1000.0 / wt if wt > 0 else 0.0
+
+        srcs = [t for t in group if t.max_density_kg_m3 > 0 and t.avg_wt_g > 0
+                and t.count * _fwt(t) / 1000.0 / t.volume_m3 > t.max_density_kg_m3]
+        srcs.sort(key=lambda t: (-t.count * _fwt(t) / t.volume_m3, t.tank_id))
+        for src in srcs:
+            if _mv_left[0] <= 0:
+                return
+            need = src.count - _cap_fish(src, _fwt(src)) * float(relief_pct)
+            if need <= 0.5:
+                continue
+            shed = min(max(need, min_move), src.count - max(min_keep, 0.0))
+            if shed < min_move - 0.5:
+                continue        # cannot shed a legal group and keep the floor
+            dests = []
+            for d in group:
+                if d is src or d.max_density_kg_m3 <= 0:
+                    continue
+                room = _cap_fish(d, _fwt(d)) * float(headroom_pct or 0.90) - d.count
+                if room >= min_move - 0.5:
+                    dests.append((room, d))
+            dests.sort(key=lambda x: (-x[0], x[1].tank_id))
+            left = shed
+            for room, d in dests[:2]:
+                take = min(left, room)
+                if take < min_move - 0.5 or _mv_left[0] <= 0:
+                    break
+                ev = Transfer(
+                    batch_id=batch_id, event_date=event_date,
+                    source_tank_id=src.tank_id,
+                    destinations=[TankAllocation(
+                        tank_id=d.tank_id, count=take,
+                        avg_wt_g=src.avg_wt_g, cv_pct=src.cv_pct,
+                    )],
+                    leaves_source_empty=False,
+                    channel="_relieve_ahead",
+                )
+                warnings.extend(ev.apply(state))
+                transfer_events.append(ev)
+                if ev.count_transferred > 0:
+                    _mv_left[0] -= 1
+                left -= take
+                if left < min_move - 0.5:
+                    break
+
+    def _equalize(group, ahead=False):
         """Move fish between tanks in `group` to equalize counts; emits
-        Transfers for the source → dest pairs needed. Returns nothing."""
+        Transfers for the source → dest pairs needed. Returns nothing.
+        `ahead` (grow-out only, MOVE-SIZE RULES): relieve ahead instead."""
+        if min_move > 0 and ahead:
+            # relieve ahead first; the even split below then only finishes
+            # with LEGAL (>= min_move) moves -- dropping it outright starved
+            # the arrival make-room on the 2.28.25 PR
+            _relieve_ahead(group)
         if len(group) < 2:
             return
         if not any(t.max_density_kg_m3 > 0
@@ -3235,7 +3353,9 @@ def _even_out_density(
     # Pass 1: sub-1kg OG1/2 group (legal intra-OG1/2).
     _equalize(og12_sub)
     # Pass 2: OG3-6 group (any weight, any-to-any allowed).
-    _equalize(og36)
+    # (OG3-6 only: the entry tier keeps the even split -- relieving OG1/2 ahead
+    # starved the arrival make-room of a free entry tank on the 2.28.25 PR)
+    _equalize(og36, ahead=True)
     # Pass 3: cross-scope OG1/2 -> OG3-6 for over-cap OG1/2 tanks that
     # passes 1+2 couldn't fix. INV-4 forbids INTRA-OG1/2 moves at >=1 kg,
     # but the system-progression law (DESIGN §4) explicitly allows
@@ -3300,6 +3420,11 @@ def _even_out_density(
             _relief = (float(chronic_relief_pct) if src.tank_id in _chronic
                        else RELIEF_PCT)
             shed = src.count - src_cap_fish * _relief
+            # (MOVE-SIZE RULES deliberately leave this OG1/2 relief's SIZE alone:
+            # forcing it to >= min_move measured worse -- worst grow-out peak
+            # 106 -> 125 kg/m3 on the recent corpus and one PR unplannable --
+            # density relief wins, operator 2026-10-08. A small group still may
+            # not OPEN an empty tank, below.)
             room = dst_cap_fish * HEADROOM_PCT - dst.count
             take = min(shed, room)
             if take <= 0.5:
@@ -6119,6 +6244,10 @@ def phase_d_emit_events(
                     headroom_pct=float(getattr(control,
                                                "density_target_pct", 0.90)),
                     min_move=_min_move(control),
+                    grow_fn=(lambda _t, _d: _grow_weight_days(
+                        _t.avg_wt_g, batch_meta.get(_t.batch_id), tables, _d,
+                        week_label)),
+                    min_keep=float(control.min_tank_control or 0.0),
                 )
 
             # Multi-objective balancer: relieve any tank still over density cap
@@ -6605,7 +6734,10 @@ def phase_d_emit_events(
                                     transfer_events, warnings, week_label,
                                     harvest_cap=getattr(
                                         control, "max_harvest_per_week", None),
-                                    min_move=_min_move(control),
+                                    # the no-drop BACKSTOP keeps the historical
+                                    # per-tank sizing: an over-full purge week
+                                    # beats a refused arrival
+                                    min_move=0.0,
                                     reason="reactive make-room for a TranOG arrival",
                                     sixn_move_in_feed=sixn_move_in_feed, tables=tables,
                                     batch_meta=batch_meta, is_purge=True,
