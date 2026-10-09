@@ -610,6 +610,32 @@ def main(
             _apply_fw_calib(_b, _solve_fw(_b, tables))
 
     states, residuals, splits, warnings = project_all_batches(incoming_batches, tables, control)
+    # INCOMING BATCHES' MANUAL-WINDOW WEEKS -- REPORT-ONLY (operator 2026-10-09:
+    # "does the Oct close and November open number tie?"). The window moved
+    # control.forecast_start to the first post-window week before this
+    # projection, and project_batch only emits weeks from the forecast start, so
+    # an egg batch stocked DURING the window (B57: 570,000 eggs on 2026-10-08,
+    # window W40-W46) first appeared at W47 already at 534,804 with no input
+    # ever booked -- the facility fish total jumped 534,804 between October's
+    # close and November's open. Project the same batches on the ORIGINAL grid
+    # (as the FW in-flight projection already does, _fw_proj_fs) and keep only
+    # their pre-handoff FW/EGG weeks. They feed the REPORT writers only (ledger,
+    # BiologyProjection, feed/advisory inputs) -- never states_by_batch, so the
+    # planner and every plan sheet are unchanged. Every row from the handoff on
+    # is identical on both grids, so the two join cleanly.
+    prefix_incoming_states: list = []
+    if window_n > 0 and states:
+        import dataclasses as _dc_pi
+        from .time_grid import iso_week_label as _iwl_pi
+        _pi_ctl = _dc_pi.replace(control, forecast_start=_fw_proj_fs,
+                                 horizon_weeks=_fw_proj_horizon)
+        _first_planned_lbl = _iwl_pi(control.forecast_start)
+        _planned_ids = {s.batch_id for s in states}
+        _pi_states, _, _, _ = project_all_batches(
+            [b for b in incoming_batches if b.batch_id in _planned_ids], tables, _pi_ctl)
+        prefix_incoming_states = [s for s in _pi_states
+                                  if s.week_label < _first_planned_lbl
+                                  and s.stage in ("FW", "EGG")]
     print(f"\n  Projected {len(states)} batch-week rows across {len({s.batch_id for s in states})} batches (incoming)")
     print(f"  TranOG size-class splits captured: {len(splits)}")
     for w in warnings:
@@ -1090,7 +1116,8 @@ def main(
     # 297,968. Empty (no split, or `off`) = the old sheet.
     _bp_split_fw = [s for _b in _sb.sorted_ids(_sb_fw_states) for s in _sb_fw_states[_b]]
     write_biology_projection(
-        wb, _to_realized_lifespan(states + in_flight_states + _bp_split_fw))
+        wb, _to_realized_lifespan(prefix_incoming_states + states
+                                  + in_flight_states + _bp_split_fw))
     write_calibration_diagnostics(wb, residuals)
 
     # ----- Stage 2.5: optional LP-guided LNS placement refinement (opt-in) -----
@@ -1223,6 +1250,15 @@ def main(
     rl_states_by_batch = {
         b: _to_realized_lifespan(sl) for b, sl in states_by_batch.items()
     }
+    if prefix_incoming_states:
+        # The manual-window weeks of incoming batches (report-only, see above):
+        # FW/EGG rows, so they reach the feed and FW-biomass report inputs only.
+        rl_states_by_batch = dict(rl_states_by_batch)
+        for _b in sorted({s.batch_id for s in prefix_incoming_states}):
+            rl_states_by_batch[_b] = sorted(
+                [s for s in prefix_incoming_states if s.batch_id == _b]
+                + list(rl_states_by_batch.get(_b, [])),
+                key=lambda s: s.week_label)
     if _sb_fw_states:
         # A split's FW part is real freshwater biomass and feed: the report
         # writers below read FW/EGG rows only (never one-row-per-week), so its
@@ -1452,7 +1488,7 @@ def main(
         wb, placement.batch_locations, rl_states_by_batch, fs_date, tables, batch_by_id,
         sixn_move_in_feed=getattr(placement, "sixn_move_in_feed", None),
         report_start=report_start)
-    all_states = _to_realized_lifespan(states + in_flight_states)
+    all_states = _to_realized_lifespan(prefix_incoming_states + states + in_flight_states)
     # The PR-hydrated seawater opening per batch (the same anchor the
     # continuity audits open from). The ledgers use it only for a batch with
     # nothing else to open on -- a PR batch missing from batches.yaml.
