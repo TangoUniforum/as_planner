@@ -1094,7 +1094,7 @@ def _second_fw_to_og_reason(ev, consumed) -> Optional[str]:
 
 def apply_events_for_week(state, events, week, week_start, week_label=None,
                           handling_frac=0.0, fw_lookup=None, out_week_culls=None,
-                          consumed_fw=None):
+                          consumed_fw=None, min_move=0.0):
     """Apply every manual event scheduled for `week` (1-based) at the start of
     that override-window week, dating each event at `week_start`.
 
@@ -1128,6 +1128,7 @@ def apply_events_for_week(state, events, week, week_start, week_label=None,
         # NOT run ("MANUAL EVENT REFUSED"), and both land in the ValidationLog.
         n_before = len(transfers) + len(harvests) + len(tranogs)
         h_before = len(harvests)
+        t_before = len(transfers)
         ew: list[str] = []
         if ev.type == TYPE_OG_TRANSFER:
             ew = _apply_og_transfer(
@@ -1177,6 +1178,19 @@ def apply_events_for_week(state, events, week, week_start, week_label=None,
             warns.append(_describe_applied_event(
                 ev, i, wk_name, transfers, harvests, tranogs,
                 harvested_now=(len(harvests) > h_before)))
+            # MOVE-SIZE RULES (warning only -- a scripted move runs as written):
+            # a PARTIAL move below the minimum, i.e. one that left fish behind.
+            if min_move > 0:
+                for _t in transfers[t_before:]:
+                    _src = state.tanks_by_id.get(getattr(_t, "source_tank_id", None))
+                    _n = float(getattr(_t, "count_transferred", 0.0) or 0.0)
+                    if 0.5 < _n < min_move - 0.5 and _src is not None and not _src.is_empty:
+                        warns.append(
+                            f"MANUAL EVENT NOTE — {wk_name}: {ev.type} #{i} moves "
+                            f"{_n:,.0f} fish out of tank #{_t.source_tank_id} and "
+                            f"leaves {_src.count:,.0f} behind: below the "
+                            f"{min_move:,.0f}-fish minimum transfer (runs as "
+                            f"scripted)")
         else:
             _why = "; ".join(ew) if ew else "no reason reported (tool bug)"
             warns.append(

@@ -145,6 +145,18 @@ class ControlParams:
     # 0 = no floor at all (the tail must still clear min_fraction of the tank
     # and leave a legal remnant behind). Unit: fish.
     min_grade_count: Optional[float] = None
+    # MOVE-SIZE RULES (opt-in, operator 2026-10-08: "there are a number of
+    # transfers that dont meet the 7000 fish min transfer constraint").
+    # False = byte-identical plans. True makes min_transfer_count / min_tank_control
+    # bind on the passes that ignored them: a PARTIAL move is >= min_transfer_count
+    # or does not happen (a move that EMPTIES its source is always allowed), and no
+    # move may start a NEW group below min_tank_control in an empty tank. Density
+    # relief still wins (a source over its density cap may shed less), and the 6N
+    # rotation fill is solved so each source gives its whole tank or a >= minimum
+    # piece that leaves >= the floor behind, hitting the fill exactly when it can
+    # (else it plans exactly as before). Goal: touch PRODUCTION fish as little as
+    # possible.
+    move_size_rules: bool = False
     # GRADE-TO-MIN (opt-in): on a 6N purge week where whole mature tanks can't fill
     # the harvest floor, peel the over-weight TAIL from near-market tanks into a free
     # pair tank (big -> 6N purge) with the small tail to a free OG retention tank,

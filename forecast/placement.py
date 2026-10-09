@@ -479,6 +479,93 @@ _REMNANT_KEEP_PAD = 1.02
 _REMNANT_SWEEP_PAD = 1.002
 
 
+def _min_move(control) -> float:
+    """The partial-move minimum the MOVE-SIZE RULES enforce: min_transfer_count
+    when `move_size_rules` is on, else 0 (= the historical behaviour)."""
+    if not getattr(control, "move_size_rules", False):
+        return 0.0
+    return float(getattr(control, "min_transfer_count", 0.0) or 0.0)
+
+
+def _small_move_blocked(take: float, src_tank, dst_tank, min_move: float,
+                        relief: bool = False) -> bool:
+    """MOVE-SIZE RULES: is this `take` a move the rules forbid?
+
+    A take below `min_move` is allowed only when it EMPTIES its source (a
+    whole-tank move), and never when it would start a NEW group below the
+    minimum in an empty destination. `relief=True` (a source over its density
+    cap) lifts the source-side rule only: density relief wins, but it still may
+    not create a dribble tank. min_move <= 0 never blocks.
+    """
+    if min_move <= 0 or take >= min_move - 0.5:
+        return False
+    if dst_tank is not None and dst_tank.is_empty:
+        return True
+    src_now = 0.0 if (src_tank is None or src_tank.is_empty) else src_tank.count
+    if take >= src_now - 0.5:
+        return False                       # empties the source: whole-tank move
+    return not relief
+
+
+def _plan_sixn_draws(cands, need: float, min_piece: float, keep: float,
+                     lo: float = None, hi: float = None,
+                     max_wholes: int = 4, max_cands: int = 12):
+    """MOVE-SIZE RULES: which source tanks feed one 6N fill, and how many each.
+
+    `cands` = [(tank_id, count, batch_rank)] in the fill's priority order (FIFO
+    batch, then heaviest band). Every source gives either its WHOLE tank or ONE
+    partial piece of at least `min_piece` that leaves at least `keep` behind; at
+    most one partial. The total must land in the week's band [lo, hi] (default
+    = exactly `need`). Chosen by: closest to `need` (in 500-fish steps), then
+    fewest tanks touched, then oldest batches, then whole-tank moves, then
+    earliest (heaviest) tanks. When the whole pool is not more than `hi`, every
+    tank goes whole (what the fill did anyway). None = no plan in the band; the
+    caller keeps its old draw.
+    """
+    import itertools
+    lo = need if lo is None else lo
+    hi = need if hi is None else max(hi, need)
+    pool = [(tid, float(c), int(br)) for tid, c, br in cands if c > 0.5][:max_cands]
+    if need <= 0.5 or not pool:
+        return None
+    if sum(c for _, c, _ in pool) <= hi + 0.5:
+        return {tid: c for tid, c, _ in pool}
+    best = None
+
+    def _offer(combo, part, x):
+        got = sum(pool[i][1] for i in combo) + x
+        if got < lo - 0.5 or got > hi + 0.5:
+            return
+        used = list(combo) + ([part] if part is not None else [])
+        key = (round(abs(got - need) / 500.0), len(used),
+               max(pool[i][2] for i in used), 0 if part is None else 1,
+               sum(used))
+        nonlocal best
+        if best is None or key < best[0]:
+            plan = {pool[i][0]: pool[i][1] for i in combo}
+            if part is not None:
+                plan[pool[part][0]] = x
+            best = (key, plan)
+
+    for k in range(0, min(max_wholes, len(pool)) + 1):
+        for combo in itertools.combinations(range(len(pool)), k):
+            got = sum(pool[i][1] for i in combo)
+            if got > hi + 0.5:
+                continue
+            if k:
+                _offer(combo, None, 0.0)
+            for p in range(len(pool)):
+                if p in combo:
+                    continue
+                c = pool[p][1]
+                x_lo = max(min_piece, lo - got)
+                x_hi = min(c - keep, hi - got)
+                if x_hi < x_lo - 0.5:
+                    continue
+                _offer(combo, p, min(max(need - got, x_lo), x_hi))
+    return None if best is None else best[1]
+
+
 def _floored_take(src_count: float, want: float, min_keep: float) -> float:
     """Clamp a removal so the source ends EMPTY or with >= min_keep fish.
 
@@ -1588,6 +1675,7 @@ def _transit_entry_to_pair(
             # bind the fish that will be harvested in that week.
             harvest_cap=(weekly_max if weekly_max
                          else getattr(control, "max_harvest_per_week", None)),
+            min_move=_min_move(control),
             reason=f"6N rotation fill via entry forward-transit (from {src_loc})",
             sixn_move_in_feed=sixn_move_in_feed, tables=tables,
             batch_meta=batch_meta, is_purge=True, avoid=avoid)
@@ -2074,6 +2162,17 @@ def _run_sixn_purge_week(
         target = max(_min_fill, min(max_h, move_in_target))
     else:
         target = _min_fill
+    # MOVE-SIZE RULES: fish already sitting in the fill pair (a make-room dump
+    # or a partial drain's residue) ARE part of this pair's harvest -- the pair
+    # drains as one. Size the fill to what is still missing, so a dump plus a
+    # full fill cannot double the week (2028-W14 on the 10.1.26 PR: 38,343
+    # make-room fish + a 39,270 fill = 77,531 in one drain).
+    if _min_move(control) > 0:
+        _pre = pair_combined_count(state, fill_pair)
+        if _pre > 0:
+            target = max(0.0, target - _pre)
+            _min_fill = max(0.0, _min_fill - _pre)
+            max_h = max(0.0, max_h - _pre)
     # LEVEL DRAINS (opt-in `sixn_level_drains`): cap the fill by the resting pair's
     # REMAINING headroom (one weekly harvest's worth, max_h) so fills don't ACCUMULATE
     # into one pair across its rotation residency — the root cause of the 90-113k drain
@@ -2112,8 +2211,39 @@ def _run_sixn_purge_week(
 
     count_moved = 0
     contributing_batches: list[str] = []
+
+    def _fill_sources(_b):
+        """The eligible grow-out tanks of batch `_b`, in draw order."""
+        _st = [t for t in state.tanks_by_id.values()
+               if t.batch_id == _b and not t.is_empty
+               and t.tank_id not in state.sixn_closed_tanks
+               and t.system_id not in OG12_SYSTEMS
+               and t.avg_wt_g >= control.min_harvest_weight_g]
+        _st.sort(key=lambda t: (-int(t.avg_wt_g // 100.0), t.count, t.tank_id))
+        return _st
+
+    # MOVE-SIZE RULES: solve the whole fill up front, across the FIFO batches
+    # together (an older batch is preferred, not exhausted first), so no source
+    # gives a sub-minimum piece: each gives its whole tank or one piece of at
+    # least min_transfer_count that leaves at least the floor, the total inside
+    # this drain week's band [floor, limit], closest to the target. None = no
+    # such plan -> the old draw (and it is logged).
+    _draw_plan = None
+    if _min_move(control) > 0 and is_purge_mode(control, week_start_date):
+        _cands = [(t.tank_id, t.count, _bi)
+                  for _bi, _b in enumerate(move_in_batches)
+                  for t in _fill_sources(_b)]
+        _draw_plan = _plan_sixn_draws(
+            _cands, target, _min_move(control),
+            (control.min_tank_control or 0.0) * _REMNANT_KEEP_PAD,
+            lo=min(_min_fill, target), hi=max(target, max_h))
+        if _draw_plan is None and _cands:
+            warnings.append(
+                f"{week_label}: MOVE-SIZE 6N fill: no whole-tank/minimum-piece "
+                f"plan lands in {min(_min_fill, target):,.0f}-{max(target, max_h):,.0f}; "
+                f"previous draw used")
     for move_in_batch in move_in_batches:
-        if count_moved >= target:
+        if count_moved >= target and _draw_plan is None:
             break
         src_tanks = [
             t for t in state.tanks_by_id.values()
@@ -2148,8 +2278,10 @@ def _run_sixn_purge_week(
                                       t.tank_id))
         moved_this_batch = 0
         for src in src_tanks:
-            if count_moved >= target:
+            if count_moved >= target and _draw_plan is None:
                 break
+            if _draw_plan is not None and _draw_plan.get(src.tank_id, 0.0) <= 0.5:
+                continue
             # PURGE move-in weight first — the per-tank fill cap is judged at
             # the mid-week (Friday) transfer weight the fish actually land at.
             _bm = batch_meta.get(move_in_batch)
@@ -2267,6 +2399,8 @@ def _run_sixn_purge_week(
             # not blow the pair's 95-capacity, so it degrades to the
             # never-escalating partial form when it would.
             _want = min(target - count_moved, src.count, _cap_total)
+            if _draw_plan is not None:
+                _want = min(_draw_plan[src.tank_id], src.count, _cap_total)
             take = _floored_take(src.count, _want,
                                  control.min_tank_control or 0.0)
             _escalated = take > _want + 0.5     # floor forced a WHOLE-tank sweep
@@ -2367,7 +2501,7 @@ def _run_sixn_purge_week(
     # entry tanks, route them the physical way: entry -> grow-out hop ->
     # fill pair. See _transit_entry_to_pair (whole-tank ripe transits to the
     # target + graded ripe-tail peels up to the floor).
-    if count_moved < target:
+    if count_moved < (min(_min_fill, target) if _draw_plan is not None else target):
         # Front of the (already-popped) queue drains NEXT week — the transit's
         # second-leg fallthrough must not land fish there (depuration hold).
         _avoid_imminent = frozenset(pair_queue[0]) if pair_queue else frozenset()
@@ -2443,6 +2577,7 @@ def _emit_transfers_for_batch_diff(
     min_keep: float = 0.0,
     moves_left=None,
     purge: bool = True,
+    min_move: float = 0.0,
 ) -> None:
     """Rebalance a batch's fish across its new tank set via Transfer events.
 
@@ -2658,6 +2793,17 @@ def _emit_transfers_for_batch_diff(
                 # advance; a zero-count Transfer is not a move and emitting one
                 # would only spin the pairing loop.
                 i += 1; continue
+            # MOVE-SIZE RULES: a sub-minimum partial pairing is not worth a pump
+            # setup. Close whichever side made it small; a dropped source's
+            # leftover still drains WHOLE through the residual router below.
+            if _small_move_blocked(take, src_tank, state.tanks_by_id.get(dst_id),
+                                   min_move):
+                if unders[j][1] <= take + 0.5:
+                    unders[j][1] = 0.0
+                else:
+                    over_list[i][1] = 0.0
+                    i += 1
+                continue
             # Never set leaves_source_empty=True at the rebalance level —
             # earlier transfers from the same source can be REJECTED by
             # Transfer.apply (INV-4 etc.), so the rebalance can't know the
@@ -2726,6 +2872,8 @@ def _emit_transfers_for_batch_diff(
                 continue
             dest_id = cand.tank_id
             whole = room >= tank.count - 0.5
+            if not whole and _small_move_blocked(room, tank, cand, min_move):
+                continue
             ev = Transfer(
                 batch_id=batch_id, event_date=event_date, source_tank_id=s,
                 destinations=[TankAllocation(
@@ -2986,6 +3134,7 @@ def _even_out_density(
     relief_pct: float = 0.90,
     chronic_relief_pct: float = 0.80,
     headroom_pct: float = 0.90,
+    min_move: float = 0.0,
 ) -> None:
     """Even fish across a batch's tanks when any tank is over density cap.
 
@@ -3050,6 +3199,18 @@ def _even_out_density(
             take = min(overs[i][1], unders[j][1])
             src_id, _, src_tank = overs[i]
             dst_id = unders[j][0]
+            # MOVE-SIZE RULES: evening counts is a quality move; below the
+            # minimum it may only come from a tank actually over its density
+            # cap (relief wins), never from one merely above the mean.
+            if _small_move_blocked(
+                    take, src_tank, state.tanks_by_id.get(dst_id), min_move,
+                    relief=(src_tank.max_density_kg_m3 > 0
+                            and src_tank.density_kg_m3 > src_tank.max_density_kg_m3)):
+                if overs[i][1] <= unders[j][1]:
+                    i += 1
+                else:
+                    j += 1
+                continue
             ev = Transfer(
                 batch_id=batch_id, event_date=event_date,
                 source_tank_id=src_id,
@@ -3142,6 +3303,14 @@ def _even_out_density(
             room = dst_cap_fish * HEADROOM_PCT - dst.count
             take = min(shed, room)
             if take <= 0.5:
+                continue
+            # MOVE-SIZE RULES: an over-cap source may shed a small group (relief
+            # wins); a chronic-only source may not, and no small group may open
+            # an empty tank.
+            if _small_move_blocked(
+                    take, src, dst, min_move,
+                    relief=(src.max_density_kg_m3 > 0
+                            and src.density_kg_m3 > src.max_density_kg_m3)):
                 continue
             if _mv_left[0] <= 0:
                 return                    # handling budget spent
@@ -4317,6 +4486,7 @@ def _make_room_into_6n(
     is_purge: bool = False,
     avoid=frozenset(),
     harvest_cap=None,
+    min_move: float = 0.0,
 ) -> bool:
     """PURGE-mode make-room: MOVE one growout tank's fish into a free 6N tank.
 
@@ -4364,22 +4534,48 @@ def _make_room_into_6n(
     # the remainder anyway — an overloaded purge tank beats a dropped arrival.
     _allocs = []
     _rem = _src_count
+    _pair_added: dict = {}
     for _i, _tk in enumerate(_usable):
         if _rem <= 0:
             break
         _cap = _sixn_fill_slot_cap(state, _tk.tank_id, _xfer_wt,
                                    purge=is_purge,
                                    harvest_cap=harvest_cap)
+        # MOVE-SIZE RULES: a pair drains as ONE harvest, so the limit binds the
+        # PAIR (both tanks held + what this dump already put there), not each
+        # tank on its own -- else a dump on top of a full fill doubles a week.
+        if min_move > 0 and harvest_cap:
+            _pr = next((p for p in SIXN_PAIRS if _tk.tank_id in p), None)
+            if _pr is not None:
+                _held_pr = pair_combined_count(state, _pr) + _pair_added.get(_pr, 0.0)
+                _cap = min(_cap, max(0.0, float(harvest_cap) - _held_pr))
         _a = _rem if _i == len(_usable) - 1 else min(_rem, _cap)
         if _a <= 0:
             continue
         _allocs.append(TankAllocation(tank_id=_tk.tank_id, count=_a,
                                       avg_wt_g=_xfer_wt, cv_pct=src.cv_pct))
+        if min_move > 0:
+            _pr = next((p for p in SIXN_PAIRS if _tk.tank_id in p), None)
+            if _pr is not None:
+                _pair_added[_pr] = _pair_added.get(_pr, 0.0) + _a
         _rem -= _a
     if _rem > 0:                    # every slot at 0 capacity and none last?
         _allocs.append(TankAllocation(tank_id=_usable[-1].tank_id, count=_rem,
                                       avg_wt_g=_xfer_wt, cv_pct=src.cv_pct))
         _rem = 0
+    # MOVE-SIZE RULES: a split leg below the minimum would START a small group
+    # in a 6N tank; fold it into the largest other leg (same whole-tank move,
+    # one fewer group). A single leg is the whole tank and always stays.
+    if min_move > 0 and len(_allocs) > 1:
+        _allocs.sort(key=lambda a: -a.count)
+        _keep = [_allocs[0]]
+        for _al in _allocs[1:]:
+            _dst = state.tanks_by_id.get(_al.tank_id)
+            if _al.count < min_move - 0.5 and _dst is not None and _dst.is_empty:
+                _keep[0].count += _al.count
+            else:
+                _keep.append(_al)
+        _allocs = _keep
     _mv = Transfer(
         batch_id=_src_batch, event_date=event_date,
         source_tank_id=src.tank_id,
@@ -5786,6 +5982,7 @@ def phase_d_emit_events(
                     # essential and never blocked (see the function's docstring).
                     moves_left=_moves_left_quality,
                     purge=purge_this_week,
+                    min_move=_min_move(control),
                 )
             # Even-out pass: fix PR/residual over-concentration by
             # leveling fish across each batch's tanks where a tank is
@@ -5921,6 +6118,7 @@ def phase_d_emit_events(
                                                      "chronic_relief_pct", 0.80)),
                     headroom_pct=float(getattr(control,
                                                "density_target_pct", 0.90)),
+                    min_move=_min_move(control),
                 )
 
             # Multi-objective balancer: relieve any tank still over density cap
@@ -6075,6 +6273,7 @@ def phase_d_emit_events(
                             transfer_events, warnings, week_label,
                             harvest_cap=getattr(
                                 control, "max_harvest_per_week", None),
+                            min_move=_min_move(control),
                             reason=(f"anticipatory purge pacing — holding a tank "
                                     f"for TranOG arrival in {_wk} (needs "
                                     f"{_need_wk})"),
@@ -6406,6 +6605,7 @@ def phase_d_emit_events(
                                     transfer_events, warnings, week_label,
                                     harvest_cap=getattr(
                                         control, "max_harvest_per_week", None),
+                                    min_move=_min_move(control),
                                     reason="reactive make-room for a TranOG arrival",
                                     sixn_move_in_feed=sixn_move_in_feed, tables=tables,
                                     batch_meta=batch_meta, is_purge=True,

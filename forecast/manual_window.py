@@ -460,7 +460,9 @@ def advance_facility_window(state, batch_by_id, tables, forecast_start,
             tr, hv, tn, w, fwb = apply_events_for_week(
                 state, events, i + 1, week_start, week_label=labels[i],
                 handling_frac=handling_frac, fw_lookup=fw_lookup,
-                out_week_culls=_wk_culls, consumed_fw=consumed_fw)
+                out_week_culls=_wk_culls, consumed_fw=consumed_fw,
+                min_move=(float(getattr(control, "min_transfer_count", 0.0) or 0.0)
+                          if getattr(control, "move_size_rules", False) else 0.0))
             for _cb, _cn, _cbio in _wk_culls:
                 _e = manual_fw_cull.setdefault((_cb, labels[i]), [0.0, 0.0])
                 _e[0] += _cn

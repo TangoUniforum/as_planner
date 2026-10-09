@@ -984,6 +984,16 @@ _CONTROL_HELP = {
         "= fewer, larger transfers but slightly more crowding left "
         "unrelieved; 0 = no floor. Whole-tank moves are unaffected. Unit: "
         "fish.",
+    "move_size_rules":
+        "Makes the move minimums bind everywhere. Off = plans exactly as "
+        "before. On: a PARTIAL move is at least Min transfer size or does not "
+        "happen (a move that empties its tank is always allowed); no move may "
+        "start a new group below the Force-empty floor in an empty tank; "
+        "density relief may still move less from a tank that is over its "
+        "density cap; and each 6N fill is solved so every source tank gives "
+        "its whole tank or one piece of at least the minimum that leaves at "
+        "least the floor behind. Goal: touch production fish as little as "
+        "possible.",
     "min_grade_count":
         "The smallest RIPE TAIL the planner may grade out of a tank on a week "
         "that is short of the harvest floor. This is NOT the same rule as 'Min "
@@ -1458,6 +1468,7 @@ _CONTROL_LABEL = {
     "min_harvest_weight_g": "Min harvest weight (g)",
     "min_tank_control": "Force-empty floor (fish)",
     "min_transfer_count": "Min transfer size (fish)",
+    "move_size_rules": "Enforce move minimums everywhere (on/off)",
     "min_grade_count": "Min graded-tail size (fish)",
     "max_transfers_per_week": "Handling budget (moves / week)",
     "default_hog_yield": "Default HOG yield",
@@ -1700,7 +1711,7 @@ _CONTROL_GROUPS = [
      ["max_feed_per_day_kg", "max_biomass_kg", "max_harvest_per_week",
       "harvest_relief_pct", "min_harvest_per_week", "min_harvest_weight_g",
       "min_tank_control", "max_transfers_per_week", "min_transfer_count",
-      "min_grade_count",
+      "move_size_rules", "min_grade_count",
       "tran_og_default_tanks", "entry_tier_exit", "density_target_pct",
       "density_welfare_threshold_kg_m3", "default_hog_yield",
       "grade_efficiency", "handling_mortality_pct"]),
