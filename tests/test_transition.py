@@ -330,7 +330,11 @@ def test_yaml_text_is_what_the_apps_save_writes(live, tmp_path):
 
 def test_unchanged_live_scenario_text_equals_the_live_file(live):
     text = tr.batches_yaml_text(live)
+    # Line endings are Git's, not the tool's: a Windows checkout turns the
+    # file's LF into CRLF, which made this fail on every Windows machine while
+    # the content was identical. Compare content, not line endings.
     on_disk = (ROOT / "scenario" / sio.BATCHES_FILE).read_bytes().decode("utf-8")
+    on_disk = on_disk.replace("\r\n", "\n")
     assert text.startswith(tr.BATCHES_HEADER)
     assert text[len(tr.BATCHES_HEADER):] == on_disk[len(tr.BATCHES_HEADER):]
     assert text == on_disk
