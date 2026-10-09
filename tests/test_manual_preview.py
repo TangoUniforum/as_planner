@@ -24,8 +24,10 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-PR_0930 = Path(r"C:\Users\julian.f\OneDrive - Atlantic Sapphire\Production"
-               r"\Forecasts\2026\Oct\Oct Forecast V2.xlsm")
+# The 9/30 ProductionReport as a fixture in the repo. These tests used to read
+# it from an operator workbook in the Oct forecasts folder ("Oct Forecast
+# V2.xlsm"); when that folder was tidied every test here skipped silently.
+PR_0930 = ROOT / "tests" / "fixtures" / "pr_2026-09-30.xlsx"
 
 pytestmark = pytest.mark.skipif(not PR_0930.exists(),
                                 reason="the 2026-09-30 ProductionReport is not on this machine")

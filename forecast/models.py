@@ -157,6 +157,10 @@ class ControlParams:
     # (else it plans exactly as before). Goal: touch PRODUCTION fish as little as
     # possible.
     move_size_rules: bool = False
+    # How far ahead (days) the move-size rules' grow-out density relief looks:
+    # a tank projected over its cap within this many days of its own growth is
+    # relieved now, once, by a legal group. Only used when move_size_rules is on.
+    relief_lookahead_days: int = 21
     # GRADE-TO-MIN (opt-in): on a 6N purge week where whole mature tanks can't fill
     # the harvest floor, peel the over-weight TAIL from near-market tanks into a free
     # pair tank (big -> 6N purge) with the small tail to a free OG retention tank,

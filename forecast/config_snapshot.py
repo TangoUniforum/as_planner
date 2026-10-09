@@ -147,7 +147,8 @@ def _write_yaml_sheet(ws, dirs) -> None:
     hold (so the pre-split reader parses it unchanged)."""
     ws.append([f"{KIND_SNAPSHOT_MARK} — the exact config + scenario this "
                "forecast ran from."])
-    ws.append(["Re-importable: app Configure mode > 'Import from workbook', "
+    ws.append(["Re-importable: app Configure > 'Template & import' > "
+               "'Import config', "
                "or forecast.config_snapshot.import_config_snapshot(). The "
                "readable view of the same files is the RunConfig tab."])
     ws.append([_excluded_line()])

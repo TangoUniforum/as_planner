@@ -171,7 +171,8 @@ def write_readable_view(ws, dirs, *, files, run_info=None, pr_closing=None,
     meanings = _meanings()
     v.put([title])
     v.put([f"The run's config and scenario as tables. The exact YAML (what "
-           f"'Import from workbook' restores) is on the '{yaml_sheet}' tab. "
+           f"Configure > 'Template & import' > 'Import config' restores) is "
+           f"on the '{yaml_sheet}' tab. "
            f"Rows marked + are collapsed: click + in the left margin to "
            f"expand."], note=True)
     v.put([excluded_line], note=True)

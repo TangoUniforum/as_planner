@@ -2734,10 +2734,11 @@ def _emit_transfers_for_batch_diff(
         return move_allowed(src_tank.system_id, dst.system_id,
                             src_tank.avg_wt_g)[0]
 
-    def _room_fish(dst_id, wt_g) -> float:
+    def _room_fish(dst_id, wt_g, ratio=DENSITY_SEVERE_RATIO) -> float:
         """Fish of weight `wt_g` the destination can still take before it
-        reaches DENSITY_SEVERE_RATIO x its density cap -- unbounded for a
-        harvest-prep / purge tank (as every sizing caller of
+        reaches `ratio` x its density cap (default DENSITY_SEVERE_RATIO; the
+        move-size residual spread passes 1.0, the cap itself) -- unbounded for
+        a harvest-prep / purge tank (as every sizing caller of
         `_eff_density_cap` keeps it) or a tank with no cap."""
         dst = state.tanks_by_id.get(dst_id)
         if dst is None or wt_g <= 0:
@@ -2746,7 +2747,7 @@ def _emit_transfers_for_batch_diff(
         if cap == float("inf") or cap <= 0:
             return float("inf")
         held_kg = (dst.count * dst.avg_wt_g / 1000.0) if not dst.is_empty else 0.0
-        limit_kg = dst.volume_m3 * cap * DENSITY_SEVERE_RATIO
+        limit_kg = dst.volume_m3 * cap * ratio
         return max(0.0, (limit_kg - held_kg) * 1000.0 / wt_g)
 
     def _pair_surpluses(over_list: list[list], budgeted: bool) -> None:
@@ -2869,20 +2870,11 @@ def _emit_transfers_for_batch_diff(
         # once the small legs were barred, put a whole drained tank into ONE
         # destination for a week (114-120 kg/m3 on the 3.31 / 2.28 PRs).
         if min_move > 0:
-            def _room_at_cap(cid, wt_g):
-                _d = state.tanks_by_id.get(cid)
-                if _d is None or wt_g <= 0:
-                    return 0.0
-                _c = _eff_density_cap(_d.max_density_kg_m3, _d.system_id, _d.stage, purge)
-                if _c == float("inf") or _c <= 0:
-                    return float("inf")
-                _held = (_d.count * _d.avg_wt_g / 1000.0) if not _d.is_empty else 0.0
-                return max(0.0, (_d.volume_m3 * _c - _held) * 1000.0 / wt_g)
-            for cand in sorted(candidates, key=lambda c: (-_room_at_cap(c.tank_id, tank.avg_wt_g), c.tank_id)):
+            for cand in sorted(candidates, key=lambda c: (-_room_fish(c.tank_id, tank.avg_wt_g, 1.0), c.tank_id)):
                 if tank.is_empty:
                     break
                 rem = tank.count
-                take = min(rem, _room_at_cap(cand.tank_id, tank.avg_wt_g))
+                take = min(rem, _room_fish(cand.tank_id, tank.avg_wt_g, 1.0))
                 if take < min_move - 0.5:
                     continue
                 if 0.5 < rem - take < min_move - 0.5:
@@ -6248,6 +6240,7 @@ def phase_d_emit_events(
                         _t.avg_wt_g, batch_meta.get(_t.batch_id), tables, _d,
                         week_label)),
                     min_keep=float(control.min_tank_control or 0.0),
+                    lookahead_days=int(getattr(control, "relief_lookahead_days", 21) or 21),
                 )
 
             # Multi-objective balancer: relieve any tank still over density cap

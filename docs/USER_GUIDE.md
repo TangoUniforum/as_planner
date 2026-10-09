@@ -170,10 +170,12 @@ Facility-wide knobs read into `ControlParams`:
 | `min_harvest_per_week` | weekly harvest floor | *(none — must be set)*; 30,000 in the committed config, 26,000 in the operator's live tree (the value §14's measurements used) |
 | `plan_tank_feasibility` | **Plan within the tanks you actually have.** The precalc canvas already detects, weeks ahead, that OG tank demand exceeds placeable supply (`tank_supply` bottleneck) — and then plans past it: that list is handed to `_build_facility_assignment_plan` and only ever *appended* to, never read. The excess is not real need — each SW week's `tanks_needed_at_density_cap` is raised to that batch's own peak over the next 6 weeks so it can claim grow-out early, per batch, with nothing arbitrating the sum. On: the canvas hands those forward reservations back, deepest slack first and **never below a batch's need for that week**, until each week fits. **Measured on 3 PR closings and it does NOT win** — the tank-supply shortfall goes to zero, transfer legs fall on all three (626→585, 604→589, 550→516), ceiling breaches improve on 2 of 3, and worst grow-out density improves sharply on 2 of 3 (198.7→109.6 kg/m³ on 8/19) — but HOG slips on all three (−54.0, −4.2, −24.3 t), refused transfers **rise** (the forward claim was doing real work: hand it back and batches get boxed in later), and 1–3 weeks per horizon exceed the 15-move handling budget. Off by default; the **Controller — plan-feasible tanks** method in Compare pins it on. | false |
 | `max_transfers_per_week` | weekly HANDLING BUDGET (transfer moves/week). A "move" = one distinct src→dst tank transfer with fish in it, exactly what a TransferPlan `Transfer` row shows (same-week duplicate legs are merged into one row; 0-fish float-residue legs are dropped; TranOG/Grade rows are not moves) — the engine's internal budget counts the **same unit**. Once a week's moves reach the budget, the deferrable quality passes (plan-diff *evening* top-ups, even-out, balancer, variable-quantity, remnant sweep) wait for a calmer week and the leveling resumes there; essential moves (6N rotation fills, arrival make-room/vacates, plan-diff *source drains* — tanks another batch takes over) are never blocked. A week can still end 1-2 moves OVER the budget, because the essential passes run LAST: the deferrable work spends the budget out to the cap and the essential moves that follow land on top. That is common, not exceptional — measured across **8 test months, 5 of them contain a week over 15 moves**, which is why the handling-budget gate is soft (§12). Two anticipatory layers that close that gap are BUILT but shipped **off** (`_ANTICIPATE_ARRIVAL_RESERVE` / `_ANTICIPATE_PACING_DEFER` in `placement.py` — engineering switches, not knobs, with no config key): a 4-arm x 3-PR x 2-knob-set ablation measured that they buy full budget compliance by starving the quality rebalancer, and pay for it out of the **harvest floor** — on the operator's own PR, weeks under `min_harvest_per_week` go 3 -> 5 and the shortfall more than doubles, and on one PR a 69,677-fish week lands past the 60,500 relief ceiling. Steady harvest outranks handling, so the plan may show a 16-17 move week instead. An overrun on the handling gate (WARN >12 / FAIL >15) means the week's quality work and essential work together exceeded the budget — most often a TranOG arrival week coinciding with a 6N rotation fill. 0 = off. **One scope limit worth knowing:** the *split* pass is NOT budget-gated (the `_rebalance_systems_realized` split pass, which takes its own `split_budget` and does not consult the weekly move budget) | 15 |
-| `min_harvest_weight_g` | minimum weight a fish can be harvested at — a **tank is eligible when its MEAN reaches this**, which is why a tank averaging 3,438 g holds ~92,000 fish individually over 3,500 g and still cannot be harvested whole (the graded peel exists for exactly that: see `min_grade_count` and `harvest_grade_to_min` below). **No dataclass default** — `ControlParams` declares it without one, so `config/control.yaml` is the only source. **Committed value 3,300** (since 2026-09-03; measured on the 8.31 PR it takes rest-of-2026 from 2,582 t to 2,715 t and the weekly-contract shortfall from 65,470 fish to 5,686, at the cost of five December-trough weeks shipping at 3.43–3.48 kg live — nothing below 3.4 kg). The operator's live tree currently runs **3,200**, which this row does not measure. Read `config/control.yaml` for the value a run uses. Beware 3,150 — a 600 t hole sits there | *(none — must be set)* |
-| `min_tank_control` | force-empty floor (fish): a harvest/transfer leaving fewer than this empties the tank (INV-5) | 7,000 |
-| `min_transfer_count` | min rebalancer transfer size (fish): the density/load balancer won't split a sub-group **smaller than this OUT** of a tank (the OUT-side mirror of `min_tank_control`). **0 = OFF.** Suppresses tiny partial moves — trades fewer transfers for more *marginal* density over-cap (the small moves were doing fine-grained relief); whole-tank consolidation moves are unaffected | 0 (off) |
+| `min_harvest_weight_g` | minimum weight a fish can be harvested at — a **tank is eligible when its MEAN reaches this**, which is why a tank averaging 3,438 g holds ~92,000 fish individually over 3,500 g and still cannot be harvested whole (the graded peel exists for exactly that: see `min_grade_count` and `harvest_grade_to_min` below). **No dataclass default** — `ControlParams` declares it without one, so `config/control.yaml` is the only source. **Committed value 3,300** (since 2026-09-03; measured on the 8.31 PR it takes rest-of-2026 from 2,582 t to 2,715 t and the weekly-contract shortfall from 65,470 fish to 5,686, at the cost of five December-trough weeks shipping at 3.43–3.48 kg live — nothing below 3.4 kg). The operator's live tree currently runs **3,500** (2026-10-09), which this row does not measure. Read `config/control.yaml` for the value a run uses. This is the default for **every** week: a week with a `min_harvest_weight_g` row in **Limits → Facility limits** uses that row instead (§3.3a). Beware 3,150 — a 600 t hole sits there | *(none — must be set)* |
+| `min_tank_control` | force-empty floor (fish): a harvest/transfer leaving fewer than this empties the tank (INV-5). With `move_size_rules` on (§4.6) no move may **start** a group below it in an empty tank either | 7,000 |
+| `min_transfer_count` | min rebalancer transfer size (fish): the density/load balancer won't split a sub-group **smaller than this OUT** of a tank (the OUT-side mirror of `min_tank_control`). **0 = OFF.** Suppresses tiny partial moves — trades fewer transfers for more *marginal* density over-cap (the small moves were doing fine-grained relief); whole-tank consolidation moves are unaffected. With `move_size_rules` on (§4.6) it binds on **every** planner step, not just the balancer | 0 (off) |
 | `min_grade_count` | min GRADED-TAIL size (fish) for the floor-fill peel — a **different rule** from the two 7,000s beside it. `min_tank_control` says how thin a tank may be **left**; `min_transfer_count` says how small a group is worth rigging a **pump** for; this says how small a ripe tail is worth running the **grader** for, on a week that is short of the harvest floor. They shared one number until 2026-09, which made the peel take **nothing** whenever the ripe fish stood as 3-7k tails spread over 8-12 tanks. **Blank = inherit `min_transfer_count`** (the historical behaviour, and the only setting measured to hold every hard gate at both 3,300 g and 3,500 g). A number is the explicit floor; **0 = no floor** (the tail must still be ≥ `min_fraction` = 10% of the tank and must leave a legal remnant). MEASURED 2026-09-03 on the 8.31 PR: at a **3,300 g** harvest gate the value is inert — 0 / 3,000 / 7,000 give the identical plan; at **3,500 g** it bites, and dropping it to 0 buys rest-of-2026 2,582 → 2,700 t with thin tank-weeks 9 → 0, but pushes a 2027-W39 grow-out tank to 115.6 kg/m³ and the weekly move peak to 17. Check the density and handling gates before keeping a low value | blank (inherit) |
+| `move_size_rules` | make `min_transfer_count` and `min_tank_control` bind on every planner step (partial moves ≥ the minimum or none; no new sub-floor groups, 6N included; solved 6N fills; plan-ahead grow-out relief). **Off = plans exactly as before.** See §4.6 | off |
+| `relief_lookahead_days` | with `move_size_rules` on: how many days ahead the grow-out density relief looks (a tank its own growth would take over cap within this many days is relieved once, now). Unused when the switch is off. See §4.6 | 21 |
 | `harvest_grade_to_min` | **INACTIVE — this switch no longer controls anything.** The behaviour it used to gate (on a 6N purge week whose move-in falls below `min_harvest_per_week`, peel just enough of the over-weight tail from near-market tanks to reach the floor: big → 6N purge, the small tail stays in the source tank) now runs **unconditionally** — `placement._run_sixn_purge_week`: *"NOW UNCONDITIONAL (subsumes the old opt-in `harvest_grade_to_min`, which remains accepted but no longer gates this)"*. Leaving it off does **not** disable the behaviour; it produced empty harvest weeks, which breaks the steady-harvest contract. Flipping the box changes only a row in the app's run summary. Kept so older configs load | n/a (inert) |
 | `default_hog_yield` | gross→HOG conversion (per-week overrides in FacilityLimits) | 0.81 |
 | `scenario_name` | label for the run (reports + RunConfig) | Forecast |
@@ -430,7 +432,8 @@ To act: **click the cell**
 for the tank and week you want — a **single click picks both** the tank (its row)
 and the week (its column) — and a panel opens *in context* showing what's actually
 in that tank (batch, fish, weight, density) and offering **Harvest / Graded →
-6N / Move / Send to 6N** with real tank pickers — no tank numbers to
+6N / Move (OG→OG) / Graded / split transfer (OG→OG) / Send to 6N depuration**
+with real tank pickers — no tank numbers to
 memorise, no codes to type.
 The grid **re-draws as you script**, so you watch each operation ripple forward
 over the weeks. A **"Weeks to view"** slider sets how far ahead to
@@ -779,6 +782,13 @@ pairs **61/67, 63/69, 65/71**:
   count fidelity at harvest. Spending a sister on one batch's overflow burns the slot
   that separation needs — that was a real defect, fixed 2026-08-20. The harvest limit
   applies to the pair's **combined** drain.
+- **A fill is sized to the week it is harvested, not the week it is filled**
+  (since 2026-10-05). Fish moved into 6N in week *t* drain about two weeks later, so
+  the fill uses **that** week's per-week floor and limit (`min_harvest_per_week` /
+  `max_harvest_per_week` rows) — to shape a month, set rows on its **harvest**
+  weeks. Make-room dumps into 6N are still capped at Control's
+  `max_harvest_per_week` (per pair when `move_size_rules` is on, §4.6). Past the
+  horizon's last week, that last week's band stands in.
 - **The rotation repairs itself when it starts in the wrong shape.** Fish purge ~2
   weeks, so a pair is never drained in the rotation right after its fill — that would
   be a 1-week purge (**`DEPURATION HOLD`** in the ValidationLog: the tank waits for its
@@ -980,6 +990,52 @@ board are pinned `off` so you can always see them side by side.
 > reports "no difference" — which is exactly how a real feature was once wrongly
 > recorded as inert on this project.
 
+### 4.6 Move-size rules (opt-in): `move_size_rules`
+
+**Off by default** — with it off, every plan is exactly what it was before
+2026-10-09. Turn it on in **Configure → Control** ("Enforce move minimums
+everywhere"). It makes the two 7,000-fish rules you already set bind on every
+planner step, not just some of them:
+
+- **A partial move is at least `min_transfer_count`, or it does not happen.** A
+  move that **empties** its source tank is always allowed, whatever its size.
+- **No move may start a new group below `min_tank_control` in an empty tank** —
+  6N tanks included (a 24-fish purge group no longer ties up a 6N tank).
+- **Each weekly 6N fill is solved as a set:** every source tank gives either its
+  whole tank or one piece of at least the minimum that leaves at least the floor
+  behind, and the total lands **inside that week's harvest band** (closest to the
+  target first; then fewest tanks touched; then the oldest batch; then whole-tank
+  moves; then the heaviest fish). If no such fill exists the step plans as before
+  and the ValidationLog says so (`MOVE-SIZE 6N fill: … previous draw used`).
+- **Fish already sitting in a 6N pair count toward that pair's fill**, and the
+  planned make-room dump into 6N is limited per **pair** (a pair drains as one
+  harvest). The last-resort make-room for an arriving batch keeps its old sizing —
+  an over-full purge week beats a refused arrival.
+- **Grow-out density relief plans ahead:** a tank that its own growth would take
+  over its density cap within `relief_lookahead_days` (default 21) is relieved now,
+  **once**, by at least the minimum, into the same-batch tank(s) with the most room
+  — instead of a small trim every week. A tank actually over its cap may still
+  shed less (density wins).
+- **A tank leaving the plan** is spread over the batch's kept tanks **within their
+  real density cap**, in pieces of at least the minimum, before the old
+  whole-into-one-tank route.
+- **Manual events still run as you script them**; a scripted partial move below
+  the minimum adds a `MANUAL EVENT NOTE` line to the ValidationLog.
+
+**Deliberately not changed:** the entry tier (OG1/2) and TranOG arrival splits,
+and the size of density relief out of OG1/2 — forcing 7,000 there measured worse
+(worst grow-out peak 106 → 125 kg/m³ on the recent corpus, and one PR became
+unplannable). 6N "carry-over" (moving a 6N surplus to the next tank) is not built:
+with the solved fills a week goes over its band only rarely.
+
+**Measured** on the 11 most recent corpus PRs (off → on): partial moves under 7,000
+845 → 95, total moves 6,719 → 6,044, weeks under the floor 32 → 30, weeks over the
+weekly max 10 → 3, tank-weeks over the density cap 364 → 316, HOG −0.03%.
+
+**Turning it on changes a tuned scenario.** Weekly bands and manual counts tuned
+with it off will land differently with it on (on the 9/30 PR, late-December weeks
+and early 2027 shifted) — re-check the weeks you care about after switching.
+
 ---
 
 ## 5. Output reports — where to read what
@@ -1007,8 +1063,8 @@ board are pinned `off` so you can always see them side by side.
 | **WeeklyReport Grouped / MonthlyReport Grouped** | the SAME rows with a **blank line between periods**, for reading and printing. **Do not filter these** — a blank row ends Excel's contiguous range, so a filter would silently cover only the first period | reading a period end-to-end |
 | **Diagnostics** | FW-calibration: per batch (in batch order), the target vs projected pre-cull avg weight at TranOG, the residual, and a back-solved `Suggested_FW_Correction` | tuning `fw_correction` (§7 step 2) |
 | **BiologyProjection** | the unharvested per-batch biology projection (growth, feed along the curve, ignoring harvest/caps) | model inputs — NOT the fed plan (see the Overview note) |
-| **RunConfig** | the run's config + scenario **as readable tables**: run identity (PR closing, forecast start, horizon, manual window, scenario, placement method, when written), then one section per file — control settings (Setting / Value / the meaning from this guide's settings tables), biology curves, facility tanks, batches (pointer to BatchInputs), limits (system defaults, weekly exceptions, per-week facility rows with one column per metric), and this PR's manual events (display only). Long tables start collapsed — click **+** in the left margin. Links at the top go to RunConfig YAML and BatchInputs | reading what the run used |
-| **RunConfig YAML** | the exact config + scenario files as YAML text, one labelled block per file — what **Configure → Import from workbook** restores. Always the last tab. Workbooks written before this tab existed keep the YAML in RunConfig itself, and still import | reproducibility |
+| **RunConfig** | the run's config + scenario **as readable tables**: run identity (PR closing, forecast start, horizon, manual window, scenario, placement method, hybrid follow, when written), then one section per file — control settings (Setting / Value / the meaning from this guide's settings tables), biology curves, facility tanks, batches (pointer to BatchInputs), limits (system defaults, weekly exceptions, per-week facility rows with one column per metric), and this PR's manual events (display only). Long tables start collapsed — click **+** in the left margin. Links at the top go to RunConfig YAML and BatchInputs | reading what the run used |
+| **RunConfig YAML** | the run's control, biology, facility, batches and limits files as YAML text, one labelled block per file — what **Configure → 📦 Template & import → 📥 Import config** restores. Manual events, `costs.yaml` and the analysis overlays (`targets.yaml`, `economics.yaml`, `analysis_defaults.yaml`) are **not** restored. Always the last tab. Workbooks written before this tab existed keep the YAML in RunConfig itself, and still import | reproducibility |
 | **BatchInputs** | one row per batch, **in batch order**: what `scenario/batches.yaml` told the run — source (in OG / in freshwater / split at the PR close, scheduled, or pre-start), input date + eggs, Tran SF date, Tran OG date, TranOG count / target weight / CV, FCR model (and the `biology.yaml` curve it selects), FW correction **input and used** (after `auto_calibrate_fw`) with what calibration did, SGR correction — next to what the run did: OG entry week/date, **count into OG** (the batch's TranOG rows on the TransferPlan; reconciles with the InputConservationAudit's Realized_TranOG), average entry weight, entry tanks, and whether a manual `fw_to_og` scripted it. Below the table: the run settings that shape batch inputs and the biology models in force. Report only; appended after CostsAndProfit so no other tab moves | **what went in, per batch** |
 | **CostsAndProfit** | only when `config/costs.yaml` exists; after RunConfig (only BatchInputs and RunConfig YAML follow it): per month (with a first row for any days before the report opens), per year and horizon — feed kg, eggs stocked, feed / shipping / oxygen / chemicals / eggs / fixed cost, total cost, HOG, revenue, **profit**, spend per kg HOG sold, unpriced feed kg; then **feed by type** with your item names. Row 2 says when feed had no price (profit then overstated). NOT COMPUTED (with the reason) when the file is invalid or empty | the cash-view P&L — §15 |
 
@@ -2491,8 +2547,9 @@ and prices, costs price a plan and change nothing it computes.
 **The promoted default** lives in `config/analysis_defaults.yaml`, alongside
 the rest of your config, and is **never written to an output workbook** — so it
 cannot be lost to a run. Note the flip side: it is *not* part of the workbook's
-`RunConfig` snapshot (the RunConfig and RunConfig YAML tabs, which carry
-control/biology/facility/batches/limits only), so importing config from a workbook will not restore it — and **must
+`RunConfig` snapshot (the RunConfig and RunConfig YAML tabs restore
+control/biology/facility/batches/limits only — RunConfig also lists this PR's
+manual events for reading, but no import restores them), so importing config from a workbook will not restore it — and **must
 not**: a workbook you open from last month would otherwise silently re-point
 today's Quick run at a plan that won a tournament on a different PR. The same
 goes for `targets.yaml` and `economics.yaml`, the yardstick a run is *judged*
@@ -3611,8 +3668,10 @@ Ideal page.
 **An Ideal "year" is ISO weeks YYYY-W01 to W52/53** (Monday to Sunday) — every
 Ideal figure, check and cost is read on that basis, and the page says so. The
 Run workbook's YearlySummary and CostsAndProfit use calendar years, so the
-same year can differ by one boundary week between the two (step 3 today,
-2029: 7,103 t HOG on the Ideal page, 7,202 t on the sheet).
+same year can differ by part of a boundary week between the two (the sheet
+splits a week that crosses the new year by its Mon–Fri harvest days; a figure
+measured before 2026-10-06, 2029: 7,103 t HOG on the Ideal page against
+7,202 t on the sheet, predates that rule).
 
 **Feed with no price is never priced at 0.** If a feed type has no price (for
 example after a rename in Biology), its kg are left out of the feed cost, so
