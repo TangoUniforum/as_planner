@@ -1407,6 +1407,13 @@ def write_yearly_summary(
     yr_feed: dict[int, float] = defaultdict(float)
     for (_name, _mo), _kg in _ftm.items():
         yr_feed[int(_mo[:4])] += _kg
+    # ... plus the feed a mid-month PR already fed (1st to closing), as
+    # FeedForecastMonthly and MonthlyReport include it (operator, 2026-10-10).
+    _pr_feed_kg = 0.0
+    if pr_period is not None and getattr(pr_period, "is_mid_month", False):
+        _pr_feed_kg = sum(getattr(pb, "feed_kg", 0.0) or 0.0
+                          for pb in pr_period.batches.values())
+        yr_feed[pr_period.closing_date.year] += _pr_feed_kg
 
     # Biomass + utilisation per year (a stock: each week in its start's year).
     yr_bio: dict[int, list] = defaultdict(list)
@@ -1430,8 +1437,15 @@ def write_yearly_summary(
     if _pr_merged is not None:
         _note += (f" {_pr_merged[0]} harvest INCLUDES {_pr_merged[1]:,.0f} fish "
                   f"the ProductionReport landed from the 1st to "
-                  f"{_pr_merged[2]} (as HarvestPlan Report and MonthlyReport "
-                  f"include them); feed and biomass are the forecast's only.")
+                  f"{_pr_merged[2]} (as HarvestPlan Report, HarvestReport and "
+                  f"MonthlyReport include them).")
+    if _pr_feed_kg > 0:
+        _note += (f" {pr_period.closing_date.year} feed INCLUDES "
+                  f"{_pr_feed_kg:,.0f} kg the ProductionReport fed from the 1st "
+                  f"to {pr_period.closing_date} (as FeedForecastMonthly and "
+                  f"MonthlyReport include it).")
+    if _pr_merged is not None or _pr_feed_kg > 0:
+        _note += " Peak/Mean biomass and utilisation are the forecast's only."
     ws.append([_note])
     ws.append([
         "Year", "Harvest_Count (fish)", "Harvest_HOG (t)", "Harvest_Gross (t)",
@@ -1574,6 +1588,7 @@ def write_harvest_report(
     forecast_start=None,
     sheet_name: str = "HarvestReport",
     report_start=None,
+    pr_period=None,
 ) -> None:
     """Per-event harvest forecast (one row per tank harvest), matches reference.
 
@@ -1586,6 +1601,12 @@ def write_harvest_report(
     and kg split by harvest days (whole fish that sum to the event), dated on
     that part's first harvest day; a week inside one month keeps its single row
     dated on its Monday.
+
+    On a MID-MONTH PR the harvest the ProductionReport already landed (the 1st
+    to its closing date) comes first, one row per tank, so a month summed from
+    this sheet is the whole month, as on HarvestPlan Report and MonthlyReport
+    (operator, 2026-10-10). The PR has no per-day detail: those rows read
+    "PR" in Week and the period in Date, at the default HOG yield.
     """
     from .time_grid import harvest_month_split, harvest_schedule_days
     if sheet_name in wb.sheetnames:
@@ -1597,12 +1618,39 @@ def write_harvest_report(
     # window shifts forward -- this sheet also contains the window weeks.
     _hs = report_start if report_start is not None else forecast_start
     fs = _hs.date() if hasattr(_hs, "date") else _hs
-    ws.append([f"Generated from forecast starting {fs}" if fs else "Generated from forecast"])
+    _pr_mid = pr_period is not None and getattr(pr_period, "is_mid_month", False)
+    _head = f"Generated from forecast starting {fs}" if fs else "Generated from forecast"
+    if _pr_mid:
+        _cd = pr_period.closing_date
+        _head += (f". Rows with Week 'PR' are the ProductionReport's harvest from "
+                  f"{_cd.replace(day=1)} to {_cd} (per tank; the report has no "
+                  f"per-day detail), so each month sums to the whole month.")
+    ws.append([_head])
     ws.append([])
     ws.append([
         "Year", "Month", "Week", "Date", "Tank", "Batch",
         "Count (fish)", "Gross Biomass (kg)", "HOG Biomass (kg)", "Avg Live Wt (kg)",
     ])
+    if _pr_mid:
+        _cd = pr_period.closing_date
+        _span = f"{_cd.replace(day=1)} to {_cd}"
+        for _b in sorted_batches(pr_period.batches):
+            _pb = pr_period.batches[_b]
+            if _pb.harv_count <= 0:
+                continue
+            _units = list((getattr(_pb, "harv_units", None) or {}).items())
+            # Whatever the Unit rows do not account for stays on the batch, so
+            # the batch's rows always sum to its PR harvest.
+            _rc = _pb.harv_count - sum(c for _t, (c, _g) in _units)
+            _rg = _pb.harv_gross_kg - sum(g for _t, (_c, g) in _units)
+            if abs(_rc) >= 0.5 or abs(_rg) >= 0.5:
+                _units.append(("", (_rc, _rg)))
+            for _t, (_c, _g) in sorted(_units, key=lambda u: str(u[0])):
+                ws.append([
+                    _cd.year, date(_cd.year, _cd.month, 1), "PR", _span, _t, _b,
+                    round(_c, 0), round(_g, 0), round(_g * default_hog_yield, 0),
+                    round(_g / _c, 2) if _c else "",
+                ])
 
     def _d(ev_date):
         return ev_date.date() if hasattr(ev_date, "date") else ev_date
@@ -1820,6 +1868,7 @@ def write_feed_forecast_monthly(
     sheet_name: str = "FeedForecastMonthly",
     sixn_move_in_feed=None,
     report_start=None,
+    pr_period=None,
 ) -> None:
     """Per-month feed forecast as a Feed Type x Month matrix (kg/month).
 
@@ -1827,6 +1876,12 @@ def write_feed_forecast_monthly(
     month-start dates, cells are monthly feed (kg) by feed-type band, plus a
     Grand Total row. Feed source = realized OG/SW + projected FW (rolled up
     from the same per-week aggregation as the weekly sheet).
+
+    On a MID-MONTH PR the feed the ProductionReport already fed (the 1st to its
+    closing date) is added to that month as its own row -- the PR gives feed
+    per batch, not per feed type -- and the Grand Total includes it, so the
+    month is whole, as on MonthlyReport (operator, 2026-10-10). The by-batch
+    block gets the same row per batch. CostsAndProfit stays forecast-only.
     """
     if sheet_name in wb.sheetnames:
         del wb[sheet_name]
@@ -1846,8 +1901,26 @@ def write_feed_forecast_monthly(
     else:
         ftypes = [(None, n) for n in sorted({ft for (ft, _) in ftm})]
 
+    # The elapsed part of a mid-month PR's month: {batch: kg}, in that month.
+    _pr_feed: dict[str, float] = {}
+    _pr_mo = _pr_label = None
+    if pr_period is not None and getattr(pr_period, "is_mid_month", False):
+        _pr_mo = pr_period.month_label
+        _cd = pr_period.closing_date
+        _pr_label = f"ProductionReport {_cd.replace(day=1)} to {_cd}"
+        _pr_feed = {b: getattr(pb, "feed_kg", 0.0) for b, pb in pr_period.batches.items()
+                    if (getattr(pb, "feed_kg", 0.0) or 0.0) > 0}
+        if _pr_feed and _pr_mo not in months_sorted:
+            months_sorted = sorted(set(months_sorted) | {_pr_mo})
+            mo_dates = [_date(int(m[:4]), int(m[5:7]), 1) for m in months_sorted]
+
     ws.append(["MONTHLY FEED FORECAST BY TYPE (kg)"])
-    ws.append([])
+    if _pr_feed:
+        ws.append([f"{_pr_label}: feed already fed, as reported (the "
+                   f"ProductionReport gives feed per batch, not per feed type); "
+                   f"the Grand Total includes it."])
+    else:
+        ws.append([])
     ws.append(["Feed Type", "Max Size (g)"] + mo_dates)
     totals = [0.0] * len(months_sorted)
     for max_size, name in ftypes:
@@ -1857,6 +1930,12 @@ def write_feed_forecast_monthly(
             row.append(round(v, 0))
             totals[i] += v
         ws.append(row)
+    if _pr_feed:
+        _pr_tot = sum(_pr_feed.values())
+        ws.append([f"{_pr_label} (all types)", ""]
+                  + [round(_pr_tot, 0) if m == _pr_mo else 0 for m in months_sorted])
+        totals = [t + (_pr_tot if m == _pr_mo else 0.0)
+                  for t, m in zip(totals, months_sorted)]
     ws.append(["Grand Total", ""] + [round(t, 0) for t in totals])
 
     # ----- FEED BY BATCH & TYPE block (matches the legacy layout) -----
@@ -1878,7 +1957,7 @@ def write_feed_forecast_monthly(
     # Natural batch order from the ONE shared key (forecast/batch_order). The
     # private key that lived here was a second source of truth and not unique
     # ("B041" and "B41" tied) over a set of strings, so a tie fell to hash order.
-    batch_ids = sorted_batches({bid for (bid, _n, _m) in fbtm})
+    batch_ids = sorted_batches({bid for (bid, _n, _m) in fbtm} | set(_pr_feed))
     ws.append([])
     ws.append(["FEED BY BATCH & TYPE (kg)"])
     ws.append(["Batch", "Feed Type"] + mo_dates)
@@ -1886,6 +1965,11 @@ def write_feed_forecast_monthly(
         names = sorted({n for (b, n, _m) in fbtm if b == bid},
                        key=lambda n: (size_of.get(n, 0.0), n))
         first = True
+        if bid in _pr_feed:
+            ws.append([bid, f"{_pr_label} (all types)"]
+                      + [round(_pr_feed[bid], 0) if m == _pr_mo else 0
+                         for m in months_sorted])
+            first = False
         for name in names:
             row = [bid if first else None, name]
             for m in months_sorted:
@@ -2262,6 +2346,7 @@ def _build_batch_week_ledger(
         except (TypeError, ValueError, IndexError):
             continue
     inputc: dict[tuple, float] = defaultdict(float)
+    _egg_prestart: dict[tuple, float] = {}   # eggs lost before the first projected day
     # Manual fw_to_og culls. The AUTOMATIC TranOG books its reconcile-to-target
     # cull through the biology's cull_count_week; a MANUAL fw_to_og bypasses
     # that path entirely, so without this the fish leave with no flow to
@@ -2290,8 +2375,26 @@ def _build_batch_week_ledger(
             # STOCKING week: the input flow is the count that was STOCKED =
             # the closing balance plus this week's mortality + culls (open is 0).
             # Using the weekly-mean count instead left a residual in Count_Check.
-            inputc[key] += (getattr(s, "close_count", 0.0) or s.count) \
-                + getattr(s, "mort_count_week", 0.0) + s.cull_count_week
+            _stk = ((getattr(s, "close_count", 0.0) or s.count)
+                    + getattr(s, "mort_count_week", 0.0) + s.cull_count_week)
+            # Eggs stocked BEFORE the projection's first day (input on the PR
+            # closing day, not yet in the PR): the projection opens on the
+            # count after those days' mortality, so the stocked eggs and that
+            # loss both went missing -- 10.8.26 PR: B57 booked 566,686 of
+            # 570,000. Book the stocking whole and the gap as mortality.
+            _bt = batches.get(s.batch_id) if isinstance(batches, dict) else None
+            _in_d = getattr(_bt, "input_date", None)
+            _in_n = float(getattr(_bt, "input_count", 0.0) or 0.0)
+            _s_d = getattr(s, "week_start", None)
+            if hasattr(_in_d, "date"):
+                _in_d = _in_d.date()
+            if hasattr(_s_d, "date"):
+                _s_d = _s_d.date()
+            if (_in_d is not None and _s_d is not None and _in_d < _s_d
+                    and _in_n > _stk + 0.5):
+                _egg_prestart[key] = _in_n - _stk
+                _stk = _in_n
+            inputc[key] += _stk
         # FW (pre-TranOG) feed: FW fish live in FW tanks, which are NOT in
         # batch_locations (OG-only). Pull their feed from the projection so the
         # ledger + FeedForecast cover small-fish feed. SW/OG feed always comes
@@ -2650,6 +2753,8 @@ def _build_batch_week_ledger(
             if _sp_now is not None:
                 # The split FW part's own freshwater mortality (daily sim).
                 mort_count += getattr(_sp_now, "mort_count_week", 0.0) or 0.0
+            # Eggs that died between stocking and the projection's first day.
+            mort_count += _egg_prestart.get((b, wk), 0.0)
             mort_bio = mort_count * owt / 1000.0
             # INPUT = EGGS STOCKED, and nothing else (operator, 2026-09-11). The
             # FW->SW move is inside the batch: it shows in Xfer_In/Xfer_Out and

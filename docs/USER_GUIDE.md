@@ -1048,11 +1048,11 @@ and early 2027 shifted) — re-check the weeks you care about after switching.
 
 | Sheet | What it is | Read it for |
 |---|---|---|
-| **HarvestReport** | one row per harvest event (Year/Month/Week/Date/Tank/Batch/Count/Gross/HOG/Avg wt); an event whose Mon–Fri harvest days cross a month end gets one row per month, split by days | the full harvest event log |
+| **HarvestReport** | one row per harvest event (Year/Month/Week/Date/Tank/Batch/Count/Gross/HOG/Avg wt); an event whose Mon–Fri harvest days cross a month end gets one row per month, split by days. On a mid-month PR the PR's own harvest comes first, one row per tank, Week = *PR* | the full harvest event log |
 | **HarvestPlan** | single-table harvest plan (Week/Batch/Tank/Count/Gross/HOG…) | the actionable harvest plan |
 | **TransferPlan** | every tank-to-tank move, grade and TranOG row the plan executes (refused transfers omitted; see the RealizationReport note) | the actionable transfer plan |
 | **HarvestPlan Report** | per-year blocks, per-batch Units/AvWt/Biomass by month + **bottom monthly TOTAL row** | **monthly sales planning** (HOG tonnes landed per month) |
-| **YearlySummary** | facility-wide per calendar year: harvest count/HOG t/gross t/avg wt (each week counted on its Mon–Fri harvest days — 2026-W53 is 4/5 in 2026, 1/5 in 2027 — in the whole fish HarvestPlan shows — plus, on a mid-month PR, the PR's own harvest of that month, exactly as HarvestPlan Report adds it), feed t (each week split **by calendar day**, so a year's feed equals the CostsAndProfit / FeedForecastMonthly year), peak+mean biomass, utilization (each week in the year it starts). Row 2 says which basis each column uses | **year-over-year trends** |
+| **YearlySummary** | facility-wide per calendar year: harvest count/HOG t/gross t/avg wt (each week counted on its Mon–Fri harvest days — 2026-W53 is 4/5 in 2026, 1/5 in 2027 — in the whole fish HarvestPlan shows — plus, on a mid-month PR, the PR's own harvest of that month, exactly as HarvestPlan Report adds it), feed t (each week split **by calendar day**, so a year's feed equals the FeedForecastMonthly year; on a mid-month PR both add the PR's own feed of that month, which CostsAndProfit leaves out), peak+mean biomass, utilization (each week in the year it starts). Row 2 says which basis each column uses | **year-over-year trends** |
 | **TransferTemplate** | (A) the canonical batch journey through seawater; (B) per-batch summary: SW entry week (the batch's TranOG week; `(in-flight)` = in seawater at the start with no TranOG; `(split: part in SW from <week>)` = a batch split across FW and SW at the PR close — the same rule Batch Plan uses) + weeks-from-start, entry count/weight (**the fish of its TranOG rows**, as TransferPlan shows them; an in-flight batch: its first week's close) and density, peak tank footprint, peak density (×cap — a tank preparing for harvest is judged at 150 kg/m³, exactly as the R8 audit judges it) + Density_Status flag, harvest window + weight (fish-weighted). A batch harvested out in the first week (no tank row) still has a row | **the general plan at a glance** — which batches enter when, their footprint, density risk, and harvest timing |
 | **Batch Plan** | per batch, **in batch order** (B41, B42, …): a summary header, then the milestone timeline (each tier entered, week, weight, tanks) with handling moves per batch/fish. Every harvested batch has a row — also one harvested out in the first week, which has no tank row; SW_entry follows the TransferTemplate rule; the Harvest weight is fish-weighted (total live kg ÷ fish) | one batch's path |
 | **Daily Harvest Schedule** | each week's harvest — **all tanks combined** — split evenly over its Mon–Fri days (blended avg weights), never a day before the report opens (a Saturday/Sunday report start puts its first week on its own date), with a per-week **Total** row and a blank line between weeks; Tank/Batch list every contributor | daily ops |
@@ -1168,8 +1168,9 @@ and early 2027 shifted) — re-check the weeks you care about after switching.
 > went to the month of its ISO Monday. **HarvestPlan Report**, **MonthlyReport**,
 > **YearlySummary**, **HarvestReport** and **CostsAndProfit** all use this rule, so
 > their monthly and yearly HOG tie out — with one stated exception: on a **mid-month PR**,
-> MonthlyReport and HarvestPlan Report add the PR's own month-to-date harvest
-> to its month (see *A mid-month PR completes its own month*), while
+> MonthlyReport, HarvestPlan Report, HarvestReport and YearlySummary add the
+> PR's own month-to-date harvest to its month (see *A mid-month PR completes its
+> own month*), while
 > CostsAndProfit prices the forecast days only (its row reads *Month (forecast
 > from …)* and row 2 says so). The app's target grading, Decide panels and
 > Harvest tab use the same harvest-day rule (they read the report's opening
@@ -1330,9 +1331,17 @@ without the check, 85 harvest weeks compared, **0 differ, 0.0 fish**.
 > month is split across two sources: the days the PR already reported, and the
 > forecast that starts the next day. **MonthlyReport** and **HarvestPlan
 > Report** merge the two, so the month reads as the month rather than as the
-> tail of it; **YearlySummary** adds the same PR harvest to that year's
-> harvest columns (its feed and biomass stay the forecast's, and row 2 says
-> so). **CostsAndProfit** does NOT merge: it is the cash view of the
+> tail of it. **HarvestReport** lists the PR's harvest first, one row per tank
+> (Week reads *PR* and Date the period — the PR has no per-day detail).
+> **FeedForecastMonthly** adds the PR's feed as its own row (the PR gives feed
+> per batch, not per feed type) and in each batch's block, and its Grand Total
+> includes it. **YearlySummary** adds the same PR harvest and feed to that
+> year (peak/mean biomass stay the forecast's; row 2 says so). Operator,
+> 2026-10-10: on the 10.8 PR, HarvestReport's October read 159,494 fish
+> against 214,879 and FeedForecastMonthly 644,005 kg against 830,935 before
+> this. The **Daily Harvest Schedule**, the event sheets (HarvestPlan,
+> TransferPlan) and the weekly sheets stay forecast-only. **CostsAndProfit**
+> does NOT merge: it is the cash view of the
 > forecast days, so its first row reads *Month (forecast from …)* and row 2
 > names the PR days it leaves out. Measured on the 8.13 PR: August showed 70,444 of its 134,289
 > harvested fish — 48% of the real tonnage — on the two sheets sales planning
@@ -1353,8 +1362,15 @@ without the check, 85 harvest weeks compared, **0 differ, 0.0 fish**.
 >
 > **Reporting layer only.** The audits never see the merge: they exist to prove
 > the *forecast* conserves, and feeding actuals into them would break their
-> identities and mask real defects. Nothing else in the tool reads these two
+> identities and mask real defects. Nothing else in the tool reads these
 > sheets, so the merge cannot reach a gate, a score, or the accuracy grader.
+>
+> **Eggs stocked on the PR closing day.** A batch whose eggs go in on or before
+> the closing date but which the PR does not list yet is projected from the
+> next day, after that day's egg mortality. The ledger books the stocking
+> whole (its `input_count`) and the eggs lost before the first projected day
+> as mortality in the stocking week — on the 10.8 PR, B57 used to show 566,686
+> of its 570,000 eggs, with the 3,314 in neither column.
 >
 > The PR's "in period" columns are **month-to-date** (1st → closing date) —
 > confirmed by the operator, 2026-08-18, and independently consistent with the
@@ -3701,7 +3717,9 @@ opening cost for fish already in the water, which the forecast never fed.
   calendar year, then the whole horizon: feed kg, each cost, total cost, HOG
   harvested, revenue, profit, spend per kg HOG sold and any unpriced feed kg. A
   **feed by type** block below it gives each type's item, price, kg and cost.
-  Feed kg ties to the FeedForecastMonthly sheet. Row 2 names the pricing,
+  Feed kg ties to the FeedForecastMonthly sheet's feed-type rows (on a
+  mid-month PR that sheet also shows the PR's own feed, which this view
+  leaves out). Row 2 names the pricing,
   the currency and the first 8 characters of the MD5 fingerprints (labelled
   `md5`; workbooks written before 2026-09-12 say `sha` for the same MD5) of `costs.yaml`
   and `economics.yaml`. If

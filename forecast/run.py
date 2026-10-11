@@ -1472,6 +1472,7 @@ def main(
         facility_limits_hog=facility_hog_overrides,
         forecast_start=fs_date,
         report_start=report_start,
+        pr_period=_pr_period,
     )
     write_yearly_summary(
         wb, placement.batch_locations, placement.harvest_events,
@@ -1487,7 +1488,7 @@ def main(
     write_feed_forecast_monthly(
         wb, placement.batch_locations, rl_states_by_batch, fs_date, tables, batch_by_id,
         sixn_move_in_feed=getattr(placement, "sixn_move_in_feed", None),
-        report_start=report_start)
+        report_start=report_start, pr_period=_pr_period)
     all_states = _to_realized_lifespan(prefix_incoming_states + states + in_flight_states)
     # The PR-hydrated seawater opening per batch (the same anchor the
     # continuity audits open from). The ledgers use it only for a batch with

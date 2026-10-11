@@ -20,7 +20,7 @@ TranOG_CV from BatchRegistry (16% if the batch isn't found).
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Optional
 
@@ -584,6 +584,10 @@ class PRBatchPeriod:
     # closing balance simply derives no input rather than a negative one.
     close_count: float = 0.0
     dev_count: float = 0.0
+    # Per-TANK harvest in the period {tank: (count, gross kg)}, from the PR's
+    # "Unit:" rows under the batch -- HarvestReport lists the elapsed harvest
+    # by tank. Only units that harvested; the PR has no per-day detail.
+    harv_units: dict = field(default_factory=dict)
 
     @property
     def input_count(self) -> float:
@@ -658,6 +662,7 @@ def read_pr_period(ws, closing_date) -> Optional[PRPeriod]:
         return None
     batches: dict[str, PRBatchPeriod] = {}
     colmap: Optional[dict] = None
+    _cur: Optional[PRBatchPeriod] = None    # batch whose Unit rows follow
 
     def _num(row, key) -> float:
         i = (colmap or _PR_COL).get(key)
@@ -688,6 +693,18 @@ def read_pr_period(ws, closing_date) -> Optional[PRPeriod]:
                     raise PRLayoutError(_layout_error(_missing, _labs))
                 continue
         c3 = row[2]
+        c4 = row[3]
+        if (isinstance(c4, str) and c4.strip().startswith("Unit:")
+                and _cur is not None and not (isinstance(c3, str) and c3.strip())):
+            _hc, _hg = _num(row, "harv_count"), _num(row, "harv_gross_kg")
+            if _hc > 0 or _hg > 0:
+                _u = c4.split(":", 1)[1].strip()
+                _u = int(_u) if _u.isdigit() else _u
+                _p = _cur.harv_units.get(_u, (0.0, 0.0))
+                _cur.harv_units[_u] = (_p[0] + _hc, _p[1] + _hg)
+            continue
+        if isinstance(c3, str) and c3.strip() and "Fish group name" not in c3:
+            _cur = None          # any other group row ends the batch's units
         if not (isinstance(c3, str) and "Fish group name" in c3):
             continue
         bid = c3.split(":", 1)[1].strip()
@@ -709,6 +726,7 @@ def read_pr_period(ws, closing_date) -> Optional[PRPeriod]:
             cull_count=_num(row, "cull_count"),
             cull_bio_kg=_num(row, "cull_bio_kg"),
         )
+        _cur = batches[bid]
     if not batches:
         return None
     if colmap is None:
