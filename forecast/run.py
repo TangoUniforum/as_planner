@@ -1527,6 +1527,7 @@ def main(
         split_fw=_sb_fw_states or None,
         sixn_move_in_feed=getattr(placement, "sixn_move_in_feed", None),
         pr_openings=_pr_openings)
+    _acc_month_rows: list = []
     write_monthly_report(
         wb, placement.batch_locations, placement.harvest_events, all_states,
         transfer_events=placement.transfer_events, batches=batch_by_id, tables=tables,
@@ -1559,7 +1560,8 @@ def main(
         fw_projected=fw_projected_ids,
         split_fw=_sb_fw_states or None,
         sixn_move_in_feed=getattr(placement, "sixn_move_in_feed", None),
-        pr_period=_pr_period, pr_openings=_pr_openings)
+        pr_period=_pr_period, pr_openings=_pr_openings,
+        month_rows_out=_acc_month_rows)
     write_reconciliation_report(
         wb,
         placement.batch_locations,
@@ -1764,6 +1766,42 @@ def main(
     except Exception as _bi_err:  # noqa: BLE001 - a report must not sink a run
         print(f"  NOTE: BatchInputs sheet skipped ({type(_bi_err).__name__}: "
               f"{_bi_err}); the plan is unaffected.")
+    # Lifetime per batch (report only, 2026-10-10): ONLY when the uploaded
+    # workbook carries an accumulated tab (a full monthly production report);
+    # a PR-only upload runs exactly as before, with one INFO line saying why
+    # there is no lifetime sheet.
+    try:
+        from .accumulated import find_acc_sheet, write_batch_accumulated
+        from .excel_io import _feed_by_batch_type_week
+        _acc_ws = find_acc_sheet(wb)
+        if _acc_ws is None:
+            _acc_msg = ("no accumulated (Acc) tab in the uploaded workbook - "
+                        "lifetime per-batch results not built (a full monthly "
+                        "production report has one)")
+        else:
+            _fbtw, _fbws = _feed_by_batch_type_week(
+                placement.batch_locations, rl_states_by_batch, tables,
+                batch_by_id, sixn_move_in_feed=getattr(placement, "sixn_move_in_feed", None))
+            _st = write_batch_accumulated(
+                wb, acc_ws=_acc_ws, pr_period=_pr_period,
+                month_rows=_acc_month_rows, feed_bt_week=_fbtw, wk_start=_fbws,
+                report_start=report_start, pr_closing=pr_closing,
+                batch_by_id=batch_by_id, tables=tables, config_dir=config_dir,
+                hog_yield=control.default_hog_yield,
+                scenario_name=control.scenario_name)
+            _acc_msg = (f"lifetime per-batch results built from tab '{_acc_ws.title}' "
+                        f"({_st['batches']} batches): BatchAccumulated, BatchAccumulatedMonthly"
+                        if _st["built"] else
+                        f"lifetime per-batch results NOT built: {_st['reason']}")
+        print(f"  Accumulated: {_acc_msg}")
+        if "ValidationLog" in wb.sheetnames:
+            _vl = wb["ValidationLog"]
+            _n = sum(1 for _r in _vl.iter_rows(min_row=5, max_col=1, values_only=True)
+                     if isinstance(_r[0], int))
+            _vl.append([_n + 1, "INFO - Accumulated", _acc_msg])
+    except Exception as _acc_err:  # noqa: BLE001 - a report must not sink a run
+        print(f"  NOTE: BatchAccumulated sheets skipped ({type(_acc_err).__name__}: "
+              f"{_acc_err}); the plan is unaffected.")
     # The YAML record goes last: it is the machine copy import reads, and
     # keeping it at the end leaves every other tab where it was.
     from .config_snapshot import move_yaml_sheet_last

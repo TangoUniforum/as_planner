@@ -1072,6 +1072,7 @@ and early 2027 shifted) — re-check the weeks you care about after switching.
 | **RunConfig** | the run's config + scenario **as readable tables**: run identity (PR closing, forecast start, horizon, manual window, scenario, placement method, hybrid follow, when written), then one section per file — control settings (Setting / Value / the meaning from this guide's settings tables), biology curves, facility tanks, batches (pointer to BatchInputs), limits (system defaults, weekly exceptions, per-week facility rows with one column per metric), and this PR's manual events (also restored by an import, via RunConfig YAML). Long tables start collapsed — click **+** in the left margin. Links at the top go to RunConfig YAML and BatchInputs | reading what the run used |
 | **RunConfig YAML** | the run's control, biology, facility, batches and limits files, plus this PR's manual events (`scenario/manual_events/<date>.yaml`, since 2026-10-09), as YAML text, one labelled block per file — what **Configure → 📦 Template & import → 📥 Import config** restores (the replaced manual-events file is kept as `<date>.yaml.before-import`). `costs.yaml` and the analysis overlays (`targets.yaml`, `economics.yaml`, `analysis_defaults.yaml`) are **not** restored. Always the last tab. Workbooks written before this tab existed keep the YAML in RunConfig itself, and still import | reproducibility |
 | **BatchInputs** | one row per batch, **in batch order**: what `scenario/batches.yaml` told the run — source (in OG / in freshwater / split at the PR close, scheduled, or pre-start), input date + eggs, Tran SF date, Tran OG date, TranOG count / target weight / CV, FCR model (and the `biology.yaml` curve it selects), FW correction **input and used** (after `auto_calibrate_fw`) with what calibration did, SGR correction — next to what the run did: OG entry week/date, **count into OG** (the batch's TranOG rows on the TransferPlan; reconciles with the InputConservationAudit's Realized_TranOG), average entry weight, entry tanks, and whether a manual `fw_to_og` scripted it. Below the table: the run settings that shape batch inputs and the biology models in force. Report only; appended after CostsAndProfit so no other tab moves | **what went in, per batch** |
+| **BatchAccumulated** / **BatchAccumulatedMonthly** | only when the upload is a **full monthly production report** with an accumulated tab (see *Lifetime per batch* below): per batch, History (the tab, to the closing date) / Forecast / Lifetime — eggs in, mortality and cull (count and % of fish in), harvest count / gross / HOG / avg HOG, feed, gross and net growth, Bio and Econ FCR, gross growth %, SGR (approximate), feed / feed-linked / egg cost, cost per kg HOG; the Monthly sheet gives the same lifetime-to-date at the report date and every forecast month end. A PR-only upload gets no such sheet and one `INFO - Accumulated` ValidationLog line | **lifetime results per batch** |
 | **CostsAndProfit** | only when `config/costs.yaml` exists; after RunConfig (only BatchInputs and RunConfig YAML follow it): per month (with a first row for any days before the report opens), per year and horizon — feed kg, eggs stocked, feed / shipping / oxygen / chemicals / eggs / fixed cost, total cost, HOG, revenue, **profit**, spend per kg HOG sold, unpriced feed kg; then **feed by type** with your item names. Row 2 says when feed had no price (profit then overstated). NOT COMPUTED (with the reason) when the file is invalid or empty | the cash-view P&L — §15 |
 
 > **`PR FW WEIGHT DERIVED`** (console WARN + ValidationLog). A freshwater batch
@@ -1143,7 +1144,9 @@ and early 2027 shifted) — re-check the weeks you care about after switching.
 
 > The `ProductionReport` sheet stays the **historical** input month only — the
 > *forecast* is in the sheets above (same as the reference workbook). Skipped vs the
-> reference: AccumulatedReport, AccumulatedOutput, MonthlyTargets, RunComparison.
+> reference: MonthlyTargets, RunComparison. (The reference's AccumulatedReport /
+> AccumulatedOutput pair is now **BatchAccumulated** — built from the upload's own
+> accumulated tab, see *Lifetime per batch*.)
 >
 > **`Avg_Density (kg/m³)` in the two ledgers** is the batch's **average** density
 > that period — its total biomass divided by the total water it occupied — and the
@@ -1371,6 +1374,37 @@ without the check, 85 harvest weeks compared, **0 differ, 0.0 fish**.
 > whole (its `input_count`) and the eggs lost before the first projected day
 > as mortality in the stocking week — on the 10.8 PR, B57 used to show 566,686
 > of its 570,000 eggs, with the 3,314 in neither column.
+>
+> **Lifetime per batch (full production report).** Operator, 2026-10-10. A full
+> monthly production report carries an accumulated tab ("Acc"): the same FishTalk
+> columns as the PR sheet, one row per fish group, summed from the group's first
+> day to the closing date (openings 0). The run finds it **by content**, not by
+> name; with it, **BatchAccumulated** shows each batch's History (the tab),
+> Forecast (closing + 1 → horizon end, the same per-batch figures as
+> MonthlyReport, before any mid-month PR merge — the tab already holds those
+> days) and Lifetime, and **BatchAccumulatedMonthly** the lifetime-to-date at
+> every forecast month end. Every batch is listed: closed before the report
+> (history only), in stock at the report, stocked after it (forecast only).
+> * **Exact:** counts, kg, feed and growth are sums (Aug'26 Acc + Sep'26 month =
+>   Sep'26 Acc on every summed column, 16/16 batches). Bio FCR = feed / gross
+>   growth, Econ FCR = feed / net growth, Mortality % = mortality / fish in
+>   (eggs + transfers in), as the FishTalk Control User Guide defines them.
+>   Eggs in come from the tab's own balance (no input column): close +
+>   mortality + cull + harvest − deviation − transfers in + transfers out.
+>   History rows show the tab's own %, FCRs and SGR.
+> * **Approximate:** lifetime SGR — FishTalk does not document how it
+>   accumulates SGR; a day-weighted average of period SGRs (days from the
+>   batch's `input_date`) reproduces the tab to ~0.03. Blank when a batch in
+>   stock has no input date. SFR, temperature and growth-vs-model are not carried.
+> * **Costs** (`config/costs.yaml`): forecast feed is priced by its feed type;
+>   history feed has no type in the tab, so it is an **estimate** — split by
+>   type along a typical growth path (weight gained × model FCR per size band,
+>   egg weight → weight at the report) at today's prices. Shipping, oxygen and
+>   chemicals per kg feed and the egg price are added; fixed monthly cost is
+>   not per batch and is left out. Forecast feed cost ties to CostsAndProfit.
+> * **Safety:** each batch's closing count in the tab must equal the PR
+>   sheet's. If not (a tab from another report), nothing is built and the
+>   ValidationLog says why; the forecast is never affected.
 >
 > The PR's "in period" columns are **month-to-date** (1st → closing date) —
 > confirmed by the operator, 2026-08-18, and independently consistent with the

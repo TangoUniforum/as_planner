@@ -611,10 +611,12 @@ def test_run_py_has_exactly_the_two_hooks():
     call = text.index("write_costs_sheet(wb")
     save = text.index("wb.save(out_path)")
     assert ann < gate < call < save
-    # Between the costs call and the save: only the two report-only appends
-    # that come AFTER CostsAndProfit by design (2026-10-02) -- the BatchInputs
-    # tab and moving the RunConfig YAML record last. Nothing else may sit
-    # there, and neither may touch the costs hook.
+    # Between the costs call and the save: only the report-only appends that
+    # come AFTER CostsAndProfit by design -- the BatchInputs tab (2026-10-02),
+    # the BatchAccumulated lifetime sheets (2026-10-10; they read costs.yaml
+    # inside forecast/accumulated.py, never through this hook) and moving the
+    # RunConfig YAML record last. Nothing else may sit there, and none may
+    # touch the costs hook.
     tail = "report_start=report_start)"
     between = text[call:save]
     rest = between[between.index(tail) + len(tail):]

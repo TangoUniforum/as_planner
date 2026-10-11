@@ -3134,6 +3134,7 @@ def write_monthly_report(
     fw_projected=None,
     split_fw=None,
     pr_openings=None,
+    month_rows_out=None,
 ) -> None:
     """Per-(month, batch) open/close production ledger (matches reference format).
 
@@ -3141,6 +3142,12 @@ def write_monthly_report(
     Close = last week's close; flows (growth, feed, mortality, harvest, cull,
     transfers, input) are summed; SGR/SFR/FCR are recomputed from the monthly
     aggregates. Columns mirror the weekly report minus Week_Start.
+
+    `month_rows_out`, when a list, receives a copy of every (month, batch, row)
+    BEFORE a mid-month PR's elapsed days are merged in -- the forecast's own
+    months, which BatchAccumulated adds to the report's accumulated history
+    (that history already covers the PR's days, so the merged month would
+    count them twice).
     """
     from collections import defaultdict
     from math import log
@@ -3319,6 +3326,8 @@ def write_monthly_report(
                                  "close_bio")):
                 continue      # nothing happened to this batch in this month
             rows_out.append((mo, b, a))
+    if month_rows_out is not None:
+        month_rows_out.extend((mo, b, dict(a)) for mo, b, a in rows_out)
 
     # ---- merge the ELAPSED part of a mid-month PR -------------------------
     # A PR closing mid-month splits its month across two sources: the days
