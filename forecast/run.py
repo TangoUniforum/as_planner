@@ -38,6 +38,7 @@ from .excel_io import (
     write_harvest_plan_report,
     write_yearly_summary,
     write_harvest_report,
+    write_rolling_harvest_plan,
     write_monthly_report,
     write_reconciliation_report,
     write_input_conservation_audit,
@@ -1473,6 +1474,17 @@ def main(
         forecast_start=fs_date,
         report_start=report_start,
         pr_period=_pr_period,
+    )
+    # The operator's paste-ready weekly layout (REPORT ONLY, 2026-10-15).
+    write_rolling_harvest_plan(
+        wb, placement.harvest_events,
+        default_hog_yield=control.default_hog_yield,
+        facility_limits_hog=facility_hog_overrides,
+        transfer_events=placement.transfer_events,
+        grade_events=placement.grade_events,
+        report_start=report_start,
+        first_id=int(getattr(control, "rolling_harvest_first_id", 1) or 1),
+        weeks=int(getattr(control, "rolling_harvest_weeks", 12) or 0),
     )
     write_yearly_summary(
         wb, placement.batch_locations, placement.harvest_events,

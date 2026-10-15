@@ -171,6 +171,12 @@ class ControlParams:
     # transit moves go to another 6N slot or do not happen. The operator's
     # manual events are not limited. Unit: tanks.
     sixn_max_source_tanks: int = 0
+    # RollingHarvestPlan sheet (REPORT ONLY, 2026-10-15): the first running
+    # number of its Harvest IDs ({batch}T{tank}-{n}) and how many weeks from
+    # the first forecast week it covers (0 or negative = every forecast week).
+    # Neither touches the plan or any other sheet.
+    rolling_harvest_first_id: int = 1
+    rolling_harvest_weeks: int = 12
     # GRADE-TO-MIN (opt-in): on a 6N purge week where whole mature tanks can't fill
     # the harvest floor, peel the over-weight TAIL from near-market tanks into a free
     # pair tank (big -> 6N purge) with the small tail to a free OG retention tank,

@@ -1580,6 +1580,96 @@ def write_daily_harvest_schedule(
         ws.column_dimensions[get_column_letter(c)].width = w
 
 
+def write_rolling_harvest_plan(
+    wb,
+    harvest_events,
+    default_hog_yield: float,
+    facility_limits_hog: dict,
+    transfer_events=(),
+    grade_events=(),
+    report_start=None,
+    first_id: int = 1,
+    weeks: int = 12,
+    sheet_name: str = "RollingHarvestPlan",
+) -> None:
+    """The operator's "12 weeks rolling harvest plan" layout, ready to paste
+    (REPORT ONLY, 2026-10-15): columns A..O fixed, header on row 4, one block
+    per harvest week (a row per harvest day filled tank after tank, a Total
+    row, a check row), contiguous. The rows come from
+    rolling_harvest.build_rolling_rows -- the same function the app's table
+    uses; this writer only turns K/L/N/O (and the Total sums) into the
+    operator's formulas. Plan numbers are untouched."""
+    from openpyxl.styles import Font, Alignment
+    from .rolling_harvest import (COLUMNS, build_rolling_rows,
+                                  harvest_inputs_from_events,
+                                  transfer_inputs_from_events)
+    if sheet_name in wb.sheetnames:
+        del wb[sheet_name]
+    ws = wb.create_sheet(sheet_name)
+    _rs = report_start.date() if hasattr(report_start, "date") else report_start
+    ws.cell(row=1, column=1, value="ROLLING HARVEST PLAN")
+    ws.cell(row=2, column=1, value=(
+        f"Weekly harvest in the '12 weeks rolling harvest plan' layout "
+        f"(columns A-O): each week's whole fish split evenly Mon-Fri and "
+        f"filled tank after tank; Total and check row per week. "
+        f"Forecast start {_rs}. Report only."))
+    ws.cell(row=3, column=9, value="Kg")
+    ws.cell(row=3, column=14, value="Lb")
+    for c, name in enumerate(COLUMNS, start=1):
+        cell = ws.cell(row=4, column=c, value=name if name else None)
+        cell.font = Font(bold=True)
+    rows = build_rolling_rows(
+        harvest_inputs_from_events(harvest_events, default_hog_yield,
+                                   facility_limits_hog),
+        transfer_inputs_from_events(transfer_events, grade_events),
+        report_start=report_start, first_id=first_id, weeks=weeks)
+    base = 5
+    fmt = {9: "#,##0", 10: "#,##0", 11: "0.00", 12: "0.00", 14: "#,##0",
+           15: "0.00"}
+    total_row_of: dict = {}
+    for i, r in enumerate(rows):
+        x = base + i
+        y = r["yield"]
+        ys = f"{round(float(y), 4):g}"
+        top = base + r["block_top"]
+        if r["kind"] == "day":
+            vals = {2: r["source"] or None, 3: r["year"],
+                    4: r["harvest_id"] or None, 5: r["week"], 6: r["date"],
+                    7: r["tank"] if r["tank"] != "" else None,
+                    8: r["batch"] or None, 9: r["count"], 10: r["kg_hog"],
+                    11: f"=J{x}/I{x}", 12: f"=K{x}/{ys}",
+                    14: f"=J{x}*2.2046", 15: f"=K{x}*2.2046"}
+        elif r["kind"] == "total":
+            total_row_of[r["block_top"]] = x
+            last = x - 1
+            vals = {3: r["year"], 5: r["week"], 6: f'=E{x}&" Total"',
+                    7: r["tank"], 8: r["batch"],
+                    9: f"=SUM(I{top}:I{last})", 10: f"=SUM(J{top}:J{last})",
+                    11: f"=J{x}/I{x}", 12: f"=K{x}/{ys}",
+                    14: f"=J{x}*2.2046", 15: f"=K{x}*2.2046"}
+        else:
+            t = total_row_of[r["block_top"]]
+            vals = {9: f"=I{t}", 11: f"=O{x}/2.2046", 12: f"=K{x}/{ys}",
+                    14: f"=O{x}*I{x}", 15: f"=O{t}"}
+        for c, v in vals.items():
+            cell = ws.cell(row=x, column=c, value=v)
+            if c in fmt:
+                cell.number_format = fmt[c]
+            elif c == 6 and r["kind"] == "day":
+                cell.number_format = "yyyy-mm-dd"
+            if r["kind"] == "total":
+                cell.font = Font(bold=True)
+        if r["kind"] == "total" and x - 1 >= top:
+            # Source Tank over the block's day rows + Total, as the operator does.
+            ws.merge_cells(start_row=top, start_column=2, end_row=x, end_column=2)
+            ws.cell(row=top, column=2).alignment = Alignment(vertical="center")
+    widths = {1: 4, 2: 16, 3: 7, 4: 18, 5: 6, 6: 12, 7: 9, 8: 10, 9: 9,
+              10: 15, 11: 12, 12: 12, 13: 12, 14: 14, 15: 12}
+    for c, w in widths.items():
+        ws.column_dimensions[get_column_letter(c)].width = w
+    ws.freeze_panes = "A5"
+
+
 def write_harvest_report(
     wb,
     harvest_events,
