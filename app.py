@@ -1002,6 +1002,14 @@ _CONTROL_HELP = {
         "from those tanks, and make-room / entry-transit moves go to another "
         "6N slot or wait; a week can come in lighter. Manual events are not "
         "limited. Unit: tanks.",
+    "rolling_harvest_first_id":
+        "Report only. The running number the RollingHarvestPlan sheet's "
+        "first Harvest ID ends with ({batch}T{tank}-{n}); set it to carry on "
+        "from the IDs already in your rolling plan. Changes no plan number.",
+    "rolling_harvest_weeks":
+        "Report only. How many weeks, from the first forecast week, the "
+        "RollingHarvestPlan sheet covers (0 = every forecast week). Changes "
+        "no plan number. Unit: weeks.",
     "relief_lookahead_days":
         "Only used when 'Enforce move minimums everywhere' is on. A grow-out "
         "tank that its own growth would take over its density cap within this "
@@ -1485,6 +1493,8 @@ _CONTROL_LABEL = {
     "move_size_rules": "Enforce move minimums everywhere (on/off)",
     "relief_lookahead_days": "Density relief look-ahead (days)",
     "sixn_max_source_tanks": "Max OG tanks per 6N fill (0 = no limit)",
+    "rolling_harvest_first_id": "Rolling harvest plan: first Harvest ID number",
+    "rolling_harvest_weeks": "Rolling harvest plan: weeks shown (0 = all)",
     "min_grade_count": "Min graded-tail size (fish)",
     "max_transfers_per_week": "Handling budget (moves / week)",
     "default_hog_yield": "Default HOG yield",
@@ -1737,7 +1747,8 @@ _CONTROL_GROUPS = [
      "switchover.",
      ["forecast_start", "horizon_weeks", "scenario_name",
       "starvation_period_days", "sixn_growth", "sixn_production_start",
-      "sixn_transition_weeks", "split_batch_fw"]),
+      "sixn_transition_weeks", "split_batch_fw",
+      "rolling_harvest_weeks", "rolling_harvest_first_id"]),
     ("🎣 Harvest control",
      "How the weekly harvest is paced against the biomass cap and the contract "
      "floor.",
@@ -12462,6 +12473,63 @@ def _daily_harvest_table(he_df, report_start=None):
     return pd.DataFrame(rows, columns=cols), total_pos, blank_pos
 
 
+def _rolling_harvest_table(out_path, report_start=None):
+    """(DataFrame, TSV text, {total-row positions}) — the RollingHarvestPlan
+    table for the Harvest tab, columns A..O exactly as the operator's "12 weeks
+    rolling harvest plan" sheet (A and M blank), computed values in K/L/N/O.
+
+    ONE BUILDER (2026-10-15): forecast.rolling_harvest.build_rolling_rows, the
+    function the workbook's RollingHarvestPlan sheet is written from, fed from
+    this run's HarvestPlan + TransferPlan sheets and the Control knobs
+    rolling_harvest_first_id / rolling_harvest_weeks. The TSV has no header
+    row, so a paste into A5 of the operator's sheet lands in the right
+    columns. Report only."""
+    import datetime as _dt
+    import openpyxl
+    from forecast.rolling_harvest import (COLUMNS, build_rolling_rows,
+                                          inputs_from_workbook, rows_as_table)
+    cols = [c if c else " " for c in COLUMNS]
+    empty = (pd.DataFrame([], columns=cols), "", set())
+    if not out_path or not Path(str(out_path)).exists():
+        return empty
+    first_id, weeks = 1, 12
+    try:
+        from forecast.config_io import load_control
+        _c = load_control(CONFIG_DIR)
+        first_id = int(getattr(_c, "rolling_harvest_first_id", 1) or 1)
+        weeks = int(getattr(_c, "rolling_harvest_weeks", 12) or 0)
+    except Exception:  # noqa: BLE001 — defaults are the shipped knob values
+        pass
+    wb = openpyxl.load_workbook(str(out_path), read_only=True, data_only=True)
+    try:
+        hs, trs, rs = inputs_from_workbook(wb)
+    finally:
+        wb.close()
+    rows = build_rolling_rows(hs, trs, report_start=report_start or rs,
+                              first_id=first_id, weeks=weeks)
+    if not rows:
+        return empty
+    table = rows_as_table(rows)
+    total_pos = {i for i, r in enumerate(rows) if r["kind"] == "total"}
+
+    def _cell(v, ci):
+        if isinstance(v, _dt.date):
+            return v.strftime("%Y-%m-%d")
+        if isinstance(v, float):
+            if ci in (8, 9, 13):              # I count, J kg, N lb
+                return round(v, 0) if ci == 8 else round(v, 1)
+            return round(v, 3)
+        return v
+
+    shown = [[_cell(v, ci) for ci, v in enumerate(r)] for r in table]
+    df = pd.DataFrame(shown, columns=cols)
+    for c in cols:
+        df[c] = df[c].map(lambda v: "" if v is None else v).astype(str)
+    df[cols[8]] = df[cols[8]].map(lambda v: v[:-2] if v.endswith(".0") else v)
+    tsv = "\n".join("\t".join(str(v) for v in r) for r in df.values.tolist())
+    return df, tsv, total_pos
+
+
 def _feed_weekly(out_path):
     """(DataFrame, notes) — whole-facility feed per DAY, week by week, against
     THAT week's cap: the workbook's own Advisory sheet, `Total_Feed (kg/day)`
@@ -15744,6 +15812,45 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
                 st.dataframe(_dh.style.apply(_hl_totals, axis=1),
                              hide_index=True, use_container_width=True,
                              height=min(760, 44 + 35 * len(_dh)))
+
+            # Rolling harvest plan — the operator's paste-ready layout
+            # (columns A..O of the "12 weeks rolling harvest plan" sheet).
+            # Additive: the daily schedule above is unchanged.
+            st.markdown("**Rolling harvest plan (paste-ready, columns A–O)**")
+            st.caption(
+                "The same table as the workbook's **RollingHarvestPlan** sheet: "
+                "each week's fish split evenly over its harvest days and filled "
+                "tank after tank (a day that finishes one tank and starts the "
+                "next lists both), then a Total and a check row. Source Tank = "
+                "the grow-out tanks that filled that week's 6N tanks. Weeks and "
+                "the first Harvest ID number are the Control knobs "
+                "*rolling_harvest_weeks* / *rolling_harvest_first_id*. "
+                "**To copy:** download the TSV (or use the copy icon on the "
+                "text box) and paste into cell **A5** of the rolling plan "
+                "sheet — columns A and M are left blank so every value lands "
+                "in its column.")
+            _rh, _rh_tsv, _rh_tot = _rv_memo(
+                "rolling_harvest", _rid,
+                lambda: _rolling_harvest_table(r.get("output_path"), _run_rs))
+            if _rh.empty:
+                st.info("No rolling harvest plan for this run (no harvest "
+                        "weeks, or the output workbook is not on disk).")
+            else:
+                def _hl_rh(row):
+                    if row.name in _rh_tot:
+                        return ["background-color:#e8eaf0;font-weight:700"] * len(row)
+                    return [""] * len(row)
+                st.dataframe(_rh.style.apply(_hl_rh, axis=1),
+                             hide_index=True, use_container_width=True,
+                             height=min(760, 44 + 35 * len(_rh)))
+                st.download_button(
+                    "⬇ Download rolling harvest plan (TSV, columns A–O)",
+                    data=_rh_tsv.encode("utf-8"),
+                    file_name="RollingHarvestPlan.tsv",
+                    mime="text/tab-separated-values",
+                    key="dl_rolling_harvest_tsv")
+                with st.expander("Copy as text (paste into A5)"):
+                    st.code(_rh_tsv, language=None)
 
             with st.expander("Raw harvest events"):
                 st.dataframe(he_df, hide_index=True, use_container_width=True)
