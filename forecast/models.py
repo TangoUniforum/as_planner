@@ -161,6 +161,16 @@ class ControlParams:
     # a tank projected over its cap within this many days of its own growth is
     # relieved now, once, by a legal group. Only used when move_size_rules is on.
     relief_lookahead_days: int = 21
+    # 6N SOURCE LIMIT (opt-in, operator 2026-10-15: "never move more then two
+    # tanks into 6N to make a harvest tank because there are logistical
+    # constraints"). The most OG tanks one week's fill of a 6N PAIR may draw
+    # from -- main + sister together, i.e. one harvest week. 0 = no limit
+    # (plans exactly as before). When it binds, the rotation fill takes bigger
+    # pieces from the tanks it already uses (each gives its whole tank or one
+    # piece), graded peels come only from those tanks, and make-room / entry-
+    # transit moves go to another 6N slot or do not happen. The operator's
+    # manual events are not limited. Unit: tanks.
+    sixn_max_source_tanks: int = 0
     # GRADE-TO-MIN (opt-in): on a 6N purge week where whole mature tanks can't fill
     # the harvest floor, peel the over-weight TAIL from near-market tanks into a free
     # pair tank (big -> 6N purge) with the small tail to a free OG retention tank,

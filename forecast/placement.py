@@ -509,7 +509,8 @@ def _small_move_blocked(take: float, src_tank, dst_tank, min_move: float,
 
 def _plan_sixn_draws(cands, need: float, min_piece: float, keep: float,
                      lo: float = None, hi: float = None,
-                     max_wholes: int = 4, max_cands: int = 12):
+                     max_wholes: int = 4, max_cands: int = 12,
+                     max_tanks: Optional[int] = None):
     """MOVE-SIZE RULES: which source tanks feed one 6N fill, and how many each.
 
     `cands` = [(tank_id, count, batch_rank)] in the fill's priority order (FIFO
@@ -521,6 +522,12 @@ def _plan_sixn_draws(cands, need: float, min_piece: float, keep: float,
     earliest (heaviest) tanks. When the whole pool is not more than `hi`, every
     tank goes whole (what the fill did anyway). None = no plan in the band; the
     caller keeps its old draw.
+
+    `max_tanks` (6N source limit, None = no limit): at most this many tanks
+    may be used. When no plan with that few tanks reaches `lo`, the plan
+    closest to `need` from below is returned instead (bigger pieces from the
+    allowed tanks beat breaking the limit; the shortfall waits for the next
+    fill), so a limited fill never falls back to the unlimited old draw.
     """
     import itertools
     lo = need if lo is None else lo
@@ -528,7 +535,10 @@ def _plan_sixn_draws(cands, need: float, min_piece: float, keep: float,
     pool = [(tid, float(c), int(br)) for tid, c, br in cands if c > 0.5][:max_cands]
     if need <= 0.5 or not pool:
         return None
-    if sum(c for _, c, _ in pool) <= hi + 0.5:
+    if max_tanks is not None and max_tanks <= 0:
+        return None
+    if (sum(c for _, c, _ in pool) <= hi + 0.5
+            and (max_tanks is None or len(pool) <= max_tanks)):
         return {tid: c for tid, c, _ in pool}
     best = None
 
@@ -537,6 +547,8 @@ def _plan_sixn_draws(cands, need: float, min_piece: float, keep: float,
         if got < lo - 0.5 or got > hi + 0.5:
             return
         used = list(combo) + ([part] if part is not None else [])
+        if max_tanks is not None and len(used) > max_tanks:
+            return
         key = (round(abs(got - need) / 500.0), len(used),
                max(pool[i][2] for i in used), 0 if part is None else 1,
                sum(used))
@@ -563,6 +575,10 @@ def _plan_sixn_draws(cands, need: float, min_piece: float, keep: float,
                 if x_hi < x_lo - 0.5:
                     continue
                 _offer(combo, p, min(max(need - got, x_lo), x_hi))
+    if best is None and max_tanks is not None and lo > 0.5:
+        return _plan_sixn_draws(cands, need, min_piece, keep, lo=0.0, hi=hi,
+                                max_wholes=max_wholes, max_cands=max_cands,
+                                max_tanks=max_tanks)
     return None if best is None else best[1]
 
 
@@ -1433,6 +1449,10 @@ def _try_graded_move_in(
         # Prefer largest avg first (closer to threshold => fatter tail).
         cands.sort(key=lambda t: t.avg_wt_g, reverse=True)
         for t in cands:
+            # 6N SOURCE LIMIT: once the pair has drawn from its limit of OG
+            # tanks this week, only those tanks may be graded into it.
+            if not _sixn_source_ok(state, pair[0], t.tank_id, week_start_date):
+                continue
             frac_t = frac_above(t.avg_wt_g, t.cv_pct or 16.0, min_hv)
             if frac_t < min_fraction:
                 continue
@@ -1563,7 +1583,8 @@ def _try_graded_move_in(
         return 0.0
     # Freeze the 6N pickup tank (off-feed depuration) and book its 4 pre-
     # transfer feed-days; the retention tank keeps growing/feeding normally.
-    _freeze_6n_dest(state, pair[0], fill_date=week_start_date)
+    _freeze_6n_dest(state, pair[0], fill_date=week_start_date,
+                    source_tank_id=chosen.tank_id)
     if tables is not None:
         _book_move_in_feed(sixn_move_in_feed, chosen.batch_id, week_label,
                            pickup_xfer_wt, big_count, tables, _bm)
@@ -1683,6 +1704,13 @@ def _transit_entry_to_pair(
             state.reserved_tanks.add(hop.tank_id)
         return ok
 
+    def _room_for_new_source() -> bool:
+        """6N SOURCE LIMIT: may the fill pair take one more OG tank this
+        week? (The hop tank is always a new source.) No limit -> True."""
+        cap = int(getattr(state, "sixn_max_source_tanks", 0) or 0)
+        return cap <= 0 or len(_sixn_fill_sources(
+            state, fill_pair[0], week_start_date)) < cap
+
     added = 0.0
     # ---- Stage 1: whole-tank transit of ripe entry tanks --------------------
     _ripe = sorted(
@@ -1694,6 +1722,8 @@ def _transit_entry_to_pair(
     for _es in _ripe:
         if already_moved + added >= goal:
             break
+        if not _room_for_new_source():
+            break          # 6N source limit: the hop would be a new source
         hop, was_res = _hop_tank()
         if hop is None:
             break
@@ -1743,6 +1773,8 @@ def _transit_entry_to_pair(
         for _es in _near:
             if already_moved + added >= _floor_goal:
                 break
+            if not _room_for_new_source():
+                break      # 6N source limit: the hop would be a new source
             hop, was_res = _hop_tank()
             if hop is None:
                 break
@@ -2233,10 +2265,18 @@ def _run_sixn_purge_week(
         _cands = [(t.tank_id, t.count, _bi)
                   for _bi, _b in enumerate(move_in_batches)
                   for t in _fill_sources(_b)]
+        # 6N SOURCE LIMIT: tanks that already fed this pair this week (a
+        # make-room dump) count against the limit unless the plan reuses them.
+        _src_cap = int(getattr(state, "sixn_max_source_tanks", 0) or 0)
+        _max_tanks = None
+        if _src_cap > 0:
+            _had = _sixn_fill_sources(state, main_tank_id, week_start_date)
+            _max_tanks = _src_cap - len(_had - {c[0] for c in _cands})
         _draw_plan = _plan_sixn_draws(
             _cands, target, _min_move(control),
             (control.min_tank_control or 0.0) * _REMNANT_KEEP_PAD,
-            lo=min(_min_fill, target), hi=max(target, max_h))
+            lo=min(_min_fill, target), hi=max(target, max_h),
+            max_tanks=_max_tanks)
         if _draw_plan is None and _cands:
             warnings.append(
                 f"{week_label}: MOVE-SIZE 6N fill: no whole-tank/minimum-piece "
@@ -2281,6 +2321,10 @@ def _run_sixn_purge_week(
             if count_moved >= target and _draw_plan is None:
                 break
             if _draw_plan is not None and _draw_plan.get(src.tank_id, 0.0) <= 0.5:
+                continue
+            # 6N SOURCE LIMIT (the unplanned draw, when move-size rules are off).
+            if not _sixn_source_ok(state, main_tank_id, src.tank_id,
+                                   week_start_date):
                 continue
             # PURGE move-in weight first — the per-tank fill cap is judged at
             # the mid-week (Friday) transfer weight the fish actually land at.
@@ -2487,7 +2531,8 @@ def _run_sixn_purge_week(
             warnings.extend(warns)
             transfer_events.append(ev)
             for _a in _allocs:
-                _freeze_6n_dest(state, _a.tank_id, fill_date=week_start_date)
+                _freeze_6n_dest(state, _a.tank_id, fill_date=week_start_date,
+                                source_tank_id=src.tank_id)
             _book_move_in_feed(sixn_move_in_feed, move_in_batch, week_label,
                                _xfer_wt, take, tables, _bm)
             count_moved += take
@@ -4505,8 +4550,38 @@ def _free_6n_slots(state: FacilityState, resting_pair,
     return topup + pref + last
 
 
+def _sixn_source_key(dest_tank_id: int, fill_date):
+    """Ledger key of a 6N fill: (pair, ISO year, ISO week), or None."""
+    pr = next((p for p in SIXN_PAIRS if dest_tank_id in p), None)
+    if pr is None or fill_date is None:
+        return None
+    iso = fill_date.isocalendar()
+    return (pr, iso[0], iso[1])
+
+
+def _sixn_fill_sources(state: FacilityState, dest_tank_id: int,
+                       fill_date) -> set:
+    """OG tanks that have filled `dest_tank_id`'s pair in `fill_date`'s week."""
+    key = _sixn_source_key(dest_tank_id, fill_date)
+    led = getattr(state, "sixn_fill_sources", None) or {}
+    return set(led.get(key, ())) if key is not None else set()
+
+
+def _sixn_source_ok(state: FacilityState, dest_tank_id: int, src_tank_id: int,
+                    fill_date) -> bool:
+    """May `src_tank_id` fill `dest_tank_id`'s pair this week under the 6N
+    source limit (control.sixn_max_source_tanks)? A tank already feeding the
+    pair this week is always allowed; a new one only while the pair has drawn
+    from fewer tanks than the limit. No limit (0) -> always True."""
+    cap = int(getattr(state, "sixn_max_source_tanks", 0) or 0)
+    if cap <= 0 or src_tank_id in SIXN_ALL_TANKS:
+        return True
+    have = _sixn_fill_sources(state, dest_tank_id, fill_date)
+    return src_tank_id in have or len(have) < cap
+
+
 def _freeze_6n_dest(state: FacilityState, dest_tank_id: int,
-                    fill_date=None) -> None:
+                    fill_date=None, source_tank_id=None) -> None:
     """Freeze a 6N depuration destination after a purge-mode move-in.
 
     Sets the tank to STARVE so the daily biology loop neither grows nor feeds
@@ -4530,6 +4605,14 @@ def _freeze_6n_dest(state: FacilityState, dest_tank_id: int,
         t.stage = STAGE_STARVE
         if fill_date is not None:
             getattr(state, "sixn_fill_date", {})[dest_tank_id] = fill_date
+        # `source_tank_id`: the OG tank the fish came from, for the 6N source
+        # limit's ledger (_sixn_source_ok). Recorded whether or not a limit is
+        # set; nothing reads it when the limit is 0.
+        _key = _sixn_source_key(dest_tank_id, fill_date)
+        if (source_tank_id is not None and _key is not None
+                and source_tank_id not in SIXN_ALL_TANKS
+                and hasattr(state, "sixn_fill_sources")):
+            state.sixn_fill_sources.setdefault(_key, set()).add(source_tank_id)
 
 
 def _book_move_in_feed(accum: dict, batch_id: str, week_label: str,
@@ -4625,6 +4708,10 @@ def _make_room_into_6n(
                                same_batch=(src.batch_id if is_purge else None),
                                fill_date=(event_date if is_purge else None)):
         _tk = state.tanks_by_id.get(_tid)
+        # 6N SOURCE LIMIT: a pair that has already drawn from its limit of
+        # OG tanks this week is not a slot for a further tank.
+        if is_purge and not _sixn_source_ok(state, _tid, src.tank_id, event_date):
+            continue
         # Empty slot, OR a 6N tank already holding this same batch (top-up,
         # INV-1-safe). Empty is the common case here.
         if _tk is not None and (_tk.is_empty or _tk.batch_id == src.batch_id):
@@ -4708,7 +4795,8 @@ def _make_room_into_6n(
     transfer_events.append(_mv)
     if is_purge:
         for _a in _allocs:
-            _freeze_6n_dest(state, _a.tank_id, fill_date=event_date)
+            _freeze_6n_dest(state, _a.tank_id, fill_date=event_date,
+                            source_tank_id=src.tank_id)
         if sixn_move_in_feed is not None and tables is not None:
             _book_move_in_feed(sixn_move_in_feed, _src_batch,
                                week_label, _xfer_wt, _src_count,
@@ -5145,6 +5233,8 @@ def phase_d_emit_events(
         # because the answer is the same for the whole week and every pass
         # already has `state`.
         state.sixn_closed_tanks = sixn_closed_tanks(control, week_start_date)
+        state.sixn_max_source_tanks = int(
+            getattr(control, "sixn_max_source_tanks", 0) or 0)
 
         # ---------------- ANTICIPATORY HANDLING RESERVE ------------------
         # `_moves_left` above answers "what is left of the budget RIGHT NOW".

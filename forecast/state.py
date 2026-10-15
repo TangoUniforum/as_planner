@@ -152,6 +152,12 @@ class FacilityState:
         # PR-hydrated fish already purging at forecast start) are treated as
         # old enough — the hold can only be judged on fills we witnessed.
         self.sixn_fill_date: dict[int, date] = {}
+        # 6N SOURCE LEDGER: (pair, ISO year, ISO week) -> OG tank ids that
+        # filled that pair that week (recorded by placement._freeze_6n_dest),
+        # and the limit placement enforces against it
+        # (control.sixn_max_source_tanks; 0 = no limit, the default).
+        self.sixn_fill_sources: dict[tuple, set] = {}
+        self.sixn_max_source_tanks: int = 0
         # 6N tanks CLOSED to ordinary production placement this week.
         #
         # 6N is a depuration system while purge mode runs, and from
