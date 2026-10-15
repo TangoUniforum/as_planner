@@ -212,10 +212,10 @@ FIXTURE = ROOT / "tests" / "fixtures" / "pr_2026-09-30.xlsx"
 
 
 @pytest.mark.skipif(not FIXTURE.exists(), reason="fixture PR missing")
-def test_fixture_run_sheet_week_totals_match_harvest_plan(tmp_path):
+def test_fixture_run_sheet_week_totals_match_harvest_plan(tmp_path, copy_config):
     from forecast.run import main
     cfg, scn = tmp_path / "config", tmp_path / "scenario"
-    shutil.copytree(ROOT / "config", cfg)
+    copy_config(ROOT / "config", cfg)          # never the operator's costs
     shutil.copytree(ROOT / "scenario", scn)
     out = tmp_path / "out.xlsx"
     main(str(FIXTURE), str(out), config_dir=str(cfg), scenario_dir=str(scn),
