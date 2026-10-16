@@ -2199,12 +2199,14 @@ def _run_sixn_purge_week(
     # drains as one. Size the fill to what is still missing, so a dump plus a
     # full fill cannot double the week (2028-W14 on the 10.1.26 PR: 38,343
     # make-room fish + a 39,270 fill = 77,531 in one drain).
+    _netted = 0.0
     if _min_move(control) > 0:
         _pre = pair_combined_count(state, fill_pair)
         if _pre > 0:
             target = max(0.0, target - _pre)
             _min_fill = max(0.0, _min_fill - _pre)
             max_h = max(0.0, max_h - _pre)
+            _netted = _pre
     # LEVEL DRAINS (opt-in `sixn_level_drains`): cap the fill by the resting pair's
     # REMAINING headroom (one weekly harvest's worth, max_h) so fills don't ACCUMULATE
     # into one pair across its rotation residency — the root cause of the 90-113k drain
@@ -2212,7 +2214,12 @@ def _run_sixn_purge_week(
     # becomes the move-in for the next thin pair, lifting its drain toward the floor —
     # so every week meets the harvest MIN.
     if getattr(control, "sixn_level_drains", False):
-        _existing = pair_combined_count(state, fill_pair)
+        # TOP-UP (2026-10-16): fish already in the pair were netted out of
+        # max_h just above (move-size rules); subtract only what is left, or
+        # a make-room dump is counted twice and the pair is topped up to
+        # max_h - 2 x dump -- 2026-W52 on the 10.11 PR drained 29,251 against
+        # a 41,948 floor with 31,907 + 22,922 mature B45 fish still in OG.
+        _existing = pair_combined_count(state, fill_pair) - _netted
         # NOTE (measured 2026-08-01): forcing the floor through this clamp —
         # "the contract must win" — BACKFIRES. It re-creates the accumulation
         # this clamp exists to prevent: weeks over the processing cap 4->6,
