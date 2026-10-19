@@ -974,6 +974,16 @@ _CONTROL_HELP = {
         "ship at least this many fish — never an empty week. This knob is a "
         "floor only; the holding-back-for-lean-weeks behaviour comes from the "
         "harvest guide (hybrid_follow) further down. Unit: fish/week.",
+    "min_harvest_hog_kg_per_week":
+        "The weekly harvest floor in kg HOG (head-on gutted): every week must "
+        "ship at least this much. The planner works in fish, so each week it "
+        "turns this into fish at the weight it expects to harvest (HOG kg / "
+        "(harvest weight x HOG yield)) and uses the larger of that and "
+        "`min_harvest_per_week`. It never asks for more fish than the week's "
+        "harvest limit. A single week can use a different floor in Limits → "
+        "Facility limits, row `min_harvest_hog_kg`. Blank = no HOG floor. "
+        "The run's ValidationLog lists every week that shipped less. "
+        "Unit: kg HOG/week (124,700 kg = 275,000 lb).",
     "min_tank_control":
         "The 'no dribbles' rule: if a harvest or transfer would leave a tank "
         "holding fewer fish than this, the tank is emptied completely instead "
@@ -1488,6 +1498,7 @@ _CONTROL_LABEL = {
     "harvest_relief_pct": "Harvest relief band (fraction of limit)",
     "min_harvest_per_week": "Min harvest / week (fish)",
     "min_harvest_weight_g": "Min harvest weight (g)",
+    "min_harvest_hog_kg_per_week": "Min harvest / week (kg HOG)",
     "min_tank_control": "Force-empty floor (fish)",
     "min_transfer_count": "Min transfer size (fish)",
     "move_size_rules": "Enforce move minimums everywhere (on/off)",
@@ -1739,8 +1750,8 @@ _CONTROL_GROUPS = [
      "operator inputs no automatic search may touch — the tuner may change how "
      "the model plans, never what the facility is or what you have promised.",
      ["max_feed_per_day_kg", "max_biomass_kg", "max_harvest_per_week",
-      "harvest_relief_pct", "min_harvest_per_week", "min_harvest_weight_g",
-      "min_tank_control", "max_transfers_per_week", "min_transfer_count",
+      "harvest_relief_pct", "min_harvest_per_week", "min_harvest_hog_kg_per_week",
+      "min_harvest_weight_g", "min_tank_control", "max_transfers_per_week", "min_transfer_count",
       "move_size_rules", "relief_lookahead_days", "min_grade_count",
       "sixn_max_source_tanks",
       "tran_og_default_tanks", "entry_tier_exit", "density_target_pct",
@@ -5501,7 +5512,8 @@ def _edit_limits():
     )
     from forecast.caps import (METRIC_BIOMASS, METRIC_FEED_DAY, METRIC_MAX_HARVEST,
                                METRIC_MIN_HARVEST, METRIC_HOG_YIELD, METRIC_SGR_OG,
-                               METRIC_MIN_HARVEST_WT, SYSTEM_MODES, SystemLimits)
+                               METRIC_MIN_HARVEST_WT, METRIC_MIN_HARVEST_HOG,
+                               SYSTEM_MODES, SystemLimits)
     st.caption(
         "Capacity limits. A capacity is a fact about the facility, so it is "
         "stated **once** per system below and applies to every week of every "
@@ -5522,8 +5534,8 @@ def _edit_limits():
     sl_cur = {(r["week"], r["system"], r["metric"]): r["value"]
               for r in system_limits_to_list(sl)}
     fl_metrics = [METRIC_BIOMASS, METRIC_FEED_DAY, METRIC_MAX_HARVEST,
-                  METRIC_MIN_HARVEST, METRIC_MIN_HARVEST_WT, METRIC_HOG_YIELD,
-                  METRIC_SGR_OG]
+                  METRIC_MIN_HARVEST, METRIC_MIN_HARVEST_HOG, METRIC_MIN_HARVEST_WT,
+                  METRIC_HOG_YIELD, METRIC_SGR_OG]
     sl_metrics = [METRIC_BIOMASS, METRIC_FEED_DAY]
     systems = _og_systems_app()
     # Weeks drive the EXCEPTION grid only; the defaults editor needs none, so

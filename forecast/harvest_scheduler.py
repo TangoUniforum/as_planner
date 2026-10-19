@@ -46,6 +46,7 @@ from .caps import (
     METRIC_MIN_HARVEST,
     apply_facility_buffer,
     harvest_weight_g,
+    min_harvest_fish,
     resolve_facility_cap,
 )
 from .models import BatchInput, BatchWeekState, ControlParams
@@ -95,6 +96,16 @@ def _effective_inventory(
     }
 
 
+def _pool_mean_wt(effective: dict, label: str, facility_limits, control) -> float:
+    """Mean live weight (g) of the batches at the week's harvest weight -- the
+    weight a kg-HOG floor converts to fish at (caps.min_harvest_fish), as the
+    planner does with its tanks. 0.0 when none qualifies."""
+    wmin = harvest_weight_g(label, facility_limits, control)
+    n = sum(e["count"] for e in effective.values() if e["avg_wt_g"] >= wmin)
+    kg = sum(e["count"] * e["avg_wt_g"] for e in effective.values() if e["avg_wt_g"] >= wmin)
+    return kg / n if n > 0 else 0.0
+
+
 def project_biomass_under_min_only(
     states_by_batch: dict[str, list[BatchWeekState]],
     batches_by_id: dict[str, BatchInput],
@@ -134,7 +145,8 @@ def project_biomass_under_min_only(
         projected[label] = sum(e["biomass_kg"] for e in effective.values())
 
         # Apply FIFO min-only harvest for next-week projection.
-        min_hv = resolve_facility_cap(METRIC_MIN_HARVEST, label, facility_limits, control) or 0.0
+        min_hv = min_harvest_fish(label, facility_limits, control,
+                                  _pool_mean_wt(effective, label, facility_limits, control)) or 0.0
         need = float(min_hv)
         for b in fifo_order:
             if need <= 0:
@@ -264,6 +276,11 @@ def schedule_harvests(
             if e and e["avg_wt_g"] >= harvest_weight_g(label, facility_limits, control):
                 oldest_mature_avg_wt = e["avg_wt_g"]
                 break
+        # A HOG floor converts to fish at the weight it will harvest
+        # (caps.min_harvest_fish); without one this is min_hv unchanged.
+        _mh = min_harvest_fish(label, facility_limits, control,
+                               _pool_mean_wt(effective, label, facility_limits, control))
+        weekly_min = _mh if _mh else 0.0
 
         if overflow_pressure:
             # Biomass over cap (or will be): use full harvest capacity.

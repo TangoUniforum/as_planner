@@ -68,6 +68,13 @@ METRIC_SGR_OG = "sgr_correction_og"
 # week. Absent week = Control `min_harvest_weight_g`, so a limits file with no
 # such rows plans exactly as before. Resolved by `harvest_weight_g` below.
 METRIC_MIN_HARVEST_WT = "min_harvest_weight_g"
+# Per-week harvest floor in kg HOG (operator 2026-10-19: "a tonnes HOG floor
+# instead of a count floor"). NOT a cap. The planner still counts fish, so the
+# week's floor in fish becomes the larger of `min_harvest_per_week` and this
+# HOG floor divided by the HOG weight of the fish it will harvest -- see
+# `min_harvest_fish`. Absent week = Control `min_harvest_hog_kg_per_week`;
+# both unset (the default) = no HOG floor, a run plans exactly as before.
+METRIC_MIN_HARVEST_HOG = "min_harvest_hog_kg"
 
 # Operating modes a system-default may be qualified by. Today only 6N has
 # two; the dimension is general so a future mode (a system taken off-line
@@ -382,6 +389,57 @@ def control_for_week(control: ControlParams, facility_limits, week_label: str) -
     c = copy.copy(control)
     c.min_harvest_weight_g = w
     return c
+
+
+def hog_floor_kg(week_label: str, facility_limits, control: ControlParams) -> Optional[float]:
+    """The harvest floor in kg HOG for `week_label`, or None when there is none.
+
+    A positive per-week `min_harvest_hog_kg` row wins; otherwise Control
+    `min_harvest_hog_kg_per_week`. 0 / blank = no HOG floor.
+    """
+    base = float(getattr(control, "min_harvest_hog_kg_per_week", None) or 0.0)
+    v = None
+    if facility_limits is not None:
+        v = getattr(facility_limits, "overrides", {}).get((week_label, METRIC_MIN_HARVEST_HOG))
+    val = float(v) if v is not None and float(v) > 0 else base
+    return val if val > 0 else None
+
+
+def min_harvest_fish(week_label: str, facility_limits, control: ControlParams,
+                     harvest_wt_g: float = 0.0) -> Optional[float]:
+    """The week's harvest floor in FISH, the number the planner works in.
+
+    Without a HOG floor this IS `resolve_facility_cap(min_harvest_per_week)`,
+    value for value, so a run without HOG rows plans exactly as before. With
+    one, the floor is the larger of the fish floor and the fish needed to land
+    the HOG floor: HOG kg / (harvest_wt_g / 1000 x the week's HOG yield).
+
+    `harvest_wt_g` is the live weight of the fish the floor will harvest (the
+    caller's estimate -- the planner passes the oldest batch at harvest
+    weight; fish staged in 6N are frozen, so their weight at the fill is their
+    weight at the drain). 0 / unknown falls back to the week's minimum
+    harvest weight, the lightest fish that may go, which asks for the most
+    fish. The converted floor never exceeds the week's fish limit
+    (`max_harvest_per_week`): a HOG floor cannot ask for more fish than the
+    plant may process.
+    """
+    import math
+    fish = resolve_facility_cap(METRIC_MIN_HARVEST, week_label, facility_limits, control)
+    hog = hog_floor_kg(week_label, facility_limits, control)
+    if hog is None:
+        return fish
+    wt = float(harvest_wt_g or 0.0)
+    if wt <= 0:
+        wt = harvest_weight_g(week_label, facility_limits, control)
+    yld = (resolve_facility_cap(METRIC_HOG_YIELD, week_label, facility_limits, control)
+           or float(control.default_hog_yield or 0.0))
+    if wt <= 0 or yld <= 0:
+        return fish
+    need = float(math.ceil(hog / (wt / 1000.0 * yld)))
+    mx = resolve_facility_cap(METRIC_MAX_HARVEST, week_label, facility_limits, control)
+    if mx:
+        need = min(need, float(mx))
+    return max(float(fish or 0.0), need)
 
 
 def og_sgr_factors(facility_limits) -> dict[str, float]:

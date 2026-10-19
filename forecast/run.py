@@ -68,6 +68,31 @@ def _pr_sheet(wb):
     return find_pr_sheet(wb)
 
 
+def hog_floor_notes(harvest_events, facility_limits, control, forecast_start=None) -> list:
+    """One line per forecast week that shipped less kg HOG than its HOG floor
+    (caps.hog_floor_kg), plus a one-line summary; [] when no week has one."""
+    from .caps import METRIC_HOG_YIELD, hog_floor_kg, resolve_facility_cap
+    from .time_grid import forecast_week_labels, iso_week_label
+    start = forecast_start.date() if hasattr(forecast_start, "date") else forecast_start
+    weeks = forecast_week_labels(start, control.horizon_weeks)
+    floors = {w: hog_floor_kg(w, facility_limits, control) for w in weeks}
+    floors = {w: f for w, f in floors.items() if f}
+    if not floors:
+        return []
+    hog: dict = {}
+    for ev in harvest_events:
+        w = iso_week_label(ev.event_date)
+        yld = (resolve_facility_cap(METRIC_HOG_YIELD, w, facility_limits, control)
+               or float(control.default_hog_yield or 0.0))
+        hog[w] = hog.get(w, 0.0) + float(ev.count or 0.0) * float(ev.avg_wt_g or 0.0) / 1000.0 * yld
+    short = [w for w in sorted(floors) if hog.get(w, 0.0) < floors[w] - 1.0]
+    out = [f"HOG FLOOR - {w}: shipped {hog.get(w, 0.0):,.0f} kg HOG, floor "
+           f"{floors[w]:,.0f} kg ({hog.get(w, 0.0) - floors[w]:+,.0f} kg)" for w in short]
+    out.append(f"HOG FLOOR - {len(floors) - len(short)} of {len(floors)} week(s) with a "
+               f"HOG floor met it" + (f"; {len(short)} short (listed above)" if short else ""))
+    return out
+
+
 def main(
     input_path: str | Path | None = None,
     output_path: str | Path | None = None,
@@ -1401,6 +1426,18 @@ def main(
         _plan_end_notes = [f"PLAN ENDS EARLY - check failed: {_pe_err!r}"]
     for _m in _plan_end_notes:
         print(f"  WARN: {_m}")
+    # HOG FLOOR (operator 2026-10-19). The planner converts the kg-HOG floor to
+    # fish at its estimate of the harvest weight; this measures what each week
+    # ACTUALLY shipped in kg HOG and names every week under its floor. Nothing
+    # is said when no HOG floor is set.
+    try:
+        _hog_notes = hog_floor_notes(placement.harvest_events, facility_limits,
+                                     control, forecast_start=control.forecast_start)
+    except Exception as _hf_err:                                   # noqa: BLE001
+        _hog_notes = [f"HOG FLOOR - check failed: {_hf_err!r}"]
+    for _m in _hog_notes:
+        print(f"  {_m}")
+    _plan_end_notes += _hog_notes
 
     # PER-WEEK COVERAGE. A metric the operator steers week by week, whose rows
     # STOP before the horizon ends, hands the remaining weeks a number nobody

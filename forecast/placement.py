@@ -53,6 +53,7 @@ from .caps import (
     SystemLimits,
     carry_forward_cap_lookup,
     control_for_week,
+    min_harvest_fish,
     predictive_move_in_count,
     resolve_facility_cap,
     resolve_system_cap,
@@ -3501,6 +3502,21 @@ def _even_out_density(
                 break
 
 
+def _eligible_mean_wt(state, week_label, facility_limits, control) -> float:
+    """Mean live weight (g) of the grow-out fish (OG, not 6N) whose tank is at
+    the week's harvest weight -- the pool a harvest floor draws from. 0.0 when
+    no tank qualifies. Used only to convert a kg-HOG floor to fish."""
+    from .caps import harvest_weight_g
+    wmin = harvest_weight_g(week_label, facility_limits, control)
+    n = kg = 0.0
+    for t in state.tanks_by_id.values():
+        if (t.type == "OG" and t.tank_id not in SIXN_ALL_TANKS and t.count > 0
+                and t.avg_wt_g >= wmin):
+            n += t.count
+            kg += t.count * t.avg_wt_g
+    return kg / n if n > 0 else 0.0
+
+
 def _realized_facility_metrics(
     state: FacilityState,
     batch_meta: dict[str, BatchInput],
@@ -5488,7 +5504,14 @@ def phase_d_emit_events(
         bio_cap = resolve_facility_cap(METRIC_BIOMASS, week_label, facility_limits, control)
         feed_cap = resolve_facility_cap(METRIC_FEED_DAY, week_label, facility_limits, control)
         max_hv = resolve_facility_cap(METRIC_MAX_HARVEST, week_label, facility_limits, control)
-        min_hv = resolve_facility_cap(METRIC_MIN_HARVEST, week_label, facility_limits, control)
+        # The fish floor, raised to cover a HOG floor at the harvest weight
+        # (caps.min_harvest_fish; identical to the plain fish floor without one).
+        # The HOG floor converts at the MEAN weight of the grow-out fish now at
+        # harvest weight: the oldest batch alone is heavier than the fish the
+        # week actually takes, so converting at it asked for too few fish
+        # (19 of 60 weeks short on the 10.18 PR against 4 at this weight).
+        _hog_wt = _eligible_mean_wt(state, week_label, facility_limits, control) or oldest_wt
+        min_hv = min_harvest_fish(week_label, facility_limits, control, _hog_wt)
         weekly_max = max_hv if max_hv else float("inf")
         if bio_cap is not None:
             # DUAL-LIMIT, control-driven setpoint (no hardcoded margin). The harvest
@@ -5550,8 +5573,9 @@ def phase_d_emit_events(
         # budget and limit hold keep this week's band (min_hv / weekly_max).
         _fill_lbl = (sorted_weeks[drain_idx] if drain_idx < len(sorted_weeks)
                      else sorted_weeks[-1])
-        fill_min = resolve_facility_cap(METRIC_MIN_HARVEST, _fill_lbl,
-                                        facility_limits, control)
+        # Fish staged now are frozen in 6N, so their weight now is their weight
+        # at the drain: the drain week's HOG floor converts at oldest_wt.
+        fill_min = min_harvest_fish(_fill_lbl, facility_limits, control, _hog_wt)
         _fill_max_v = resolve_facility_cap(METRIC_MAX_HARVEST, _fill_lbl,
                                            facility_limits, control)
         fill_max = _fill_max_v if _fill_max_v else float("inf")
@@ -5682,8 +5706,7 @@ def phase_d_emit_events(
         _si = cur_idx + _starve_weeks
         _serve_lbl = (sorted_weeks[_si] if _si < len(sorted_weeks)
                       else sorted_weeks[-1])
-        serve_min = resolve_facility_cap(METRIC_MIN_HARVEST, _serve_lbl,
-                                         facility_limits, control)
+        serve_min = min_harvest_fish(_serve_lbl, facility_limits, control, _hog_wt)
         _serve_max_v = resolve_facility_cap(METRIC_MAX_HARVEST, _serve_lbl,
                                             facility_limits, control)
         serve_max = _serve_max_v if _serve_max_v else float("inf")

@@ -436,6 +436,12 @@ class ControlParams:
     # (R6) and leaves only when a TranOG arrival needs them, density pushes it
     # forward, or harvest routing does.
     entry_tier_exit: str = "when_needed"    # "when_needed" (default, operator 2026-10-02) | "at_1kg"
+    # HARVEST FLOOR IN kg HOG (operator 2026-10-19). Every week must ship at
+    # least this much HOG; per-week limits rows `min_harvest_hog_kg` override
+    # it. The planner converts it to fish at the harvest weight
+    # (caps.min_harvest_fish) and keeps the larger of that and
+    # min_harvest_per_week. None / 0 = off: plans exactly as before.
+    min_harvest_hog_kg_per_week: Optional[float] = None
 
 
 @dataclass
