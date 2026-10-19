@@ -3052,7 +3052,7 @@ with buttons — rendering the page writes nothing:
   calibration history — tests, scratch runs, Decide/Compare harnesses — record nothing
   here either. A problem with the history file never stops a run.
 - **Scan the Reports folder (from Nov 2024)** reads every report under
-  `Production\Reports4…`; files already in are skipped. **Add one report** takes a
+  `Production\Reports\2024…`; files already in are skipped. **Add one report** takes a
   single file. The expander shows which reports are used and why the others are not.
 - **Fit (preview)** shows the new curve in g/day against the base curve, with the
   3-month holdout. **Save as frozen version** keeps it. Saving does not touch biology.yaml.
