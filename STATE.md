@@ -5,7 +5,7 @@ each list. Last updated: **2026-10-18**.
 
 ## Live setup (what the app runs right now)
 
-- Branch `v2/capacity-and-transition`, code = `edede1d` (growth models step 1, 2026-10-18).
+- Branch `v2/capacity-and-transition`, code = `43f9974` (growth models steps 1+2, 2026-10-18).
   Run name in `config/control.yaml`: "Sep Production Report Forecast" (stale label, harmless).
 - Latest input: the **10.15.26 PR** (`Reports\2026\Oct\10.15.26_PR.xlsx`, mid-month,
   closing 2026-10-15). Not yet used: `Reports\2026\Sep\Sep'26 Production Report.xlsx`
@@ -34,7 +34,8 @@ each list. Last updated: **2026-10-18**.
 
 ## Waiting on the operator
 
-- Push the growth-models step 1 commits: `! git push origin v2/capacity-and-transition`.
+- Push: origin is still at `aa06014` (the step 1 push did not land) - 7+ commits waiting:
+  `! git push origin v2/capacity-and-transition`.
 
 ## In progress: learning growth model (agreed plan 2026-10-18)
 
@@ -52,7 +53,13 @@ improvement BOTH % per year and blend-to-target, labelled ASSUMED everywhere; FC
 on the same machinery. Each step in its own sandbox + gate + approval.
 1. DONE `b41ab98` engine: biology.yaml `sgr_sw_by_model` + batches.yaml `growth_model`
    (blank = Base curve, plan-identical: gate 23/24, live set identical but BatchInputs column).
-2. NEXT: growth history store + fitter + frozen versions (backfill Nov 2024 ->).
+2. DONE `4328b4b` forecast/growth_history.py + `python -m tools.growth_history --store <file>`
+   backfill/add/show/fit (frozen versions). Scratch backfill: 38 reports, 23-report chain
+   Nov 2024..2026-10-15, 370 clean tank-months; fit cap 13.9 g/d above 2 kg; holdout last 3 mo
+   fit +1.0% vs base +3.1%. 22 files unreadable (2024 formats, Jan'25, Nov'25 V2, May'26 prelim).
+   The live `growth_history.json` (repo root, gitignored) is NOT built yet - operator's call.
+   NEXT: step 3 app Growth models panel (auto-add each PR loaded, fit, adopt version into
+   biology.yaml with before/after) + Batches tab growth_model column and plain sentence.
 3. App Growth models panel + Batches tab sentence. 4. Improvement helpers. 5. FCR learning.
 6. Adoption (before/after, corpus, scenario retune) - operator's call.
 Scratch analysis: session c33340bb scratchpad `growth\` (measure.py, fit.py, chains.py, runs\).
@@ -78,6 +85,8 @@ Scratch analysis: session c33340bb scratchpad `growth\` (measure.py, fit.py, cha
 
 ## Recent history
 
+- 2026-10-18 growth history step 2 merged (`4328b4b`..`43f9974`), tag
+  `v2-before-growth-history-2026-10-18`; two more tests stopped copying the live costs.
 - 2026-10-18 growth models step 1 merged (`b41ab98`..`edede1d`), tag
   `v2-before-growth-models-2026-10-18`; test fix: BatchAccumulated test no longer copies costs.
 - 2026-10-17 10.15 PR: aggressive-Q4 set built, fish-matched, written live, operator ran it
