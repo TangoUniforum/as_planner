@@ -56,7 +56,7 @@ PREFIXES = ("as_forecast_", "as_pr_", "as_copilot_", "as_tmpl_", "as_import_",
             "as_solveui_", "as_frontier_", "as_opt_in_", "as_mcheck_",
             "as_ana_", "as_cmp_", "as_optcfg_", "as_stock_", "as_run_",
             "ideal_ref_keep_", "ideal_tr_pr_", "ideal_tr_opt_",
-            "ideal_engine_")
+            "ideal_engine_", "as_growth_")
 # A folder is removed only when its own mtime is older than this. A run
 # lasts minutes; two days leaves every folder a live session could still
 # be reading alone.

@@ -542,7 +542,8 @@ def compare_plan(pr_path, config_dir, scenario_dir, name: str, values, work_dir,
     rows_by = {}
     for arm in ("before", "after"):
         d = work_dir / arm
-        shutil.rmtree(d, ignore_errors=True)
+        if d.exists():
+            shutil.rmtree(d)
         shutil.copytree(config_dir, d / "config",
                         ignore=shutil.ignore_patterns("costs.yaml*"))
         shutil.copytree(scenario_dir, d / "scenario")

@@ -2065,7 +2065,7 @@ def _growth_models_panel():
         st.rerun()
     up = a2.file_uploader("Add one report", type=["xlsx", "xlsm"], key="gh_upload")
     if up is not None and a2.button("Add it", key="gh_add"):
-        tmp = Path(tempfile.mkdtemp()) / Path(up.name).name
+        tmp = Path(tempfile.mkdtemp(prefix="as_growth_")) / Path(up.name).name
         tmp.write_bytes(up.getvalue())
         try:
             st.session_state["gh_msg"] = {"added": [gh.record_pr(tmp, store_path)]}
@@ -2155,7 +2155,7 @@ def _growth_models_panel():
     cpr = st.file_uploader("PR for the comparison", type=["xlsx", "xlsm"],
                            key="gh_cmp_pr")
     if cpr is not None and st.button("Compare", key="gh_cmp"):
-        wd = Path(tempfile.mkdtemp())
+        wd = Path(tempfile.mkdtemp(prefix="as_growth_"))
         prp = wd / Path(cpr.name).name
         prp.write_bytes(cpr.getvalue())
         try:
