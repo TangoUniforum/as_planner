@@ -5,7 +5,7 @@ each list. Last updated: **2026-10-19**.
 
 ## Live setup (what the app runs right now)
 
-- Branch `v2/capacity-and-transition`, code = `8b8d5a3` (growth models steps 1-3, 2026-10-19).
+- Branch `v2/capacity-and-transition`, code = `a1c8924` (growth models steps 1-4, 2026-10-19).
   Run name in `config/control.yaml`: "Sep Production Report Forecast" (stale label, harmless).
 - Latest input: the **10.15.26 PR** (`Reports\2026\Oct\10.15.26_PR.xlsx`, mid-month,
   closing 2026-10-15). Not yet used: `Reports\2026\Sep\Sep'26 Production Report.xlsx`
@@ -34,8 +34,8 @@ each list. Last updated: **2026-10-19**.
 
 ## Waiting on the operator
 
-- Push: origin is still at `aa06014` (the "pushed" for steps 1 and 2 did not land) - steps 1-3
-  (~14 commits) are local only:
+- Push: origin is still at `aa06014` (the "pushed" for steps 1 and 2 did not land) - steps 1-4
+  (~18 commits) are local only:
   `! git push origin v2/capacity-and-transition`.
 
 ## In progress: learning growth model (agreed plan 2026-10-18)
@@ -67,7 +67,14 @@ on the same machinery. Each step in its own sandbox + gate + approval.
    `growth_model` dropdown + "What each batch grows on". Gate 23/24, live set identical
    (31 sheets), suite 2454 passed / 0 failed.
    NEXT for the operator: Scan in the app (or ask for the backfill) -> Fit -> Save.
-4. Improvement helpers (%/yr, blend-to-target, ASSUMED) + per-batch own-history factor.
+4. DONE `c55ba1a`..`a1c8924` (tag `v2-before-growth-improve-2026-10-19`): ASSUMED versions
+   (+%/yr or straight-line blend to a target curve by a date, made for fish growing in a
+   stated month, frozen, adoptable like a measured one) + per-batch own-history table
+   (INFORMATION ONLY - operator 2026-10-19: the size slowdown is facility-wide and already
+   in the measured version, so fleet only, sgr_correction 1.0, is the usual choice).
+   Measured by size (Nov24-Oct26): actual/base 1.02 at 0.5-1 kg, ~0.89 at 1-2.5 kg,
+   0.76 at 2.5-3, 0.70 at 3-4 kg; g/day flat 13.4-14.5 from 2-4 kg (no further decline;
+   >4 kg only 1 tank-month). Gate 23/24, live set identical, suite 2466 passed.
 5. FCR learning.
 6. Adoption (before/after, corpus, scenario retune) - operator's call.
 Scratch analysis: session c33340bb scratchpad `growth\` (measure.py, fit.py, chains.py, runs\).
