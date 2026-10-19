@@ -12823,8 +12823,9 @@ def _daily_harvest_table(he_df, report_start=None):
 
 def _rolling_harvest_table(out_path, report_start=None):
     """(DataFrame, TSV text, {total-row positions}) — the RollingHarvestPlan
-    table for the Harvest tab, columns A..O exactly as the operator's "12 weeks
-    rolling harvest plan" sheet (A and M blank), computed values in K/L/N/O.
+    table for the Harvest tab, columns A..W exactly as the operator's "12 weeks
+    rolling harvest plan" sheet (A and M blank), computed values in K/L/N/O
+    and the lb HOG weight ranges in P..W.
 
     ONE BUILDER (2026-10-15): forecast.rolling_harvest.build_rolling_rows, the
     function the workbook's RollingHarvestPlan sheet is written from, fed from
@@ -12866,6 +12867,8 @@ def _rolling_harvest_table(out_path, report_start=None):
         if isinstance(v, float):
             if ci in (8, 9, 13):              # I count, J kg, N lb
                 return round(v, 0) if ci == 8 else round(v, 1)
+            if ci >= 15:                      # P..W lb per weight range
+                return round(v, 0)
             return round(v, 3)
         return v
 
@@ -12873,7 +12876,8 @@ def _rolling_harvest_table(out_path, report_start=None):
     df = pd.DataFrame(shown, columns=cols)
     for c in cols:
         df[c] = df[c].map(lambda v: "" if v is None else v).astype(str)
-    df[cols[8]] = df[cols[8]].map(lambda v: v[:-2] if v.endswith(".0") else v)
+    for c in [cols[8]] + cols[15:]:
+        df[c] = df[c].map(lambda v: v[:-2] if v.endswith(".0") else v)
     tsv = "\n".join("\t".join(str(v) for v in r) for r in df.values.tolist())
     return df, tsv, total_pos
 
@@ -16136,42 +16140,21 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
                     fig.update_layout(height=320, yaxis_title="fish", xaxis_title="")
                     st.plotly_chart(fig, use_container_width=True)
 
-            # Daily harvest schedule — each weekly tank-harvest split Mon–Fri,
-            # with a per-week Total row and a blank line between weeks.
-            st.markdown("**Daily harvest schedule (Mon–Fri)**")
-            st.caption(
-                "**All tanks harvesting in a week are combined**, then split "
-                "evenly across the week's operating days (Mon–Fri, never a day "
-                "before the report opens), with a **Total** "
-                "row per week and a blank line between weeks. Tank/Batch list every "
-                "tank + batch that contributed; average weights are blended (total "
-                "biomass ÷ total fish). Same as the Excel 'Daily Harvest Schedule' "
-                "sheet.")
-            _dh, _totpos, _blankpos = _rv_memo(
-                "harvest_daily", _rid,
-                lambda: _daily_harvest_table(he_df, _run_rs))
-            if _dh.empty:
-                st.info("No datable harvest events for a daily breakout.")
-            else:
-                def _hl_totals(row):
-                    if row.name in _totpos:
-                        return ["background-color:#e8eaf0;font-weight:700"] * len(row)
-                    return [""] * len(row)
-                st.dataframe(_dh.style.apply(_hl_totals, axis=1),
-                             hide_index=True, use_container_width=True,
-                             height=min(760, 44 + 35 * len(_dh)))
-
             # Rolling harvest plan — the operator's paste-ready layout
-            # (columns A..O of the "12 weeks rolling harvest plan" sheet).
-            # Additive: the daily schedule above is unchanged.
-            st.markdown("**Rolling harvest plan (paste-ready, columns A–O)**")
+            # (columns A..W of the "12 weeks rolling harvest plan" sheet). It
+            # replaced the Daily harvest schedule table (operator 2026-10-19).
+            st.markdown("**Rolling harvest plan (paste-ready, columns A–W)**")
             st.caption(
                 "The same table as the workbook's **RollingHarvestPlan** sheet: "
-                "each week's fish split evenly over its harvest days and filled "
-                "tank after tank (a day that finishes one tank and starts the "
-                "next lists both), then a Total and a check row. Source Tank = "
-                "the grow-out tanks that filled that week's 6N tanks. Weeks and "
-                "the first Harvest ID number are the Control knobs "
+                "each week's fish split evenly over its harvest days (Mon–Fri, "
+                "never a day before the report opens) and filled tank after "
+                "tank (a day that finishes one tank and starts the next lists "
+                "both), then a **Total** row and a blank line. Source Tank = "
+                "the grow-out tanks that filled that week's 6N tanks. "
+                "**P–W: lb HOG by weight range** (lb HOG per fish), your sales "
+                "sheet's PCT_LBS_IN_RANGE — a lognormal with CV 0.1805 around "
+                "each tank's average, by biomass; blank at 15 lb or less. Weeks "
+                "and the first Harvest ID number are the Control knobs "
                 "*rolling_harvest_weeks* / *rolling_harvest_first_id*. "
                 "**To copy:** download the TSV (or use the copy icon on the "
                 "text box) and paste into cell **A5** of the rolling plan "
@@ -16192,7 +16175,7 @@ if "result" in st.session_state and st.session_state.result.get("ok"):
                              hide_index=True, use_container_width=True,
                              height=min(760, 44 + 35 * len(_rh)))
                 st.download_button(
-                    "⬇ Download rolling harvest plan (TSV, columns A–O)",
+                    "⬇ Download rolling harvest plan (TSV, columns A–W)",
                     data=_rh_tsv.encode("utf-8"),
                     file_name="RollingHarvestPlan.tsv",
                     mime="text/tab-separated-values",

@@ -1471,7 +1471,7 @@ def write_yearly_summary(
         ws.column_dimensions[get_column_letter(c)].width = w
 
 
-def write_daily_harvest_schedule(
+def write_daily_harvest_schedule(  # no longer written by run.py (2026-10-19)
     wb,
     harvest_events,
     forecast_start,
@@ -1593,14 +1593,17 @@ def write_rolling_harvest_plan(
     sheet_name: str = "RollingHarvestPlan",
 ) -> None:
     """The operator's "12 weeks rolling harvest plan" layout, ready to paste
-    (REPORT ONLY, 2026-10-15): columns A..O fixed, header on row 4, one block
+    (REPORT ONLY, 2026-10-15): columns A..W fixed, header on row 4, one block
     per harvest week (a row per harvest day filled tank after tank, a Total
-    row, a check row), contiguous. The rows come from
+    row, a blank line). P..W are lb HOG per weight range (values; blank at
+    rolling_harvest.BAND_MIN_LB or less), the sales-planning columns
+    (operator 2026-10-19). The rows come from
     rolling_harvest.build_rolling_rows -- the same function the app's table
     uses; this writer only turns K/L/N/O (and the Total sums) into the
     operator's formulas. Plan numbers are untouched."""
     from openpyxl.styles import Font, Alignment
-    from .rolling_harvest import (COLUMNS, build_rolling_rows,
+    from .rolling_harvest import (COLUMNS, MODEL_CV, BAND_MIN_LB,
+                                  build_rolling_rows, shown_band,
                                   harvest_inputs_from_events,
                                   transfer_inputs_from_events)
     if sheet_name in wb.sheetnames:
@@ -1610,11 +1613,14 @@ def write_rolling_harvest_plan(
     ws.cell(row=1, column=1, value="ROLLING HARVEST PLAN")
     ws.cell(row=2, column=1, value=(
         f"Weekly harvest in the '12 weeks rolling harvest plan' layout "
-        f"(columns A-O): each week's whole fish split evenly Mon-Fri and "
-        f"filled tank after tank; Total and check row per week. "
+        f"(columns A-W): each week's whole fish split evenly Mon-Fri and "
+        f"filled tank after tank; a Total row and a blank line per week; P-W "
+        f"lb HOG by weight range (lognormal, CV {MODEL_CV:g}, by biomass; "
+        f"blank at {BAND_MIN_LB:g} lb or less). "
         f"Forecast start {_rs}. Report only."))
     ws.cell(row=3, column=9, value="Kg")
     ws.cell(row=3, column=14, value="Lb")
+    ws.cell(row=3, column=16, value="Lb HOG by weight range (lb HOG per fish)")
     for c, name in enumerate(COLUMNS, start=1):
         cell = ws.cell(row=4, column=c, value=name if name else None)
         cell.font = Font(bold=True)
@@ -1626,7 +1632,7 @@ def write_rolling_harvest_plan(
     base = 5
     fmt = {9: "#,##0", 10: "#,##0", 11: "0.00", 12: "0.00", 14: "#,##0",
            15: "0.00"}
-    total_row_of: dict = {}
+    fmt.update({c: "#,##0" for c in range(16, 16 + len(COLUMNS) - 15)})
     for i, r in enumerate(rows):
         x = base + i
         y = r["yield"]
@@ -1640,7 +1646,6 @@ def write_rolling_harvest_plan(
                     11: f"=J{x}/I{x}", 12: f"=K{x}/{ys}",
                     14: f"=J{x}*2.2046", 15: f"=K{x}*2.2046"}
         elif r["kind"] == "total":
-            total_row_of[r["block_top"]] = x
             last = x - 1
             vals = {3: r["year"], 5: r["week"], 6: f'=E{x}&" Total"',
                     7: r["tank"], 8: r["batch"],
@@ -1648,9 +1653,11 @@ def write_rolling_harvest_plan(
                     11: f"=J{x}/I{x}", 12: f"=K{x}/{ys}",
                     14: f"=J{x}*2.2046", 15: f"=K{x}*2.2046"}
         else:
-            t = total_row_of[r["block_top"]]
-            vals = {9: f"=I{t}", 11: f"=O{x}/2.2046", 12: f"=K{x}/{ys}",
-                    14: f"=O{x}*I{x}", 15: f"=O{t}"}
+            vals = {}                    # the blank line between weeks
+        if r["kind"] in ("day", "total"):
+            for bi, v in enumerate(r["bands"]):
+                sv = shown_band(v)
+                vals[16 + bi] = sv if sv != "" else None
         for c, v in vals.items():
             cell = ws.cell(row=x, column=c, value=v)
             if c in fmt:
@@ -1665,6 +1672,7 @@ def write_rolling_harvest_plan(
             ws.cell(row=top, column=2).alignment = Alignment(vertical="center")
     widths = {1: 4, 2: 16, 3: 7, 4: 18, 5: 6, 6: 12, 7: 9, 8: 10, 9: 9,
               10: 15, 11: 12, 12: 12, 13: 12, 14: 14, 15: 12}
+    widths.update({c: 12 for c in range(16, 16 + len(COLUMNS) - 15)})
     for c, w in widths.items():
         ws.column_dimensions[get_column_letter(c)].width = w
     ws.freeze_panes = "A5"

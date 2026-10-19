@@ -3,19 +3,28 @@
 The operator pastes a weekly harvest plan into a working Excel document whose
 columns are fixed (A notes | B Source Tank | C Year | D Harvest ID | E Week |
 F Date | G Tank | H Batch | I Count | J kg HOG | K avg kg HOG | L live kg |
-M Origin FT weight | N lb HOG | O avg lb HOG). This module builds that table
-ONCE, as plain rows, for both surfaces: the workbook's RollingHarvestPlan sheet
-(excel_io.write_rolling_harvest_plan, which turns K/L/N/O into formulas) and the
-app's Harvest tab (computed values + a TSV a paste lands in A..O).
+M Origin FT weight | N lb HOG | O avg lb HOG | P..W lb HOG by weight range).
+This module builds that table ONCE, as plain rows, for both surfaces: the
+workbook's RollingHarvestPlan sheet (excel_io.write_rolling_harvest_plan, which
+turns K/L/N/O into formulas) and the app's Harvest tab (computed values + a TSV
+a paste lands in A..W).
 
 Per harvest week, one block: a row per harvest day (time_grid.
 harvest_schedule_days -- Mon-Fri, none before the report opens), a Total row
-and a check row. The week's whole fish are split evenly over its days (whole
+and a blank line (operator 2026-10-19: laid out like the old Daily Harvest
+Schedule, which this sheet replaces). The week's whole fish are split evenly over its days (whole
 fish, remainder to the earliest days -- excel_io.whole_parts, the evenness
 harvest_month_split assumes) and the days are filled tank after tank, the way
 the site harvests: a day that finishes one tank and starts the next is ONE row
 listing both tanks and batches. Nothing here changes a plan number; the
 inputs are the whole fish and HOG kg every other harvest sheet already shows.
+
+P..W (operator 2026-10-19, the sales-planning sheet's PCT_LBS_IN_RANGE): lb HOG
+in each weight range, from a lognormal of fish weight with CV MODEL_CV around
+the harvested average, weighted by biomass (the lb that fall in the range, not
+the fish). Each tank's part of a day is spread at its own average weight, so a
+day that finishes one tank and starts the next is not blended. A cell of
+BAND_MIN_LB or less is shown blank, as in the operator's sheet.
 
 Inputs are plain dicts so the app (which reads the workbook) and the writer
 (which holds the engine's events) feed the same function:
@@ -27,7 +36,9 @@ transfers: {"week": "YYYY-Www", "batch": str, "from_tank": int,
 """
 from __future__ import annotations
 
+import math
 from datetime import date, datetime, timedelta
+from statistics import NormalDist
 from typing import Iterable, Optional
 
 from .batch_order import sorted_batches
@@ -39,6 +50,15 @@ COLUMNS = ["", "Source Tank", "Year ", "Harvest ID", "Week", "Date", "Tank ",
            "Batch", "Count", "Weight (kg HOG)", "Average weight (kg HOG)",
            "Live weight (kg)", "Origin FT Weight (kg)", "Weight (lb HOG)",
            "Average weight (lb HOG)"]
+# P..W: lb HOG per weight range (lb HOG per fish), the operator's sales sheet.
+BANDS_LB = [(0, 2), (2, 4), (4, 5.8), (5.8, 8), (8, 10), (10, 12), (12, 14),
+            (14, 16)]
+BAND_COLUMNS = ["0 - 2lbs HOG", "2 - 4lbs HOG", "4 - 5.8lbs HOG",
+                "5.8 - 8lbs HOG", "8 - 10lbs HOG", "10 - 12lbs HOG",
+                "12-14lbs HOG", "14-16 lbs HOG"]
+COLUMNS = COLUMNS + BAND_COLUMNS
+MODEL_CV = 0.1805          # the sales sheet's Model_CV
+BAND_MIN_LB = 15.0         # a range of this many lb or fewer is shown blank
 # How far back a 6N fill is looked for when the tank has no earlier harvest.
 _FILL_LOOKBACK_WEEKS = 5
 
@@ -55,6 +75,30 @@ def _week_label(d: date) -> str:
 def _whole_parts(values) -> list[float]:
     from .excel_io import whole_parts
     return whole_parts(values)
+
+
+def pct_lbs_in_range(mean_lb: float, lo: float, hi: float,
+                     cv: float = MODEL_CV) -> float:
+    """Share of the BIOMASS (lb) of fish averaging `mean_lb` whose own weight
+    is in [lo, hi) lb -- the sales sheet's PCT_LBS_IN_RANGE: a lognormal with
+    sigma^2 = ln(1 + cv^2), its log-mean moved up by sigma^2 so each fish
+    counts by its weight."""
+    if mean_lb <= 0:
+        return 0.0
+    s2 = math.log(1.0 + cv * cv)
+    d = NormalDist(math.log(mean_lb) - 0.5 * s2 + s2, math.sqrt(s2))
+    lo = max(1e-6, lo)
+    return d.cdf(math.log(max(lo, hi))) - d.cdf(math.log(lo))
+
+
+def band_lbs(lb: float, mean_lb: float) -> list[float]:
+    """lb HOG in each BANDS_LB range for `lb` of fish averaging `mean_lb`."""
+    return [lb * pct_lbs_in_range(mean_lb, a, b) for a, b in BANDS_LB]
+
+
+def shown_band(v) -> object:
+    """A range cell as the sheet shows it: blank at BAND_MIN_LB lb or less."""
+    return v if isinstance(v, (int, float)) and v > BAND_MIN_LB else ""
 
 
 def _tank_text(tanks: list) -> object:
@@ -116,12 +160,14 @@ def source_tank_text(week_harvests: list[dict], all_harvests: list[dict],
 def build_rolling_rows(harvests: Iterable[dict], transfers: Iterable[dict] = (),
                        report_start=None, first_id: int = 1,
                        weeks: int = 12) -> list[dict]:
-    """The RollingHarvestPlan rows, block after block (no blank rows).
+    """The RollingHarvestPlan rows, block after block, a blank row after
+    each week's Total.
 
-    Each row is a dict: kind ('day' | 'total' | 'check'), week_label, yield,
+    Each row is a dict: kind ('day' | 'total' | 'blank'), week_label, yield,
     block_top (index of the block's first day row), and the A..O values with
     K/L/N/O computed: source, year, harvest_id, week, date, tank, batch,
-    count, kg_hog, avg_kg_hog, live_kg, lb_hog, avg_lb_hog."""
+    count, kg_hog, avg_kg_hog, live_kg, lb_hog, avg_lb_hog -- plus `bands`,
+    the lb HOG per BANDS_LB range (unrounded; shown_band blanks small ones)."""
     hs = [dict(h, date=_d(h["date"])) for h in harvests]
     trs = list(transfers)
     if not hs:
@@ -162,11 +208,15 @@ def build_rolling_rows(harvests: Iterable[dict], transfers: Iterable[dict] = (),
         for di, d in enumerate(days):
             need = quotas[di]
             taken_fish, taken_kg, tanks, bats = 0.0, 0.0, [], []
+            bands = [0.0] * len(BANDS_LB)
             while need > 0 and qi < len(queue):
                 piece = queue[qi]
                 take = min(need, piece[0])
                 taken_fish += take
                 taken_kg += take * piece[1]
+                for bi, v in enumerate(band_lbs(take * piece[1] * LB_PER_KG,
+                                                piece[1] * LB_PER_KG)):
+                    bands[bi] += v
                 tanks.append(piece[2])
                 bats.append(piece[3])
                 piece[0] -= take
@@ -189,6 +239,7 @@ def build_rolling_rows(harvests: Iterable[dict], transfers: Iterable[dict] = (),
                 "count": taken_fish, "kg_hog": taken_kg,
                 "avg_kg_hog": avg, "live_kg": avg / yld,
                 "lb_hog": taken_kg * LB_PER_KG, "avg_lb_hog": avg * LB_PER_KG,
+                "bands": bands,
             })
             if tanks:
                 n_id += 1
@@ -208,26 +259,28 @@ def build_rolling_rows(harvests: Iterable[dict], transfers: Iterable[dict] = (),
             "count": t_fish, "kg_hog": t_kg, "avg_kg_hog": t_avg,
             "live_kg": t_avg / yld, "lb_hog": t_kg * LB_PER_KG,
             "avg_lb_hog": t_avg * LB_PER_KG,
+            "bands": [sum(r["bands"][bi] for r in day_rows)
+                      for bi in range(len(BANDS_LB))],
         })
-        o_t = t_avg * LB_PER_KG
         rows.append({
-            "kind": "check", "week_label": wk, "yield": yld, "block_top": top,
+            "kind": "blank", "week_label": wk, "yield": yld, "block_top": top,
             "source": "", "year": "", "harvest_id": "", "week": "", "date": "",
-            "tank": "", "batch": "", "count": t_fish, "kg_hog": "",
-            "avg_kg_hog": o_t / LB_PER_KG, "live_kg": o_t / LB_PER_KG / yld,
-            "lb_hog": o_t * t_fish, "avg_lb_hog": o_t,
+            "tank": "", "batch": "", "count": "", "kg_hog": "",
+            "avg_kg_hog": "", "live_kg": "", "lb_hog": "", "avg_lb_hog": "",
+            "bands": [""] * len(BANDS_LB),
         })
     return rows
 
 
 def rows_as_table(rows: list[dict]) -> list[list]:
-    """Rows as A..O value lists (A and M blank) -- what a paste must land on."""
+    """Rows as A..W value lists (A and M blank, ranges of BAND_MIN_LB lb or
+    less blank) -- what a paste must land on."""
     out = []
     for r in rows:
         out.append(["", r["source"], r["year"], r["harvest_id"], r["week"],
                     r["date"], r["tank"], r["batch"], r["count"], r["kg_hog"],
                     r["avg_kg_hog"], r["live_kg"], "", r["lb_hog"],
-                    r["avg_lb_hog"]])
+                    r["avg_lb_hog"]] + [shown_band(v) for v in r["bands"]])
     return out
 
 
@@ -301,8 +354,9 @@ def _int_or_none(v) -> Optional[int]:
 def inputs_from_workbook(wb) -> tuple[list[dict], list[dict], Optional[date]]:
     """(harvests, transfers, report_start) read from a run's workbook:
     HarvestPlan (whole fish, HOG kg, yield; dated on the week's Monday --
-    the sheet has no day), TransferPlan, and the report start from the Daily
-    Harvest Schedule header ('Forecast start YYYY-MM-DD')."""
+    the sheet has no day), TransferPlan, and the report start from the
+    RollingHarvestPlan header ('Forecast start YYYY-MM-DD'), or the Daily
+    Harvest Schedule's in a workbook written before 2026-10-19."""
     import re
     harvests, transfers, rs = [], [], None
     if "HarvestPlan" in wb.sheetnames:
@@ -333,9 +387,11 @@ def inputs_from_workbook(wb) -> tuple[list[dict], list[dict], Optional[date]]:
             transfers.append({"week": row[0], "batch": str(row[1]),
                               "from_tank": src, "to_tank": dst,
                               "count": float(row[5] or 0)})
-    if "Daily Harvest Schedule" in wb.sheetnames:
-        hdr = wb["Daily Harvest Schedule"].cell(row=2, column=1).value or ""
-        m = re.search(r"(\d{4}-\d{2}-\d{2})", str(hdr))
-        if m:
-            rs = date.fromisoformat(m.group(1))
+    for name in ("RollingHarvestPlan", "Daily Harvest Schedule"):
+        if name in wb.sheetnames:
+            hdr = wb[name].cell(row=2, column=1).value or ""
+            m = re.search(r"Forecast start (\d{4}-\d{2}-\d{2})", str(hdr))
+            if m:
+                rs = date.fromisoformat(m.group(1))
+                break
     return harvests, transfers, rs

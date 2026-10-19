@@ -193,11 +193,16 @@ def test_runs_named_weeks_and_days(runs, close):
     named = {re.search(r"\d{4}-W\d{2}", d).group(0) for _c, d in _vlog(s)
              if "NO HARVEST" in d}
     assert zero <= named                                      # harvest zero weeks
-    rows = s["Daily Harvest Schedule"]                         # harvest daily / calendar-05
+    # harvest daily / calendar-05: the harvest days are listed on
+    # RollingHarvestPlan (it replaced the Daily Harvest Schedule, 2026-10-19).
+    rows = s["RollingHarvestPlan"]
+    n_days = 0
     for r in rows:
-        if r and isinstance(r[0], int) and isinstance(r[2], (dt.date, dt.datetime)):
-            d = r[2].date() if isinstance(r[2], dt.datetime) else r[2]
+        if r and len(r) > 5 and isinstance(r[5], (dt.date, dt.datetime)):
+            d = r[5].date() if isinstance(r[5], dt.datetime) else r[5]
             assert d >= rs, r
+            n_days += 1
+    assert n_days, "no harvest day rows found"
 
 
 @pytest.mark.parametrize("close", CLOSES)

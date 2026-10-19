@@ -13,8 +13,9 @@ import pytest
 
 from forecast.events import Harvest
 from forecast.excel_io import whole_harvest_counts, write_rolling_harvest_plan
-from forecast.rolling_harvest import (build_rolling_rows, harvest_inputs_from_events,
-                                      rows_as_table, source_tank_text)
+from forecast.rolling_harvest import (BANDS_LB, band_lbs, build_rolling_rows,
+                                      harvest_inputs_from_events, pct_lbs_in_range,
+                                      rows_as_table, shown_band, source_tank_text)
 
 ROOT = Path(__file__).resolve().parents[1]
 MON43 = date(2026, 10, 19)          # Monday of 2026-W43
@@ -50,7 +51,7 @@ def block_structure_errors(rows):
         blk = [r for r in rows if r["week_label"] == wk]
         kinds = [r["kind"] for r in blk]
         n_day = kinds.count("day")
-        if kinds != ["day"] * n_day + ["total", "check"] or not 1 <= n_day <= 5:
+        if kinds != ["day"] * n_day + ["total", "blank"] or not 1 <= n_day <= 5:
             errs.append((wk, kinds))
         i += len(blk)
     return errs
@@ -80,7 +81,7 @@ def evenness_errors(rows):
 
 def test_block_structure_and_negative_control():
     rows = build_rolling_rows(_two_tank_week(), report_start=date(2026, 10, 12))
-    assert [r["kind"] for r in rows] == ["day"] * 5 + ["total", "check"]
+    assert [r["kind"] for r in rows] == ["day"] * 5 + ["total", "blank"]
     assert block_structure_errors(rows) == []
     bad = copy.deepcopy(rows)
     del bad[5]                                   # drop the Total row
@@ -109,7 +110,7 @@ def test_kg_follows_each_tank_and_mixed_day_lists_both():
     assert tot["kg_hog"] == pytest.approx(30000 * 5.0 + 20003 * 6.0)
     assert tot["tank"] == "61, 67" and tot["batch"] == "B44, B45"
     assert tot["date"] == "43 Total"
-    assert rows[6]["lb_hog"] == pytest.approx(tot["lb_hog"])  # check row
+    assert rows[6]["kind"] == "blank" and rows[6]["count"] == ""   # blank line
     # negative control: a single-tank week has no mixed day
     one = build_rolling_rows([_h(MON43, 61, "B44", 50000)])
     assert all("," not in str(r["tank"]) for r in one if r["kind"] == "day")
@@ -198,12 +199,73 @@ def test_writer_layout_formulas_and_yield():
     assert ws["K5"].value == "=J5/I5" and ws["L5"].value == "=K5/0.8"
     assert ws["N5"].value == "=J5*2.2046" and ws["O5"].value == "=K5*2.2046"
     assert ws["I10"].value == "=SUM(I5:I9)" and ws["F10"].value == '=E10&" Total"'
-    assert ws["I11"].value == "=I10" and ws["O11"].value == "=O10"
-    assert ws["N11"].value == "=O11*I11" and ws["K11"].value == "=O11/2.2046"
+    # the line after a week's Total is blank, all the way across A..W
+    assert all(ws.cell(row=11, column=c).value is None for c in range(1, 24))
     assert ws.freeze_panes == "A5"
     assert sum(ws.cell(row=r, column=9).value for r in range(5, 10)) == 50003
     tab = rows_as_table(build_rolling_rows(harvest_inputs_from_events(evs, 0.81, {})))
-    assert all(len(r) == 15 and r[0] == "" and r[12] == "" for r in tab)
+    assert all(len(r) == 23 and r[0] == "" and r[12] == "" for r in tab)
+    # P..W: the sales weight ranges, header and values
+    assert [ws.cell(row=4, column=c).value for c in range(16, 24)] == [
+        "0 - 2lbs HOG", "2 - 4lbs HOG", "4 - 5.8lbs HOG", "5.8 - 8lbs HOG",
+        "8 - 10lbs HOG", "10 - 12lbs HOG", "12-14lbs HOG", "14-16 lbs HOG"]
+    p10 = [ws.cell(row=10, column=c).value for c in range(16, 24)]
+    n10 = sum(v for v in p10 if v)
+    lb = sum(30000 * 6.0 * 0.8 * 2.2046 if t == 61 else 0 for t in (61,)) + \
+        20003 * 6.1 * 0.8 * 2.2046
+    # the ranges stop at 16 lb, as on the sales sheet: these ~10.7 lb fish put
+    # ~1.5% of their weight above it, so the ranges hold just under the total
+    assert 0.95 * lb < n10 <= lb
+    assert p10[0] is None                  # 0-2 lb: nothing, shown blank
+
+
+# ---- the sales weight ranges (operator 2026-10-19) -------------------------
+
+def test_ranges_reproduce_the_sales_sheet_row_and_negative_control():
+    # The operator's sales sheet, B43T65-978: 10,915 fish, 78,649 lb HOG ->
+    # 2-4: 29, 4-5.8: 7,565, 5.8-8: 46,638, 8-10: 21,204, 10-12: 2,986,
+    # 12-14: 216 (0-2 and 14-16 under 15 lb, blank).
+    lb = 78649.0
+    got = band_lbs(lb, lb / 10915)
+    want = [0, 29, 7565, 46638, 21204, 2986, 216, 11]
+    assert all(abs(g - w) <= 1.0 for g, w in zip(got, want)), [round(g) for g in got]
+    assert [shown_band(round(g)) for g in got][0] == ""
+    assert shown_band(round(got[7])) == "" and shown_band(round(got[1])) == 29
+    # negative control: weighting by FISH (no sigma^2 shift) is not the sheet.
+    import math
+    from statistics import NormalDist
+    s2 = math.log(1 + 0.1805 ** 2)
+    d = NormalDist(math.log(lb / 10915) - 0.5 * s2, math.sqrt(s2))
+    by_fish = lb * (d.cdf(math.log(10)) - d.cdf(math.log(8)))
+    assert abs(by_fish - 21204) > 1000
+
+
+def test_threshold_is_more_than_15_lb():
+    assert shown_band(15.0) == "" and shown_band(15.01) == 15.01
+    assert shown_band(0.0) == "" and shown_band("") == ""
+    assert pct_lbs_in_range(0.0, 2, 4) == 0.0
+    assert pct_lbs_in_range(7.0, 4, 4) == 0.0           # empty range
+
+
+def test_day_ranges_follow_each_tank_and_sum_to_the_total():
+    rows = build_rolling_rows(_two_tank_week())
+    days = [r for r in rows if r["kind"] == "day"]
+    tot = next(r for r in rows if r["kind"] == "total")
+    for bi in range(len(BANDS_LB)):
+        assert tot["bands"][bi] == pytest.approx(sum(r["bands"][bi] for r in days))
+    for r in days:              # the ranges stop at 16 lb: never more than the total
+        assert sum(r["bands"]) <= r["lb_hog"]
+    for r in days[:2]:          # 11 lb fish (tank 61): only a ~2% tail above 16 lb
+        assert sum(r["bands"]) > 0.95 * r["lb_hog"]
+    # Wednesday finishes 61 (9,998 at 5.0 kg) and starts 67 (3 at 6.0 kg):
+    # each part spread at its own weight.
+    wed = days[2]
+    want = [a + b for a, b in zip(band_lbs(9998 * 5.0 * 2.2046, 5.0 * 2.2046),
+                                  band_lbs(3 * 6.0 * 2.2046, 6.0 * 2.2046))]
+    assert wed["bands"] == pytest.approx(want)
+    # negative control: one blended average gives different ranges
+    blend = band_lbs(wed["lb_hog"], wed["avg_lb_hog"])
+    assert any(abs(a - b) > 1e-6 for a, b in zip(blend, want))
 
 
 # ---- the whole pipeline on the fixture PR -----------------------------------
@@ -223,7 +285,8 @@ def test_fixture_run_sheet_week_totals_match_harvest_plan(tmp_path, copy_config)
     out = next(tmp_path.glob("out.xls*"))     # suffix follows the input's macros
     wb = openpyxl.load_workbook(out)
     assert "RollingHarvestPlan" in wb.sheetnames
-    assert "Daily Harvest Schedule" in wb.sheetnames
+    # replaced by RollingHarvestPlan (operator 2026-10-19)
+    assert "Daily Harvest Schedule" not in wb.sheetnames
     plan: dict = {}
     for row in wb["HarvestPlan"].iter_rows(min_row=5, values_only=True):
         if row and isinstance(row[0], str) and "-W" in row[0]:

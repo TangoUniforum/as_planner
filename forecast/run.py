@@ -30,7 +30,6 @@ from .excel_io import (
     write_batch_locations,
     write_biology_projection,
     write_calibration_diagnostics,
-    write_daily_harvest_schedule,
     write_facility_map,
     write_feed_forecast_monthly,
     write_feed_forecast_weekly,
@@ -1518,12 +1517,9 @@ def main(
                             + _plan_end_notes),
         placed_batches={r.batch_id for r in placement.batch_locations},
     )
-    write_daily_harvest_schedule(
-        wb, placement.harvest_events, fs_date,
-        default_hog_yield=control.default_hog_yield,
-        facility_limits_hog=facility_hog_overrides,
-        report_start=report_start,
-    )
+    # The Daily Harvest Schedule sheet is no longer written (operator
+    # 2026-10-19): RollingHarvestPlan lays the same days out, with the sales
+    # weight ranges, and replaces it.
     write_harvest_report(
         wb, placement.harvest_events,
         default_hog_yield=control.default_hog_yield,
@@ -1532,7 +1528,8 @@ def main(
         report_start=report_start,
         pr_period=_pr_period,
     )
-    # The operator's paste-ready weekly layout (REPORT ONLY, 2026-10-15).
+    # The operator's paste-ready weekly layout (REPORT ONLY, 2026-10-15; the
+    # sales weight ranges and the blank line between weeks 2026-10-19).
     write_rolling_harvest_plan(
         wb, placement.harvest_events,
         default_hog_yield=control.default_hog_yield,
