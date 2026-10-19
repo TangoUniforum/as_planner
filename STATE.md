@@ -5,23 +5,25 @@ each list. Last updated: **2026-10-19**.
 
 ## Live setup (what the app runs right now)
 
-- Branch `v2/capacity-and-transition`, code = `a1c8924` (growth models steps 1-4, 2026-10-19).
-  Run name in `config/control.yaml`: "Sep Production Report Forecast" (stale label, harmless).
-- Latest input: the **10.15.26 PR** (`Reports\2026\Oct\10.15.26_PR.xlsx`, mid-month,
-  closing 2026-10-15). Not yet used: `Reports\2026\Sep\Sep'26 Production Report.xlsx`
-  (full monthly report, 2026-10-16).
-- Live config = scenario set **`..\_backups\scenario_sets\10.15 PR 130t-wk, Dec 125t, B44 out W47\`**
-  ("stable"; control + limits + manual events identical). Operator's workbook:
-  `Forecasts\2026\Oct\10.15.26_PR_planned_stable 130t-wk Dec125.xlsm` (= scratch exactly).
-  - `control.yaml`: max_harvest_per_week 55,000, min_harvest_weight_g 3,500, biomass
-    3,800 t, feed 33,000 kg/d, `sixn_max_source_tanks: 2` (≤2 OG tanks fill a 6N pair/week).
-  - `manual_events/2026-10-15.yaml`: operator's weeks 1–4 (2026-W42..W45): harvests
-    63 (W1), 65+71 (W2), 61 (W3), 67+63 (W4); og_to_6n 41→61, 33→67 (W1), 43→63 32,000 (W2),
-    52→65, 43→71 (W3), 53→61 (W4); B50 fw_to_og W1 252,205 → 13 big / 23+22 small.
-  - `limits.yaml`: 2026 W44–W53 bands 36–50k fish, min weight 3,000 g (3,600 g W51–W52);
-    2027 per-week bands ~35–47k fish all year.
-  - Result: Q4 2026 598k fish / 1,746 t / 6.44 lb HOG; Q1 2027 520k / 1,625 t / 6.90 lb;
-    Nov/Dec/Jan/Feb/Mar 539/580/538/533/554 t; 2027 7,037 t; end-Dec standing 3,540 t.
+- Branch `v2/capacity-and-transition`, code = `462ddd6` (growth models steps 1-4 + harvest floor
+  in kg HOG, 2026-10-19). Run name in `config/control.yaml`: "Sep Production Report Forecast" (stale label).
+- Latest input: the **10.18.26 PR** (`Reports\2026\Oct\10.18.26 PR.xlsx`, mid-month, closing 2026-10-18).
+- Live config = scenario set **`..\_backups\scenario_sets\10.18 PR steady 100t Nov-Dec, 110t 2027, 3400g, Actual growth\`**
+  ("steady", operator 2026-10-19: lower harvest now to grow size, then a 110 t HOG/wk floor).
+  - Growth: every batch `growth_model: Actual 2026-10-15` (measured, `sgr_sw_by_model` in
+    biology.yaml), `sgr_correction` 1.0. Walk-forward error -0.7..+1.0% (base curve ran +3.7..+4.9% hot).
+  - `control.yaml`: min_harvest_weight_g 3,400, **min_harvest_hog_kg_per_week 110,000** (new knob).
+  - `limits.yaml`: Nov-Dec `min_harvest_hog_kg` rows 100 t + max bands (floor +3%); fill min-weight
+    rows 3,100 g W51-W53, 3,300 g 2027-W01..W08; 2027 bands 26-55k fish.
+  - `manual_events/2026-10-18.yaml`: B50 fw_to_og W43; 43->63 38,000 W43, rest of 43->71 W44;
+    52->65, 53->61 W45; harvests 65, 71, 61, 63.
+  - Result: Nov/Dec/Jan/Feb/Mar 459/483/502/497/634 t HOG; 2027 6,340 t, 6.59 lb/fish; peak 3,683 t.
+    ValidationLog: 72 of 82 floor weeks met; 2027 short W03 W12 W21-23 W27 W31 by 0.1-4.3 t and
+    **W42 79 t**; 2028-W17 98 t. Sales size rules pass 25 of 60 weeks (base-curve plan 50) - growth
+    is the measured one, so the 8 lb+ rule is the open question for sales.
+- Previous live set (10.15 PR "stable") is still in `scenario_sets\10.15 PR 130t-wk, Dec 125t, B44 out W47\`;
+  backups of the replaced live files: `..\_backups\2026-10-19_before_hog_floor\live\`.
+
 - **Alternative saved and run**: `scenario_sets\10.15 PR aggressive Q4 (S1 rows, fish-matched)\`
   = stable set + the 10.11 S1-rebuild harvest rows from 2026-W42 (54–60k fish/wk Nov–Dec,
   min weight 2,950–3,100 g) + control min weight 3,100 g + 2027-W04/W05 floors −5,500 each.
@@ -34,8 +36,8 @@ each list. Last updated: **2026-10-19**.
 
 ## Waiting on the operator
 
-- Push: origin is still at `aa06014` (the "pushed" for steps 1 and 2 did not land) - steps 1-4
-  (~18 commits) are local only:
+- Push: origin is still at `aa06014` (the "pushed" for steps 1 and 2 did not land) - steps 1-4 + HOG floor
+  (~20 commits) are local only:
   `! git push origin v2/capacity-and-transition`.
 
 ## In progress: learning growth model (agreed plan 2026-10-18)
