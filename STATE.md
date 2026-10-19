@@ -1,11 +1,11 @@
 # Where things stand
 
 Updated at the end of every working session (`/forecast-handoff`). Newest first in
-each list. Last updated: **2026-10-17**.
+each list. Last updated: **2026-10-18**.
 
 ## Live setup (what the app runs right now)
 
-- Branch `v2/capacity-and-transition`, HEAD = this handoff commit (code = `dd21e45`).
+- Branch `v2/capacity-and-transition`, code = `edede1d` (growth models step 1, 2026-10-18).
   Run name in `config/control.yaml`: "Sep Production Report Forecast" (stale label, harmless).
 - Latest input: the **10.15.26 PR** (`Reports\2026\Oct\10.15.26_PR.xlsx`, mid-month,
   closing 2026-10-15). Not yet used: `Reports\2026\Sep\Sep'26 Production Report.xlsx`
@@ -34,7 +34,28 @@ each list. Last updated: **2026-10-17**.
 
 ## Waiting on the operator
 
-- Push `dd21e45` + this handoff commit: `! git push origin v2/capacity-and-transition`.
+- Push the growth-models step 1 commits: `! git push origin v2/capacity-and-transition`.
+
+## In progress: learning growth model (agreed plan 2026-10-18)
+
+Measured (scratch, read-only): fish under ~2.5 kg grow ~on the base curve; above 2 kg
+they gain a flat ~14 g/day (curve says 15-21) -> ~0.71-0.77 of curve at 3-4 kg. 2026
+grew slower than 2025 (0.84 vs 0.91 of curve). Hindcast May-Oct 2026: model B (AGR
+power law, capped above 2 kg) best at 1/2/3 months (+0.6/+1.8/+2.8%). Stable 10.15 plan
+under B: Jan 2027 falls to ~214 t, Q1 biomass > 3,800 t cap (needs a Dec-Jan min-weight
+retune). Acc tabs: "closing better" = harvest weight (2.0 -> 3.6-4.2 kg/fish) + econ FCR
+(~2 -> 1.27-1.54), NOT growth rate per size (B44-B48 0.92-1.00 vs B38-B43 1.03-1.14).
+Operator decisions: rolling **24-month window** (full life cycle), history from **Nov 2024**;
+full monthly reports (have Acc) supersede mid-month PRs (PR sheet only, provisional,
+weighted by days); per batch BOTH fleet-only and fleet x own-history (shrunk to 1.0);
+improvement BOTH % per year and blend-to-target, labelled ASSUMED everywhere; FCR learning
+on the same machinery. Each step in its own sandbox + gate + approval.
+1. DONE `b41ab98` engine: biology.yaml `sgr_sw_by_model` + batches.yaml `growth_model`
+   (blank = Base curve, plan-identical: gate 23/24, live set identical but BatchInputs column).
+2. NEXT: growth history store + fitter + frozen versions (backfill Nov 2024 ->).
+3. App Growth models panel + Batches tab sentence. 4. Improvement helpers. 5. FCR learning.
+6. Adoption (before/after, corpus, scenario retune) - operator's call.
+Scratch analysis: session c33340bb scratchpad `growth\` (measure.py, fit.py, chains.py, runs\).
 
 ## Open items (offered, not started)
 
@@ -57,6 +78,8 @@ each list. Last updated: **2026-10-17**.
 
 ## Recent history
 
+- 2026-10-18 growth models step 1 merged (`b41ab98`..`edede1d`), tag
+  `v2-before-growth-models-2026-10-18`; test fix: BatchAccumulated test no longer copies costs.
 - 2026-10-17 10.15 PR: aggressive-Q4 set built, fish-matched, written live, operator ran it
   (verified), then live restored to the stable set (verified). Tags
   `v2-before-aggressive-q4-2026-10-17`, `v2-before-back-to-stable-2026-10-17`.
