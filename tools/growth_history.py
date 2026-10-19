@@ -4,6 +4,7 @@
     python -m tools.growth_history --store growth_history.json add PR.xlsx [PR.xlsx ...]
     python -m tools.growth_history --store growth_history.json show
     python -m tools.growth_history --store growth_history.json fit [--as-of DATE] [--window 24] [--dry-run]
+    python -m tools.growth_history --store growth_history.json factors [--version NAME]
 
 --store is required (no default), so nothing writes the operator's history by
 accident. `fit` saves a new FROZEN version; --dry-run prints it and saves
@@ -70,6 +71,24 @@ def cmd_show(store, facility):
     for f in store.fits:
         print(f"version {f.name!r}: as of {f.as_of}, window from {f.window_start}, "
               f"n={f.n}, cap {f.cap_g_day:.1f} g/day above {f.breakpoint_g:,.0f} g")
+    for m in store.derived:
+        print(f"version {m.name!r}: {m.explain}")
+
+
+def cmd_factors(store, facility, version):
+    if not store.fits:
+        print("no measured version saved yet")
+        return 1
+    fit = store.get_fit(version) if version else store.fits[-1]
+    sixn, og = gh.facility_tank_sets(facility)
+    print(f"Each batch's clean tank-months against {fit.name!r} "
+          f"(window {fit.window_start} .. {fit.as_of}); suggested = pulled toward "
+          f"1.0, half way at {gh.BATCH_PRIOR_MONTHS:g} tank-months")
+    print(f"  {'batch':<6} {'tank-months':>11} {'measured':>9} {'suggested':>10}  dates")
+    for f in gh.batch_factors(store.intervals(sixn, og), fit):
+        print(f"  {f.batch:<6} {f.tank_months:>11.1f} {f.measured:>9.3f} "
+              f"{f.suggested:>10.3f}  {f.first} .. {f.last}")
+    return 0
 
 
 def cmd_fit(store, facility, tables, as_of, window, name, dry_run):
@@ -127,6 +146,8 @@ def main(argv=None) -> int:
     f.add_argument("--window", type=int, default=gh.DEFAULT_WINDOW_MONTHS)
     f.add_argument("--name")
     f.add_argument("--dry-run", action="store_true")
+    x = sub.add_parser("factors")
+    x.add_argument("--version")
     args = ap.parse_args(argv)
 
     store = gh.GrowthHistory(args.store)
@@ -140,6 +161,8 @@ def main(argv=None) -> int:
     elif args.cmd == "fit":
         return cmd_fit(store, facility, tables, args.as_of, args.window,
                        args.name, args.dry_run)
+    elif args.cmd == "factors":
+        return cmd_factors(store, facility, args.version)
     return 0
 
 

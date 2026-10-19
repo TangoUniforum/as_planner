@@ -2129,15 +2129,29 @@ def _growth_models_panel():
     if not store.fits:
         return
     st.markdown("**Saved versions**")
-    names = [f.name for f in store.fits]
-    pick = st.selectbox("Version", names, index=len(names) - 1, key="gh_version")
-    fit = store.get_fit(pick)
+    names = [v.name for v in store.versions()]
+    pending = st.session_state.pop("gh_version_next", None)   # just saved
+    if pending in names or st.session_state.get("gh_version") not in names:
+        st.session_state.pop("gh_version", None)
+    pick = st.selectbox("Version", names, key="gh_version",
+                        index=names.index(pending) if pending in names
+                        else len(store.fits) - 1,
+                        help="Measured versions come from the history. ASSUMED "
+                             "versions add an improvement you expect.")
+    fit = store.get_version(pick)
+    measured = store.get_fit(getattr(fit, "source", pick))
     in_bio = pick in (tables.sgr_sw_by_model or {})
-    st.caption(f"{fit.n} tank-months, window {fit.window_start} .. {fit.as_of}. "
-               + ("In biology.yaml — pick it per batch on the Batches tab."
-                  if in_bio else "Not in biology.yaml yet."))
-    st.dataframe(_gh_curve_table(tables, [(fit.name, fit.sizes_g, fit.sgr_pct_day)]),
-                 hide_index=True, width="stretch")
+    where = ("In biology.yaml — pick it per batch on the Batches tab."
+             if in_bio else "Not in biology.yaml yet.")
+    if isinstance(fit, gh.DerivedModel):
+        st.warning(f"{fit.explain}. {where}")
+        shown = [(measured.name, measured.sizes_g, measured.sgr_pct_day),
+                 (fit.name, fit.sizes_g, fit.sgr_pct_day)]
+    else:
+        st.caption(f"Measured: {fit.n} tank-months, window {fit.window_start} .. "
+                   f"{fit.as_of}. {where}")
+        shown = [(fit.name, fit.sizes_g, fit.sgr_pct_day)]
+    st.dataframe(_gh_curve_table(tables, shown), hide_index=True, width="stretch")
     if not in_bio and st.button(f"Add '{pick}' to biology.yaml growth models",
                                 key="gh_adopt",
                                 help="Writes biology.yaml only. No plan changes until "
@@ -2149,6 +2163,9 @@ def _growth_models_panel():
             st.rerun()
         except ValueError as e:
             st.error(str(e))
+
+    _gh_improvement(store, measured, tables)
+    _gh_batch_factors(store, measured, ivs)
 
     st.markdown("**Before / after on a PR** — your scenario as it is, and the same "
                 f"with every batch on '{pick}'. Runs on copies; writes nothing.")
@@ -2171,6 +2188,93 @@ def _growth_models_panel():
                                            "Fish after", "HOG t after"])
         df["HOG t change"] = (df["HOG t after"] - df["HOG t before"]).round(1)
         st.dataframe(df, hide_index=True, width="stretch")
+
+
+def _gh_improvement(store, measured, tables):
+    """Build an ASSUMED version from a measured one: +% per year, or a straight
+    line toward a target curve. Preview first; Save makes it a frozen version."""
+    from datetime import date as _date, timedelta
+    from forecast import growth_history as gh
+    from forecast.biology import BASE_GROWTH_MODEL
+    st.markdown("**Expected improvement — ASSUMED, not measured**")
+    st.caption(
+        f"The history shows how fish HAVE grown. If you expect batches still to come "
+        f"to grow better, build an ASSUMED version from '{measured.name}' here. It is "
+        f"made for fish growing in one month (a batch keeps one curve for its life), "
+        f"so pick it for the batches growing then. Saving does not change a plan.")
+    as_of = _date.fromisoformat(measured.as_of)
+    how = st.radio("How", ["+ % per year", "Blend toward a target curve"],
+                   key="gh_imp_how", horizontal=True)
+    i1, i2, i3 = st.columns(3)
+    growing_in = i1.date_input("For fish growing in", value=as_of + timedelta(days=365),
+                               key="gh_imp_when")
+    try:
+        if how == "+ % per year":
+            pct = i2.number_input("% per year (grams per day)", min_value=-20.0,
+                                  max_value=20.0, value=0.0, step=0.5,
+                                  key="gh_imp_pct")
+            prev = gh.improve_pct_per_year(measured, pct, growing_in)
+        else:
+            targets = {BASE_GROWTH_MODEL: list(tables.sgr_sw_pct_day)}
+            targets.update({v.name: list(v.sgr_pct_day) for v in store.fits
+                            if v.name != measured.name})
+            tname = i2.selectbox("Target curve", list(targets), key="gh_imp_target")
+            tdate = i3.date_input("Reached by", value=as_of + timedelta(days=730),
+                                  key="gh_imp_tdate")
+            prev = gh.blend_to_target(measured, tname, targets[tname], tdate, growing_in)
+    except ValueError as e:
+        st.error(str(e))
+        return
+    st.info(prev.explain)
+    st.dataframe(_gh_curve_table(tables, [(measured.name, measured.sizes_g,
+                                           measured.sgr_pct_day),
+                                          ("ASSUMED", prev.sizes_g, prev.sgr_pct_day)]),
+                 hide_index=True, width="stretch")
+    if st.button(f"Save as frozen version '{prev.name}'", key="gh_imp_save",
+                 disabled=prev.sgr_pct_day == measured.sgr_pct_day,
+                 help="Disabled while it equals the measured version."):
+        try:
+            store.add_derived(prev)
+            store.save()
+            st.session_state["gh_version_next"] = prev.name
+            st.rerun()
+        except (ValueError, KeyError) as e:
+            st.error(str(e))
+
+
+def _gh_batch_factors(store, measured, ivs):
+    """Each batch's own clean tank-months against a measured version, and the
+    sgr_correction that would carry it (shown only; the operator types it)."""
+    from forecast import growth_history as gh
+    from forecast.scenario_io import load_batches
+    st.markdown(f"**Per batch: its own history against '{measured.name}'**")
+    rows = gh.batch_factors(ivs, measured)
+    if not rows:
+        st.caption("No batch has clean tank-months in this version's window.")
+        return
+    try:
+        cur = {b.batch_id: b for b in load_batches(SCENARIO_DIR)}
+    except Exception:  # noqa: BLE001
+        cur = {}
+    st.caption(
+        f"Measured = how much weight the batch put on against what '{measured.name}' "
+        f"predicts for the same start weight and days (1.05 = 5% more). Suggested = "
+        f"pulled toward 1.0: a batch with {gh.BATCH_PRIOR_MONTHS:g} tank-months counts "
+        f"half. Two ways to use it, per batch on the Batches tab:  \n"
+        f"• **Fleet only** — growth_model '{measured.name}', sgr_correction 1.0.  \n"
+        f"• **Fleet × own history** — growth_model '{measured.name}', sgr_correction = "
+        f"Suggested.  \nToday's sgr_correction was set against the curve the batch "
+        f"grows on now, so a suggested value REPLACES it — never multiply the two. "
+        f"Batches not listed have no history yet: fleet only. Nothing is written here.")
+    df = pd.DataFrame([{
+        "Batch": f.batch, "Tank-months": f.tank_months,
+        "Measured": f.measured, "Suggested": f.suggested,
+        "From": f.first, "To": f.last,
+        "Grows on now": (getattr(cur.get(f.batch), "growth_model", "") or "Base curve")
+        if f.batch in cur else "—",
+        "sgr_correction now": getattr(cur.get(f.batch), "sgr_correction", None),
+    } for f in rows])
+    st.dataframe(df, hide_index=True, width="stretch")
 
 
 def _edit_facility():

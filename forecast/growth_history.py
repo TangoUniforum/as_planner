@@ -376,6 +376,7 @@ class GrowthHistory:
         self.path = Path(path)
         self.snapshots: list[Snapshot] = []
         self.fits: list[GrowthFit] = []
+        self.derived: list[DerivedModel] = []
         if self.path.exists():
             d = json.loads(self.path.read_text(encoding="utf-8"))
             if d.get("format") != STORE_FORMAT:
@@ -383,6 +384,7 @@ class GrowthHistory:
                                  f"{d.get('format')!r}")
             self.snapshots = [Snapshot(**s) for s in d.get("snapshots", [])]
             self.fits = [GrowthFit(**f) for f in d.get("fits", [])]
+            self.derived = [DerivedModel(**m) for m in d.get("derived", [])]
 
     def add(self, snap: Snapshot) -> str:
         """'duplicate' (same file content already in), else 'added'."""
@@ -399,6 +401,9 @@ class GrowthHistory:
 
     def add_fit(self, fit: GrowthFit) -> None:
         """Frozen: a name is never overwritten with different values."""
+        if any(m.name == fit.name for m in self.derived):
+            raise ValueError(f"{fit.name!r} is already an ASSUMED version - "
+                             f"fit under a new name")
         for f in self.fits:
             if f.name == fit.name:
                 if f.sgr_pct_day == fit.sgr_pct_day:
@@ -415,10 +420,36 @@ class GrowthHistory:
         raise KeyError(f"no growth model version {name!r} "
                        f"(have: {[f.name for f in self.fits]})")
 
+    def add_derived(self, m: "DerivedModel") -> None:
+        """Frozen like the fits; its source must be a saved measured version."""
+        self.get_fit(m.source)
+        if any(f.name == m.name for f in self.fits):
+            raise ValueError(f"{m.name!r} is already a measured version")
+        for o in self.derived:
+            if o.name == m.name:
+                if o.sgr_pct_day == m.sgr_pct_day:
+                    return
+                raise ValueError(
+                    f"ASSUMED version {m.name!r} already exists with different "
+                    f"values - versions are frozen; save under a new name")
+        self.derived.append(m)
+
+    def versions(self) -> list:
+        """Every saved version, measured first, then ASSUMED."""
+        return list(self.fits) + list(self.derived)
+
+    def get_version(self, name: str):
+        for v in self.versions():
+            if v.name == name:
+                return v
+        raise KeyError(f"no growth model version {name!r}")
+
     def save(self) -> None:
         d = {"format": STORE_FORMAT,
              "snapshots": [asdict(s) for s in self.snapshots],
              "fits": [asdict(f) for f in self.fits]}
+        if self.derived:
+            d["derived"] = [asdict(m) for m in self.derived]
         self.path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(prefix=self.path.name + ".tmp-",
                                    dir=str(self.path.parent))
@@ -427,12 +458,160 @@ class GrowthHistory:
         os.replace(tmp, self.path)
 
 
-def biology_entry(fit: GrowthFit, sizes) -> tuple[str, list]:
-    """(name, values) for biology.yaml sgr_sw_by_model. Refuses a fit made on
-    other size rows -- its values would land on the wrong sizes."""
+def biology_entry(fit, sizes) -> tuple[str, list]:
+    """(name, values) for biology.yaml sgr_sw_by_model, from a measured or an
+    ASSUMED version. Refuses one made on other size rows -- its values would
+    land on the wrong sizes."""
     if [float(x) for x in fit.sizes_g] != [float(x) for x in sizes]:
         raise ValueError(f"{fit.name!r} was fitted on different biology size rows")
     return fit.name, list(fit.sgr_pct_day)
+
+
+# --------------------------------------------------------------------------- #
+# Expected improvement (step 4) -- ASSUMED, never measured
+# --------------------------------------------------------------------------- #
+# The history measures how fish HAVE grown. Planning better growth for fish
+# still to come is an assumption the operator makes; these helpers turn one
+# into a separate frozen version whose name says ASSUMED, built from a measured
+# version. Both work in grams per day (what was measured), size row by size
+# row; rows below DEFAULT_SW_MIN_G keep the source value. The engine holds one
+# curve per batch for its whole life, so each version is made for the fish
+# GROWING IN a stated month: pick it for the batches growing then.
+ASSUMED = "ASSUMED"
+
+
+@dataclass
+class DerivedModel:
+    name: str
+    source: str                   # the measured version it is built from
+    method: str                   # "pct_per_year" | "blend"
+    params: dict
+    growing_in: str               # the date the improvement is reckoned to
+    factor: float                 # pct: the AGR multiplier; blend: share of the way
+    explain: str                  # the plain sentence shown everywhere
+    sizes_g: list
+    sgr_pct_day: list
+    created: str = ""
+    assumed: bool = True
+
+
+def _sgr_to_agr(sgr: float, w: float) -> float:
+    return w * (math.exp(sgr / 100.0) - 1.0)
+
+
+def _as_date(d) -> date:
+    return d if isinstance(d, date) else date.fromisoformat(str(d)[:10])
+
+
+def improve_pct_per_year(fit: GrowthFit, pct: float, growing_in, *, name=None,
+                         sw_min_g=DEFAULT_SW_MIN_G) -> DerivedModel:
+    """Grams per day x (1 + pct/100) ^ years from the version's as-of date to
+    `growing_in`. A date before the as-of date gives factor 1 (no improvement
+    backwards)."""
+    if not -50.0 < float(pct) < 50.0:
+        raise ValueError(f"{pct}% per year is outside -50..50")
+    g = _as_date(growing_in)
+    years = max(0.0, (g - _as_date(fit.as_of)).days / 365.25)
+    k = (1.0 + float(pct) / 100.0) ** years
+    table = [s if (w < sw_min_g or s is None)
+             else round(_agr_to_sgr(_sgr_to_agr(s, w) * k, w), 4)
+             for w, s in zip(fit.sizes_g, fit.sgr_pct_day)]
+    explain = (f"{ASSUMED}: '{fit.name}' (measured to {fit.as_of}) with growth "
+               f"{float(pct):+g}% per year, {years:.2f} years to {g.isoformat()} "
+               f"-> grams per day x {k:.3f} at every seawater size")
+    return DerivedModel(
+        name=name or f"{fit.name} {float(pct):+g}%/yr for {g.strftime('%Y-%m')} ({ASSUMED})",
+        source=fit.name, method="pct_per_year", params={"pct_per_year": float(pct)},
+        growing_in=g.isoformat(), factor=round(k, 6), explain=explain,
+        sizes_g=list(fit.sizes_g), sgr_pct_day=table,
+        created=datetime.now().isoformat(timespec="seconds"))
+
+
+def blend_to_target(fit: GrowthFit, target_name: str, target_sgr, target_date,
+                    growing_in, *, name=None,
+                    sw_min_g=DEFAULT_SW_MIN_G) -> DerivedModel:
+    """Grams per day moved from the measured version toward a target curve (on
+    the same size rows), in a straight line: none of the way at the version's
+    as-of date, all of it at `target_date`, held there after."""
+    t0, t1, g = _as_date(fit.as_of), _as_date(target_date), _as_date(growing_in)
+    if t1 <= t0:
+        raise ValueError(f"the target date {t1} must be after {fit.name!r}'s "
+                         f"as-of date {t0}")
+    if len(target_sgr) != len(fit.sizes_g):
+        raise ValueError(f"target {target_name!r} has {len(target_sgr)} values, "
+                         f"{fit.name!r} has {len(fit.sizes_g)} size rows")
+    f = min(1.0, max(0.0, (g - t0).days / (t1 - t0).days))
+    table = []
+    for w, s, t in zip(fit.sizes_g, fit.sgr_pct_day, target_sgr):
+        if w < sw_min_g or s is None or t is None:
+            table.append(s)
+            continue
+        a0, a1 = _sgr_to_agr(s, w), _sgr_to_agr(t, w)
+        table.append(round(_agr_to_sgr(a0 + f * (a1 - a0), w), 4))
+    explain = (f"{ASSUMED}: '{fit.name}' (measured to {t0}) moving in a straight "
+               f"line to '{target_name}' by {t1}; fish growing in {g.isoformat()} "
+               f"are {f:.0%} of the way there")
+    return DerivedModel(
+        name=name or (f"{fit.name} -> {target_name} {f:.0%} for "
+                      f"{g.strftime('%Y-%m')} ({ASSUMED})"),
+        source=fit.name, method="blend",
+        params={"target": target_name, "target_date": t1.isoformat()},
+        growing_in=g.isoformat(), factor=round(f, 6), explain=explain,
+        sizes_g=list(fit.sizes_g), sgr_pct_day=table,
+        created=datetime.now().isoformat(timespec="seconds"))
+
+
+# --------------------------------------------------------------------------- #
+# Per-batch factor from its own history (step 4)
+# --------------------------------------------------------------------------- #
+# How a batch grew in its clean tank-months against what the measured version
+# predicts for the same start weight and days: 1.10 = it put on 10% more
+# weight than the fleet curve. Pulled toward 1.0 by BATCH_PRIOR_MONTHS: a
+# batch with that many tank-months of evidence counts half, so one good month
+# in one tank does not set a batch's whole future.
+BATCH_PRIOR_MONTHS = 12.0
+
+
+@dataclass
+class BatchFactor:
+    batch: str
+    tank_months: float            # summed interval weights (a 30-day interval = 1)
+    n: int
+    n_provisional: int
+    measured: float               # weighted median, not pulled toward 1.0
+    suggested: float              # pulled toward 1.0
+    first: str
+    last: str
+
+
+def batch_factors(intervals, fit: GrowthFit, *, prior_months=BATCH_PRIOR_MONTHS,
+                  sw_min_g=DEFAULT_SW_MIN_G) -> list:
+    """BatchFactor per batch with clean seawater tank-months in `fit`'s window,
+    in batch order. Batches with none are not listed (fleet only = 1.0)."""
+    from .biology import _interp
+    sgr = lambda w: _interp(w, fit.sizes_g, fit.sgr_pct_day)        # noqa: E731
+    by: dict = {}
+    for i in intervals:
+        if not (fit.window_start < i.d1 <= fit.as_of) or i.w0 < sw_min_g:
+            continue
+        pred = _predict(i.w0, i.days, sgr)
+        if pred <= i.w0:
+            continue
+        by.setdefault(i.batch, []).append(
+            (math.log(i.w1 / i.w0) / math.log(pred / i.w0), i))
+    out = []
+    for b, rows in by.items():
+        wts = [i.weight for _, i in rows]
+        m = _wmedian([r for r, _ in rows], wts)
+        tm = sum(wts)
+        out.append(BatchFactor(
+            batch=b, tank_months=round(tm, 2), n=len(rows),
+            n_provisional=sum(i.provisional for _, i in rows),
+            measured=round(m, 3),
+            suggested=round(1.0 + (m - 1.0) * tm / (tm + prior_months), 3),
+            first=min(i.d0 for _, i in rows), last=max(i.d1 for _, i in rows)))
+    key = lambda f: (int(re.sub(r"\D", "", f.batch) or 0), f.batch)  # noqa: E731
+    return sorted(out, key=key)
 
 
 _PR_NAME = re.compile(r"production report|(^|[ _])pr\.xlsx$", re.IGNORECASE)
