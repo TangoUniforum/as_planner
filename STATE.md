@@ -1,11 +1,11 @@
 # Where things stand
 
 Updated at the end of every working session (`/forecast-handoff`). Newest first in
-each list. Last updated: **2026-10-18**.
+each list. Last updated: **2026-10-19**.
 
 ## Live setup (what the app runs right now)
 
-- Branch `v2/capacity-and-transition`, code = `43f9974` (growth models steps 1+2, 2026-10-18).
+- Branch `v2/capacity-and-transition`, code = `8b8d5a3` (growth models steps 1-3, 2026-10-19).
   Run name in `config/control.yaml`: "Sep Production Report Forecast" (stale label, harmless).
 - Latest input: the **10.15.26 PR** (`Reports\2026\Oct\10.15.26_PR.xlsx`, mid-month,
   closing 2026-10-15). Not yet used: `Reports\2026\Sep\Sep'26 Production Report.xlsx`
@@ -34,7 +34,8 @@ each list. Last updated: **2026-10-18**.
 
 ## Waiting on the operator
 
-- Push: origin is still at `aa06014` (the step 1 push did not land) - 7+ commits waiting:
+- Push: origin is still at `aa06014` (the "pushed" for steps 1 and 2 did not land) - steps 1-3
+  (~14 commits) are local only:
   `! git push origin v2/capacity-and-transition`.
 
 ## In progress: learning growth model (agreed plan 2026-10-18)
@@ -58,9 +59,16 @@ on the same machinery. Each step in its own sandbox + gate + approval.
    Nov 2024..2026-10-15, 370 clean tank-months; fit cap 13.9 g/d above 2 kg; holdout last 3 mo
    fit +1.0% vs base +3.1%. 22 files unreadable (2024 formats, Jan'25, Nov'25 V2, May'26 prelim).
    The live `growth_history.json` (repo root, gitignored) is NOT built yet - operator's call.
-   NEXT: step 3 app Growth models panel (auto-add each PR loaded, fit, adopt version into
-   biology.yaml with before/after) + Batches tab growth_model column and plain sentence.
-3. App Growth models panel + Batches tab sentence. 4. Improvement helpers. 5. FCR learning.
+3. DONE `4fa29a0`..`8b8d5a3` (tag `v2-before-growth-app-2026-10-18`): every operational run
+   adds its PR to `growth_history.json` (same rule as the calibration log; never fails a run;
+   test runs with `calib_log_path=""` record nothing). Configure -> Biology models panel: scan
+   Reports (from Nov 2024), add one report, Fit (preview + holdout), Save frozen version, Add a
+   version to biology.yaml (biology only), before/after on a PR (copies). Batches tab:
+   `growth_model` dropdown + "What each batch grows on". Gate 23/24, live set identical
+   (31 sheets), suite 2454 passed / 0 failed.
+   NEXT for the operator: Scan in the app (or ask for the backfill) -> Fit -> Save.
+4. Improvement helpers (%/yr, blend-to-target, ASSUMED) + per-batch own-history factor.
+5. FCR learning.
 6. Adoption (before/after, corpus, scenario retune) - operator's call.
 Scratch analysis: session c33340bb scratchpad `growth\` (measure.py, fit.py, chains.py, runs\).
 
