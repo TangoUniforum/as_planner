@@ -76,7 +76,11 @@ def test_the_fill_is_sized_by_the_DRAIN_weeks_floor():
     src = _src(P.phase_d_emit_events)
     assert "_fill_lbl = (sorted_weeks[drain_idx]" in src, (
         "the fill must resolve the DRAIN week")
-    assert "resolve_facility_cap(METRIC_MIN_HARVEST, _fill_lbl" in src
+    # Since 2026-10-19 the floor goes through caps.min_harvest_fish, which IS
+    # resolve_facility_cap(min_harvest_per_week) without a kg-HOG floor -- the
+    # drain week is what this pins.
+    assert ("resolve_facility_cap(METRIC_MIN_HARVEST, _fill_lbl" in src
+            or "min_harvest_fish(_fill_lbl" in src)
     assert "resolve_facility_cap(METRIC_MAX_HARVEST, _fill_lbl" in src
     i = src.index("_run_sixn_purge_week(")
     call = src[i:i + 900]
