@@ -1597,11 +1597,12 @@ def write_rolling_harvest_plan(
     per harvest week (a row per harvest day filled tank after tank, a Total
     row, a blank line). P..W are lb HOG per weight range (values; blank at
     rolling_harvest.BAND_MIN_LB or less), the sales-planning columns
-    (operator 2026-10-19). The rows come from
+    (operator 2026-10-19), and a 'YYYY Total' row after each calendar year's
+    last week (values: that year's harvest days). The rows come from
     rolling_harvest.build_rolling_rows -- the same function the app's table
     uses; this writer only turns K/L/N/O (and the Total sums) into the
     operator's formulas. Plan numbers are untouched."""
-    from openpyxl.styles import Font, Alignment
+    from openpyxl.styles import Font, Alignment, PatternFill
     from .rolling_harvest import (COLUMNS, MODEL_CV, BAND_MIN_LB,
                                   build_rolling_rows, shown_band,
                                   harvest_inputs_from_events,
@@ -1614,7 +1615,8 @@ def write_rolling_harvest_plan(
     ws.cell(row=2, column=1, value=(
         f"Weekly harvest in the '12 weeks rolling harvest plan' layout "
         f"(columns A-W): each week's whole fish split evenly Mon-Fri and "
-        f"filled tank after tank; a Total row and a blank line per week; P-W "
+        f"filled tank after tank; a Total row and a blank line per week; a "
+        f"year Total after each calendar year (its harvest days); P-W "
         f"lb HOG by weight range (lognormal, CV {MODEL_CV:g}, by biomass; "
         f"blank at {BAND_MIN_LB:g} lb or less). "
         f"Forecast start {_rs}. Report only."))
@@ -1652,9 +1654,14 @@ def write_rolling_harvest_plan(
                     9: f"=SUM(I{top}:I{last})", 10: f"=SUM(J{top}:J{last})",
                     11: f"=J{x}/I{x}", 12: f"=K{x}/{ys}",
                     14: f"=J{x}*2.2046", 15: f"=K{x}*2.2046"}
+        elif r["kind"] == "year":
+            vals = {3: r["year"], 4: r["harvest_id"], 6: r["date"],
+                    9: r["count"], 10: r["kg_hog"],
+                    11: f"=J{x}/I{x}", 12: f"=K{x}/{ys}",
+                    14: f"=J{x}*2.2046", 15: f"=K{x}*2.2046"}
         else:
             vals = {}                    # the blank line between weeks
-        if r["kind"] in ("day", "total"):
+        if r["kind"] in ("day", "total", "year"):
             for bi, v in enumerate(r["bands"]):
                 sv = shown_band(v)
                 vals[16 + bi] = sv if sv != "" else None
@@ -1664,8 +1671,10 @@ def write_rolling_harvest_plan(
                 cell.number_format = fmt[c]
             elif c == 6 and r["kind"] == "day":
                 cell.number_format = "yyyy-mm-dd"
-            if r["kind"] == "total":
+            if r["kind"] in ("total", "year"):
                 cell.font = Font(bold=True)
+            if r["kind"] == "year":
+                cell.fill = PatternFill("solid", fgColor="DDEBF7")
         if r["kind"] == "total" and x - 1 >= top:
             # Source Tank over the block's day rows + Total, as the operator does.
             ws.merge_cells(start_row=top, start_column=2, end_row=x, end_column=2)

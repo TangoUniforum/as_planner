@@ -43,7 +43,22 @@ def _transfers():
 
 # ---- checkers (each has a negative control) --------------------------------
 
+def _week_rows(rows):
+    """The week blocks without the year summary (its row + blank line)."""
+    out, skip = [], False
+    for r in rows:
+        if r["kind"] == "year":
+            skip = True
+            continue
+        if skip and r["kind"] == "blank":
+            skip = False
+            continue
+        out.append(r)
+    return out
+
+
 def block_structure_errors(rows):
+    rows = _week_rows(rows)
     errs = []
     i = 0
     while i < len(rows):
@@ -69,6 +84,7 @@ def total_errors(rows, week_totals):
 
 
 def evenness_errors(rows):
+    rows = _week_rows(rows)
     errs = []
     for wk in {r["week_label"] for r in rows}:
         c = [r["count"] for r in rows if r["week_label"] == wk and r["kind"] == "day"]
@@ -81,7 +97,8 @@ def evenness_errors(rows):
 
 def test_block_structure_and_negative_control():
     rows = build_rolling_rows(_two_tank_week(), report_start=date(2026, 10, 12))
-    assert [r["kind"] for r in rows] == ["day"] * 5 + ["total", "blank"]
+    assert [r["kind"] for r in rows] == ["day"] * 5 + ["total", "blank", "year",
+                                                       "blank"]
     assert block_structure_errors(rows) == []
     bad = copy.deepcopy(rows)
     del bad[5]                                   # drop the Total row
@@ -158,7 +175,7 @@ def test_weeks_knob_limits_blocks():
     hs = [_h(date.fromisocalendar(2026, w, 1), 61, "B44", 1000) for w in range(42, 54)]
     hs += [_h(date.fromisocalendar(2027, 1, 1), 61, "B44", 1000)]
     rs = date(2026, 10, 12)
-    wk = lambda rows: sorted({r["week_label"] for r in rows})
+    wk = lambda rows: sorted({r["week_label"] for r in _week_rows(rows)})
     assert len(wk(build_rolling_rows(hs, report_start=rs, weeks=12))) == 12
     assert len(wk(build_rolling_rows(hs, report_start=rs, weeks=3))) == 3
     assert len(wk(build_rolling_rows(hs, report_start=rs, weeks=0))) == 13
@@ -201,6 +218,10 @@ def test_writer_layout_formulas_and_yield():
     assert ws["I10"].value == "=SUM(I5:I9)" and ws["F10"].value == '=E10&" Total"'
     # the line after a week's Total is blank, all the way across A..W
     assert all(ws.cell(row=11, column=c).value is None for c in range(1, 24))
+    # then the year summary (values) and another blank line
+    assert ws["F12"].value == "2026 Total" and ws["I12"].value == 50003
+    assert ws["D12"].value == "2026-10-19 to 2026-10-23"
+    assert all(ws.cell(row=13, column=c).value is None for c in range(1, 24))
     assert ws.freeze_panes == "A5"
     assert sum(ws.cell(row=r, column=9).value for r in range(5, 10)) == 50003
     tab = rows_as_table(build_rolling_rows(harvest_inputs_from_events(evs, 0.81, {})))
@@ -266,6 +287,42 @@ def test_day_ranges_follow_each_tank_and_sum_to_the_total():
     # negative control: one blended average gives different ranges
     blend = band_lbs(wed["lb_hog"], wed["avg_lb_hog"])
     assert any(abs(a - b) > 1e-6 for a, b in zip(blend, want))
+
+
+def test_year_summary_adds_each_years_days_and_negative_control():
+    # 2026-W53 runs Mon Dec 28 .. Fri Jan 1: four days in 2026, one in 2027.
+    hs = [_h(date(2026, 12, 21), 61, "B44", 10000, 3.0),
+          _h(date(2026, 12, 28), 63, "B45", 10000, 3.2),
+          _h(date(2027, 1, 4), 65, "B46", 10000, 3.4)]
+    rows = build_rolling_rows(hs, report_start=date(2026, 12, 21))
+    yrs = {r["year"]: r for r in rows if r["kind"] == "year"}
+    assert sorted(yrs) == [2026, 2027]
+    days = [r for r in rows if r["kind"] == "day"]
+    for y, yr in yrs.items():
+        mine = [d for d in days if d["date"].year == y]
+        assert yr["count"] == sum(d["count"] for d in mine)
+        assert yr["kg_hog"] == pytest.approx(sum(d["kg_hog"] for d in mine))
+        assert yr["bands"] == pytest.approx(
+            [sum(d["bands"][b] for d in mine) for b in range(len(BANDS_LB))])
+    assert yrs[2026]["count"] == 10000 + 8000           # W53's Jan 1 is 2027's
+    assert yrs[2027]["count"] == 2000 + 10000
+    assert yrs[2026]["harvest_id"] == "2026-12-21 to 2026-12-31"
+    # each year's row comes after the last week holding one of its days:
+    # 2026 after W53 (Dec 28 .. Jan 1), 2027 after W01
+    kinds = [(r["kind"], r["week_label"] or r["year"]) for r in rows
+             if r["kind"] in ("total", "year")]
+    assert kinds == [("total", "2026-W52"), ("total", "2026-W53"), ("year", 2026),
+                     ("total", "2027-W01"), ("year", 2027)]
+    # negative control: counting W53 by its ISO year would put 10,000 in 2026
+    by_week_year = sum(r["count"] for r in rows if r["kind"] == "total"
+                       and r["week_label"].startswith("2026"))
+    assert by_week_year != yrs[2026]["count"]
+    # the blocks still read day..Total, blank, with block_top on their first day
+    assert block_structure_errors(rows) == []
+    for r in rows:
+        if r["kind"] in ("day", "total"):
+            assert rows[r["block_top"]]["kind"] == "day"
+            assert rows[r["block_top"]]["week_label"] == r["week_label"]
 
 
 # ---- the whole pipeline on the fixture PR -----------------------------------

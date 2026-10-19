@@ -12859,7 +12859,7 @@ def _rolling_harvest_table(out_path, report_start=None):
     if not rows:
         return empty
     table = rows_as_table(rows)
-    total_pos = {i for i, r in enumerate(rows) if r["kind"] == "total"}
+    total_pos = {i for i, r in enumerate(rows) if r["kind"] in ("total", "year")}
 
     def _cell(v, ci):
         if isinstance(v, _dt.date):

@@ -26,6 +26,11 @@ the fish). Each tank's part of a day is spread at its own average weight, so a
 day that finishes one tank and starts the next is not blended. A cell of
 BAND_MIN_LB or less is shown blank, as in the operator's sheet.
 
+YEAR SUMMARY (operator 2026-10-19): after the last week with a harvest day in a
+calendar year, a 'YYYY Total' row adds up that year's DAY rows -- each day in
+its own year, the rule the monthly HOG rollups use, so 2026-W53's Jan 1 counts
+in 2027 -- with the dates it covers (a forecast starts and ends mid-year).
+
 Inputs are plain dicts so the app (which reads the workbook) and the writer
 (which holds the engine's events) feed the same function:
 
@@ -163,8 +168,8 @@ def build_rolling_rows(harvests: Iterable[dict], transfers: Iterable[dict] = (),
     """The RollingHarvestPlan rows, block after block, a blank row after
     each week's Total.
 
-    Each row is a dict: kind ('day' | 'total' | 'blank'), week_label, yield,
-    block_top (index of the block's first day row), and the A..O values with
+    Each row is a dict: kind ('day' | 'total' | 'blank' | 'year'), week_label,
+    yield, block_top (index of the block's first day row), and the A..O values with
     K/L/N/O computed: source, year, harvest_id, week, date, tank, batch,
     count, kg_hog, avg_kg_hog, live_kg, lb_hog, avg_lb_hog -- plus `bands`,
     the lb HOG per BANDS_LB range (unrounded; shown_band blanks small ones)."""
@@ -269,7 +274,56 @@ def build_rolling_rows(harvests: Iterable[dict], transfers: Iterable[dict] = (),
             "avg_kg_hog": "", "live_kg": "", "lb_hog": "", "avg_lb_hog": "",
             "bands": [""] * len(BANDS_LB),
         })
-    return rows
+    return _with_year_totals(rows)
+
+
+def _with_year_totals(rows: list[dict]) -> list[dict]:
+    """`rows` with a 'YYYY Total' row (and a blank line) after the last week
+    block holding a harvest day of year YYYY; block_top re-pointed after the
+    insertions."""
+    days = [r for r in rows if r["kind"] == "day" and isinstance(r["date"], date)
+            and r["count"]]
+    if not days:
+        return rows
+    years = sorted({r["date"].year for r in days})
+    last_block = {}                      # year -> block_top of its last block
+    for r in days:
+        last_block[r["date"].year] = r["block_top"]
+    out: list[dict] = []
+    for r in rows:
+        out.append(r)
+        if r["kind"] != "blank":
+            continue
+        for y in years:
+            if last_block[y] != r["block_top"]:
+                continue
+            yd = [d for d in days if d["date"].year == y]
+            n = sum(d["count"] for d in yd)
+            kg = sum(d["kg_hog"] for d in yd)
+            yld = yd[-1]["yield"]
+            avg = kg / n if n else 0.0
+            span = f"{min(d['date'] for d in yd)} to {max(d['date'] for d in yd)}"
+            out.append({
+                "kind": "year", "week_label": "", "yield": yld, "block_top": 0,
+                "source": "", "year": y, "harvest_id": span, "week": "",
+                "date": f"{y} Total", "tank": "", "batch": "",
+                "count": n, "kg_hog": kg, "avg_kg_hog": avg,
+                "live_kg": avg / yld, "lb_hog": kg * LB_PER_KG,
+                "avg_lb_hog": avg * LB_PER_KG,
+                "bands": [sum(d["bands"][bi] for d in yd)
+                          for bi in range(len(BANDS_LB))],
+            })
+            out.append(dict(r, block_top=0))
+    top = 0
+    for i, r in enumerate(out):
+        if r["kind"] == "day" and (i == 0 or out[i - 1]["kind"] != "day"):
+            top = i
+        if r["kind"] in ("day", "total") or (r["kind"] == "blank" and i
+                                             and out[i - 1]["kind"] == "total"):
+            r["block_top"] = top
+        else:
+            r["block_top"] = i
+    return out
 
 
 def rows_as_table(rows: list[dict]) -> list[list]:
