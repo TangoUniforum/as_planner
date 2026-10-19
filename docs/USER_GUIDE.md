@@ -227,6 +227,7 @@ Each batch row carries its stocking AND its **growth models**:
 | `fcr_model` | FCR curve, e.g. `FCR_116_Quick` → 1.16 |
 | `fw_correction` | multiplier calibrating freshwater growth/survival |
 | `sgr_correction` | multiplier calibrating seawater growth |
+| `growth_model` | *optional* — which named seawater growth curve the batch grows on (`biology.yaml` `sgr_sw_by_model`, §3.4). Blank = **Base curve** (`sgr_sw_pct_day`), exactly as before. `sgr_correction` and the per-week `sgr_correction_og` still multiply on top. A name that is not in `biology.yaml` stops the run and names the batch |
 
 **To test a different scenario without a new PR:** keep the same PR upload and
 change the per-batch models (`fcr_model`, `fw_correction`, `sgr_correction`) — the
@@ -372,6 +373,17 @@ Between edits, remember the app is the source of truth: a save writes
 `config/biology.yaml` and every later run reads it. Per-batch multipliers
 (`fcr_model`, `sgr_correction`, `fw_correction` in §3.3) scale these shared curves
 for one batch without touching them.
+
+**Named seawater growth curves (`sgr_sw_by_model`).** Besides the base SW curve,
+`biology.yaml` can hold named seawater curves — one %/day value per `sgr_size_g`
+row, e.g. a curve fitted to the Production Reports — and each batch picks one with
+`growth_model` (§3.3). Blank picks the base curve, so a config without named curves,
+or a batch that does not choose one, runs exactly as before. A curve with the wrong
+number of values is refused when the config loads. Saving the Biology grid keeps the
+named curves (the grid has no columns for them); if you change the size rows, the
+save stops and asks you to update the named curves first. The **BatchInputs** sheet
+shows each batch's curve in **Growth model (SW)**, and lists the curves available.
+Freshwater growth is never affected.
 
 ### 3.5 Manual override window (optional starting-state editor)
 
