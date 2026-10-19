@@ -75,6 +75,7 @@ def main(
     scenario_dir: str | Path | None = None,
     advance_weeks: int = 0,
     calib_log_path: str | Path | None = None,
+    growth_history_path: str | Path | None = None,
 ) -> int:
     """Run the full forecast pipeline.
 
@@ -90,6 +91,10 @@ def main(
             control.
         scenario_dir: scenario YAML directory (batches/limits). Defaults to
             the repo's scenario/. The forward batch schedule + caps.
+        growth_history_path: where this run's PR is added to the growth
+            history (forecast/growth_history.py). None follows
+            `calib_log_path`: the live growth_history.json when that is None
+            too (an operational run), otherwise nothing. "" = record nothing.
 
     The workbook supplies ONLY the ProductionReport (current state, and the
     forecast_start derived from its closing date). Everything else comes from
@@ -782,6 +787,21 @@ def main(
         else:
             print(f"  FW calibration history: NOT recorded "
                   f"({len(fw_calib_records)} records suppressed — non-operational run)")
+    # Growth history: the same "operational runs only" rule as the
+    # calibration history above, so every test/scratch/harness run that
+    # already passes calib_log_path="" (or its own path) records nothing.
+    if growth_history_path is None:
+        _gh_target = "" if calib_log_path is not None else "LIVE"
+    else:
+        _gh_target = str(growth_history_path)
+    if _gh_target:
+        try:
+            from . import growth_history as _gh
+            _gh_store = (_gh.live_store_path() if _gh_target == "LIVE"
+                         else Path(_gh_target))
+            print(f"  Growth history: {_gh.record_pr(in_path, _gh_store)}")
+        except Exception as _e:  # noqa: BLE001 - history must never fail a run
+            print(f"  Growth history: NOT recorded ({type(_e).__name__}: {_e})")
     in_flight_batches = sorted({s.batch_id for s in in_flight_states})
     print(f"  In-flight projection: {len(in_flight_states)} batch-week rows across "
           f"{len(in_flight_batches)} batches {in_flight_batches}")

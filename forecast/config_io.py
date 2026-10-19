@@ -232,6 +232,17 @@ def dump_config(
            "# Facility definition: tanks (system, stage, volume, caps, type).\n")
 
 
+def dump_biology(config_dir, tables: BiologyTables) -> None:
+    """Write biology.yaml ONLY (same format as dump_config), leaving control and
+    facility untouched -- for a change that is biology alone."""
+    d = Path(config_dir)
+    text = ("# Biology models: SGR (FW/SW), FCR curves, mortality, feed types,\n"
+            "# culling schedule. Edit to add/adjust models.\n"
+            + yaml.safe_dump(biology_to_dict(tables), sort_keys=False,
+                             allow_unicode=True, default_flow_style=False))
+    write_text_atomic(d / BIOLOGY_FILE, text)
+
+
 def _load_yaml(path) -> dict:
     return yaml.safe_load(read_text_resilient(path)) or {}
 

@@ -1685,6 +1685,10 @@ _BATCH_HELP = {
         "exactly by the seawater growth table; above/below = faster/slower. "
         "Calibrate against how the cohort is actually performing.",
     "notes": "Free-text notes — reporting only, changes nothing.",
+    "growth_model": "Which seawater growth curve this batch grows on. Blank = "
+        "the Base curve (the seawater growth table). The other choices are the "
+        "named curves in biology.yaml, e.g. an actual growth model added from "
+        "Configure -> Biology models. sgr_correction still multiplies on top.",
 }
 
 # Biology-tab grids: one help per column, keyed per grid (growth FCR columns
@@ -1981,6 +1985,192 @@ def _edit_biology():
         _reset_keys("bio_growth", "bio_mort", "bio_feed", "bio_cull")
         st.session_state.pop("bio_models", None)
         st.rerun()
+    _growth_models_panel()
+
+
+_GH_SIZES = (500, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 4500, 5000)
+
+
+def _gh_curve_table(tables, versions):
+    """Grams/day at a few sizes: base curve and each (name, sizes, values)."""
+    from forecast.biology import _interp
+    rows = []
+    for w in _GH_SIZES:
+        r = {"Size (g)": w,
+             "Base curve (g/day)": round(
+                 w * _interp(w, tables.sgr_size_g, tables.sgr_sw_pct_day) / 100, 1)}
+        for name, sizes, vals in versions:
+            r[f"{name} (g/day)"] = round(w * _interp(w, sizes, vals) / 100, 1)
+        rows.append(r)
+    return pd.DataFrame(rows)
+
+
+def _growth_models_panel():
+    """Configure -> Biology models: the growth history and the actual growth
+    model learned from the Production Reports (forecast/growth_history.py).
+    Rendering writes nothing; every write is a button."""
+    import tempfile
+    from datetime import date as _date
+    from forecast import growth_history as gh
+    from forecast.config_io import load_config
+    st.markdown("---")
+    st.markdown("#### Actual growth model — learned from your Production Reports")
+    st.caption(
+        "Each forecast you run adds its PR to the growth history. The fit uses only "
+        "clean tank-months (same batch, same tank, no fish added, under 5% lost, "
+        "not 6N) from the last 24 months; a full monthly report replaces that "
+        "month's mid-month PRs. Saved versions are frozen. **Nothing here changes "
+        "a plan**: a version only reaches a forecast when you add it to biology.yaml "
+        "and pick it for a batch on the Batches tab (growth_model).")
+    store_path = gh.live_store_path()
+    try:
+        store = gh.GrowthHistory(store_path)
+        _ctrl, tables, facility = load_config(CONFIG_DIR)
+    except Exception as e:  # noqa: BLE001
+        st.error(f"Growth history could not be read: {e}")
+        return
+    chain, superseded = store.chain()
+    sixn, og = gh.facility_tank_sets(facility)
+    ivs = gh.clean_intervals(chain, sixn, og)
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Reports stored", len(store.snapshots))
+    m2.metric("Reports used", len(chain),
+              help=(f"{chain[0].closing} .. {chain[-1].closing}" if chain else None))
+    m3.metric("Clean tank-months", len(ivs),
+              help=f"{sum(i.provisional for i in ivs)} provisional (mid-month)")
+    if chain:
+        with st.expander("Which reports are used, and which are not"):
+            st.dataframe(pd.DataFrame([{"Closing": s.closing, "Kind": s.kind,
+                                        "File": s.source} for s in chain]),
+                         hide_index=True, width="stretch")
+            if superseded:
+                st.markdown("**Not used**")
+                st.dataframe(pd.DataFrame(
+                    [{"Closing": s.closing, "File": s.source, "Why": why}
+                     for s, why in sorted(superseded, key=lambda x: x[0].closing)]),
+                    hide_index=True, width="stretch")
+    else:
+        st.info("The growth history is empty. Scan the Reports folder to start it.")
+
+    reports_dir = _ROOT.parent.parent.parent / "Reports"
+    a1, a2 = st.columns(2)
+    if a1.button("Scan the Reports folder (from Nov 2024)", key="gh_scan",
+                 help=f"Reads every Production Report and PR under {reports_dir} "
+                      "closing on or after 2024-11-01. Files already in are skipped."):
+        years = [d for d in sorted(reports_dir.glob("20*")) if d.is_dir()
+                 and d.name >= "2024"]
+        with st.spinner("Reading the reports..."):
+            res = gh.scan_reports(store, years, since="2024-11-01")
+        st.session_state["gh_msg"] = res
+        st.rerun()
+    up = a2.file_uploader("Add one report", type=["xlsx", "xlsm"], key="gh_upload")
+    if up is not None and a2.button("Add it", key="gh_add"):
+        tmp = Path(tempfile.mkdtemp()) / Path(up.name).name
+        tmp.write_bytes(up.getvalue())
+        try:
+            st.session_state["gh_msg"] = {"added": [gh.record_pr(tmp, store_path)]}
+        except ValueError as e:
+            st.session_state["gh_msg"] = {"unreadable": [str(e)]}
+        st.rerun()
+    msg = st.session_state.pop("gh_msg", None)
+    if msg:
+        st.success(f"{len(msg.get('added', []))} added, {msg.get('already', 0)} already "
+                   f"in, {msg.get('before_since', 0)} before Nov 2024, "
+                   f"{len(msg.get('unreadable', []))} unreadable")
+        if msg.get("unreadable"):
+            with st.expander("Unreadable files"):
+                for u in msg["unreadable"]:
+                    st.text(u)
+
+    st.markdown("**Fit a new version**")
+    f1, f2, f3 = st.columns(3)
+    default_asof = _date.fromisoformat(chain[-1].closing) if chain else _date.today()
+    as_of = f1.date_input("As of", value=default_asof, key="gh_asof",
+                          help="The fit uses tank-months ending in the window "
+                               "before this date.")
+    window = f2.number_input("Window (months)", min_value=6, max_value=60,
+                             value=gh.DEFAULT_WINDOW_MONTHS, step=1, key="gh_window",
+                             help="24 = one full life cycle (agreed 2026-10-18).")
+    if f3.button("Fit (preview)", key="gh_fit", disabled=not ivs):
+        try:
+            st.session_state["gh_preview"] = gh.fit_actual(
+                ivs, sizes=tables.sgr_size_g, base_sw=tables.sgr_sw_pct_day,
+                as_of=as_of, window_months=int(window),
+                sources=[s.source for s in chain if s.closing <= as_of.isoformat()])
+        except ValueError as e:
+            st.error(str(e))
+    prev = st.session_state.get("gh_preview")
+    if prev is not None:
+        st.markdown(f"Preview **{prev.name}** — {prev.n} tank-months "
+                    f"({prev.n_provisional} provisional), window {prev.window_start} .. "
+                    f"{prev.as_of}; AGR {prev.a:.3f} × w^{prev.b:.3f}, capped at "
+                    f"{prev.cap_g_day:.1f} g/day above {prev.breakpoint_g:,.0f} g")
+        if prev.holdout:
+            h = prev.holdout
+            st.caption(f"Last {gh.HOLDOUT_MONTHS} months, fitted without them "
+                       f"({h['n']} tank-months, end weight): this fit "
+                       f"{h['fit']['median_err_pct']:+.1f}% (typically "
+                       f"{h['fit']['median_abs_err_pct']:.1f}%), base curve "
+                       f"{h['base']['median_err_pct']:+.1f}% (typically "
+                       f"{h['base']['median_abs_err_pct']:.1f}%).")
+        st.dataframe(_gh_curve_table(tables, [(prev.name, prev.sizes_g,
+                                               prev.sgr_pct_day)]),
+                     hide_index=True, width="stretch")
+        if st.button(f"Save as frozen version '{prev.name}'", key="gh_save"):
+            try:
+                store.add_fit(prev)
+                store.save()
+                st.session_state.pop("gh_preview", None)
+                st.success(f"Saved '{prev.name}'.")
+                st.rerun()
+            except ValueError as e:
+                st.error(str(e))
+
+    if not store.fits:
+        return
+    st.markdown("**Saved versions**")
+    names = [f.name for f in store.fits]
+    pick = st.selectbox("Version", names, index=len(names) - 1, key="gh_version")
+    fit = store.get_fit(pick)
+    in_bio = pick in (tables.sgr_sw_by_model or {})
+    st.caption(f"{fit.n} tank-months, window {fit.window_start} .. {fit.as_of}. "
+               + ("In biology.yaml — pick it per batch on the Batches tab."
+                  if in_bio else "Not in biology.yaml yet."))
+    st.dataframe(_gh_curve_table(tables, [(fit.name, fit.sizes_g, fit.sgr_pct_day)]),
+                 hide_index=True, width="stretch")
+    if not in_bio and st.button(f"Add '{pick}' to biology.yaml growth models",
+                                key="gh_adopt",
+                                help="Writes biology.yaml only. No plan changes until "
+                                     "a batch picks it."):
+        try:
+            name, vals = gh.biology_entry(fit, tables.sgr_size_g)
+            gh.add_growth_model_to_biology(CONFIG_DIR, name, vals)
+            st.success(f"'{name}' added to biology.yaml.")
+            st.rerun()
+        except ValueError as e:
+            st.error(str(e))
+
+    st.markdown("**Before / after on a PR** — your scenario as it is, and the same "
+                f"with every batch on '{pick}'. Runs on copies; writes nothing.")
+    cpr = st.file_uploader("PR for the comparison", type=["xlsx", "xlsm"],
+                           key="gh_cmp_pr")
+    if cpr is not None and st.button("Compare", key="gh_cmp"):
+        wd = Path(tempfile.mkdtemp())
+        prp = wd / Path(cpr.name).name
+        prp.write_bytes(cpr.getvalue())
+        try:
+            with st.spinner("Running before and after (about a minute)..."):
+                name, vals = gh.biology_entry(fit, tables.sgr_size_g)
+                rows = gh.compare_plan(prp, CONFIG_DIR, SCENARIO_DIR, name, vals, wd)
+            st.session_state["gh_cmp_rows"] = (pick, rows)
+        except Exception as e:  # noqa: BLE001
+            st.error(f"Comparison failed: {e}")
+    got = st.session_state.get("gh_cmp_rows")
+    if got and got[0] == pick:
+        df = pd.DataFrame(got[1], columns=["Month", "Fish before", "HOG t before",
+                                           "Fish after", "HOG t after"])
+        df["HOG t change"] = (df["HOG t after"] - df["HOG t before"]).round(1)
+        st.dataframe(df, hide_index=True, width="stretch")
 
 
 def _edit_facility():
@@ -2029,11 +2219,36 @@ def _edit_batches():
         "scenario/batches.yaml")
     if not _ok:
         return
-    base = _persist("batch_df", lambda: pd.DataFrame(_rows))
+    def _load_batch_df():
+        df = pd.DataFrame(_rows)
+        if "growth_model" not in df.columns:
+            # batches.yaml only writes growth_model when set; the editor always
+            # shows the column so a curve can be picked. Blank = Base curve.
+            df["growth_model"] = ""
+        df["growth_model"] = df["growth_model"].fillna("")
+        return df
+    # Added inside the loader so it happens ONCE: a new frame on every rerun
+    # would reset the operator's in-progress edits.
+    base = _persist("batch_df", _load_batch_df)
+    from forecast.config_io import load_biology_tables
+    _gm_tables = load_biology_tables(CONFIG_DIR)
+    _gm_names = sorted(_gm_tables.sgr_sw_by_model or {})
+    _bcols = {c: st.column_config.Column(help=h) for c, h in _BATCH_HELP.items()}
+    _bcols["growth_model"] = st.column_config.SelectboxColumn(
+        options=[""] + _gm_names, help=_BATCH_HELP["growth_model"])
     edited = _data_editor(base, num_rows="dynamic", hide_index=True,
                             use_container_width=True, key="batch_df_w",
-                            column_config={c: st.column_config.Column(help=h)
-                                           for c, h in _BATCH_HELP.items()})
+                            column_config=_bcols)
+    try:
+        from forecast import growth_history as _ghd
+        _shown = batches_from_list(_clean_rows(_records(edited), "batch_id", "batch"))
+        with st.expander("What each batch grows on (seawater)"):
+            st.dataframe(pd.DataFrame(
+                [{"Batch": b.batch_id,
+                  "Grows on": _ghd.describe_batch_growth(b, _gm_tables)}
+                 for b in _shown]), hide_index=True, width="stretch")
+    except Exception:  # noqa: BLE001 - a half-typed row must not break the tab
+        pass
     b1, b2, _ = st.columns([1, 1, 3])
     if b1.button("💾 Save Batches", key="save_batch"):
         try:

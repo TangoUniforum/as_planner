@@ -443,3 +443,164 @@ def is_report_name(name: str) -> bool:
     low = name.lower()
     return (low.endswith((".xlsx", ".xlsm")) and not low.startswith("~$")
             and "template" not in low and bool(_PR_NAME.search(name)))
+
+
+# --------------------------------------------------------------------------- #
+# App / run helpers (step 3)
+# --------------------------------------------------------------------------- #
+STORE_NAME = "growth_history.json"
+
+
+def live_store_path() -> Path:
+    """The operator's growth history, beside fw_calibration_history.jsonl.
+
+    AS_GROWTH_HISTORY overrides it -- only so an app test can point the app at
+    a throwaway file instead of the operator's."""
+    env = os.environ.get("AS_GROWTH_HISTORY")
+    if env:
+        return Path(env)
+    return Path(__file__).resolve().parent.parent / STORE_NAME
+
+
+def record_pr(pr_path, store_path) -> str:
+    """Add one Production Report to the history at `store_path` and save.
+
+    Returns what happened, in words, for the run log. Hashes first, so a PR
+    that is already in (the usual case: the same PR run again) is not re-read.
+    """
+    pr_path = Path(pr_path)
+    store = GrowthHistory(store_path)
+    sha = _sha1(pr_path)
+    if any(s.sha1 == sha for s in store.snapshots):
+        return f"already in ({pr_path.name})"
+    snap = read_snapshot(pr_path)
+    store.add(snap)
+    store.save()
+    return f"added {snap.closing} {snap.kind} ({pr_path.name})"
+
+
+def describe_batch_growth(batch, tables) -> str:
+    """The plain sentence for one batch: which curve, times which factor."""
+    from .biology import BASE_GROWTH_MODEL
+    name = getattr(batch, "growth_model", "") or BASE_GROWTH_MODEL
+    known = (name == BASE_GROWTH_MODEL
+             or name in (getattr(tables, "sgr_sw_by_model", None) or {}))
+    corr = float(getattr(batch, "sgr_correction", 1.0) or 1.0)
+    s = f"{name}" + ("" if known else " (NOT in biology.yaml - the run will stop)")
+    if abs(corr - 1.0) > 1e-9:
+        s += f" x {corr:g} (sgr_correction)"
+    return s
+
+
+def add_growth_model_to_biology(config_dir, name: str, values) -> str:
+    """Put a frozen version into biology.yaml sgr_sw_by_model (biology.yaml
+    only). Plans do not change until a batch picks it. Returns 'added' or
+    'already there'; refuses a name that holds different values."""
+    from .config_io import dump_biology, load_biology_tables
+    tables = load_biology_tables(config_dir)
+    if len(values) != len(tables.sgr_size_g):
+        raise ValueError(f"{name!r} has {len(values)} values but biology.yaml has "
+                         f"{len(tables.sgr_size_g)} size rows")
+    have = (tables.sgr_sw_by_model or {}).get(name)
+    if have is not None:
+        if list(have) == list(values):
+            return "already there"
+        raise ValueError(f"biology.yaml already has a different growth model named "
+                         f"{name!r}")
+    tables.sgr_sw_by_model = dict(tables.sgr_sw_by_model or {})
+    tables.sgr_sw_by_model[name] = list(values)
+    dump_biology(config_dir, tables)
+    return "added"
+
+
+def _monthly_harvest(out_path) -> dict:
+    """{YYYY-MM: [fish, HOG kg]} from a run's HarvestReport sheet."""
+    import openpyxl
+    wb = openpyxl.load_workbook(out_path, read_only=True, data_only=True)
+    m: dict = {}
+    try:
+        for r in wb["HarvestReport"].iter_rows(min_row=5, values_only=True):
+            if not (r and isinstance(r[0], int) and hasattr(r[1], "strftime")):
+                continue
+            e = m.setdefault(r[1].strftime("%Y-%m"), [0.0, 0.0])
+            e[0] += float(r[6] or 0)
+            e[1] += float(r[8] or 0)
+    finally:
+        wb.close()
+    return m
+
+
+def compare_plan(pr_path, config_dir, scenario_dir, name: str, values, work_dir,
+                 batches=None) -> list:
+    """Before/after: the scenario as it is, and the same with `batches` (all
+    when None) on growth model `name` -- both run on COPIES, recording nothing.
+    Returns rows (month, fish before, HOG t before, fish after, HOG t after)."""
+    import shutil
+    import yaml
+    from .run import main as run_main
+    work_dir = Path(work_dir)
+    rows_by = {}
+    for arm in ("before", "after"):
+        d = work_dir / arm
+        shutil.rmtree(d, ignore_errors=True)
+        shutil.copytree(config_dir, d / "config",
+                        ignore=shutil.ignore_patterns("costs.yaml*"))
+        shutil.copytree(scenario_dir, d / "scenario")
+        if arm == "after":
+            bp = d / "config" / "biology.yaml"
+            bd = yaml.safe_load(bp.read_text(encoding="utf-8")) or {}
+            bd.setdefault("sgr_sw_by_model", {})[name] = list(values)
+            bp.write_text(yaml.safe_dump(bd, sort_keys=False), encoding="utf-8")
+            sp = d / "scenario" / "batches.yaml"
+            sd = yaml.safe_load(sp.read_text(encoding="utf-8")) or {}
+            for b in sd.get("batches", []):
+                if batches is None or b.get("batch_id") in batches:
+                    b["growth_model"] = name
+            sp.write_text(yaml.safe_dump(sd, sort_keys=False), encoding="utf-8")
+        out = d / ("out" + Path(pr_path).suffix)
+        inp = d / ("pr" + Path(pr_path).suffix)
+        shutil.copy(pr_path, inp)
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = run_main(str(inp), str(out), config_dir=str(d / "config"),
+                          scenario_dir=str(d / "scenario"), calib_log_path="",
+                          growth_history_path="")
+        if rc != 0:
+            raise RuntimeError(f"the {arm} run failed (rc={rc})")
+        if not out.exists():
+            out = next(iter(d.glob("out.*")))
+        rows_by[arm] = _monthly_harvest(out)
+    months = sorted(set(rows_by["before"]) | set(rows_by["after"]))
+    rows = []
+    for m in months:
+        b = rows_by["before"].get(m, [0.0, 0.0])
+        a = rows_by["after"].get(m, [0.0, 0.0])
+        rows.append((m, round(b[0]), round(b[1] / 1000, 1), round(a[0]), round(a[1] / 1000, 1)))
+    return rows
+
+
+def scan_reports(store: GrowthHistory, dirs, since: str = "2024-11-01") -> dict:
+    """Add every report under `dirs` closing on/after `since` (files already in
+    are recognised by content hash and not re-read). Saves the store.
+    Returns {'added': [...], 'already': n, 'before_since': n, 'unreadable': [...]}"""
+    known = {s.sha1 for s in store.snapshots}
+    out = {"added": [], "already": 0, "before_since": 0, "unreadable": []}
+    for d in dirs:
+        for p in sorted(Path(d).rglob("*")):
+            if not (p.is_file() and is_report_name(p.name)):
+                continue
+            try:
+                if _sha1(p) in known:
+                    out["already"] += 1
+                    continue
+                s = read_snapshot(p)
+            except (ValueError, OSError) as e:
+                out["unreadable"].append(str(e))
+                continue
+            if s.closing < since:
+                out["before_since"] += 1
+                continue
+            store.add(s)
+            known.add(s.sha1)
+            out["added"].append(f"{s.closing} {s.kind} {s.source}")
+    store.save()
+    return out

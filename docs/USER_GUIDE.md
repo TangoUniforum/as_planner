@@ -3045,6 +3045,27 @@ python -m tools.growth_history --store growth_history.json fit [--as-of 2026-10-
 ```
 `growth_history.json` is kept out of git (it can be rebuilt from the Reports folders).
 
+**In the app (Configure → Biology models, under the tables).** The same history,
+with buttons — rendering the page writes nothing:
+- **Every forecast you run adds its PR** to the history automatically (the run log
+  says `Growth history: added …` or `already in`). Runs that record nothing for the
+  calibration history — tests, scratch runs, Decide/Compare harnesses — record nothing
+  here either. A problem with the history file never stops a run.
+- **Scan the Reports folder (from Nov 2024)** reads every report under
+  `Production\Reports4…`; files already in are skipped. **Add one report** takes a
+  single file. The expander shows which reports are used and why the others are not.
+- **Fit (preview)** shows the new curve in g/day against the base curve, with the
+  3-month holdout. **Save as frozen version** keeps it. Saving does not touch biology.yaml.
+- **Saved versions → Add to biology.yaml growth models** copies a version into
+  `sgr_sw_by_model` (biology.yaml only; your other config files are not rewritten).
+  Plans still don't change until a batch picks it.
+- **Before / after on a PR** runs your scenario as it is and the same with every batch
+  on the chosen version, on copies, and shows fish and HOG t per month side by side.
+
+**On the Batches tab** the `growth_model` column is a dropdown of the curves in
+biology.yaml (blank = Base curve), and **What each batch grows on** spells it out per
+batch, e.g. `Actual 2026-10-15 x 0.95 (sgr_correction)`.
+
 ---
 
 ## 14. Ideal (what should we stock?) — the steady rhythm (2026-09-10)
