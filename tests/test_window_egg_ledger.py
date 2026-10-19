@@ -18,6 +18,8 @@ from pathlib import Path
 import openpyxl
 import pytest
 
+from conftest import copy_config_without_costs
+
 ROOT = Path(__file__).resolve().parent.parent
 PR = ROOT / "tests" / "fixtures" / "pr_2026-09-30.xlsx"
 
@@ -30,7 +32,7 @@ pytestmark = pytest.mark.skipif(
 @pytest.fixture(scope="module")
 def wb(tmp_path_factory):
     tmp = tmp_path_factory.mktemp("egg")
-    shutil.copytree(ROOT / "config", tmp / "config")
+    copy_config_without_costs(ROOT / "config", tmp / "config")   # never the live costs
     shutil.copytree(ROOT / "scenario", tmp / "scenario")
     shutil.rmtree(tmp / "scenario" / "manual_events", ignore_errors=True)
     (tmp / "scenario" / "manual_events.yaml").unlink(missing_ok=True)

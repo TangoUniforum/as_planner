@@ -25,6 +25,8 @@ from types import SimpleNamespace
 
 import openpyxl
 import pytest
+
+from conftest import copy_config_without_costs
 import yaml
 
 from forecast import excel_io
@@ -184,7 +186,7 @@ PR = ROOT / "tests" / "fixtures" / "pr_2026-09-30.xlsx"
                          and (ROOT / "scenario" / "batches.yaml").exists()),
                     reason="needs the 9/30 PR fixture + committed config/scenario")
 def test_eggs_stocked_on_the_closing_day_are_booked_whole(tmp_path):
-    shutil.copytree(ROOT / "config", tmp_path / "config")
+    copy_config_without_costs(ROOT / "config", tmp_path / "config")   # never the live costs
     shutil.copytree(ROOT / "scenario", tmp_path / "scenario")
     shutil.rmtree(tmp_path / "scenario" / "manual_events", ignore_errors=True)
     (tmp_path / "scenario" / "manual_events.yaml").unlink(missing_ok=True)
