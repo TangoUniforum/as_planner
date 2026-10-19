@@ -20,6 +20,7 @@ from types import SimpleNamespace
 import openpyxl
 import pytest
 
+from conftest import copy_config_without_costs
 from forecast import accumulated as acc_mod
 from forecast import excel_io
 from forecast.production_report import find_pr_sheet, read_pr_period
@@ -157,7 +158,7 @@ def test_month_rows_out_holds_the_forecast_months_before_the_pr_merge():
 # ---- whole runs ----------------------------------------------------------------------
 
 def _run(tmp_path, pr_path):
-    shutil.copytree(ROOT / "config", tmp_path / "config")
+    copy_config_without_costs(ROOT / "config", tmp_path / "config")   # never the live costs
     shutil.copytree(ROOT / "scenario", tmp_path / "scenario")
     shutil.rmtree(tmp_path / "scenario" / "manual_events", ignore_errors=True)
     (tmp_path / "scenario" / "manual_events.yaml").unlink(missing_ok=True)
