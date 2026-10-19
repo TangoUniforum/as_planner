@@ -3088,7 +3088,10 @@ that made it. **Save as frozen version** keeps it next to the measured ones (fro
 same way); from there it goes into biology.yaml and the before/after exactly like a
 measured version. Rows below 150 g are never changed.
 
-**Per batch: its own history.** For every batch with clean tank-months in the chosen
+**Per batch: its own history (information only).** The slowdown as fish get bigger is
+already in the measured version for the whole facility (grams per day flat at ~14 above
+2 kg = ~0.70 of the base curve at 3-4 kg), so the usual choice is **fleet only**. The
+table shows how far each batch strayed from it. For every batch with clean tank-months in the chosen
 measured version's window: **Measured** = the weight it actually put on against what
 the version predicts for the same start weight and days (1.05 = 5% more);
 **Suggested** = that pulled toward 1.0 — a batch with 12 tank-months of evidence counts

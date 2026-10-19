@@ -2203,8 +2203,9 @@ def _gh_improvement(store, measured, tables):
         f"made for fish growing in one month (a batch keeps one curve for its life), "
         f"so pick it for the batches growing then. Saving does not change a plan.")
     as_of = _date.fromisoformat(measured.as_of)
-    how = st.radio("How", ["+ % per year", "Blend toward a target curve"],
-                   key="gh_imp_how", horizontal=True)
+    hows = ["+ % per year", "Blend toward a target curve"]
+    _resend_widget("gh_imp_how", options=hows)
+    how = st.radio("How", hows, key="gh_imp_how", horizontal=True)
     i1, i2, i3 = st.columns(3)
     growing_in = i1.date_input("For fish growing in", value=as_of + timedelta(days=365),
                                key="gh_imp_when")
@@ -2218,6 +2219,7 @@ def _gh_improvement(store, measured, tables):
             targets = {BASE_GROWTH_MODEL: list(tables.sgr_sw_pct_day)}
             targets.update({v.name: list(v.sgr_pct_day) for v in store.fits
                             if v.name != measured.name})
+            _resend_widget("gh_imp_target", options=list(targets))
             tname = i2.selectbox("Target curve", list(targets), key="gh_imp_target")
             tdate = i3.date_input("Reached by", value=as_of + timedelta(days=730),
                                   key="gh_imp_tdate")
@@ -2247,7 +2249,8 @@ def _gh_batch_factors(store, measured, ivs):
     sgr_correction that would carry it (shown only; the operator types it)."""
     from forecast import growth_history as gh
     from forecast.scenario_io import load_batches
-    st.markdown(f"**Per batch: its own history against '{measured.name}'**")
+    st.markdown(f"**Per batch: its own history against '{measured.name}' — "
+                f"information only**")
     rows = gh.batch_factors(ivs, measured)
     if not rows:
         st.caption("No batch has clean tank-months in this version's window.")
@@ -2257,6 +2260,10 @@ def _gh_batch_factors(store, measured, ivs):
     except Exception:  # noqa: BLE001
         cur = {}
     st.caption(
+        f"Information only. The slowdown as fish get bigger is already in "
+        f"'{measured.name}' itself, for the whole facility, so the usual choice is "
+        f"**fleet only** (sgr_correction 1.0). This table shows how far each batch "
+        f"strayed from it. "
         f"Measured = how much weight the batch put on against what '{measured.name}' "
         f"predicts for the same start weight and days (1.05 = 5% more). Suggested = "
         f"pulled toward 1.0: a batch with {gh.BATCH_PRIOR_MONTHS:g} tank-months counts "
