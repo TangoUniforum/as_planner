@@ -42,7 +42,8 @@ sys.path.insert(0, %(root)r)
 from streamlit.testing.v1 import AppTest
 TMP = Path(%(tmp)r)
 for d in ("config", "scenario"):
-    shutil.copytree(Path(%(root)r) / d, TMP / d)
+    shutil.copytree(Path(%(root)r) / d, TMP / d,
+                    ignore=shutil.ignore_patterns("costs.yaml*"))   # never the live costs
 
 SCRIPT = r"""
 import sys, datetime
