@@ -3066,6 +3066,45 @@ with buttons — rendering the page writes nothing:
 biology.yaml (blank = Base curve), and **What each batch grows on** spells it out per
 batch, e.g. `Actual 2026-10-15 x 0.95 (sgr_correction)`.
 
+### 13.2 Expected improvement (ASSUMED) and each batch's own history (2026-10-19)
+
+The history measures how fish **have** grown. Two helpers sit under **Saved versions**
+in the same panel; neither changes a plan.
+
+**Expected improvement — ASSUMED, not measured.** If you expect batches still to come
+to grow better, build a new version from a measured one:
+- **+ % per year**: grams per day × (1 + %/100) ^ years from the measured version's
+  date to the month you pick. +3%/yr for fish growing a year later = × 1.03.
+- **Blend toward a target curve**: grams per day move in a straight line from the
+  measured version (at its date) to a target — the base curve or another measured
+  version — reached by a date you pick, and held after it. Fish growing half way
+  there get half the difference.
+
+A batch keeps one curve for its whole life, so each ASSUMED version is made **for fish
+growing in one month** (default: a year after the measurement); pick it for the
+batches growing then. Its name always ends `(ASSUMED)`, e.g.
+`Actual 2026-10-15 +3%/yr for 2027-10 (ASSUMED)`, and the panel shows the sentence
+that made it. **Save as frozen version** keeps it next to the measured ones (frozen the
+same way); from there it goes into biology.yaml and the before/after exactly like a
+measured version. Rows below 150 g are never changed.
+
+**Per batch: its own history.** For every batch with clean tank-months in the chosen
+measured version's window: **Measured** = the weight it actually put on against what
+the version predicts for the same start weight and days (1.05 = 5% more);
+**Suggested** = that pulled toward 1.0 — a batch with 12 tank-months of evidence counts
+half, so one good month does not set a batch's future. Two ways to use it, typed in on
+the Batches tab:
+- **Fleet only** — `growth_model` = the measured version, `sgr_correction` 1.0.
+- **Fleet × own history** — `growth_model` = the measured version, `sgr_correction` =
+  Suggested.
+
+Today's `sgr_correction` was set against the curve the batch grows on now (usually the
+base curve), so a Suggested value **replaces** it — never multiply the two. Batches with
+no history yet (future batches) are not listed: fleet only. The table shows each
+batch's current curve and `sgr_correction` beside the suggestion; nothing is written.
+Command line: `python -m tools.growth_history --store growth_history.json factors
+[--version NAME]`.
+
 ---
 
 ## 14. Ideal (what should we stock?) — the steady rhythm (2026-09-10)
