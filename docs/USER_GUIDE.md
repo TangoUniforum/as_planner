@@ -2998,6 +2998,53 @@ something to re-discover every month. If the batch's transfer target is a
 planning figure rather than an observed transfer weight, check the target
 before changing the biology.
 
+### 13.1 Growth history and the actual growth model (2026-10-18)
+
+The tool can keep a **growth history** built from every Production Report you add,
+and fit an **actual growth model** from it. Nothing here changes a plan: a fitted
+model only reaches a forecast when its frozen version is copied into
+`biology.yaml` `sgr_sw_by_model` and a batch picks it with `growth_model` (§3.3, §3.4).
+
+**What is kept.** For each report: its closing date, whether it is a **full
+monthly report** (it has the accumulated **Acc** tab) or a **mid-month PR** (the
+PR sheet only), and the OG tank rows (batch, tank, count, mean weight).
+
+**Which report is used — one per closing date, one source per month:**
+- A full monthly report beats a mid-month PR with the same closing date
+  (Sep'26 Production Report over the 10.1 PR).
+- Once a month's full report is in, that month's mid-month PRs are not used.
+- In a month with no full report yet, only the **latest** mid-month PR is used;
+  its interval is **provisional**.
+- For the same closing date: final beats *Prelim*, a whole report beats a
+  few-batch extract (fewer than 80% of the rows), then the **most recently
+  modified file** wins (V3 over V2). `show` lists every report not used, and why.
+
+**What counts as growth.** Only **clean tank intervals**: the same batch in the
+same tank in two reports in a row, no fish added and under 5% lost, not a 6N tank.
+A harvest, grade or move changes the mean weight without any growth, so it is left out.
+
+**The fit.** Grams per day by fish size: `a × w^b` below 2 kg and a flat cap above
+it (the hindcast winner of 2026-10-17). It uses the intervals that end in the last
+**24 months** (one full life cycle); each interval counts by its days, so a 6-day
+provisional interval counts 6/30 of a month. It is converted to an SGR table on the
+biology size rows (rows below 150 g keep the base values). Each fit also reports a
+**holdout**: fitted without the last 3 months, how far off it was on them — next to
+the base curve on the same fish. A fit with fewer than 20 clean intervals on either
+side of 2 kg is refused, not guessed.
+
+**Frozen versions.** Each fit is saved under a name such as `Actual 2026-10-15`.
+Adding reports later never changes a saved version; it makes the next one. A name
+can't be reused with different values.
+
+**Commands** (`--store` is required, so nothing writes your history by accident):
+```
+python -m tools.growth_history --store growth_history.json backfill --since 2024-11-01 "..\..\..\Reports\2024" "..\..\..\Reports\2025" "..\..\..\Reports\2026"
+python -m tools.growth_history --store growth_history.json add "<new PR or report>.xlsx"
+python -m tools.growth_history --store growth_history.json show
+python -m tools.growth_history --store growth_history.json fit [--as-of 2026-10-15] [--window 24] [--dry-run]
+```
+`growth_history.json` is kept out of git (it can be rebuilt from the Reports folders).
+
 ---
 
 ## 14. Ideal (what should we stock?) — the steady rhythm (2026-09-10)

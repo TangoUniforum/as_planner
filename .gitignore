@@ -39,5 +39,10 @@ fw_calibration_history.jsonl
 config/costs.yaml
 config/costs.yaml.tmp-*
 
+# Growth history + frozen actual growth model versions (tools/growth_history;
+# rebuildable from the Reports folders)
+growth_history.json
+growth_history.json.tmp-*
+
 # tools/knob_corpus writes its last per-PR table here (diagnostic, not input)
 knob_corpus_last.json
