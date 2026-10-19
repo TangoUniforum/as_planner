@@ -52,6 +52,9 @@ COLUMNS = [
                              "to land the target weight at transfer."),
     ("FW calibration", "What auto-calibration did (rewritten / clamped / did "
                        "not converge / off / not applicable)."),
+    ("Growth model (SW)", "batches.yaml growth_model - the seawater growth "
+                          "curve this batch grows on (biology.yaml "
+                          "sgr_sw_by_model); Base curve = sgr_sw_pct_day."),
     ("SGR correction (SW)", "batches.yaml sgr_correction - multiplier on the "
                             "seawater SGR curve."),
     ("OG entry week (run)", "ISO week of the batch's freshwater -> OG transfer "
@@ -106,6 +109,14 @@ def _fcr_label(fcr_model, tables) -> str:
     key = _fcr_model_key(fcr_model)
     known = key in (getattr(tables, "fcr_by_model", None) or {})
     return f"{fcr_model} ({key}{'' if known else ' - NOT in biology.yaml'})"
+
+
+def _growth_label(name, tables) -> str:
+    from .biology import BASE_GROWTH_MODEL
+    if not name or name == BASE_GROWTH_MODEL:
+        return BASE_GROWTH_MODEL
+    known = name in (getattr(tables, "sgr_sw_by_model", None) or {})
+    return name if known else f"{name} - NOT in biology.yaml"
 
 
 def _calib_text(rec, control, bid, in_og, manual) -> str:
@@ -200,6 +211,7 @@ def batch_input_rows(*, batches_input, batch_by_id_used, tranog_events,
             b.fw_correction,
             used.fw_correction,
             _calib_text(calib.get(bid), control, bid, in_og, mw is not None),
+            _growth_label(getattr(b, "growth_model", ""), tables),
             b.sgr_correction,
             entry_week,
             entry_date,
@@ -253,6 +265,11 @@ def _model_rows(tables) -> list[list]:
                      f"{len(sz)} size points, {min(sz):g}-{max(sz):g} g",
                      f"biology.yaml sgr_fw_pct_day ({len(fw)} values), "
                      f"sgr_sw_pct_day ({len(sw)} values)"])
+    gm = getattr(tables, "sgr_sw_by_model", None) or {}
+    if gm:
+        rows.append(["SW growth models available", ", ".join(sorted(gm)),
+                     "biology.yaml sgr_sw_by_model - each batch's growth_model "
+                     "selects one (column Growth model); blank = Base curve"])
     fcr = getattr(tables, "fcr_by_model", None) or {}
     if fcr:
         rows.append(["FCR models available", ", ".join(sorted(fcr)),

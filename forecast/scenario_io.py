@@ -73,6 +73,10 @@ def batches_to_list(batches: list[BatchInput]) -> list[dict]:
             "sgr_correction": b.sgr_correction,
             "notes": b.notes,
         })
+        # Only when set, so a scenario that uses no growth model keeps its
+        # batches.yaml byte-identical.
+        if getattr(b, "growth_model", ""):
+            out[-1]["growth_model"] = b.growth_model
     return out
 
 
@@ -103,8 +107,17 @@ def batches_from_list(data: list[dict]) -> list[BatchInput]:
             fw_correction=float(d.get("fw_correction") if d.get("fw_correction") is not None else 1.0),
             sgr_correction=float(d.get("sgr_correction") if d.get("sgr_correction") is not None else 1.0),
             notes=str(d.get("notes") or ""),
+            growth_model=_growth_model_name(d.get("growth_model")),
         ))
     return out
+
+
+def _growth_model_name(v) -> str:
+    """'' for unset: None, blank, or the NaN a pandas grid gives a row that
+    has no growth_model while another row does."""
+    if not isinstance(v, str):
+        return ""
+    return v.strip()
 
 
 # ---------- Limits ----------

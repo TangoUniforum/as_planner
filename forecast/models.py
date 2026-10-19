@@ -452,6 +452,9 @@ class BatchInput:
     fw_correction: float                    # multiplier on SGR_FW (FW calibration)
     sgr_correction: float                   # multiplier on SGR_SW (SW user adjustment)
     notes: str = ""
+    # Named seawater growth curve from biology.yaml sgr_sw_by_model; "" (or
+    # "Base curve") = the base sgr_sw_pct_day table, i.e. today's behaviour.
+    growth_model: str = ""
 
 
 @dataclass
@@ -547,6 +550,11 @@ class BiologyTables:
     og_sgr_by_week: dict[str, float] = field(default_factory=dict)
     # Culling schedule: (days_since_input, cull_pct), sorted ascending by day.
     culling: list[tuple[int, float]] = field(default_factory=list)
+    # Named SEAWATER growth curves on the sgr_size_g keys (e.g. a curve fitted
+    # to the Production Reports), chosen per batch by BatchInput.growth_model.
+    # Empty = only the base sgr_sw_pct_day curve exists. Open-ended, like
+    # fcr_by_model, so a new curve is data, not code.
+    sgr_sw_by_model: dict[str, list[Optional[float]]] = field(default_factory=dict)
 
     def __post_init__(self):
         # Five independent key columns. sgr_size_g and fcr_size_g are SEPARATE
@@ -556,6 +564,8 @@ class BiologyTables:
             self.sgr_size_g = _permute(self.sgr_size_g, perm)
             self.sgr_fw_pct_day = _permute(self.sgr_fw_pct_day, perm)
             self.sgr_sw_pct_day = _permute(self.sgr_sw_pct_day, perm)
+            self.sgr_sw_by_model = {k: _permute(v, perm)
+                                    for k, v in self.sgr_sw_by_model.items()}
         perm = _ascending_permutation(self.fcr_size_g)
         if perm is not None:
             self.fcr_size_g = _permute(self.fcr_size_g, perm)

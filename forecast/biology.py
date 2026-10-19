@@ -170,6 +170,42 @@ def _require_fcr_models(batches, tables: BiologyTables) -> None:
         )
 
 
+BASE_GROWTH_MODEL = "Base curve"
+
+
+def sw_growth_curve(tables: BiologyTables, batch) -> list:
+    """The seawater SGR table this batch grows on: its named growth_model from
+    `tables.sgr_sw_by_model`, else the base `sgr_sw_pct_day` curve."""
+    name = getattr(batch, "growth_model", "") if batch is not None else ""
+    if not name or name == BASE_GROWTH_MODEL:
+        return tables.sgr_sw_pct_day
+    curve = (tables.sgr_sw_by_model or {}).get(name)
+    if curve is None:
+        raise ValueError(
+            f"batch {getattr(batch, 'batch_id', '?')}: growth_model {name!r} "
+            f"is not in biology.yaml sgr_sw_by_model "
+            f"(available: {sorted(tables.sgr_sw_by_model or {}) or '(none)'})")
+    return curve
+
+
+def _require_growth_models(batches, tables: BiologyTables) -> None:
+    """Fail fast, by name, when a batch asks for a growth curve the tables
+    lack - the same rule as _require_fcr_models."""
+    available = set(tables.sgr_sw_by_model or {})
+    missing: dict[str, list[str]] = {}
+    for b in batches or []:
+        name = getattr(b, "growth_model", "")
+        if name and name != BASE_GROWTH_MODEL and name not in available:
+            missing.setdefault(name, []).append(getattr(b, "batch_id", "?"))
+    if missing:
+        detail = "; ".join(f"{k!r} wanted by {', '.join(sorted(v))}"
+                           for k, v in sorted(missing.items()))
+        raise ValueError(
+            f"biology.yaml sgr_sw_by_model has no growth curve for: {detail}. "
+            f"Available: {sorted(available) or '(none)'} "
+            f"(blank = {BASE_GROWTH_MODEL}).")
+
+
 def og_sgr_factor(tables: BiologyTables, week_label: Optional[str]) -> float:
     """The operator's per-week OG growth factor for `week_label` (1.0 = none).
 
@@ -191,7 +227,7 @@ def sgr_pct_per_day(
     tables: BiologyTables, week_label: Optional[str] = None,
 ) -> float:
     """Effective SGR (%/day) at a weight: the size-interpolated FW or SW growth
-    curve scaled by the batch's stage correction (`fw_correction` in FW, else
+    curve (in SW, the batch's `growth_model` curve; see sw_growth_curve) scaled by the batch's stage correction (`fw_correction` in FW, else
     `sgr_correction`; 1.0 when no batch), and in SEAWATER by the operator's
     per-week OG factor for `week_label`.
 
@@ -212,7 +248,7 @@ def sgr_pct_per_day(
         base = _interp(avg_wt_g, tables.sgr_size_g, tables.sgr_fw_pct_day)
         corr = batch.fw_correction if batch else 1.0
         return base * corr
-    base = _interp(avg_wt_g, tables.sgr_size_g, tables.sgr_sw_pct_day)
+    base = _interp(avg_wt_g, tables.sgr_size_g, sw_growth_curve(tables, batch))
     corr = batch.sgr_correction if batch else 1.0
     return base * corr * og_sgr_factor(tables, week_label)
 
@@ -1438,6 +1474,7 @@ def project_all_batches(
     are sourced from ProductionReport in a later pipeline step.
     """
     _require_fcr_models(batches, tables)
+    _require_growth_models(batches, tables)
     states: list[BatchWeekState] = []
     residuals: list[CalibrationResidual] = []
     splits: list[SizeClassSplit] = []

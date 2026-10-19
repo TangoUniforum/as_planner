@@ -1959,6 +1959,16 @@ def _edit_biology():
     if b1.button("💾 Save Biology", key="save_bio"):
         try:
             tables2 = _frames_to_biology(g2, m2, f2, c2, models)
+            # The grid has no columns for the named growth curves; keep the
+            # ones on disk, or saving the grid would silently delete them.
+            _gm = load_biology_tables(CONFIG_DIR).sgr_sw_by_model
+            if _gm and len(tables2.sgr_size_g) != len(
+                    load_biology_tables(CONFIG_DIR).sgr_size_g):
+                raise ValueError(
+                    "the size rows changed, but biology.yaml sgr_sw_by_model "
+                    f"({', '.join(sorted(_gm))}) has one value per old row - "
+                    "update those curves first")
+            tables2.sgr_sw_by_model = _gm
             dump_config(CONFIG_DIR, control=load_control(CONFIG_DIR),
                         tables=tables2, facility=load_facility_config(CONFIG_DIR))
             _reset_keys("bio_growth", "bio_mort", "bio_feed", "bio_cull")

@@ -133,7 +133,7 @@ def control_from_dict(d: dict) -> ControlParams:
 # ---------- Biology ----------
 
 def biology_to_dict(t: BiologyTables) -> dict:
-    return {
+    d = {
         "sgr_size_g": list(t.sgr_size_g),
         "sgr_fw_pct_day": list(t.sgr_fw_pct_day),
         "sgr_sw_pct_day": list(t.sgr_sw_pct_day),
@@ -145,6 +145,11 @@ def biology_to_dict(t: BiologyTables) -> dict:
         "feed_types": [[mx, name] for (mx, name) in t.feed_types],
         "culling": [[dsi, pct] for (dsi, pct) in t.culling],
     }
+    # Written only when a curve exists, so a config without growth models
+    # round-trips byte-identical.
+    if t.sgr_sw_by_model:
+        d["sgr_sw_by_model"] = {k: list(v) for k, v in t.sgr_sw_by_model.items()}
+    return d
 
 
 def biology_from_dict(d: dict) -> BiologyTables:
@@ -163,7 +168,26 @@ def biology_from_dict(d: dict) -> BiologyTables:
         mortality_pct_weekly=[float(x) for x in d.get("mortality_pct_weekly", [])],
         feed_types=[(float(mx), str(name)) for mx, name in d.get("feed_types", [])],
         culling=[(int(dsi), float(pct)) for dsi, pct in d.get("culling", [])],
+        sgr_sw_by_model=_growth_models_from_dict(d),
     )
+
+
+def _growth_models_from_dict(d: dict) -> dict:
+    """biology.yaml sgr_sw_by_model -> {name: [%/day per sgr_size_g row]}.
+
+    A curve whose length differs from sgr_size_g would interpolate against the
+    wrong sizes, so it is refused by name here rather than run.
+    """
+    n = len(d.get("sgr_size_g", []))
+    out = {}
+    for name, vals in (d.get("sgr_sw_by_model") or {}).items():
+        vals = list(vals or [])
+        if len(vals) != n:
+            raise ValueError(
+                f"biology.yaml sgr_sw_by_model {name!r} has {len(vals)} values "
+                f"but sgr_size_g has {n} - one value per size row is needed")
+        out[str(name)] = [None if x is None else float(x) for x in vals]
+    return out
 
 
 # ---------- Facility ----------
