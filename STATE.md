@@ -1,13 +1,13 @@
 # Where things stand
 
 Updated at the end of every working session (`/forecast-handoff`). Newest first in
-each list. Last updated: **2026-10-19**.
+each list. Last updated: **2026-10-20**.
 
 ## Live setup (what the app runs right now)
 
-- Branch `v2/capacity-and-transition`, code = `f370b4f` (growth models steps 1-4, harvest floor
+- Branch `v2/capacity-and-transition`, code = `7c82b51` (growth models steps 1-4, harvest floor
   in kg HOG, RollingHarvestPlan sales weight ranges P-W + year totals, Daily Harvest Schedule
-  retired; 2026-10-19). RollingHarvestPlan: whole forecast (`rolling_harvest_weeks: 0`), IDs from 978.
+  retired; 2026-10-19; **Models** sheet 2026-10-20). RollingHarvestPlan: whole forecast (`rolling_harvest_weeks: 0`), IDs from 978.
   Live limits now also carry the Q1 ramp (2027 max fish 38.5k W01-05 / 40k / 42k / 44k / 45k W18+,
   100 t floor W01-05); set saved as `scenario_sets\10.18 PR manual to W48 + Q1 ramp\`; operator manual
   entries to W48. 2027 = 6,454 t (week sum). Run name in `config/control.yaml`: "Sep Production Report Forecast" (stale label).
@@ -105,6 +105,10 @@ Scratch analysis: session c33340bb scratchpad `growth\` (measure.py, fit.py, cha
 
 ## Recent history
 
+- 2026-10-20 `7c82b51` Models sheet (report only): growth models per batch (measured vs assumed,
+  adjustment in words, not a bare 1), curves by size, FCR tables, other assumptions. Tag
+  `v2-before-models-tab-2026-10-20`; gate 23/24, suite 2481 passed, live 10.18 plan identical.
+  Offered: same wording for BatchInputs "SGR correction (SW)".
 - 2026-10-18 growth history step 2 merged (`4328b4b`..`43f9974`), tag
   `v2-before-growth-history-2026-10-18`; two more tests stopped copying the live costs.
 - 2026-10-18 growth models step 1 merged (`b41ab98`..`edede1d`), tag
