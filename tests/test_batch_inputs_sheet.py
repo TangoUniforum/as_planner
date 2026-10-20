@@ -69,6 +69,18 @@ def test_rows_are_in_batch_number_order_one_per_batch():
     assert all(len(r) == len(COLUMNS) for r in rows)
 
 
+def test_growth_adjustment_is_in_words_never_a_bare_one():
+    """Operator 2026-10-19: a bare 1 reads like '100% of the model'."""
+    col = COL["Growth adjustment (SW)"]
+    r = _rows(batches_input=[_b("B1", datetime(2027, 1, 1)),
+                             _b("B2", datetime(2027, 1, 1), sgr_correction=1.0)],
+              batch_by_id_used={}, tranog_events=[])
+    assert r["B1"][col] == "x0.95 - 5% slower than the curve"
+    assert r["B2"][col] == "none - the curve as it is"
+    # negative control: the old cell was the raw multiplier
+    assert r["B2"][col] != 1.0 and "SGR correction (SW)" not in COL
+
+
 def test_run_columns_are_the_tranog_rows_summed():
     b = _b("B51", datetime(2026, 12, 3))
     ev = _tranog("B51", date(2026, 12, 7), (12, 144959, 460.0), (16, 144958, 356.0))

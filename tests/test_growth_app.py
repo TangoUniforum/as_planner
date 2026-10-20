@@ -348,7 +348,9 @@ def test_leave_out_fit_save_and_add_clicked_in_the_app(tmp_path):
     # Add to biology.yaml: the COPY's biology.yaml has it, with the saved values
     bio = yaml.safe_load((app.parent / "config" / "biology.yaml").read_text(encoding="utf-8"))
     assert bio["sgr_sw_by_model"]["Actual 2026-09-30"] == fit.sgr_pct_day
-    # the page reruns after adding, so it shows the version as in biology.yaml
+    # the page reruns after adding: it shows the version as in biology.yaml AND
+    # keeps the confirmation (before 2026-10-20 it vanished in the rerun)
     assert any("In biology.yaml" in c for c in r["captions"])
+    assert any("added to biology.yaml" in s for s in r["success"]), r["success"]
     # the operator's own config is untouched
     assert {p: _md5(ROOT / "config" / p) for p in live} == live

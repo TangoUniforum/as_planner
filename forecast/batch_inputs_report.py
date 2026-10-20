@@ -55,8 +55,9 @@ COLUMNS = [
     ("Growth model (SW)", "batches.yaml growth_model - the seawater growth "
                           "curve this batch grows on (biology.yaml "
                           "sgr_sw_by_model); Base curve = sgr_sw_pct_day."),
-    ("SGR correction (SW)", "batches.yaml sgr_correction - multiplier on the "
-                            "seawater SGR curve."),
+    ("Growth adjustment (SW)", "batches.yaml sgr_correction in words: 'none' = "
+                               "the batch grows exactly on its growth model's "
+                               "curve; 'x0.95 - 5% slower' = 5% below it."),
     ("OG entry week (run)", "ISO week of the batch's freshwater -> OG transfer "
                             "in this plan (TransferPlan TranOG rows)."),
     ("OG entry date (run)", "Date of that transfer."),
@@ -100,6 +101,13 @@ def _source(bid, b, *, pr_og, pr_fw, forecast_start) -> str:
     if tog is not None and fs is not None and tog < fs:
         return "Pre-start: transferred before the PR, not on site"
     return "Scheduled: batches.yaml (not yet in the PR)"
+
+
+def _adjustment(v) -> str:
+    """sgr_correction in words, as the Models sheet says it: a bare 1 reads
+    like '100% of the model' (operator 2026-10-19)."""
+    from .models_report import adjustment_text
+    return adjustment_text([1.0 if v is None else v], "curve")
 
 
 def _fcr_label(fcr_model, tables) -> str:
@@ -212,7 +220,7 @@ def batch_input_rows(*, batches_input, batch_by_id_used, tranog_events,
             used.fw_correction,
             _calib_text(calib.get(bid), control, bid, in_og, mw is not None),
             _growth_label(getattr(b, "growth_model", ""), tables),
-            b.sgr_correction,
+            _adjustment(b.sgr_correction),
             entry_week,
             entry_date,
             (int(n_in) if evs else None),

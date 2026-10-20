@@ -2174,6 +2174,9 @@ def _growth_models_panel():
                    f"{fit.as_of}. {where}")
         shown = [(fit.name, fit.sizes_g, fit.sgr_pct_day)]
     st.dataframe(_gh_curve_table(tables, shown), hide_index=True, width="stretch")
+    _adopt_msg = st.session_state.pop("gh_adopt_msg", None)
+    if _adopt_msg:
+        st.success(_adopt_msg)
     if not in_bio and st.button(f"Add '{pick}' to biology.yaml growth models",
                                 key="gh_adopt",
                                 help="Writes biology.yaml only. No plan changes until "
@@ -2181,7 +2184,10 @@ def _growth_models_panel():
         try:
             name, vals = gh.biology_entry(fit, tables.sgr_size_g)
             gh.add_growth_model_to_biology(CONFIG_DIR, name, vals)
-            st.success(f"'{name}' added to biology.yaml.")
+            # shown after the rerun: a message drawn before st.rerun() vanishes
+            st.session_state["gh_adopt_msg"] = (
+                f"'{name}' added to biology.yaml. Pick it per batch on the Batches "
+                f"tab (growth_model).")
             st.rerun()
         except ValueError as e:
             st.error(str(e))
