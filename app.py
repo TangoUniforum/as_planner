@@ -2102,8 +2102,8 @@ def _growth_models_panel():
     window = f2.number_input("Window (months)", min_value=6, max_value=60,
                              value=gh.DEFAULT_WINDOW_MONTHS, step=1, key="gh_window",
                              help="24 = one full life cycle (agreed 2026-10-18).")
-    _gh_batches = sorted({i.batch for i in ivs},
-                         key=lambda b: (int("".join(c for c in b if c.isdigit()) or 0), b))
+    _gh_batches = sorted_batches({i.batch for i in ivs})
+    _resend_widget("gh_exclude", options=_gh_batches)
     leave_out = st.multiselect(
         "Leave these batches out of the fit", _gh_batches, key="gh_exclude",
         help="Their tank-months are not used for the curve or the holdout (e.g. a "
