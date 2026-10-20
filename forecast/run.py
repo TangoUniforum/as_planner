@@ -1832,6 +1832,21 @@ def main(
     except Exception as _bi_err:  # noqa: BLE001 - a report must not sink a run
         print(f"  NOTE: BatchInputs sheet skipped ({type(_bi_err).__name__}: "
               f"{_bi_err}); the plan is unaffected.")
+    # Models (report only, 2026-10-19): the growth, FCR and other biology
+    # models this run used, spelled out -- what each is and which batches use
+    # it. The growth history is only READ here (how a measured curve was made).
+    try:
+        from .models_report import write_models_sheet
+        from .growth_history import live_store_path as _gh_live
+        write_models_sheet(
+            wb, batches=list(batch_by_id.values()), tables=tables,
+            control=control,
+            history_path=(_gh_live() if _gh_target in ("", "LIVE")
+                          else Path(_gh_target)),
+            hog_overrides=facility_hog_overrides, forecast_start=report_start)
+    except Exception as _m_err:  # noqa: BLE001 - a report must not sink a run
+        print(f"  NOTE: Models sheet skipped ({type(_m_err).__name__}: "
+              f"{_m_err}); the plan is unaffected.")
     # Lifetime per batch (report only, 2026-10-10): ONLY when the uploaded
     # workbook carries an accumulated tab (a full monthly production report);
     # a PR-only upload runs exactly as before, with one INFO line saying why
