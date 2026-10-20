@@ -281,3 +281,74 @@ def test_fit_and_save_buttons_work_and_write_only_the_named_history(tmp_path):
     assert saved.fits[0].cap_g_day == pytest.approx(13.9, rel=0.05)
     assert r["selects"].get("Version") == ["Actual 2026-09-30"]
     assert _md5(ROOT / "config" / "biology.yaml") == bio_before   # Save != adopt
+
+
+# --------------------------------------------------------------------------- #
+# Leave batches out of the fit, clicked through the app (operator 2026-10-20)
+# --------------------------------------------------------------------------- #
+_CLICK_EXCLUDE = r"""
+import json, sys
+from streamlit.testing.v1 import AppTest
+at = AppTest.from_file(sys.argv[1], default_timeout=300)
+at.session_state["app_mode"] = "Configure (models & control)"
+at.run()
+out = {"options": [str(o) for o in at.multiselect(key="gh_exclude").options]}
+at.button(key="gh_fit").click().run()               # nothing left out first
+out["preview_all"] = [m.value for m in at.markdown if m.value.startswith("Preview")]
+at.multiselect(key="gh_exclude").set_value(["B11", "B12"]).run()
+at.button(key="gh_fit").click().run()
+out["preview_out"] = [m.value for m in at.markdown if m.value.startswith("Preview")]
+at.button(key="gh_save").click().run()
+out["after_save"] = [str(e.value) for e in at.exception]
+at.button(key="gh_adopt").click().run()
+out["exceptions"] = [str(e.value) for e in at.exception]
+out["success"] = [s.value for s in at.success]
+out["captions"] = [c.value for c in at.caption]
+print("<<<RESULT>>>" + json.dumps(out))
+"""
+
+
+def _app_copy(dst):
+    """The app, its code and a COPY of the config/scenario: the 'Add to
+    biology.yaml' button writes the config next to app.py, so a click test
+    must never run the operator's own tree."""
+    ign = shutil.ignore_patterns("__pycache__", "costs.yaml")
+    dst.mkdir(parents=True)
+    shutil.copy(ROOT / "app.py", dst / "app.py")
+    for d in ("forecast", "tools", "config", "scenario"):
+        shutil.copytree(ROOT / d, dst / d, ignore=ign)
+    return dst / "app.py"
+
+
+def test_leave_out_fit_save_and_add_clicked_in_the_app(tmp_path):
+    pytest.importorskip("streamlit")
+    store = tmp_path / "gh.json"
+    _synthetic_store(store)
+    app = _app_copy(tmp_path / "app")
+    live = {p: _md5(ROOT / "config" / p) for p in ("biology.yaml", "control.yaml")}
+    env = dict(os.environ, AS_GROWTH_HISTORY=str(store))
+    proc = subprocess.run([sys.executable, "-c", _CLICK_EXCLUDE, str(app)],
+                          capture_output=True, text=True, timeout=900,
+                          cwd=str(app.parent), env=env)
+    marker = [ln for ln in proc.stdout.splitlines() if ln.startswith("<<<RESULT>>>")]
+    assert marker, f"no result: {proc.stdout[-1500:]} | {proc.stderr[-1500:]}"
+    r = json.loads(marker[-1][len("<<<RESULT>>>"):])
+    assert not r["after_save"] and not r["exceptions"], (r["after_save"], r["exceptions"])
+    # the picker offers the history's batches in batch order
+    assert r["options"][:3] == ["B11", "B12", "B13"] and len(r["options"]) == 30
+    # negative control: with nothing picked the preview names nothing left out
+    assert r["preview_all"] and "left out" not in r["preview_all"][0]
+    n_all = int(r["preview_all"][0].split("— ")[1].split(" tank-months")[0])
+    assert r["preview_out"] and "left out: B11, B12" in r["preview_out"][0]
+    n_out = int(r["preview_out"][0].split("— ")[1].split(" tank-months")[0])
+    assert n_out == n_all - 2 * 5                    # 2 tanks x 5 month intervals
+    # Save: the frozen version records the left-out batches
+    fit = gh.GrowthHistory(store).get_fit("Actual 2026-09-30")
+    assert fit.excluded_batches == ["B11", "B12"] and fit.n == n_out
+    # Add to biology.yaml: the COPY's biology.yaml has it, with the saved values
+    bio = yaml.safe_load((app.parent / "config" / "biology.yaml").read_text(encoding="utf-8"))
+    assert bio["sgr_sw_by_model"]["Actual 2026-09-30"] == fit.sgr_pct_day
+    # the page reruns after adding, so it shows the version as in biology.yaml
+    assert any("In biology.yaml" in c for c in r["captions"])
+    # the operator's own config is untouched
+    assert {p: _md5(ROOT / "config" / p) for p in live} == live
