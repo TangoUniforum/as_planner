@@ -198,6 +198,32 @@ def test_holdout_scores_the_fit_against_the_base_curve():
     assert abs(h["fit"]["median_err_pct"]) < 1.0      # the truth is the fit's shape
 
 
+def test_left_out_batches_do_not_shape_the_fit(tmp_path):
+    """Operator 2026-10-20: leave chosen batches out of the actual model."""
+    end = date(2026, 10, 15)
+    base = _synthetic(end)
+    # B99 grew at half speed everywhere (a disease episode), lots of it.
+    sick = [gh.Interval("B99", i.tank, i.d0, i.d1, i.days, i.c0, i.c1, i.w0,
+                        i.w0 + (i.w1 - i.w0) * 0.5, i.provisional) for i in base] * 2
+    clean = gh.fit_actual(base, sizes=SIZES, base_sw=BASE, as_of=end)
+    out = gh.fit_actual(base + sick, sizes=SIZES, base_sw=BASE, as_of=end,
+                        exclude_batches=["B99", " "])
+    assert out.sgr_pct_day == clean.sgr_pct_day and out.n == clean.n
+    assert out.excluded_batches == ["B99"]
+    # negative control: kept in, the slow batch drags the curve down
+    kept = gh.fit_actual(base + sick, sizes=SIZES, base_sw=BASE, as_of=end)
+    assert kept.cap_g_day < clean.cap_g_day * 0.9 and kept.excluded_batches == []
+    # saved and read back; a store written before the field existed still loads
+    store = gh.GrowthHistory(tmp_path / "gh.json")
+    store.add_fit(out)
+    store.save()
+    assert gh.GrowthHistory(tmp_path / "gh.json").get_fit(out.name).excluded_batches == ["B99"]
+    d = json.loads((tmp_path / "gh.json").read_text(encoding="utf-8"))
+    del d["fits"][0]["excluded_batches"]
+    (tmp_path / "old.json").write_text(json.dumps(d), encoding="utf-8")
+    assert gh.GrowthHistory(tmp_path / "old.json").fits[0].excluded_batches == []
+
+
 # --------------------------------------------------------------------------- #
 # Frozen versions, the store, and the engine
 # --------------------------------------------------------------------------- #

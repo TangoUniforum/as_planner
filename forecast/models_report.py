@@ -98,6 +98,9 @@ def growth_model_rows(batches, tables, history_path=None) -> list[list]:
                    f"to {bp:,.0f} g ({rec.n_below} tank-months), then a flat "
                    f"{rec.cap_g_day:.1f} g/day above {bp:,.0f} g (median of "
                    f"{rec.n_above} tank-months).")
+            if getattr(rec, "excluded_batches", None):
+                how += (" Batches left out of the fit: "
+                        f"{', '.join(rec.excluded_batches)}.")
             ho = rec.holdout or {}
             if ho.get("fit") and ho.get("base"):
                 acc = (f"Fitted without the reports after {ho['from']}, then "

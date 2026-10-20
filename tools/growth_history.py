@@ -91,7 +91,7 @@ def cmd_factors(store, facility, version):
     return 0
 
 
-def cmd_fit(store, facility, tables, as_of, window, name, dry_run):
+def cmd_fit(store, facility, tables, as_of, window, name, dry_run, exclude=()):
     chain, _ = store.chain()
     if not chain:
         print("no reports in the history")
@@ -101,6 +101,7 @@ def cmd_fit(store, facility, tables, as_of, window, name, dry_run):
     ivs = gh.clean_intervals(chain, sixn, og)
     fit = gh.fit_actual(ivs, sizes=tables.sgr_size_g, base_sw=tables.sgr_sw_pct_day,
                         as_of=as_of, window_months=window, name=name,
+                        exclude_batches=exclude,
                         sources=[s.source for s in chain
                                  if s.closing > gh._months_before(
                                      date.fromisoformat(as_of), window).isoformat()
@@ -146,6 +147,8 @@ def main(argv=None) -> int:
     f.add_argument("--window", type=int, default=gh.DEFAULT_WINDOW_MONTHS)
     f.add_argument("--name")
     f.add_argument("--dry-run", action="store_true")
+    f.add_argument("--exclude", default="",
+                   help="batches to leave out of the fit, e.g. B44,B45")
     x = sub.add_parser("factors")
     x.add_argument("--version")
     args = ap.parse_args(argv)
@@ -160,7 +163,8 @@ def main(argv=None) -> int:
         cmd_show(store, facility)
     elif args.cmd == "fit":
         return cmd_fit(store, facility, tables, args.as_of, args.window,
-                       args.name, args.dry_run)
+                       args.name, args.dry_run,
+                       [b for b in args.exclude.split(",") if b.strip()])
     elif args.cmd == "factors":
         return cmd_factors(store, facility, args.version)
     return 0

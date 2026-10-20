@@ -75,6 +75,7 @@ def test_growth_rows_say_how_each_model_was_made(tmp_path, cfg):
     assert "370 clean tank-months" in m[4] and "13.9 g/day above 2,000 g" in m[4]
     assert "+1.0%" in m[5] and "+3.1%" in m[5]
     assert "x0.9 - 10% slower" in m[3] and "none" in m[3]
+    assert "left out" not in m[4]                       # none left out: not mentioned
     assert rows["Assumed Y"][1] == "ASSUMED improvement"
     assert "ASSUMED: 3% a year" in rows["Assumed Y"][4]
     assert rows[BASE_GROWTH_MODEL][1] == "Company table (assumed)"
@@ -85,6 +86,17 @@ def test_growth_rows_say_how_each_model_was_made(tmp_path, cfg):
     none = {r[0]: r for r in growth_model_rows(bs, tables, tmp_path / "nope.json")}
     assert none["Measured X"][1] == "From biology.yaml"
     assert "not found" in none["Measured X"][4]
+
+
+def test_left_out_batches_are_named(tmp_path, cfg):
+    import json
+    _c, tables = cfg
+    p = _store(tmp_path, tables)
+    d = json.loads(p.read_text(encoding="utf-8"))
+    d["fits"][0]["excluded_batches"] = ["B40", "B41"]
+    p.write_text(json.dumps(d), encoding="utf-8")
+    row = {r[0]: r for r in growth_model_rows([_b("B44", "Measured X")], tables, p)}
+    assert "Batches left out of the fit: B40, B41." in row["Measured X"][4]
 
 
 def test_growth_curves_are_the_runs_tables(cfg):

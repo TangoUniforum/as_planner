@@ -271,6 +271,9 @@ class GrowthFit:
     holdout: Optional[dict] = None
     sources: list = field(default_factory=list)
     created: str = ""
+    # Batches the operator left out of the fit (e.g. a disease episode). Their
+    # tank-months are dropped before the window, the fit and the holdout.
+    excluded_batches: list = field(default_factory=list)
 
     def agr_g_day(self, w: float) -> float:
         return min(self.a * w ** self.b, self.cap_g_day)
@@ -335,15 +338,18 @@ def _holdout(ivs, as_of: date, breakpoint_g, sizes, base_sw) -> Optional[dict]:
 def fit_actual(intervals, *, sizes, base_sw, as_of, name=None,
                window_months=DEFAULT_WINDOW_MONTHS,
                breakpoint_g=DEFAULT_BREAKPOINT_G,
-               sw_min_g=DEFAULT_SW_MIN_G, sources=()) -> GrowthFit:
+               sw_min_g=DEFAULT_SW_MIN_G, sources=(),
+               exclude_batches=()) -> GrowthFit:
     """Fit the actual growth model on the intervals ending inside the window.
 
     `sizes`/`base_sw`: biology.yaml sgr_size_g / sgr_sw_pct_day. Rows below
-    `sw_min_g` keep the base value (no seawater fish are that small)."""
+    `sw_min_g` keep the base value (no seawater fish are that small).
+    `exclude_batches`: batch ids whose tank-months are left out."""
     as_of = as_of if isinstance(as_of, date) else date.fromisoformat(str(as_of))
     start = _months_before(as_of, window_months)
+    out = {str(b).strip() for b in exclude_batches if str(b).strip()}
     ivs = [i for i in intervals
-           if start.isoformat() < i.d1 <= as_of.isoformat()]
+           if start.isoformat() < i.d1 <= as_of.isoformat() and i.batch not in out]
     a, b, cap, n_lo, n_hi = _fit_params(ivs, breakpoint_g)
     table = []
     for w, base in zip(sizes, base_sw):
@@ -359,7 +365,8 @@ def fit_actual(intervals, *, sizes, base_sw, as_of, name=None,
         n_below=n_lo, n_above=n_hi, sizes_g=list(sizes), sgr_pct_day=table,
         holdout=_holdout(ivs, as_of, breakpoint_g, list(sizes), list(base_sw)),
         sources=list(sources),
-        created=datetime.now().isoformat(timespec="seconds"))
+        created=datetime.now().isoformat(timespec="seconds"),
+        excluded_batches=sorted(out, key=lambda b: (int(re.sub(r"\D", "", b) or 0), b)))
 
 
 # --------------------------------------------------------------------------- #

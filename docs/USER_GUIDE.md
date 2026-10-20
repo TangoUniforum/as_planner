@@ -3060,7 +3060,7 @@ can't be reused with different values.
 python -m tools.growth_history --store growth_history.json backfill --since 2024-11-01 "..\..\..\Reports\2024" "..\..\..\Reports\2025" "..\..\..\Reports\2026"
 python -m tools.growth_history --store growth_history.json add "<new PR or report>.xlsx"
 python -m tools.growth_history --store growth_history.json show
-python -m tools.growth_history --store growth_history.json fit [--as-of 2026-10-15] [--window 24] [--dry-run]
+python -m tools.growth_history --store growth_history.json fit [--as-of 2026-10-15] [--window 24] [--exclude B44,B45] [--dry-run]
 ```
 `growth_history.json` is kept out of git (it can be rebuilt from the Reports folders).
 
@@ -3075,6 +3075,11 @@ with buttons — rendering the page writes nothing:
   single file. The expander shows which reports are used and why the others are not.
 - **Fit (preview)** shows the new curve in g/day against the base curve, with the
   3-month holdout. **Save as frozen version** keeps it. Saving does not touch biology.yaml.
+  **Leave these batches out of the fit** drops the chosen batches' tank-months (e.g. a
+  disease episode) from the curve and the holdout; the version records them and the
+  Models sheet names them. Command line: `fit --exclude B44,B45`. To change one
+  batch's growth in the forecast instead, set its `sgr_correction` on the Batches tab
+  (0.95 = 5% slower than its curve).
 - **Saved versions → Add to biology.yaml growth models** copies a version into
   `sgr_sw_by_model` (biology.yaml only; your other config files are not rewritten).
   Plans still don't change until a batch picks it.

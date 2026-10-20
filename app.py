@@ -2102,12 +2102,21 @@ def _growth_models_panel():
     window = f2.number_input("Window (months)", min_value=6, max_value=60,
                              value=gh.DEFAULT_WINDOW_MONTHS, step=1, key="gh_window",
                              help="24 = one full life cycle (agreed 2026-10-18).")
+    _gh_batches = sorted({i.batch for i in ivs},
+                         key=lambda b: (int("".join(c for c in b if c.isdigit()) or 0), b))
+    leave_out = st.multiselect(
+        "Leave these batches out of the fit", _gh_batches, key="gh_exclude",
+        help="Their tank-months are not used for the curve or the holdout (e.g. a "
+             "disease episode or a trial). The saved version lists them. To slow or "
+             "speed one batch in the forecast instead, use its sgr_correction on "
+             "the Batches tab.")
     if f3.button("Fit (preview)", key="gh_fit", disabled=not ivs):
         try:
             st.session_state["gh_preview"] = gh.fit_actual(
                 ivs, sizes=tables.sgr_size_g, base_sw=tables.sgr_sw_pct_day,
                 as_of=as_of, window_months=int(window),
-                sources=[s.source for s in chain if s.closing <= as_of.isoformat()])
+                sources=[s.source for s in chain if s.closing <= as_of.isoformat()],
+                exclude_batches=leave_out)
         except ValueError as e:
             st.error(str(e))
     prev = st.session_state.get("gh_preview")
@@ -2115,7 +2124,9 @@ def _growth_models_panel():
         st.markdown(f"Preview **{prev.name}** — {prev.n} tank-months "
                     f"({prev.n_provisional} provisional), window {prev.window_start} .. "
                     f"{prev.as_of}; AGR {prev.a:.3f} × w^{prev.b:.3f}, capped at "
-                    f"{prev.cap_g_day:.1f} g/day above {prev.breakpoint_g:,.0f} g")
+                    f"{prev.cap_g_day:.1f} g/day above {prev.breakpoint_g:,.0f} g"
+                    + (f"; left out: {', '.join(prev.excluded_batches)}"
+                       if prev.excluded_batches else ""))
         if prev.holdout:
             h = prev.holdout
             st.caption(f"Last {gh.HOLDOUT_MONTHS} months, fitted without them "
