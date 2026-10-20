@@ -5,9 +5,9 @@ each list. Last updated: **2026-10-20**.
 
 ## Live setup (what the app runs right now)
 
-- Branch `v2/capacity-and-transition`, code = `7c82b51` (growth models steps 1-4, harvest floor
+- Branch `v2/capacity-and-transition`, code = `ec49cc1` (growth models steps 1-4, harvest floor
   in kg HOG, RollingHarvestPlan sales weight ranges P-W + year totals, Daily Harvest Schedule
-  retired; 2026-10-19; **Models** sheet 2026-10-20). RollingHarvestPlan: whole forecast (`rolling_harvest_weeks: 0`), IDs from 978.
+  retired; 2026-10-19; **Models** sheet + leave batches out of the growth fit 2026-10-20). RollingHarvestPlan: whole forecast (`rolling_harvest_weeks: 0`), IDs from 978.
   Live limits now also carry the Q1 ramp (2027 max fish 38.5k W01-05 / 40k / 42k / 44k / 45k W18+,
   100 t floor W01-05); set saved as `scenario_sets\10.18 PR manual to W48 + Q1 ramp\`; operator manual
   entries to W48. 2027 = 6,454 t (week sum). Run name in `config/control.yaml`: "Sep Production Report Forecast" (stale label).
@@ -105,6 +105,16 @@ Scratch analysis: session c33340bb scratchpad `growth\` (measure.py, fit.py, cha
 
 ## Recent history
 
+- 2026-10-20 `0afb391`..`ec49cc1` leave chosen batches out of the actual growth fit (app Fit picker,
+  CLI `fit --exclude`, frozen version records them, Models sheet names them; CLI warns on an unknown
+  batch). Tag `v2-before-growth-exclude-2026-10-20`; gate 23/24, suite 2484 passed, 15 recent PRs
+  (8.13-10.18) old vs new identical but time stamps, live 10.18 plan identical.
+  Operator wants the Actual model from 2026 only: Fit as of 2026-10-18, window 9 months (starts at
+  the Dec-31-2025 closing; 190 tank-months, 13.7 g/d above 3 kg vs 13.9 live) - not yet saved.
+- 2026-10-20 steady-state study (scratch, clean slate, Actual growth, 310k to OG every 49 d =
+  44k fish/wk): 130 t HOG/wk needs ~3.7 kg harvest (min wt 3,500 g) and ~3,700 t mean standing,
+  peaks ~3,900 t, density breach 60-80 tank-wk/yr; at 3,400 g it settles ~124-129 t on ~3,500 t.
+  Scripts: session c33340bb scratchpad `ss130_tools\`.
 - 2026-10-20 `7c82b51` Models sheet (report only): growth models per batch (measured vs assumed,
   adjustment in words, not a bare 1), curves by size, FCR tables, other assumptions. Tag
   `v2-before-models-tab-2026-10-20`; gate 23/24, suite 2481 passed, live 10.18 plan identical.
