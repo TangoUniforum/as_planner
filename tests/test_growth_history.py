@@ -224,6 +224,27 @@ def test_left_out_batches_do_not_shape_the_fit(tmp_path):
     assert gh.GrowthHistory(tmp_path / "old.json").fits[0].excluded_batches == []
 
 
+def test_cli_fit_names_left_out_batches_and_warns_on_unknown(tmp_path, monkeypatch,
+                                                             capsys):
+    from types import SimpleNamespace
+    from tools import growth_history as cli
+    end = date(2026, 10, 15)
+    ivs = _synthetic(end)
+    monkeypatch.setattr(gh, "clean_intervals", lambda *a, **k: ivs)
+    monkeypatch.setattr(gh, "facility_tank_sets", lambda f: (set(), None))
+    store = SimpleNamespace(chain=lambda: ([_snap(end.isoformat(), [])], []))
+    tables = SimpleNamespace(sgr_size_g=SIZES, sgr_sw_pct_day=BASE)
+    assert cli.cmd_fit(store, None, tables, end.isoformat(), 24, "X", True,
+                       ["B1", "B999"]) == 0
+    out = capsys.readouterr().out
+    assert "left out: B1" in out
+    assert "WARNING: no tank-months for B999" in out and "B1," not in out.split("WARNING")[1]
+    # negative control: nothing left out -> neither line
+    cli.cmd_fit(store, None, tables, end.isoformat(), 24, "X", True)
+    out = capsys.readouterr().out
+    assert "left out" not in out and "WARNING" not in out
+
+
 # --------------------------------------------------------------------------- #
 # Frozen versions, the store, and the engine
 # --------------------------------------------------------------------------- #

@@ -110,6 +110,14 @@ def cmd_fit(store, facility, tables, as_of, window, name, dry_run, exclude=()):
           f"({fit.window_months} months)")
     print(f"  {fit.n} clean tank intervals ({fit.n_provisional} provisional), "
           f"{fit.n_below} below / {fit.n_above} above {fit.breakpoint_g:,.0f} g")
+    if fit.excluded_batches:
+        print(f"  left out: {', '.join(fit.excluded_batches)}")
+    unknown = sorted({str(x).strip() for x in exclude if str(x).strip()}
+                     - {i.batch for i in ivs})
+    if unknown:
+        print(f"  WARNING: no tank-months for {', '.join(unknown)} in the history - "
+              f"nothing was left out for {'it' if len(unknown) == 1 else 'them'} "
+              f"(check the batch name)")
     print(f"  AGR = {fit.a:.4f} x w^{fit.b:.3f} g/day, capped at {fit.cap_g_day:.1f} g/day")
     print(f"  {'size':>6} {'base %/d':>9} {'fit %/d':>8} {'base g/d':>9} {'fit g/d':>8}")
     for w in (500, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 4500, 5000):
