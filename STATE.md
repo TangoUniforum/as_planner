@@ -5,9 +5,9 @@ each list. Last updated: **2026-10-20**.
 
 ## Live setup (what the app runs right now)
 
-- Branch `v2/capacity-and-transition`, code = `ec49cc1` (growth models steps 1-4, harvest floor
+- Branch `v2/capacity-and-transition`, code = `e4d440b` (growth models steps 1-4, harvest floor
   in kg HOG, RollingHarvestPlan sales weight ranges P-W + year totals, Daily Harvest Schedule
-  retired; 2026-10-19; **Models** sheet + leave batches out of the growth fit 2026-10-20). RollingHarvestPlan: whole forecast (`rolling_harvest_weeks: 0`), IDs from 978.
+  retired; 2026-10-19; **Models** sheet + leave batches out of the growth fit + BatchInputs growth adjustment in words 2026-10-20). RollingHarvestPlan: whole forecast (`rolling_harvest_weeks: 0`), IDs from 978.
   Live limits now also carry the Q1 ramp (2027 max fish 38.5k W01-05 / 40k / 42k / 44k / 45k W18+,
   100 t floor W01-05); set saved as `scenario_sets\10.18 PR manual to W48 + Q1 ramp\`; operator manual
   entries to W48. 2027 = 6,454 t (week sum). Run name in `config/control.yaml`: "Sep Production Report Forecast" (stale label).
@@ -105,6 +105,11 @@ Scratch analysis: session c33340bb scratchpad `growth\` (measure.py, fit.py, cha
 
 ## Recent history
 
+- 2026-10-20 `cc5ad8b` app click test (leave out, Fit, Save, Add to biology.yaml on a copy of the app
+  tree). `e4d440b` BatchInputs column 'Growth adjustment (SW)' in words (was a bare sgr_correction 1);
+  the app's 'added to biology.yaml' confirmation now survives the rerun. Tag
+  `v2-before-sgr-words-2026-10-20`; gate 23/24 (no report changes), suite 2486 passed, live 10.18
+  plan identical.
 - 2026-10-20 `0afb391`..`ec49cc1` leave chosen batches out of the actual growth fit (app Fit picker,
   CLI `fit --exclude`, frozen version records them, Models sheet names them; CLI warns on an unknown
   batch). Tag `v2-before-growth-exclude-2026-10-20`; gate 23/24, suite 2484 passed, 15 recent PRs
