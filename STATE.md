@@ -5,8 +5,12 @@ each list. Last updated: **2026-10-19**.
 
 ## Live setup (what the app runs right now)
 
-- Branch `v2/capacity-and-transition`, code = `462ddd6` (growth models steps 1-4 + harvest floor
-  in kg HOG, 2026-10-19). Run name in `config/control.yaml`: "Sep Production Report Forecast" (stale label).
+- Branch `v2/capacity-and-transition`, code = `f370b4f` (growth models steps 1-4, harvest floor
+  in kg HOG, RollingHarvestPlan sales weight ranges P-W + year totals, Daily Harvest Schedule
+  retired; 2026-10-19). RollingHarvestPlan: whole forecast (`rolling_harvest_weeks: 0`), IDs from 978.
+  Live limits now also carry the Q1 ramp (2027 max fish 38.5k W01-05 / 40k / 42k / 44k / 45k W18+,
+  100 t floor W01-05); set saved as `scenario_sets\10.18 PR manual to W48 + Q1 ramp\`; operator manual
+  entries to W48. 2027 = 6,454 t (week sum). Run name in `config/control.yaml`: "Sep Production Report Forecast" (stale label).
 - Latest input: the **10.18.26 PR** (`Reports\2026\Oct\10.18.26 PR.xlsx`, mid-month, closing 2026-10-18).
 - Live config = scenario set **`..\_backups\scenario_sets\10.18 PR steady 100t Nov-Dec, 110t 2027, 3400g, Actual growth\`**
   ("steady", operator 2026-10-19: lower harvest now to grow size, then a 110 t HOG/wk floor).
@@ -36,8 +40,7 @@ each list. Last updated: **2026-10-19**.
 
 ## Waiting on the operator
 
-- Push: origin is still at `aa06014` (the "pushed" for steps 1 and 2 did not land) - steps 1-4 + HOG floor
-  (~20 commits) are local only:
+- Push: origin is still at `aa06014` (the "pushed" for steps 1 and 2 did not land) - (pushed to 194874a 2026-10-19; 3 newer commits local):
   `! git push origin v2/capacity-and-transition`.
 
 ## In progress: learning growth model (agreed plan 2026-10-18)
