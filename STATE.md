@@ -1,13 +1,13 @@
 # Where things stand
 
 Updated at the end of every working session (`/forecast-handoff`). Newest first in
-each list. Last updated: **2026-10-20**.
+each list. Last updated: **2026-10-21**.
 
 ## Live setup (what the app runs right now)
 
-- Branch `v2/capacity-and-transition`, code = `5945a57` (growth models steps 1-4, harvest floor
+- Branch `v2/capacity-and-transition`, code = `a5cdd88` (growth models steps 1-4, harvest floor
   in kg HOG, RollingHarvestPlan sales weight ranges P-W + year totals, Daily Harvest Schedule
-  retired; 2026-10-19; **Models** sheet + leave batches out of the growth fit + BatchInputs growth adjustment in words + set several batches at once 2026-10-20). RollingHarvestPlan: whole forecast (`rolling_harvest_weeks: 0`), IDs from 978.
+  retired; 2026-10-19; **Models** sheet + leave batches out of the growth fit + BatchInputs growth adjustment in words + set several batches at once + SGR check table 2026-10-20). RollingHarvestPlan: whole forecast (`rolling_harvest_weeks: 0`), IDs from 978.
   Live limits now also carry the Q1 ramp (2027 max fish 38.5k W01-05 / 40k / 42k / 44k / 45k W18+,
   100 t floor W01-05); set saved as `scenario_sets\10.18 PR manual to W48 + Q1 ramp\`; operator manual
   entries to W48. 2027 = 6,454 t (week sum). Run name in `config/control.yaml`: "Sep Production Report Forecast" (stale label).
@@ -105,6 +105,13 @@ Scratch analysis: session c33340bb scratchpad `growth\` (measure.py, fit.py, cha
 
 ## Recent history
 
+- 2026-10-21 `a5cdd88` **Growth checked against the data**: SGR %/day by fish size (500 g bands) -
+  measured, model, 100% curve (biology.yaml `sgr_sw_pct_day`), model and measured as % of 100% -
+  under the Fit preview, under each saved version (its window as the history reads now + tank-months
+  after its as-of, which fills in as PRs are added) and in the Models sheet. Report only. Tag
+  `v2-before-growth-check-2026-10-20`; gate 23/24, suite 2497 passed; live 10.18 plan identical.
+  2026 data: measured ~100-105% of the 100% curve below 1 kg, 88% at 1.5-2 kg, ~70% at 3.5-4 kg.
+  Operator ruling: the base curve numbers (Aquasim ASUS column; 4.5-5 kg rows x0.80) stay as they are.
 - 2026-10-20 `5945a57` Batches tab **Set several batches at once**: From/To batch, seawater growth
   model, SW offset (sgr_correction), FW offset (fw_correction), Apply then Save Batches. Tag
   `v2-before-batch-bulk-2026-10-20`; gate 23/24, suite 2490 passed, live 10.18 plan identical;
