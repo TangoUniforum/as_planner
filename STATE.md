@@ -5,9 +5,9 @@ each list. Last updated: **2026-10-20**.
 
 ## Live setup (what the app runs right now)
 
-- Branch `v2/capacity-and-transition`, code = `e4d440b` (growth models steps 1-4, harvest floor
+- Branch `v2/capacity-and-transition`, code = `5945a57` (growth models steps 1-4, harvest floor
   in kg HOG, RollingHarvestPlan sales weight ranges P-W + year totals, Daily Harvest Schedule
-  retired; 2026-10-19; **Models** sheet + leave batches out of the growth fit + BatchInputs growth adjustment in words 2026-10-20). RollingHarvestPlan: whole forecast (`rolling_harvest_weeks: 0`), IDs from 978.
+  retired; 2026-10-19; **Models** sheet + leave batches out of the growth fit + BatchInputs growth adjustment in words + set several batches at once 2026-10-20). RollingHarvestPlan: whole forecast (`rolling_harvest_weeks: 0`), IDs from 978.
   Live limits now also carry the Q1 ramp (2027 max fish 38.5k W01-05 / 40k / 42k / 44k / 45k W18+,
   100 t floor W01-05); set saved as `scenario_sets\10.18 PR manual to W48 + Q1 ramp\`; operator manual
   entries to W48. 2027 = 6,454 t (week sum). Run name in `config/control.yaml`: "Sep Production Report Forecast" (stale label).
@@ -105,6 +105,11 @@ Scratch analysis: session c33340bb scratchpad `growth\` (measure.py, fit.py, cha
 
 ## Recent history
 
+- 2026-10-20 `5945a57` Batches tab **Set several batches at once**: From/To batch, seawater growth
+  model, SW offset (sgr_correction), FW offset (fw_correction), Apply then Save Batches. Tag
+  `v2-before-batch-bulk-2026-10-20`; gate 23/24, suite 2490 passed, live 10.18 plan identical;
+  clicked end to end in Chrome on a copy. Operator's intended split: batches with fish (B43-B57) on
+  Actual 2026-10-18 (9-month 2026 fit), future (B58+) on Base curve x 0.86 - not done live yet.
 - 2026-10-20 `cc5ad8b` app click test (leave out, Fit, Save, Add to biology.yaml on a copy of the app
   tree). `e4d440b` BatchInputs column 'Growth adjustment (SW)' in words (was a bare sgr_correction 1);
   the app's 'added to biology.yaml' confirmation now survives the rerun. Tag
