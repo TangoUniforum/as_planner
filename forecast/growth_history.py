@@ -370,6 +370,71 @@ def fit_actual(intervals, *, sizes, base_sw, as_of, name=None,
 
 
 # --------------------------------------------------------------------------- #
+# Check against the data (operator 2026-10-20: "is there a table that shows the
+# result from the historical relative to the 100% model ... as % SGR/day")
+# --------------------------------------------------------------------------- #
+CHECK_BANDS_G = (0, 500, 1000, 1500, 2000, 2500, 3000, 3500, 4000)
+CHECK_COLUMNS = ["Fish size", "Tank-months", "Measured SGR (%/day)",
+                 "Model SGR (%/day)", "100% curve SGR (%/day)",
+                 "Model as % of 100%", "Measured as % of 100%"]
+
+
+def _excluded(fit) -> set:
+    return set(getattr(fit, "excluded_batches", None) or [])
+
+
+def fit_intervals(fit, intervals) -> list:
+    """The tank-months a saved fit was made from: its window, without the
+    batches it left out. The same rule as fit_actual."""
+    out = _excluded(fit)
+    return [i for i in intervals
+            if fit.window_start < i.d1 <= fit.as_of and i.batch not in out]
+
+
+def later_intervals(fit, intervals) -> list:
+    """Tank-months that ended AFTER the fit's as-of date: data the frozen fit
+    has never seen. This set grows as PRs are added, so the check of a saved
+    version keeps testing it. Batches it left out stay out."""
+    out = _excluded(fit)
+    return [i for i in intervals if i.d1 > fit.as_of and i.batch not in out]
+
+
+def _sgr_over(w0: float, days: int, sgr_fn) -> float:
+    """The SGR (%/day) a curve gives over `days` from `w0`: daily steps, the
+    same way the engine grows a tank."""
+    return 100.0 * math.log(_predict(w0, days, sgr_fn) / w0) / days
+
+
+def check_rows(model_sizes, model_sgr, intervals, sizes, base_sw,
+               bands=CHECK_BANDS_G) -> list[list]:
+    """One row per fish-size band (by each tank-month's mid weight), in
+    CHECK_COLUMNS order: tank-months; the measured SGR; the SGR the model and
+    the 100% curve (biology.yaml sgr_sw_pct_day) give over the same tank-months
+    from the same start weight; the model and the measurement as % of the 100%
+    curve. Medians weighted by days, as in the fit. Bands with no tank-months
+    are left out. Report only."""
+    from .biology import _interp
+    model_fn = lambda w: _interp(w, list(model_sizes), list(model_sgr))  # noqa: E731
+    base_fn = lambda w: _interp(w, list(sizes), list(base_sw))           # noqa: E731
+    edges = list(bands) + [math.inf]
+    rows = []
+    for lo, hi in zip(edges, edges[1:]):
+        b = [i for i in intervals
+             if lo <= i.wmid < hi and i.days > 0 and i.w0 > 0 and i.w1 > 0]
+        if not b:
+            continue
+        wts = [i.weight for i in b]
+        meas = _wmedian([100.0 * math.log(i.w1 / i.w0) / i.days for i in b], wts)
+        mod = _wmedian([_sgr_over(i.w0, i.days, model_fn) for i in b], wts)
+        base = _wmedian([_sgr_over(i.w0, i.days, base_fn) for i in b], wts)
+        label = f"{lo:,}-{hi:,} g" if hi != math.inf else f"{lo:,}+ g"
+        pct = (lambda v: round(100.0 * v / base)) if base > 0 else (lambda v: None)
+        rows.append([label, len(b), round(meas, 3), round(mod, 3), round(base, 3),
+                     pct(mod), pct(meas)])
+    return rows
+
+
+# --------------------------------------------------------------------------- #
 # The store
 # --------------------------------------------------------------------------- #
 class GrowthHistory:

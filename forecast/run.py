@@ -1843,7 +1843,8 @@ def main(
             control=control,
             history_path=(_gh_live() if _gh_target in ("", "LIVE")
                           else Path(_gh_target)),
-            hog_overrides=facility_hog_overrides, forecast_start=report_start)
+            hog_overrides=facility_hog_overrides, forecast_start=report_start,
+            facility=facility)
     except Exception as _m_err:  # noqa: BLE001 - a report must not sink a run
         print(f"  NOTE: Models sheet skipped ({type(_m_err).__name__}: "
               f"{_m_err}); the plan is unaffected.")

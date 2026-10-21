@@ -2016,6 +2016,51 @@ def _gh_curve_table(tables, versions):
     return pd.DataFrame(rows)
 
 
+def _gh_check_df(fit, intervals, tables):
+    """The check-against-the-data table (growth_history.check_rows) for a fit's
+    curve on the given tank-months."""
+    from forecast import growth_history as gh
+    return pd.DataFrame(
+        gh.check_rows(fit.sizes_g, fit.sgr_pct_day, intervals,
+                      tables.sgr_size_g, tables.sgr_sw_pct_day),
+        columns=gh.CHECK_COLUMNS)
+
+
+def _gh_check_saved(fit, ivs, tables, assumed=None):
+    """A saved measured version against the data: the tank-months in its window
+    as the history reads them now, and the ones that ended after its as-of
+    date -- data it never saw, which grows as PRs are added."""
+    from forecast import growth_history as gh
+    st.markdown(f"**Check '{fit.name}' against the data** — SGR by fish size. "
+                "100% curve = the original company table (biology.yaml "
+                "sgr_sw_pct_day).")
+    if assumed:
+        st.caption(f"'{assumed}' is ASSUMED (for fish still to come), so it cannot "
+                   f"be checked against data yet; this is the measured version it "
+                   f"was built from.")
+    own = gh.fit_intervals(fit, ivs)
+    note = (f"Its window ({fit.window_start} .. {fit.as_of}): {len(own)} tank-months "
+            f"as the history reads now")
+    if len(own) != fit.n:
+        note += (f" — it was fitted on {fit.n}; a later report has replaced or "
+                 f"added reports in that window since (a full monthly report "
+                 f"replaces its month's mid-month PRs)")
+    st.caption(note + ".")
+    if own:
+        st.dataframe(_gh_check_df(fit, own, tables), hide_index=True,
+                     width="stretch")
+    new = gh.later_intervals(fit, ivs)
+    if new:
+        st.caption(f"Tank-months ending after {fit.as_of} — data this version has "
+                   f"never seen ({len(new)}; more as you add PRs):")
+        st.dataframe(_gh_check_df(fit, new, tables), hide_index=True,
+                     width="stretch")
+    else:
+        st.caption(f"No tank-months ending after {fit.as_of} yet. This table fills "
+                   f"in as you add later PRs, so you can see whether the version "
+                   f"still holds.")
+
+
 def _growth_models_panel():
     """Configure -> Biology models: the growth history and the actual growth
     model learned from the Production Reports (forecast/growth_history.py).
@@ -2138,16 +2183,25 @@ def _growth_models_panel():
         st.dataframe(_gh_curve_table(tables, [(prev.name, prev.sizes_g,
                                                prev.sgr_pct_day)]),
                      hide_index=True, width="stretch")
+        st.markdown("**Check against the data** — SGR by fish size on the "
+                    f"{prev.n} tank-months this fit uses. 100% curve = the "
+                    "original company table (biology.yaml sgr_sw_pct_day).")
+        st.dataframe(_gh_check_df(prev, gh.fit_intervals(prev, ivs), tables),
+                     hide_index=True, width="stretch")
         if st.button(f"Save as frozen version '{prev.name}'", key="gh_save"):
             try:
                 store.add_fit(prev)
                 store.save()
                 st.session_state.pop("gh_preview", None)
-                st.success(f"Saved '{prev.name}'.")
+                # shown after the rerun: a message drawn before st.rerun() vanishes
+                st.session_state["gh_saved_msg"] = f"Saved '{prev.name}'."
                 st.rerun()
             except ValueError as e:
                 st.error(str(e))
 
+    _saved_fit_msg = st.session_state.pop("gh_saved_msg", None)
+    if _saved_fit_msg:
+        st.success(_saved_fit_msg)
     if not store.fits:
         return
     st.markdown("**Saved versions**")
@@ -2174,6 +2228,8 @@ def _growth_models_panel():
                    f"{fit.as_of}. {where}")
         shown = [(fit.name, fit.sizes_g, fit.sgr_pct_day)]
     st.dataframe(_gh_curve_table(tables, shown), hide_index=True, width="stretch")
+    _gh_check_saved(measured, ivs, tables,
+                    assumed=fit.name if isinstance(fit, gh.DerivedModel) else None)
     _adopt_msg = st.session_state.pop("gh_adopt_msg", None)
     if _adopt_msg:
         st.success(_adopt_msg)

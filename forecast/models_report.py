@@ -113,6 +113,54 @@ def growth_model_rows(batches, tables, history_path=None) -> list[list]:
     return rows
 
 
+def growth_check_rows(batches, tables, history_path=None, facility=None) -> list[list]:
+    """[Model, Data, *growth_history.CHECK_COLUMNS] for every MEASURED growth
+    model the run's batches use: SGR by fish size, measured vs the curve this
+    run used (biology.yaml) vs the 100% curve -- on the tank-months the model
+    was fitted on, and on the ones that ended after it (data it never saw).
+    Read from the growth history at run time, so it updates as PRs are added."""
+    from .biology import BASE_GROWTH_MODEL
+    from . import growth_history as gh
+    names = sorted({getattr(b, "growth_model", "") or "" for b in batches} - {"", BASE_GROWTH_MODEL})
+    pad = [None] * (len(gh.CHECK_COLUMNS) - 1)
+    recs = []
+    for name in names:
+        rec, err = _history_record(history_path, name)
+        if rec is not None and not hasattr(rec, "explain"):     # a GrowthFit
+            recs.append((name, rec))
+    if not recs:
+        return [["No measured growth model in this run", "", *pad, None]]
+    if facility is None:
+        return [["(not available: no facility given)", "", *pad, None]]
+    try:
+        ivs = gh.GrowthHistory(Path(history_path)).intervals(
+            *gh.facility_tank_sets(facility))
+    except Exception as e:  # noqa: BLE001 - a report must not sink a run
+        return [[f"(growth history unreadable: {type(e).__name__})", "", *pad, None]]
+    rows = []
+    for name, rec in recs:
+        curve = (getattr(tables, "sgr_sw_by_model", None) or {}).get(name)
+        sizes = tables.sgr_size_g
+        if curve is None:                                       # not in biology.yaml
+            curve, sizes = rec.sgr_pct_day, rec.sizes_g
+        own = gh.fit_intervals(rec, ivs)
+        win = f"Fitted window {rec.window_start} .. {rec.as_of}"
+        if len(own) != rec.n:
+            win += (f" (fitted on {rec.n} tank-months; {len(own)} as the history "
+                    f"reads now - a later report replaced some)")
+        for label, sub in (
+                (win, own),
+                (f"After {rec.as_of} (not used in the fit)",
+                 gh.later_intervals(rec, ivs))):
+            body = gh.check_rows(sizes, curve, sub, tables.sgr_size_g,
+                                 tables.sgr_sw_pct_day)
+            if not body:
+                rows.append([name, label, "no tank-months yet", *pad[1:], None])
+            for r in body:
+                rows.append([name, label, *r])
+    return rows
+
+
 def growth_curve_rows(batches, tables) -> tuple[list, list[list]]:
     """(header, rows): seawater SGR %/day and g/day by fish size for every
     model in use, plus the base curve for comparison."""
@@ -211,7 +259,7 @@ def other_rows(batches, tables, control, hog_overrides=None,
 
 
 def write_models_sheet(wb, *, batches, tables, control, history_path=None,
-                       hog_overrides=None, forecast_start=None,
+                       hog_overrides=None, forecast_start=None, facility=None,
                        sheet_name: str = SHEET_NAME) -> None:
     """Append the Models sheet (replacing a stale one)."""
     from openpyxl.styles import Alignment, Font
@@ -248,6 +296,12 @@ def write_models_sheet(wb, *, batches, tables, control, history_path=None,
     section("SEAWATER GROWTH BY FISH SIZE - the curves above",
             gh, gr, {c: ("0.000" if c % 2 == 0 else "0.0") for c in range(2, len(gh) + 1)}
             | {1: "#,##0"})
+    from .growth_history import CHECK_COLUMNS
+    section("SEAWATER GROWTH CHECKED AGAINST THE DATA - SGR %/day by fish size "
+            "(100% curve = biology.yaml sgr_sw_pct_day, the original table)",
+            ["Model", "Data", *CHECK_COLUMNS],
+            growth_check_rows(batches, tables, history_path, facility),
+            {5: "0.000", 6: "0.000", 7: "0.000", 8: '0"%"', 9: '0"%"'})
     fh, fr = fcr_rows(batches, tables)
     section("FEED CONVERSION (FCR) MODELS - kg feed per kg growth, by fish size",
             fh, fr, {c: "0.00" for c in range(4, len(fh) + 1)})

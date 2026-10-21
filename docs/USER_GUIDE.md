@@ -3080,6 +3080,19 @@ with buttons — rendering the page writes nothing:
   Models sheet names them. Command line: `fit --exclude B44,B45`. To change one
   batch's growth in the forecast instead, set its `sgr_correction` on the Batches tab
   (0.95 = 5% slower than its curve).
+- **Check against the data** (2026-10-20) — under the fit preview, under each saved
+  version, and in the workbook's **Models** sheet: SGR %/day by fish-size band
+  (500 g steps), with the number of tank-months, the **measured** SGR, the SGR the
+  **model** gives and the SGR the **100% curve** (`sgr_sw_pct_day`, the original
+  company table) gives over the same tank-months from the same start weight, and the
+  model and the measurement as **% of the 100% curve** (the measured column is the
+  old-style SGR correction, by size). Model and 100% use the engine's own daily
+  growth; batch offsets and per-week factors are not applied. For a saved version it
+  shows two tables: its window as the history reads now (if a later report replaced
+  some, it says "fitted on N; M as the history reads now"), and the tank-months
+  ending **after** its as-of date — data it never saw, which grows as you add PRs. The
+  Models sheet does the same for every measured model the run uses, from the curve
+  in biology.yaml. Bands with very few tank-months (under 500 g, over 4 kg) are thin.
 - **Saved versions → Add to biology.yaml growth models** copies a version into
   `sgr_sw_by_model` (biology.yaml only; your other config files are not rewritten).
   Plans still don't change until a batch picks it.
