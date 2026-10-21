@@ -2345,6 +2345,97 @@ def _edit_facility():
         st.rerun()
 
 
+_BULK_KEEP = "(leave as is)"
+
+
+def _batch_growth_bulk(edited, gm_names):
+    """Set growth for a run of batches in one go: the seawater growth model,
+    the SW offset (sgr_correction) and the FW offset (fw_correction). It edits
+    the TABLE only; Save Batches writes the file. Operator 2026-10-20: one
+    dropdown per batch (~40 batches) was not a usable step."""
+    from forecast import growth_history as _gh
+    from forecast.biology import BASE_GROWTH_MODEL
+    from forecast.config_io import load_control
+    from forecast.models_report import adjustment_text
+    ids = sorted_batches({b for b in edited.get("batch_id", [])
+                          if isinstance(b, str) and b.strip()})
+    if not ids:
+        return
+    st.markdown("**Set several batches at once** — fills in the table above; "
+                "nothing is saved until you click Save Batches.")
+    models = [_BULK_KEEP, BASE_GROWTH_MODEL] + list(gm_names)
+    ss = st.session_state
+    if ss.get("bulk_from") not in ids:
+        ss["bulk_from"] = ids[0]
+    if ss.get("bulk_to") not in ids:
+        ss["bulk_to"] = ids[-1]
+    if ss.get("bulk_model") not in models:
+        ss["bulk_model"] = _BULK_KEEP
+    _resend_widget("bulk_from", options=ids)
+    _resend_widget("bulk_to", options=ids)
+    _resend_widget("bulk_model", options=models)
+    c1, c2, c3 = st.columns([1, 1, 2])
+    frm = c1.selectbox("From batch", ids, key="bulk_from")
+    to = c2.selectbox("To batch", ids, key="bulk_to")
+    model = c3.selectbox("Seawater growth model", models, key="bulk_model",
+                         help="Base curve = the original curve (sgr_sw_pct_day). "
+                              "(leave as is) keeps each batch's own choice.")
+    s1, s2 = st.columns(2)
+    sw_on = s1.checkbox("Change the SW offset (sgr_correction)", value=False,
+                        key="bulk_sw_on")
+    sw = s1.number_input("SW offset", min_value=0.5, max_value=1.5, value=1.0,
+                         step=0.01, format="%.3f", key="bulk_sw",
+                         disabled=not sw_on,
+                         help="Multiplies the seawater growth curve. 1 = none.")
+    s1.caption(adjustment_text([sw], "seawater curve") if sw_on
+               else "Each batch keeps its own SW offset.")
+    fw_on = s2.checkbox("Change the FW offset (fw_correction)", value=False,
+                        key="bulk_fw_on")
+    fw = s2.number_input("FW offset", min_value=0.5, max_value=1.5, value=1.0,
+                         step=0.01, format="%.3f", key="bulk_fw",
+                         disabled=not fw_on,
+                         help="Multiplies the freshwater growth curve. 1 = none.")
+    try:
+        _auto_fw = bool(getattr(load_control(CONFIG_DIR), "auto_calibrate_fw", False))
+    except Exception:  # noqa: BLE001 - only a hint
+        _auto_fw = False
+    s2.caption((adjustment_text([fw], "freshwater curve") if fw_on
+                else "Each batch keeps its own FW offset.")
+               + (" Note: auto_calibrate_fw is ON, so each run rewrites the FW "
+                  "offset to land the batch on its transfer weight "
+                  "(tran_og_avg_wt_g) - what you set here is only the start."
+                  if _auto_fw else ""))
+    if st.button("Apply to the table", key="bulk_apply"):
+        if model == _BULK_KEEP and not sw_on and not fw_on:
+            st.warning("Nothing to change: pick a growth model or tick an offset.")
+        else:
+            try:
+                rows, changed = _gh.set_batch_growth(
+                    edited.to_dict("records"), frm, to,
+                    model=None if model == _BULK_KEEP else model,
+                    sw_adjustment=sw if sw_on else None,
+                    fw_adjustment=fw if fw_on else None)
+            except ValueError as e:
+                st.error(str(e))
+            else:
+                new = pd.DataFrame(rows, columns=list(edited.columns))
+                new["growth_model"] = new["growth_model"].fillna("")
+                _reset_keys("batch_df")
+                ss["batch_df"] = new
+                what = [f"growth model {model}"] if model != _BULK_KEEP else []
+                if sw_on:
+                    what.append(f"SW offset {sw:g}")
+                if fw_on:
+                    what.append(f"FW offset {fw:g}")
+                ss["bulk_msg"] = (f"{len(changed)} batches ({frm} to {to}): "
+                                  f"{', '.join(what)}. Not saved yet - click "
+                                  f"Save Batches.")
+                st.rerun()
+    _bulk_msg = ss.pop("bulk_msg", None)
+    if _bulk_msg:
+        st.info(_bulk_msg)
+
+
 def _edit_batches():
     from forecast.config_io import load_control
     from forecast.scenario_io import (
@@ -2388,7 +2479,11 @@ def _edit_batches():
                  for b in _shown]), hide_index=True, width="stretch")
     except Exception:  # noqa: BLE001 - a half-typed row must not break the tab
         pass
+    _batch_growth_bulk(edited, _gm_names)
     b1, b2, _ = st.columns([1, 1, 3])
+    _saved_msg = st.session_state.pop("batch_saved_msg", None)
+    if _saved_msg:
+        st.success(_saved_msg)
     if b1.button("💾 Save Batches", key="save_batch"):
         try:
             batches2 = batches_from_list(
@@ -2401,7 +2496,8 @@ def _edit_batches():
             dump_scenario(SCENARIO_DIR, batches=batches2,
                           facility_limits=fl, system_limits=sl)
             _reset_keys("batch_df")
-            st.success("Saved scenario/batches.yaml")
+            # shown after the rerun: a message drawn before st.rerun() vanishes
+            st.session_state["batch_saved_msg"] = "Saved scenario/batches.yaml"
             st.rerun()
         except Exception as e:  # noqa: BLE001
             st.error(f"Save failed: {e}")

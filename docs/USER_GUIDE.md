@@ -3090,6 +3090,16 @@ with buttons — rendering the page writes nothing:
 biology.yaml (blank = Base curve), and **What each batch grows on** spells it out per
 batch, e.g. `Actual 2026-10-15 x 0.95 (sgr_correction)`.
 
+**Set several batches at once** (under the table, 2026-10-20): pick **From batch** and
+**To batch** (batch number order, both included), a **Seawater growth model** (or
+"(leave as is)"; Base curve = blank), and tick **SW offset** (`sgr_correction`) and/or
+**FW offset** (`fw_correction`) to change them; each offset is shown in words. **Apply
+to the table** fills in the table only — **Save Batches** writes `batches.yaml`. Apply
+twice to split, e.g. batches with fish on the measured model, future batches on the
+Base curve with an offset. With `auto_calibrate_fw` on, every run rewrites the FW
+offset to land each batch on its `tran_og_avg_wt_g`, so a FW offset set here is only
+the starting point.
+
 ### 13.2 Expected improvement (ASSUMED) and each batch's own history (2026-10-19)
 
 The history measures how fish **have** grown. Two helpers sit under **Saved versions**

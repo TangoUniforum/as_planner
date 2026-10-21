@@ -678,6 +678,41 @@ def describe_batch_growth(batch, tables) -> str:
     return s
 
 
+def set_batch_growth(rows, first, last, *, model=None, sw_adjustment=None,
+                     fw_adjustment=None):
+    """Set growth for every batch from `first` to `last` (batch number order,
+    both ends included) in batches.yaml-shaped rows: the seawater growth model
+    (BASE_GROWTH_MODEL = blank), sgr_correction (SW) and fw_correction (FW).
+    None leaves that field as it is. Returns (new rows, batch ids changed); the
+    input rows are not modified. One click for what was a dropdown per batch
+    (operator 2026-10-20: in-flight batches on the measured model, future ones
+    on the base curve with an offset)."""
+    from .batch_order import batch_sort_key
+    from .biology import BASE_GROWTH_MODEL
+    lo, hi = batch_sort_key(first), batch_sort_key(last)
+    if lo > hi:
+        raise ValueError(f"'{first}' comes after '{last}' - pick the first batch "
+                         f"first")
+    for what, v in (("SW adjustment", sw_adjustment),
+                    ("FW adjustment", fw_adjustment)):
+        if v is not None and not float(v) > 0:
+            raise ValueError(f"{what} must be above 0 (1 = none), not {v}")
+    out, changed = [], []
+    for r in rows:
+        r = dict(r)
+        bid = r.get("batch_id")
+        if bid not in (None, "") and lo <= batch_sort_key(bid) <= hi:
+            if model is not None:
+                r["growth_model"] = "" if model == BASE_GROWTH_MODEL else model
+            if sw_adjustment is not None:
+                r["sgr_correction"] = float(sw_adjustment)
+            if fw_adjustment is not None:
+                r["fw_correction"] = float(fw_adjustment)
+            changed.append(bid)
+        out.append(r)
+    return out, changed
+
+
 def add_growth_model_to_biology(config_dir, name: str, values) -> str:
     """Put a frozen version into biology.yaml sgr_sw_by_model (biology.yaml
     only). Plans do not change until a batch picks it. Returns 'added' or
