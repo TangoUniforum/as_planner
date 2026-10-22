@@ -28,6 +28,21 @@ commit; worktree was in session c33340bb's scratchpad `wt_rhp_source` - if that 
 
 ## Live setup (what the app runs right now)
 
+- **Since 2026-10-22 (newest; supersedes the 10-21 set below):** set
+  `..\_backups\scenario_sets\10.18 PR taper W44-45, 105-110t to Feb, Mar 120t\` = the 10-21 set +
+  (1) taper: manual events 2026-10-18 changed - W43 43->63 36,500 (was 21,000), W44 harvest 61
+  45,000 (36,000), W44 52->65 30,500 (15,000), W45 53->67 29,500 (14,000), W46 36->69 32,000 (13,500),
+  W47 graded pickup 66->65 24,000 (5,000); limits W44 max fish 45,500 (42,500);
+  (2) Q1 band: max_harvest_per_week rows 2026-W51..2027-W13 lowered to 35,900-40,900 (W02 38,800 =
+  300 over the Q1 ramp, operator OK). Result: W43/44/45 = 314k/300k/275k lb HOG, W46..2027-W09 all
+  105.1-109.9 t, March 2027 120-122 t, Apr-May 2027 137-165 t/wk; 2026 1,608 / 2027 6,471 / 2028 2,823 t;
+  HOG floor 76/79; ceilings 4 (2026-W49 +1,021, 2027-W26, W38, 2028-W14); facility biomass never over.
+  **105-110 t to end of March does NOT fit**: every version broke the 3,800 t facility biomass in
+  2027-W12..W15 (peak up to 3,932 t) - operator chose band to end Feb, March ~120 t.
+  Backups: `_backups\2026-10-22_before_taper_W44_W45\` (10-21 live), `_backups\2026-10-22_before_q1_band\`
+  (taper only = set `10.18 PR taper W44 300k W45 275k, 105t floor`). Scratch: session 327f3cff `tune\`
+  (runcand.py, band_solve.py, measure.py). Operator to run it in the app for the workbook.
+
 - **Since 2026-10-21 (newest; supersedes the description below):** set
   `..\_backups\scenario_sets\10.18 PR all 10-18 growth, 105t floor, Q4 1575\` - all batches on
   Actual 2026-10-18, 105 t HOG floor (control + limits rows 2026-W46..2027-W05), W51-53 max fish
