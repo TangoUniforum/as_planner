@@ -42,6 +42,8 @@ commit; worktree was in session c33340bb's scratchpad `wt_rhp_source` - if that 
   Backups: `_backups\2026-10-22_before_taper_W44_W45\` (10-21 live), `_backups\2026-10-22_before_q1_band\`
   (taper only = set `10.18 PR taper W44 300k W45 275k, 105t floor`). Scratch: session 327f3cff `tune\`
   (runcand.py, band_solve.py, measure.py). Operator to run it in the app for the workbook.
+  Run name = set name (control.yaml, live + saved set). Suggested workbook name:
+  `10.18.26_PR_planned_taper W44-45 105-110t to Feb Mar 120t.xlsm` (app names it <PR>_planned; rename on save).
 
 - **Since 2026-10-21 (newest; supersedes the description below):** set
   `..\_backups\scenario_sets\10.18 PR all 10-18 growth, 105t floor, Q4 1575\` - all batches on
@@ -57,7 +59,7 @@ commit; worktree was in session c33340bb's scratchpad `wt_rhp_source` - if that 
   retired; 2026-10-19; **Models** sheet + leave batches out of the growth fit + BatchInputs growth adjustment in words + set several batches at once + SGR check table 2026-10-20). RollingHarvestPlan: whole forecast (`rolling_harvest_weeks: 0`), IDs from 978.
   Live limits now also carry the Q1 ramp (2027 max fish 38.5k W01-05 / 40k / 42k / 44k / 45k W18+,
   100 t floor W01-05); set saved as `scenario_sets\10.18 PR manual to W48 + Q1 ramp\`; operator manual
-  entries to W48. 2027 = 6,454 t (week sum). Run name in `config/control.yaml`: "Sep Production Report Forecast" (stale label).
+  entries to W48. 2027 = 6,454 t (week sum). Run name (`scenario_name`) set 2026-10-22 to "10.18 PR taper W44-45, 105-110t to Feb, Mar 120t".
 - Latest input: the **10.18.26 PR** (`Reports\2026\Oct\10.18.26 PR.xlsx`, mid-month, closing 2026-10-18).
 - Live config = scenario set **`..\_backups\scenario_sets\10.18 PR steady 100t Nov-Dec, 110t 2027, 3400g, Actual growth\`**
   ("steady", operator 2026-10-19: lower harvest now to grow size, then a 110 t HOG/wk floor).
