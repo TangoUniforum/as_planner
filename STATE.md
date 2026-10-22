@@ -1,9 +1,41 @@
 # Where things stand
 
 Updated at the end of every working session (`/forecast-handoff`). Newest first in
-each list. Last updated: **2026-10-21**.
+each list. Last updated: **2026-10-22**.
+
+## ▶ PICK UP HERE (2026-10-22): merge the RollingHarvestPlan Source Tank change
+
+Built, tested, gated, NOT merged. Branch **`v2/rhp-source`** (one commit on top of the STATE
+commit; worktree was in session c33340bb's scratchpad `wt_rhp_source` - if that folder is gone,
+`git worktree prune`; the branch itself is safe in git). Report only - plan sheets identical.
+- What: Source Tank on the week's first day row now (a) marks sorted moves `66(13% graded)`
+  (graded-harvest pickups and sorter grades; density splits are not graded), (b) fills 6N tanks
+  filled BEFORE the forecast from the PR's per-unit "Transfer in/out count in period" (exact
+  count pairs first, the rest pro rata; fish already in the tank on the 1st have no source),
+  (c) weights shares by fish harvested that week. App Harvest tab reads the same (app == sheet, 85 weeks).
+- Live 10.18 before/after (only these cells change): W43 blank -> `34(61%)/41(20%)/33(19%)`;
+  W44 blank -> `41(52%)/33(48%)`; W45 `43` -> `43(57%)/41(22%)/33(21%)`; W49 `66(13% graded)`;
+  2028-W10 `51(2% graded)`; 2028-W18 `33(20% graded)`.
+  Saved in `..\_backups\2026-10-22_rhp_source_review\before_after.txt` (+ rhp_cmp.py, run_wt.py).
+- Checks: 6 new tests (all fail on old code), full suite 2503 passed / 111 skipped; gate 23/24
+  plan-identical, no report changes; USER_GUIDE updated.
+- Shown to the operator; waiting for their **yes**. Then: app closed (`netstat -ano | findstr :8501`)
+  -> `git tag v2-before-rhp-source-2026-10-22 HEAD` -> back up forecast/production_report.py,
+  rolling_harvest.py, excel_io.py, run.py, tests/test_rolling_harvest.py, docs/USER_GUIDE.md to
+  `..\_backups\2026-10-22_before_rhp_source\` -> `git merge --ff-only v2/rhp-source` (never touch
+  the uncommitted live config) -> re-run live 10.18 in scratch, compare with rhp_cmp.py -> STATE +
+  memory -> operator pushes.
 
 ## Live setup (what the app runs right now)
+
+- **Since 2026-10-21 (newest; supersedes the description below):** set
+  `..\_backups\scenario_sets\10.18 PR all 10-18 growth, 105t floor, Q4 1575\` - all batches on
+  Actual 2026-10-18, 105 t HOG floor (control + limits rows 2026-W46..2027-W05), W51-53 max fish
+  +7% (41,999 / 42,142 / 38,760), manual W46 36->69 13,500, W48 32->61 39,000. Q4 2026 1,575 t,
+  2027 6,540 t, 79/79 floor weeks. Operator ran it in the app (matched). Operator's workbook:
+  `Downloads\10.18.26_PR_planned_10-18 growth 105-110t Q4 1575t.xlsm` (to move to `2026\Oct\`).
+  1,600 t studied and NOT recommended (+20% W51-53: 7 ceiling breaches, ~70 t HOG-equiv worse overall).
+  Code = `d57c40c` (+ this STATE commit), pushed.
 
 - Branch `v2/capacity-and-transition`, code = `a5cdd88` (growth models steps 1-4, harvest floor
   in kg HOG, RollingHarvestPlan sales weight ranges P-W + year totals, Daily Harvest Schedule
@@ -40,8 +72,10 @@ each list. Last updated: **2026-10-21**.
 
 ## Waiting on the operator
 
-- Push: origin is still at `aa06014` (the "pushed" for steps 1 and 2 did not land) - (pushed to 194874a 2026-10-19; 3 newer commits local):
-  `! git push origin v2/capacity-and-transition`.
+- Yes/no on merging `v2/rhp-source` (see PICK UP HERE).
+- Push after any commit: `! git push origin v2/capacity-and-transition` (origin at d57c40c 2026-10-21).
+- Optional, offered: 10 harvests sit 3 weeks in 6N (make_room fills; planner rule change);
+  586-fish graded harvest 2028-W10; W46/W47 manual weeks over the Nov fish limits by 611/1,342.
 
 ## In progress: learning growth model (agreed plan 2026-10-18)
 
