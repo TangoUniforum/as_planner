@@ -28,7 +28,15 @@ commit; worktree was in session c33340bb's scratchpad `wt_rhp_source` - if that 
 
 ## Live setup (what the app runs right now)
 
-- **Since 2026-10-22 late (newest):** set `..\_backups\scenario_sets\10.18 PR taper W44-45, 105-110t to W07, then limits\`
+- **Since 2026-10-22 night (newest):** set `..\_backups\scenario_sets\10.18 PR taper W44-45, 105-110t to W07, then limits, Dec +5.8k\`
+  (run name the same) = P7 below + max_harvest_per_week 2026-W50..W53 +2,500 each (42,334 / 43,438 / 41,123 / 41,260).
+  Operator asked for ~10k more fish in 2026 (5k Nov + 5k Dec). Measured: Nov cannot take net fish (a bigger 6N fill
+  only shifts fish to/from the next Nov week; the chain has no spare); Dec rows deliver +5,784 fish. 2026 1,620 /
+  2027 6,444 / 2028 2,736 t; W52 114 t, W53 118 t (over the 110 band); floor misses 2027-W06 104 t, 2028-W02 102 t.
+  Full +10k needs the W47 graded pickup 24k->34k (W49 292k lb, 2027-W22 71 t) - not chosen. Live run in scratch
+  (`tune\live_dec`) == approved candidate F10B on all 26 sheets. Backup of P7 live: `_backups\2026-10-22_before_dec_plus5k\`.
+  Rollback tag NOT made (blocked by permission check) - operator may run `git tag v2-before-dec-plus5k-2026-10-22 HEAD`.
+- **Earlier 2026-10-22 late (superseded by the line above):** set `..\_backups\scenario_sets\10.18 PR taper W44-45, 105-110t to W07, then limits\`
   (run name the same) = the M2 set below with max_harvest_per_week 2027-W08..W13 back to the operator ramp
   (40,000 / 40,000 / 42,000 x4): 105-110 t until standing reaches the 3,800 t limit (2027-W07), then the pipeline
   holds the limit (operator rule). Standing peak 3,819 t (W09; 2 weeks > 3,800, inside the +-1% band) vs M2 3,861 t /
