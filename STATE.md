@@ -26,6 +26,12 @@ commit; worktree was in session c33340bb's scratchpad `wt_rhp_source` - if that 
   the uncommitted live config) -> re-run live 10.18 in scratch, compare with rhp_cmp.py -> STATE +
   memory -> operator pushes.
 
+## Code merged 2026-10-22 night
+- 1b19cbe: workbook download named `<PR stem>_planned_<run name>.xlsm` (blank run name = old name; illegal
+  file-name chars -> '-'). Download name only; plan identical (live Dec +5.8k run via the app function == sandbox
+  on all plan/report sheets). Suite 2502 passed / 111 skipped. Tag `v2-before-runname-file-2026-10-22`, backup
+  `_backups\2026-10-22_before_runname_file\app.py`.
+
 ## Live setup (what the app runs right now)
 
 - **Since 2026-10-22 night (newest):** set `..\_backups\scenario_sets\10.18 PR taper W44-45 105-110t to W07 then limits Dec +5.8k\`
