@@ -11768,6 +11768,24 @@ class _TeeIO(io.StringIO):
         return n
 
 
+def _download_name(saved_name: str, scenario_name) -> str:
+    """The workbook's download name: `<PR stem>_planned_<run name>.<ext>`.
+
+    Operator, 2026-10-22: save the workbook under the run name so the file and
+    the scenario match. Only the download name changes — the temp file the run
+    wrote keeps its own name. A blank run name keeps the old
+    `<PR stem>_planned.<ext>`. Characters Windows refuses in a file name are
+    replaced with '-', so a name like "Q1: 110t" still saves.
+    """
+    import re as _re
+    name = _re.sub(r'[\\/:*?"<>|\x00-\x1f]', "-",
+                   str(scenario_name or "")).strip(" .")
+    if not name:
+        return saved_name
+    p = Path(saved_name)
+    return f"{p.stem}_{name}{p.suffix}"
+
+
 def _run_with_workbook_bytes(
     input_bytes: bytes,
     input_name: str,
@@ -11880,7 +11898,8 @@ def _run_with_workbook_bytes(
         "elapsed": elapsed,
         "stdout": captured.getvalue(),
         "output_bytes": output_bytes,
-        "output_name": out_path.name,
+        "output_name": _download_name(out_path.name,
+                                      config_used.get("scenario_name")),
         "output_path": str(out_path),
         "config_used": config_used,
         # Identity of this run, so the results view can memoize its derived
