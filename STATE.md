@@ -26,7 +26,7 @@ patches + last suite log). Plan sheets unchanged; adds warnings/refusals/app dis
 - Shown to the operator; waiting for their **yes** (+ optional "set 3200" = `min_week_avg_harvest_wt_g:
   3200` in live control.yaml). Then: app closed -> `git tag v2-before-guards-2026-10-23 HEAD` ->
   back up app.py, forecast/{run,excel_io,caps,scenario_io,manual_events,manual_window,manual_preview,
-  models}.py, tests/test_units.py to `..\_backups6-10-23_before_guards\` -> `git merge --ff-only
+  models}.py, tests/test_units.py to `..\_backups6-10-23_before_guards\` -> `git rebase` v2/guards onto HEAD (main moved by STATE commits only) -> `git merge --ff-only
   v2/guards` -> re-run live in scratch -> USER_GUIDE (new knob, ValidationLog categories, banner,
   refusals) + STATE + memory -> operator pushes.
 - Deferred: Group D (engine number changes) from the same review, one at a time with before/after.
