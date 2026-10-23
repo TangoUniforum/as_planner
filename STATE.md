@@ -1,9 +1,37 @@
 # Where things stand
 
 Updated at the end of every working session (`/forecast-handoff`). Newest first in
-each list. Last updated: **2026-10-22**.
+each list. Last updated: **2026-10-23**.
 
-## ▶ PICK UP HERE (2026-10-22): merge the RollingHarvestPlan Source Tank change
+## ▶ PICK UP HERE (2026-10-23): merge the review guards (A+B+C) - paused for a PC restart
+
+Built, tested, gated, NOT merged. Branch **`v2/guards`** (3 commits on 5d770eb: c313014, b2b5fe4,
+85ca2c9). Worktree was `wt_guards` in session 327f3cff's scratchpad (if gone: `git worktree prune`;
+the branch is safe in git). Extra copy: `..\_backups6-10-23_guards_branch_paused\` (bundle +
+patches + last suite log). Plan sheets unchanged; adds warnings/refusals/app display only.
+- A (warnings): Control `min_week_avg_harvest_wt_g` (report-only weekly avg-weight check, off by
+  default); ValidationLog "LIMITS ROW" notes (bad week labels, duplicates, cap <= 0, tonnes/kg typos);
+  HOG FLOOR lines filed under "HOG floor" (were "Hydration"); coverage notes for weight/HOG rows;
+  manual-move notes for <2-week purge and over-cap density.
+- B (refusals / fixes): og_transfer into 6N refused; fw_to_og only into entry tanks (also empty);
+  graded_harvest retention not in 6N / must pass move rules; in-week pickup must be empty;
+  B11 purge-hold not restored on tanks refilled in the window; B12 6N release week index.
+- C (app): results-page error/warning box (severe density only), ERROR first in Advisory,
+  PR month-to-date in monthly chart, "Total harvest (gross)" labels, graded-harvest dest filter.
+- Checks: 20 new tests (17 fail on old code); full suite 2521 passed / 1 failed -> that test's
+  fixture fixed in 85ca2c9 (51 targeted tests pass). A final full rerun on 85ca2c9 was STARTED and
+  STOPPED for the restart - rerun it first (~26 min). Gate 22/24 plan-identical; 2025-07-31 fails
+  both arms (known); 2026-07-31 differs only by B11 (same fish, 2026 3,070 -> 3,062 t). Live 10.18
+  plan identical on all 26 sheets; banner shows 2027-W13 below fish + HOG floors.
+- Shown to the operator; waiting for their **yes** (+ optional "set 3200" = `min_week_avg_harvest_wt_g:
+  3200` in live control.yaml). Then: app closed -> `git tag v2-before-guards-2026-10-23 HEAD` ->
+  back up app.py, forecast/{run,excel_io,caps,scenario_io,manual_events,manual_window,manual_preview,
+  models}.py, tests/test_units.py to `..\_backups6-10-23_before_guards\` -> `git merge --ff-only
+  v2/guards` -> re-run live in scratch -> USER_GUIDE (new knob, ValidationLog categories, banner,
+  refusals) + STATE + memory -> operator pushes.
+- Deferred: Group D (engine number changes) from the same review, one at a time with before/after.
+
+## ▶ ALSO WAITING (2026-10-22): merge the RollingHarvestPlan Source Tank change
 
 Built, tested, gated, NOT merged. Branch **`v2/rhp-source`** (one commit on top of the STATE
 commit; worktree was in session c33340bb's scratchpad `wt_rhp_source` - if that folder is gone,
@@ -124,7 +152,7 @@ commit; worktree was in session c33340bb's scratchpad `wt_rhp_source` - if that 
 
 ## Waiting on the operator
 
-- Yes/no on merging `v2/rhp-source` (see PICK UP HERE).
+- Yes/no on merging `v2/guards` (see PICK UP HERE) and `v2/rhp-source` (ALSO WAITING).
 - Push after any commit: `! git push origin v2/capacity-and-transition` (origin at d57c40c 2026-10-21).
 - Optional, offered: 10 harvests sit 3 weeks in 6N (make_room fills; planner rule change);
   586-fish graded harvest 2028-W10; W46/W47 manual weeks over the Nov fish limits by 611/1,342.
