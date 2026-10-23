@@ -28,8 +28,8 @@ commit; worktree was in session c33340bb's scratchpad `wt_rhp_source` - if that 
 
 ## Live setup (what the app runs right now)
 
-- **Since 2026-10-22 night (newest):** set `..\_backups\scenario_sets\10.18 PR taper W44-45, 105-110t to W07, then limits, Dec +5.8k\`
-  (run name the same) = P7 below + max_harvest_per_week 2026-W50..W53 +2,500 each (42,334 / 43,438 / 41,123 / 41,260).
+- **Since 2026-10-22 night (newest):** set `..\_backups\scenario_sets\10.18 PR taper W44-45 105-110t to W07 then limits Dec +5.8k\`
+  (run name the same; no commas so it doubles as the workbook name) = P7 below + max_harvest_per_week 2026-W50..W53 +2,500 each (42,334 / 43,438 / 41,123 / 41,260).
   Operator asked for ~10k more fish in 2026 (5k Nov + 5k Dec). Measured: Nov cannot take net fish (a bigger 6N fill
   only shifts fish to/from the next Nov week; the chain has no spare); Dec rows deliver +5,784 fish. 2026 1,620 /
   2027 6,444 / 2028 2,736 t; W52 114 t, W53 118 t (over the 110 band); floor misses 2027-W06 104 t, 2028-W02 102 t.
