@@ -34,7 +34,17 @@ commit; worktree was in session c33340bb's scratchpad `wt_rhp_source` - if that 
 
 ## Live setup (what the app runs right now)
 
-- **Since 2026-10-22 night (newest):** set `..\_backups\scenario_sets\10.18 PR taper W44-45 105-110t to W07 then limits Dec +5.8k\`
+- **Since 2026-10-22 late night (newest):** set `..\_backups\scenario_sets\10.18 PR 53 A-grade W43 ramp 274-242-240-226 min 3.2kg Dec +5.8k\`
+  (run name the same) = the Dec +5.8k set below + operator's change of plan: tank 53 graded THIS week (W43), top
+  36,000 -> 6N 63, harvested W45 with 61's leftover (6,719). Manual events: W43 43->63 dropped; graded_harvest 53->63
+  36,000 (stage) added; tanks 43/53 swap later roles: W44 53 rest (~1.2k) + ALL of 52 -> 65; W45 52 rest->67 dropped,
+  43->67 36,000; W46 43 rest (~6.2k) -> 63. Limits: 2026-W49 min_harvest_weight_g 3000 -> 3200 (operator rule: no
+  week < 3.2 kg avg gross; W51 was 3.16 kg since the Dec rows). Weeks W43-W48: 314/300/274/242/240/226k lb HOG.
+  2026 559,029 fish 1,620 t; Oct/Nov/Dec 643/467/511; 2027 6,420 (-24) / 2028 2,783 (+47) t; avg wt 3.745 kg, no week
+  < 3.2 kg; 2027-W13 73 t (cost of the 3.2 kg row, accepted). All 19 manual events OK, 0 refused. Live rerun
+  (`tune\live_53`) == approved W1 on all 26 sheets. Backup: `_backups\2026-10-22_before_53_grade\`.
+  Rejected: raising W48 via 36->69 / 66 pickup (moves 20-80 t out of 2027, 2027-W22 ~80 t).
+- **Earlier 2026-10-22 night (superseded by the line above):** set `..\_backups\scenario_sets\10.18 PR taper W44-45 105-110t to W07 then limits Dec +5.8k\`
   (run name the same; no commas so it doubles as the workbook name) = P7 below + max_harvest_per_week 2026-W50..W53 +2,500 each (42,334 / 43,438 / 41,123 / 41,260).
   Operator asked for ~10k more fish in 2026 (5k Nov + 5k Dec). Measured: Nov cannot take net fish (a bigger 6N fill
   only shifts fish to/from the next Nov week; the chain has no spare); Dec rows deliver +5,784 fish. 2026 1,620 /
