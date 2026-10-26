@@ -5682,7 +5682,7 @@ def _edit_limits():
     from forecast.caps import (METRIC_BIOMASS, METRIC_FEED_DAY, METRIC_MAX_HARVEST,
                                METRIC_MIN_HARVEST, METRIC_HOG_YIELD, METRIC_SGR_OG,
                                METRIC_MIN_HARVEST_WT, METRIC_MIN_HARVEST_HOG,
-                               SYSTEM_MODES, SystemLimits)
+                               METRIC_OG_DENSITY, SYSTEM_MODES, SystemLimits)
     st.caption(
         "Capacity limits. A capacity is a fact about the facility, so it is "
         "stated **once** per system below and applies to every week of every "
@@ -5704,7 +5704,7 @@ def _edit_limits():
               for r in system_limits_to_list(sl)}
     fl_metrics = [METRIC_BIOMASS, METRIC_FEED_DAY, METRIC_MAX_HARVEST,
                   METRIC_MIN_HARVEST, METRIC_MIN_HARVEST_HOG, METRIC_MIN_HARVEST_WT,
-                  METRIC_HOG_YIELD, METRIC_SGR_OG]
+                  METRIC_HOG_YIELD, METRIC_SGR_OG, METRIC_OG_DENSITY]
     sl_metrics = [METRIC_BIOMASS, METRIC_FEED_DAY]
     systems = _og_systems_app()
     # Weeks drive the EXCEPTION grid only; the defaults editor needs none, so
@@ -5845,6 +5845,9 @@ def _edit_limits():
         "batch's own sgr_correction, and feed follows it (feed = biomass x "
         "SGR x FCR), so a 90% week eats 90% and grows 90%. Freshwater is "
         "unaffected. "
+        "`og_density_kg_m3` = that week's density cap (kg/m³) for every OG1-5 "
+        "and 6S tank, in place of its facility cap (blank = the facility "
+        "cap). 6N keeps its own rule (no cap while it is the purge station). "
         "The per-week system grid carries the first two only — a harvest or "
         "yield cap is a whole-facility number.")
     # Column KEYS stay the ISO label (that is what limits.yaml stores and what

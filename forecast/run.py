@@ -960,6 +960,7 @@ def main(
         )
         # Count violations: per-tank density > tank cap, OG6N excluded
         # in purge mode (depuration pool intentionally uncapped).
+        from .caps import tank_density_cap_for_week as _tank_cap_wk
         tank_cap = {t.tank_id: t.max_density_kg_m3 for t in facility.tanks}
         tank_sys = {t.tank_id: t.system_id for t in facility.tanks}
         viols = []
@@ -967,6 +968,10 @@ def main(
             cap = tank_cap.get(r.tank_id, 0.0)
             if cap <= 0:
                 continue
+            # The week's limits.yaml `og_density_kg_m3` row, if any (the cap
+            # the planner itself held this tank to that week).
+            cap = _tank_cap_wk(cap, tank_sys.get(r.tank_id, ""), r.week_label,
+                               facility_limits)
             # R8 — the SAME rule as the run's own audit. The old test
             # handled 6N-in-purge but NOT a STARVE tank outside 6N, so the
             # trial evaluator scored legal harvest-prep consolidation as a
@@ -1225,6 +1230,7 @@ def main(
     # OG4N tank at 118.8 kg/m3 in the 2028 tail).
     from .sixn import is_purge_mode as _is_purge_mode
     from .tiers import effective_density_cap as _eff_cap
+    from .caps import tank_density_cap_for_week as _tank_cap_wk
     tank_cap_by_id = {t.tank_id: t.max_density_kg_m3 for t in facility.tanks}
     tank_sys_by_id = {t.tank_id: t.system_id for t in facility.tanks}
     density_violations = []
@@ -1232,6 +1238,10 @@ def main(
         cap = tank_cap_by_id.get(r.tank_id, 0.0)
         if cap <= 0:
             continue
+        # Per-week grow-out density row (limits.yaml `og_density_kg_m3`): judged
+        # against the cap the planner held the tank to THAT week.
+        cap = _tank_cap_wk(cap, tank_sys_by_id.get(r.tank_id, ""), r.week_label,
+                           facility_limits)
         # R8 (tiers.effective_density_cap) — ONE definition, shared with
         # placement.py and lns_placement.py. A tank preparing for harvest is
         # judged at HARVEST_PREP_DENSITY_CAP (the operator's 150),
@@ -1282,6 +1292,7 @@ def main(
     write_transfer_template(
         wb, placement.batch_locations, placement.harvest_events,
         placement.tranog_events, control, facility,
+        facility_limits=facility_limits,
     )
     # Per-batch plan: the 'where each batch is + how it got there' journey
     # (summary header + tier-by-tier milestones), as a shareable sheet.
@@ -1712,7 +1723,7 @@ def main(
     write_facility_map(wb, placement.batch_locations, facility,
                        batches=batch_by_id, tables=tables,
                        biology_states_by_batch=rl_states_by_batch,
-                       control=control)
+                       control=control, facility_limits=facility_limits)
 
     # Config snapshot: embed the exact app-managed config + scenario this
     # run used into the output workbook, so the saved file is a complete,

@@ -53,7 +53,10 @@ from .caps import (
     SystemLimits,
     carry_forward_cap_lookup,
     control_for_week,
+    has_og_density_rows,
     min_harvest_fish,
+    og_density_applies,
+    tank_density_cap_for_week,
     predictive_move_in_count,
     resolve_facility_cap,
     resolve_system_cap,
@@ -5183,8 +5186,21 @@ def phase_d_emit_events(
     # week of the walk reads `control` as that week's copy. A week with no row
     # gets the very same object, so a plan without rows is unchanged.
     _base_control = control
+    # Per-week grow-out density (limits.yaml `og_density_kg_m3` rows): each
+    # week sets every OG1-5/6S tank's cap to that week's row, or back to its
+    # facility.yaml cap in a week without one. 6N is never touched (its purge
+    # / production rule stays in tiers.effective_density_cap). No rows = the
+    # caps are never written, so a plan without rows is unchanged.
+    _og_dens_base = ({tid: t.max_density_kg_m3 for tid, t in state.tanks_by_id.items()
+                      if og_density_applies(t.system_id)}
+                     if has_og_density_rows(facility_limits) else {})
     for week_label in sorted_weeks:
         control = control_for_week(_base_control, facility_limits, week_label)
+        for _tid, _cap0 in _og_dens_base.items():
+            _t = state.tanks_by_id.get(_tid)
+            if _t is not None:
+                _t.max_density_kg_m3 = tank_density_cap_for_week(
+                    _cap0, _t.system_id, week_label, facility_limits)
         # Moves emitted so far THIS week = applied Transfers appended since the
         # week opened (refused events have count_transferred 0 and don't count).
         _wk_ev0 = len(transfer_events)

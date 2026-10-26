@@ -956,6 +956,7 @@ def write_transfer_template(
     control,
     facility,
     sheet_name: str = "TransferTemplate",
+    facility_limits=None,
 ) -> None:
     """Generalized batch-flow template + a per-batch plan summary.
 
@@ -1013,6 +1014,7 @@ def write_transfer_template(
     from .sixn import is_purge_mode as _is_purge_mode
     from .tiers import (effective_density_cap as _eff_cap,
                         HARVEST_PREP_DENSITY_CAP as _PREP_CAP)
+    from .caps import tank_density_cap_for_week as _tank_cap_wk
     cap = {t.tank_id: t.max_density_kg_m3 for t in facility.tanks}
     tsys = {t.tank_id: t.system_id for t in facility.tanks}
     # Tank weeks plus harvest weeks (a batch harvested out in week 1 has only
@@ -1042,7 +1044,10 @@ def write_transfer_template(
         # (from control.sixn_production_start), and it counted an in-place
         # harvest-prep tank OUTSIDE 6N as a breach -- exactly what the
         # harvest-prep consolidation step now creates on purpose.
-        c = _eff_cap(cap.get(r.tank_id) or 0.0, tsys.get(r.tank_id, ""),
+        # The week's limits.yaml `og_density_kg_m3` row, if any.
+        c = _eff_cap(_tank_cap_wk(cap.get(r.tank_id) or 0.0, tsys.get(r.tank_id, ""),
+                                  r.week_label, facility_limits),
+                     tsys.get(r.tank_id, ""),
                      getattr(r, "stage", ""),
                      _is_purge_mode(control, r.week_start),
                      harvest_prep_cap=_PREP_CAP)
@@ -4710,6 +4715,7 @@ def write_facility_map(
     biology_states_by_batch=None,
     sheet_name: str = "FacilityMap",
     control=None,
+    facility_limits=None,
 ) -> None:
     """Tank × Week matrix showing which batch occupies each tank each week.
 
@@ -4727,6 +4733,7 @@ def write_facility_map(
     """
     from openpyxl.styles import Font, PatternFill
     from .sixn import is_purge_mode as _is_purge_mode
+    from .caps import tank_density_cap_for_week as _tank_cap_wk
     from .tiers import (effective_density_cap as _eff_cap,
                         HARVEST_PREP_DENSITY_CAP as _PREP_CAP)
 
@@ -4815,7 +4822,9 @@ def write_facility_map(
             # 2026-09-08 ruling that harvest prep is a RAISED cap. The old
             # `_stage != "STARVE"` test predated that ruling and left 86 real
             # breaches unmarked on the 2025-07-31 PR (tank 61 at 185 kg/m3).
-            _jcap = _eff_cap(_cap, t.system_id, _stage,
+            # The week's limits.yaml `og_density_kg_m3` row, if any.
+            _jcap = _eff_cap(_tank_cap_wk(_cap, t.system_id, _wkl, facility_limits),
+                             t.system_id, _stage,
                              _is_purge_mode(control, wk_start.get(_wkl))
                              if control is not None else True,
                              harvest_prep_cap=_PREP_CAP)

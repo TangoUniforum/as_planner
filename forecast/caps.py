@@ -75,6 +75,14 @@ METRIC_MIN_HARVEST_WT = "min_harvest_weight_g"
 # `min_harvest_fish`. Absent week = Control `min_harvest_hog_kg_per_week`;
 # both unset (the default) = no HOG floor, a run plans exactly as before.
 METRIC_MIN_HARVEST_HOG = "min_harvest_hog_kg"
+# Per-week grow-out DENSITY cap (kg/m3) for the OG tanks outside 6N (operator
+# 2026-10-26: "85 till we hit 4,000 t standing, then 95 to get to 4,200").
+# NOT a facility cap and not buffered: a week with a row holds every OG1-5 and
+# 6S tank to that density instead of its config/facility.yaml cap. 6N keeps its
+# own cap (purge/production), FW is untouched. Absent week = facility.yaml, so
+# a limits file with no such rows plans exactly as before. Resolved by
+# `og_density_cap` / `tank_density_cap_for_week` below.
+METRIC_OG_DENSITY = "og_density_kg_m3"
 
 # Operating modes a system-default may be qualified by. Today only 6N has
 # two; the dimension is general so a future mode (a system taken off-line
@@ -440,6 +448,47 @@ def min_harvest_fish(week_label: str, facility_limits, control: ControlParams,
     if mx:
         need = min(need, float(mx))
     return max(float(fish or 0.0), need)
+
+
+def og_density_cap(week_label: str, facility_limits) -> Optional[float]:
+    """The week's `og_density_kg_m3` row, or None when there is none.
+
+    0 / negative / blank = no row (a tank cannot be capped at 0 kg/m3; that
+    would be inventing a shutdown nobody asked for).
+    """
+    if facility_limits is None:
+        return None
+    v = getattr(facility_limits, "overrides", {}).get((str(week_label), METRIC_OG_DENSITY))
+    try:
+        f = float(v) if v is not None else 0.0
+    except (TypeError, ValueError):
+        return None
+    return f if f > 0 else None
+
+
+def og_density_applies(system_id: str) -> bool:
+    """True for the grow-out OG systems an `og_density_kg_m3` row governs:
+    every OG system except 6N, which has its own purge/production cap."""
+    s = str(system_id or "").upper()
+    return s.startswith("OG") and s != "OG6N"
+
+
+def tank_density_cap_for_week(cap_kg_m3: float, system_id: str, week_label: str,
+                              facility_limits) -> float:
+    """A tank's density cap in `week_label`: the week's `og_density_kg_m3` row
+    for a grow-out OG tank (see `og_density_applies`), else `cap_kg_m3` (its
+    facility.yaml cap) unchanged."""
+    if og_density_applies(system_id):
+        v = og_density_cap(week_label, facility_limits)
+        if v is not None:
+            return v
+    return cap_kg_m3
+
+
+def has_og_density_rows(facility_limits) -> bool:
+    """Whether any `og_density_kg_m3` row exists (callers skip all work if not)."""
+    return any(isinstance(k, tuple) and len(k) == 2 and k[1] == METRIC_OG_DENSITY
+               for k in (getattr(facility_limits, "overrides", None) or {}))
 
 
 def og_sgr_factors(facility_limits) -> dict[str, float]:
