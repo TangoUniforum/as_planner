@@ -3,6 +3,15 @@
 Updated at the end of every working session (`/forecast-handoff`). Newest first in
 each list. Last updated: **2026-10-26**.
 
+## LIVE since 2026-10-26 evening: 4,200 t build/hold with B49+ on Base curve x0.95
+
+- Set `..\_backups\scenario_sets\10.18 PR build to 4200t, B48 Actual, B49+ Base 95pct, 85 then 95 kgm3 from W20, hold to 2029\` (README inside).
+  B37-B48 Actual 2026-10-18; B49-B81 growth_model blank (Base) + sgr_correction 0.95 (grows FASTER than Actual:
+  harvest avg 4.13 kg vs 3.82-3.95). og_density 95 from 2027-W20 (week standing hits 4,000 t); build cap 36k to
+  2027-W05, 40k W06-W20; hold 2027-W21..W52 41k fish / 111 t; 2028+ 48k / 125 t. Result: 4,200 t 2027-W48, standing
+  4,113-4,248 t; 2027 6,943 / 2028 8,014 t HOG; 200 tank-weeks over cap (11 by >5, max 103). Live rerun == sandbox.
+  Backup of the replaced live files: `..\_backups\2026-10-26_before_b49_base95\`. The set below (B55+ 330k, W13) is the previous live.
+
 ## Done 2026-10-26: per-week grow-out density + 4,200 t build/hold scenario LIVE
 
 - Code merged (ff, 8f1afd9 + 394a34d docs): limits.yaml facility row **`og_density_kg_m3`** = that week's
