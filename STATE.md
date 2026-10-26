@@ -11,9 +11,9 @@ each list. Last updated: **2026-10-26**.
   TransferTemplate + FacilityMap judge the week's cap; editable in app Limits tab; USER_GUIDE updated.
   Checks: 4 new tests (e2e fails on old engine); gate 24/25 plan-identical (2025-07-31 known); suite 2595
   passed / 7 failed = all pre-existing (long sandbox paths / live-dir guard), identical on old code.
-  Tag `v2-before-og-density-2026-10-26`; backup `..\_backups6-10-26_before_og_density\` (code + live
+  Tag `v2-before-og-density-2026-10-26`; backup `..\_backups\2026-10-26_before_og_density\` (code + live
   control/limits/batches/manual_events 2026-10-18).
-- **Live set now:** `..\_backups\scenario_sets.18 PR build to 4200t, 85 then 95 kgm3 from W13, B55+ 330k, hold to 2029\`
+- **Live set now:** `..\_backups\scenario_sets\10.18 PR build to 4200t, 85 then 95 kgm3 from W13, B55+ 330k, hold to 2029\`
   (README inside; first set that also carries batches.yaml). Horizon 121 wks (to 2029-W06), 4.2M biomass,
   36k feed, B55-B81 TranOG 330k, og_density 95 from 2027-W13, build cap 36k fish 2026-W49..2027-W20,
   hold 2027-W21..W52 39.5k fish / 111 t HOG, 2028+ 46k / 121 t. Result: 4,000 t 2027-W20, 4,200 t
