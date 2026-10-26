@@ -266,11 +266,26 @@ it **once** and it applies to every week of every horizon.
 | **Per-week system exceptions** (collapsed, advanced) | A cap for ONE unusual week — a shutdown, a trial, maintenance. Blank is the normal state. | Almost never. |
 
 The **Facility limits** grid below those three carries the per-week facility
-numbers. It holds **eight** metrics, not the harvest ones alone: `biomass` and
+numbers. It holds **nine** metrics, not the harvest ones alone: `biomass` and
 `feed_per_day` (the whole-facility totals, which are *also* where a temporary
 derate against the Control design figure is expressed), `max_harvest_per_week`,
 `min_harvest_per_week`, `min_harvest_hog_kg`, `min_harvest_weight_g`, `hog_yield`,
-and one entry that is not a cap at all (`sgr_correction_og`, below).
+`og_density_kg_m3` (below), and one entry that is not a cap at all
+(`sgr_correction_og`, below).
+
+> **`og_density_kg_m3` — the per-week grow-out density cap (added
+> 2026-10-26).** kg/m³. In the weeks you give it, every OG1–5 and 6S tank is
+> held to this density instead of its `config/facility.yaml` cap (85 today);
+> weeks without a row use the facility cap, so a limits file without these rows
+> plans exactly as before. **6N is never affected**: while it is the purge
+> station it has no density cap (harvest prep is judged at 150), and in
+> production mode it keeps its own 120. Freshwater is untouched. The planner,
+> the density audit and the FacilityMap / TransferTemplate breach colouring all
+> use the week's value, so a tank at 92 kg/m³ in a 95 week is not a breach.
+> Use it for a staged raise, e.g. 85 until standing biomass reaches ~4,000 t,
+> then 95 to build to 4,200 t: put a 95 row on every week from the switch week
+> to the end of the horizon (rows are per week; a week without one falls back to
+> 85). Not part of the coverage warning below.
 
 > **`min_harvest_hog_kg` — the per-week harvest floor in kg HOG (added
 > 2026-10-19).** The operator's floor in tonnes instead of fish: every week must
