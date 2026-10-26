@@ -1,7 +1,26 @@
 # Where things stand
 
 Updated at the end of every working session (`/forecast-handoff`). Newest first in
-each list. Last updated: **2026-10-23**.
+each list. Last updated: **2026-10-26**.
+
+## Done 2026-10-26: per-week grow-out density + 4,200 t build/hold scenario LIVE
+
+- Code merged (ff, 8f1afd9 + 394a34d docs): limits.yaml facility row **`og_density_kg_m3`** = that week's
+  density cap for every OG1-5/6S tank (6N never touched: purge = no cap / 150 prep judge, production 120; FW
+  untouched; no row = facility.yaml). Planner loop sets caps per week; run audit, trial evaluator,
+  TransferTemplate + FacilityMap judge the week's cap; editable in app Limits tab; USER_GUIDE updated.
+  Checks: 4 new tests (e2e fails on old engine); gate 24/25 plan-identical (2025-07-31 known); suite 2595
+  passed / 7 failed = all pre-existing (long sandbox paths / live-dir guard), identical on old code.
+  Tag `v2-before-og-density-2026-10-26`; backup `..\_backups6-10-26_before_og_density\` (code + live
+  control/limits/batches/manual_events 2026-10-18).
+- **Live set now:** `..\_backups\scenario_sets.18 PR build to 4200t, 85 then 95 kgm3 from W13, B55+ 330k, hold to 2029\`
+  (README inside; first set that also carries batches.yaml). Horizon 121 wks (to 2029-W06), 4.2M biomass,
+  36k feed, B55-B81 TranOG 330k, og_density 95 from 2027-W13, build cap 36k fish 2026-W49..2027-W20,
+  hold 2027-W21..W52 39.5k fish / 111 t HOG, 2028+ 46k / 121 t. Result: 4,000 t 2027-W20, 4,200 t
+  2027-W42, standing 4,125-4,314 t Oct-27..Feb-29 (peak Dec 2027); 2027 6,462 t, 2028 7,525 t HOG;
+  2028 ~141-149 t/wk. Live rerun from merged tree == sandbox. Previous live set = "10.18 PR 53 A-grade ..." (below).
+- v2/guards and v2/rhp-source must now be REBASED onto the new HEAD before their merges.
+- Operator must push: `git push origin v2/capacity-and-transition`.
 
 ## ▶ PICK UP HERE (2026-10-23): merge the review guards (A+B+C) - paused for a PC restart
 
