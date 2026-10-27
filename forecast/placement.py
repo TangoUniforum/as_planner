@@ -6932,6 +6932,116 @@ def phase_d_emit_events(
                         return True
                     return False
 
+
+                def _consolidate_growout_for_arrival() -> bool:
+                    """Free ONE grow-out tank by merging a grow-out batch into
+                    one fewer of its OWN tanks, so an entry tank can then move
+                    forward into it and the arrival gets its entry tank.
+
+                    ABORT-PREVENTION ONLY, like _consolidate_entry_forward: it
+                    is reached only where the ladder previously gave up and the
+                    run aborted (entry tier full, no free grow-out tank, nothing
+                    harvest-ripe to purge, no same-batch room for a whole entry
+                    tank). So every plan that ran before is unchanged.
+
+                    MEASURED 2026-10-27 (3 corpus aborts, 2025-02-28 / 03-31 /
+                    05-31 PRs): 12/12 entry and 21/21 grow-out tanks held, 6N
+                    half empty, nothing ripe -- but grow-out full of half-empty
+                    tanks of one batch (e.g. B42 in 3 tanks at ~53 kg/m3), which
+                    fit in one fewer tank at ~80.
+
+                    Rules: same batch only (one batch per tank); the source
+                    leaves EMPTY (a whole-tank move, so the move-size floor does
+                    not apply); destinations filled to at most
+                    0.95 of their own cap (_REPAIR_DENS_FILL); a destination system
+                    in another system stays within its biomass and feed cap x
+                    (1 + global_buffer_pct) -- the rebalancer's own working limit
+                    and the line the SystemLimitsAudit flags;
+                    6N, STARVE and reserved tanks are never touched; the
+                    smallest source that fits is chosen (fewest fish moved).
+                    Returns True if a grow-out tank was freed."""
+                    _fill = _REPAIR_DENS_FILL   # 0.95 of cap: the same ceiling the repair passes fill to
+                    _grow = [t for t in state.tanks_by_id.values()
+                             if not t.is_empty and t.type == "OG"
+                             and t.system_id not in OG12_SYSTEMS
+                             and t.tank_id not in state.sixn_closed_tanks
+                             and t.tank_id not in _reserved_og
+                             and t.stage != STAGE_STARVE
+                             and t.max_density_kg_m3 > 0
+                             and t.avg_wt_g > 0]
+                    _by_b = collections.defaultdict(list)
+                    for _t in _grow:
+                        _by_b[_t.batch_id].append(_t)
+                    _sys_bio = collections.defaultdict(float)
+                    _sys_feed = collections.defaultdict(float)
+                    for _t in state.tanks_by_id.values():
+                        if not _t.is_empty and _t.type == "OG":
+                            _sys_bio[_t.system_id] += _t.biomass_kg
+                            if _t.stage != STAGE_STARVE:
+                                _sys_feed[_t.system_id] += realized_feed_kg_day(
+                                    _t.avg_wt_g, _t.biomass_kg,
+                                    batch_meta.get(_t.batch_id), tables, week_label)
+                    _best = None
+                    for _b in sorted(_by_b):
+                        _ts = _by_b[_b]
+                        if len(_ts) < 2:
+                            continue
+                        for _src in sorted(_ts, key=lambda t: (t.biomass_kg, t.tank_id)):
+                            _inten = (realized_feed_kg_day(
+                                _src.avg_wt_g, _src.biomass_kg, batch_meta.get(_b),
+                                tables, week_label) / _src.biomass_kg) if _src.biomass_kg > 0 else 0.0
+                            _left = _src.biomass_kg
+                            _plan = []
+                            _sb = dict(_sys_bio); _sf = dict(_sys_feed)
+                            for _d in sorted((t for t in _ts if t is not _src),
+                                             key=lambda t: (t.density_kg_m3, t.tank_id)):
+                                _head = _d.max_biomass_kg * _fill - _d.biomass_kg
+                                if _d.system_id != _src.system_id:
+                                    _bc, _fc = _sys_cap(week_label, _d.system_id)
+                                    if _bc:
+                                        _head = min(_head, _bc * _rebal_buf - _sb.get(_d.system_id, 0.0))
+                                    if _fc and _inten > 0:
+                                        _head = min(_head, (_fc * _rebal_buf - _sf.get(_d.system_id, 0.0)) / _inten)
+                                _take = min(_left, _head)
+                                if _take <= 1.0:
+                                    continue
+                                _plan.append((_d, _take))
+                                _sb[_d.system_id] = _sb.get(_d.system_id, 0.0) + _take
+                                _sf[_d.system_id] = _sf.get(_d.system_id, 0.0) + _take * _inten
+                                _left -= _take
+                                if _left <= 1.0:
+                                    break
+                            if _left <= 1.0:
+                                if _best is None or _src.biomass_kg < _best[0].biomass_kg:
+                                    _best = (_src, _plan)
+                                break      # smallest fitting source of this batch
+                    if _best is None:
+                        return False
+                    _src, _plan = _best
+                    _w = _src.avg_wt_g / 1000.0
+                    _allocs, _n_left = [], _src.count
+                    for _i, (_d, _kg) in enumerate(_plan):
+                        _n = _n_left if _i == len(_plan) - 1 else min(_n_left, _kg / _w)
+                        _allocs.append(TankAllocation(tank_id=_d.tank_id, count=_n,
+                                                      avg_wt_g=_src.avg_wt_g, cv_pct=_src.cv_pct))
+                        _n_left -= _n
+                    _sl, _sb_id, _sn = _src.location_id, _src.batch_id, _src.count
+                    _cmv = Transfer(
+                        batch_id=_sb_id, event_date=ws_date,
+                        source_tank_id=_src.tank_id, destinations=_allocs,
+                        leaves_source_empty=True,
+                        channel="_consolidate_growout_for_arrival")
+                    warnings.extend(_cmv.apply(state))
+                    transfer_events.append(_cmv)
+                    if not state.tanks_by_id[_src.tank_id].is_empty:
+                        return False
+                    warnings.append(
+                        f"{week_label}: FREED grow-out tank {_sl} by merging batch "
+                        f"{_sb_id} ({_sn:.0f} fish) into its own other grow-out "
+                        f"tanks, so an entry tank can move forward for "
+                        f"{len(_arrivals)} TranOG arrival(s) this week")
+                    return True
+
                 while _deficit > 0:
                     # Entry occupants that can be vacated (readiest first —
                     # biggest fish are nearest their forward move anyway).
@@ -6984,6 +7094,8 @@ def phase_d_emit_events(
                                 if _consolidate_entry_forward():
                                     _deficit -= 1
                                     continue
+                                if _consolidate_growout_for_arrival():
+                                    continue   # a grow-out tank is free: forward-move next pass
                                 break  # genuinely saturated — abort handled below
                             _cands.sort(key=lambda t: (
                                 t.starvation_days_remaining, -t.avg_wt_g, t.tank_id))
@@ -7029,6 +7141,8 @@ def phase_d_emit_events(
                                 if _consolidate_entry_forward():
                                     _deficit -= 1
                                     continue
+                                if _consolidate_growout_for_arrival():
+                                    continue   # a grow-out tank is free: forward-move next pass
                                 warnings.append(
                                     f"{week_label}: make-room CANNOT free "
                                     f"{_src.location_id} for a TranOG arrival — 6N is full "
