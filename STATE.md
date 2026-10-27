@@ -3,6 +3,19 @@
 Updated at the end of every working session (`/forecast-handoff`). Newest first in
 each list. Last updated: **2026-10-26**.
 
+## ▶ IN PROGRESS (2026-10-27): least-transfer plan research (scratch only) + density trim (sandbox)
+
+- Operator yardstick: fewer grow-out transfers per harvested fish with the same or more HOG. Full notes in memory
+  `least_moves_template_roadmap_2026_10_26.md`; harness in session 857a2183 scratchpad (sweep.py, corpus_par.py,
+  patch_all.py -> exp2 throwaway engine copy, sched*.py model searches).
+- Sandbox branch `v2/density-trim` (b8fd34c + bc0c4e3): knob `density_trim_budget` (off). Gate 24/25 identical,
+  suite only the 6 known path/live-dir failures. NOT merged - operator: no code changes until the decision is sure.
+- Best practical settings (trim 4 + rebalance_level false + controller-hybrid): live set to 2029 tpf 2.35 -> 1.81,
+  HOG +19 t; corpus tpf lower on 18/18 but 2 old PRs become infeasible (TranOG arrival: no free entry tank).
+- Standard schedule: sound in principle (~1.4 tpf when it holds) but cannot start from today's tanks (B55 forward in
+  2027-W45 finds grow-out full -> B58 arrival unplaceable). Waiting on operator: A fix arrival entry tanks + adopt
+  settings / B design schedule transition / C both.
+
 ## LIVE since 2026-10-26 evening: 4,200 t build/hold with B49+ on Base curve x0.95
 
 - Set `..\_backups\scenario_sets\10.18 PR build to 4200t, B48 Actual, B49+ Base 95pct, 85 then 95 kgm3 from W20, hold to 2029\` (README inside).
