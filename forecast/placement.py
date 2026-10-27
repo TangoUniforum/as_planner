@@ -4392,6 +4392,158 @@ def _repair_over_cap_systems(
     return moves
 
 
+# ---- END-OF-WEEK TANK DENSITY TRIM (`density_trim_budget`) ------------------
+# The tank-level sibling of the system repair above, for the same reason: every
+# density pass runs BEFORE the week's growth, the audit measures AFTER it.
+# MEASURED 2026-10-26 on the 10.18 PR live 4,200 t set with NO move limit: 189
+# tank-weeks over cap, 171 of them within 5 kg/m3 (a week's growth), and 148 had
+# a legal SAME-BATCH tank with room after growth (<= 0.95 of its cap) that same
+# week; ~165 moves over 85 weeks, <= 6 a week, would have cleared them. The
+# system repair cannot see them: it fires on system totals, not on one tank.
+_TRIM_SRC_FILL = 0.98     # bring an over-cap tank back to this x its density cap
+
+
+def _trim_over_density_tanks(
+    state, wl, event_date, transfer_events, warnings,
+    cap_lookup, batch_meta, tables, og_systems, og_tanks_by_system, budget,
+    purge=True, reserved=frozenset(), min_move=0.0, min_keep=0.0,
+):
+    """END-OF-WEEK tank density trim — see the block above for WHY.
+
+    On the post-growth state the audit measures: while a grow-out tank is over
+    its density cap (R8, `tiers.effective_density_cap` — harvest prep and 6N in
+    purge are not capped here), move the MINIMUM fish out of the worst one into
+    a tank its OWN batch already holds, until the budget runs out or nothing
+    legal is left. The same rules as `_repair_over_cap_systems`:
+      * tiers.move_allowed (R2-R4) at the source's average weight;
+      * footprint-neutral: same-batch destinations only, never an empty tank
+        (the harvest controller's free-tank pool, see the _REPAIR_* note);
+      * a destination tank is filled only to _REPAIR_DENS_FILL of its cap, and
+        another SYSTEM only to _REPAIR_DST_FILL of its biomass/feed caps, so a
+        trim never moves a breach somewhere else;
+      * remnant floor via `_floored_partial`; move-size rules via
+        `_small_move_blocked(relief=True)` (a source over its cap is relief);
+      * TranOG holds (`reserved`), 6N sisters, and 6N mains in purge are never
+        touched; STARVE (harvest-prep) tanks neither give nor take;
+      * the handling budget — `budget` is what the caller has left.
+    Returns the number of moves made. Never raises.
+    """
+    if budget <= 0:
+        return 0
+    skip = set(SIXN_SISTER_TANKS) | (set(SIXN_MAIN_TANKS) if purge else set())
+
+    def loads():
+        sb = collections.defaultdict(float)
+        sf = collections.defaultdict(float)
+        for sid, ids in og_tanks_by_system.items():
+            for tid in ids:
+                t = state.tanks_by_id.get(tid)
+                if t is None or t.is_empty:
+                    continue
+                sb[sid] += t.biomass_kg
+                if t.stage != STAGE_STARVE:
+                    sf[sid] += realized_feed_kg_day(
+                        t.avg_wt_g, t.biomass_kg, batch_meta.get(t.batch_id),
+                        tables, wl)
+        return sb, sf
+
+    def cap_of(t):
+        return _eff_density_cap(t.max_density_kg_m3, t.system_id, t.stage, purge)
+
+    moves = 0
+    stuck: set = set()
+    while moves < int(budget):
+        over = []
+        for sid in sorted(og_systems):
+            for tid in og_tanks_by_system.get(sid, []):
+                if tid in skip or tid in stuck:
+                    continue
+                t = state.tanks_by_id.get(tid)
+                if (t is None or t.is_empty or t.stage == STAGE_STARVE
+                        or t.avg_wt_g <= 0 or t.volume_m3 <= 0):
+                    continue
+                c = cap_of(t)
+                if c == float("inf") or c <= 0 or t.density_kg_m3 <= c:
+                    continue
+                over.append(((t.density_kg_m3 - c) * t.volume_m3, tid, c))
+        if not over:
+            break
+        over.sort(key=lambda x: (-x[0], x[1]))       # worst excess (kg) first
+        sb, sf = loads()
+        placed = False
+        for _ex, tid, c in over:
+            src = state.tanks_by_id[tid]
+            want = src.biomass_kg - c * _TRIM_SRC_FILL * src.volume_m3
+            src_feed = realized_feed_kg_day(
+                src.avg_wt_g, src.biomass_kg, batch_meta.get(src.batch_id), tables, wl)
+            intensity = src_feed / src.biomass_kg if src.biomass_kg > 0 else 0.0
+            best = None
+            for T in sorted(og_systems):
+                if not move_allowed(src.system_id, T, src.avg_wt_g)[0]:
+                    continue
+                if T == src.system_id:               # an in-system move adds nothing
+                    bio_head = feed_head = 1e18
+                else:
+                    tbc, tfc = cap_lookup(wl, T)
+                    bio_head = (tbc * _REPAIR_DST_FILL - sb[T]) if tbc else 1e18
+                    feed_head = (tfc * _REPAIR_DST_FILL - sf[T]) if tfc else 1e18
+                if bio_head <= 0 or feed_head <= 0:
+                    continue
+                for tid2 in og_tanks_by_system.get(T, []):
+                    if tid2 == tid or tid2 in skip or tid2 in reserved:
+                        continue
+                    t2 = state.tanks_by_id.get(tid2)
+                    if (t2 is None or t2.is_empty or t2.batch_id != src.batch_id
+                            or t2.stage == STAGE_STARVE):
+                        continue
+                    c2 = cap_of(t2)
+                    if c2 == float("inf") or c2 <= 0:
+                        continue
+                    dens_head = c2 * _REPAIR_DENS_FILL * t2.volume_m3 - t2.biomass_kg
+                    move_kg = min(want, dens_head, bio_head, src.biomass_kg * 0.95)
+                    if intensity > 0:
+                        move_kg = min(move_kg, feed_head / intensity)
+                    if move_kg <= 1.0:
+                        continue
+                    # The BIGGER relief first (fewest moves), then the emptier
+                    # tank, then tank id for determinism.
+                    key = (-round(move_kg, 3), round(t2.density_kg_m3 / c2, 6), tid2)
+                    if best is None or key < best[0]:
+                        best = (key, t2, move_kg)
+            if best is None:
+                stuck.add(tid)
+                continue
+            _key, dst, move_kg = best
+            move_count = _floored_partial(
+                src.count, move_kg / (src.avg_wt_g / 1000.0), min_keep)
+            if move_count < 1.0 or _small_move_blocked(
+                    move_count, src, dst, min_move, relief=True):
+                stuck.add(tid)
+                continue
+            before = src.biomass_kg
+            ev = Transfer(
+                batch_id=src.batch_id, event_date=event_date,
+                source_tank_id=src.tank_id,
+                destinations=[TankAllocation(
+                    tank_id=dst.tank_id, count=move_count,
+                    avg_wt_g=src.avg_wt_g, cv_pct=src.cv_pct,
+                )],
+                leaves_source_empty=False,
+                channel="_trim_over_density_tanks",
+            )
+            warnings.extend(ev.apply(state))
+            transfer_events.append(ev)
+            if src.biomass_kg >= before - 1.0:         # refused by the INV gate
+                stuck.add(tid)
+                continue
+            moves += 1
+            placed = True
+            break
+        if not placed:
+            break
+    return moves
+
+
 def _consolidate_remnants(
     state: FacilityState,
     event_date: date,
@@ -7306,6 +7458,22 @@ def phase_d_emit_events(
                 _repair_budget,
                 reserved=_reserved_og,
                 min_transfer=getattr(control, "min_transfer_count", 0.0) or 0.0,
+                min_keep=control.min_tank_control or 0.0,
+            )
+
+        # ---- END-OF-WEEK TANK DENSITY TRIM (opt-in: control.density_trim_budget) ----
+        # After the system repair, still on the post-growth state the snapshot
+        # records: trim any grow-out tank over its density cap into a same-batch
+        # tank with room. See the _TRIM_* block near the top of this module.
+        _trim_budget = min(
+            int(getattr(control, "density_trim_budget", 0) or 0), _moves_left())
+        if _trim_budget > 0 and ws_we is not None:
+            _trim_over_density_tanks(
+                state, week_label, ws_we[0], transfer_events, warnings,
+                _sys_cap, batch_meta, tables, _og_sys, _og_tanks,
+                _trim_budget, purge=purge_this_week,
+                reserved=_reserved_og,
+                min_move=_min_move(control),
                 min_keep=control.min_tank_control or 0.0,
             )
 

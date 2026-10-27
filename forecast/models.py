@@ -347,6 +347,11 @@ class ControlParams:
     # is deferrable: it spends only the weekly handling budget left over, which
     # — uniquely, because nothing follows it — is exact.
     cap_repair_budget: int = 0
+    # End-of-week TANK density trim (moves/week; 0 = off). Runs after the
+    # system repair on the post-growth state: moves the minimum fish out of any
+    # grow-out tank over its density cap into a tank the same batch already
+    # holds (never an empty one). Spends only the weekly handling budget left.
+    density_trim_budget: int = 0
     # Anticipatory harvest setpoint: hold facility biomass below the cap by ~this
     # many weeks of the facility's REALIZED weekly growth (margin clamped to
     # [0.5%, 4%] of cap), so harvest pre-sheds each peak across the calm run-up
