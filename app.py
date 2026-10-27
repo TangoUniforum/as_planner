@@ -1274,6 +1274,18 @@ _CONTROL_HELP = {
         "cap system-weeks 312 → 25). Off = the old crowding-only behavior. "
         "Uses the main rebalancer's move budget."
         + _VALIDATED,
+    "density_trim_budget":
+        "End-of-week tank density trim. The tank-level partner of the cap "
+        "repair: after the week's growth, on the state the reports measure, it "
+        "moves the fewest fish it can out of any grow-out tank over its density "
+        "cap into a tank the SAME batch already holds (never an empty tank, "
+        "never another batch, destination filled to at most 95% of its cap and "
+        "its system to 95% of the system limits). Uses only the moves left in "
+        "the week's handling budget. 0 = off. Unit: moves/week. MEASURED "
+        "2026-10-26 on 20 corpus PRs at 8: density breaches -18% (worse on none), "
+        "HOG +0.1%, harvest-floor weeks 130 -> 131 (worse on 7, better on 8), "
+        "transfers per harvested fish 2.05 -> 2.01. 8 and 15 give the same plan. "
+        "Shipped OFF: switching it on is the operator's call.",
     "cap_repair_budget":
         "End-of-week cap repair. Every other rebalancing pass runs BEFORE the "
         "week's growth is applied, but the numbers you see are measured AFTER "
@@ -1538,6 +1550,7 @@ _CONTROL_LABEL = {
     "rebalance_varqty_budget": "Variable-qty moves / week",
     "rebalance_level": "Load leveling (on/off)",
     "cap_repair_budget": "End-of-week cap repair / week",
+    "density_trim_budget": "End-of-week density trim / week",
     "harvest_setpoint_lookahead_weeks": "Setpoint lookahead (INACTIVE)",
     "harvest_level_load": "Harvest smoother (on/off)",
     "harvest_smooth_lookahead_weeks": "Harvest smoother window K",
@@ -1777,6 +1790,7 @@ _CONTROL_GROUPS = [
      "which reports what each one is ACTUALLY doing on your config.",
      ["rebalance_balance_budget", "rebalance_level", "rebalance_headroom_days",
       "rebalance_split_budget", "rebalance_varqty_budget", "cap_repair_budget",
+      "density_trim_budget",
       "density_relief_pct", "consolidation_fill_pct",
       "harvest_prep_density_limit",
       "chronic_pressure_frac", "chronic_pressure_weeks", "chronic_relief_pct",
