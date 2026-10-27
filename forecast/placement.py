@@ -6960,6 +6960,10 @@ def phase_d_emit_events(
                     6N, STARVE and reserved tanks are never touched; the
                     smallest source that fits is chosen (fewest fish moved).
                     Returns True if a grow-out tank was freed."""
+                    if any(t.is_empty and t.type == "OG"
+                           and t.system_id in OG12_SYSTEMS
+                           for t in state.tanks_by_id.values()):
+                        return False   # not abort-bound: keep the legacy behaviour (cram)
                     _fill = _REPAIR_DENS_FILL   # 0.95 of cap: the same ceiling the repair passes fill to
                     _grow = [t for t in state.tanks_by_id.values()
                              if not t.is_empty and t.type == "OG"
