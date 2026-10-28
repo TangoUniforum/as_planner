@@ -3,17 +3,19 @@
 Updated at the end of every working session (`/forecast-handoff`). Newest first in
 each list. Last updated: **2026-10-28**.
 
-## LIVE since 2026-10-28: best settings + hold-band retune (merged af9312a)
+## 2026-10-28: code merged (af9312a), best settings REVERTED - live set unchanged from 2026-10-26
 
-- Merged (ff, rebased onto f4751ed; code identical to the gated d3bb8ef): density trim (`density_trim_budget`) +
-  arrival make-room merge. Tag `v2-before-arrival-room-2026-10-28`; backup
-  `..\_backups\2026-10-28_before_arrival_room_best_settings\` (code + live control/limits/batches/manual_events).
-- Live set `..\_backups\scenario_sets\10.18 PR build to 4200t, B49+ Base 95pct, best settings, hold 40k 2027 50k 2028+, 95 kgm3 from W20\`:
-  control density_trim_budget 4, rebalance_level false, hybrid_follow full; limits max_harvest_per_week
-  2027-W21..W53 41k -> 40k, 2028+ 48k -> 50k (picked from 37 band settings; neighbours jump - planner is
-  mode-discontinuous). 10.18 PR: tpf 2.26 -> 1.91, HOG 17,137 -> 17,158 t (2027 6,954 / 2028 8,078), peak
-  4,235 t, density warnings 202 -> 63, weeks < 100 t 6 -> 5. Live rerun from merged tree == sandbox.
-- Next: Global v2 (least-moves layout with the same endpoint) into the tool, in a sandbox, kept simple.
+- Merged (ff, rebased onto f4751ed; code identical to the gated d3bb8ef): density trim (`density_trim_budget`,
+  default off) + arrival make-room merge (acts only when the entry tier is completely full). Tag
+  `v2-before-arrival-room-2026-10-28`; backup `..\_backups6-10-28_before_arrival_room_best_settings\`.
+  With the live set the plan is identical to the operator's 10-26 workbook (all plan/report sheets).
+- Best settings (trim 4 + rebalance_level false + hybrid_follow full) + bands 40k/50k were made live, then REVERTED
+  the same morning (operator chose revert): rebalance_level false raises SystemLimitsAudit FEED_OVER system-weeks
+  18 -> 208 (bio 3 -> 7) - the sweep had not scored system feed. With rebalance on, trim+hybrid keeps the caps but
+  costs 150-270 t HOG. Saved set "...best settings, hold 40k 2027 50k 2028+..." is kept for reference, NOT live.
+  Live control/limits restored from the backup (== lchk2 == 10-26 set).
+- Fewer transfers now come from Global v2 (least-moves layout, same endpoint): sandbox `v2/least-moves`
+  (forecast/least_moves.py + tools/least_moves.py), kept simple; in progress.
 - Parked: fixed 4->8 tank standard schedule (310k looks possible on bounds; scratch tmpl_compact.py).
 - Operator must push: `git push origin v2/capacity-and-transition`.
 
