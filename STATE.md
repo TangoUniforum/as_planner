@@ -1,7 +1,21 @@
 # Where things stand
 
 Updated at the end of every working session (`/forecast-handoff`). Newest first in
-each list. Last updated: **2026-10-26**.
+each list. Last updated: **2026-10-28**.
+
+## LIVE since 2026-10-28: best settings + hold-band retune (merged af9312a)
+
+- Merged (ff, rebased onto f4751ed; code identical to the gated d3bb8ef): density trim (`density_trim_budget`) +
+  arrival make-room merge. Tag `v2-before-arrival-room-2026-10-28`; backup
+  `..\_backups\2026-10-28_before_arrival_room_best_settings\` (code + live control/limits/batches/manual_events).
+- Live set `..\_backups\scenario_sets\10.18 PR build to 4200t, B49+ Base 95pct, best settings, hold 40k 2027 50k 2028+, 95 kgm3 from W20\`:
+  control density_trim_budget 4, rebalance_level false, hybrid_follow full; limits max_harvest_per_week
+  2027-W21..W53 41k -> 40k, 2028+ 48k -> 50k (picked from 37 band settings; neighbours jump - planner is
+  mode-discontinuous). 10.18 PR: tpf 2.26 -> 1.91, HOG 17,137 -> 17,158 t (2027 6,954 / 2028 8,078), peak
+  4,235 t, density warnings 202 -> 63, weeks < 100 t 6 -> 5. Live rerun from merged tree == sandbox.
+- Next: Global v2 (least-moves layout with the same endpoint) into the tool, in a sandbox, kept simple.
+- Parked: fixed 4->8 tank standard schedule (310k looks possible on bounds; scratch tmpl_compact.py).
+- Operator must push: `git push origin v2/capacity-and-transition`.
 
 ## ▶ IN PROGRESS (2026-10-27): least-transfer plan research (scratch only) + density trim (sandbox)
 
