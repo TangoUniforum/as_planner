@@ -7,7 +7,7 @@ each list. Last updated: **2026-10-28**.
 
 - Merged (ff, rebased onto f4751ed; code identical to the gated d3bb8ef): density trim (`density_trim_budget`,
   default off) + arrival make-room merge (acts only when the entry tier is completely full). Tag
-  `v2-before-arrival-room-2026-10-28`; backup `..\_backups6-10-28_before_arrival_room_best_settings\`.
+  `v2-before-arrival-room-2026-10-28`; backup `..\_backups\2026-10-28_before_arrival_room_best_settings\`.
   With the live set the plan is identical to the operator's 10-26 workbook (all plan/report sheets).
 - Best settings (trim 4 + rebalance_level false + hybrid_follow full) + bands 40k/50k were made live, then REVERTED
   the same morning (operator chose revert): rebalance_level false raises SystemLimitsAudit FEED_OVER system-weeks
