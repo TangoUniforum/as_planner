@@ -4009,3 +4009,51 @@ key, a word where a number belongs, a negative number, a feed type named
 twice) is refused, and the message names the field. The Costs section then
 shows that message instead of its inputs; fix the file or delete it and enter
 the costs again.
+
+## 16. Least-moves layout (Global v2) — the same plan with fewer transfers (2026-10-28)
+
+**What it is.** A normal run decides *what* happens to every batch (fish per week, weight, TranOG arrival, when it
+goes into 6N) and *where* it sits, week by week. The "where" is decided one week at a time, reacting to that week's
+density, and that reshuffling is where most transfers come from. The least-moves layout keeps the *what* exactly —
+same fish, same arrivals, same 6N staging, so the same harvest, HOG, biomass and feed — and re-plans only the *where*,
+looking about ten weeks ahead, so fish go where they can stay.
+
+**What it does not do.** It never changes the run's workbook or any setting. It writes a separate companion
+workbook. It does not choose 6N tanks (those stay as in the run) and it does not grade fish.
+
+**How to run it** (after a normal run; about 2 hours for a two-year horizon at the defaults, so let it run in the
+background):
+
+```
+python -m tools.least_moves --workbook "<the run's workbook>.xlsm"
+```
+
+Options: `--config-dir` / `--scenario-dir` = the folders the run was made with (default: the live `config/` and
+`scenario/`); `--start 2026-W49` = first week to re-plan (default: the week after the manual starting events, read
+from the run's RunConfig); `--minutes-per-step 6` and `--workers` = solver effort; `--out` = where to write (default:
+next to the workbook, `<name>_least_moves.xlsx`).
+
+**How it works.** It looks 10 weeks ahead, fixes the first 5, then moves on 5 weeks and repeats. It starts each step
+from the run's own layout and improves it with an exact solver (OR-Tools CP-SAT). Never broken: fish conservation,
+one batch per tank, arrivals only into OG1/2, nothing back into OG1/2, no split inside OG1/2 at ≥ 1 kg, 6N staging
+only from grow-out. Heavily penalised (counted in the report if ever used): tank density cap, system biomass and feed
+× (1 + buffer), the weekly move budget, min fish per tank, the 7k move sizes. A step that needs any of those, or
+finds no answer, is retried with double the time.
+
+**The companion workbook.**
+
+| Sheet | What it shows |
+|---|---|
+| Summary | transfers per harvested fish, engine plan vs least-moves, by year; move events per week; the same rule check run on both layouts (density tank-weeks, system biomass and feed, weeks over the move budget, small moves) |
+| Transfers | every move the layout needs: week, batch, from tank, to tank, fish (FW = TranOG placement; 6N = staging for harvest, 6N tank as in the run) |
+| Layout | which batch is in which tank at the end of each week: fish, average weight, density |
+| Batches | transfers per harvested fish for each batch, engine plan vs least-moves |
+
+**Reading it.** "Transfers per harvested fish" = fish moved between OG tanks ÷ fish harvested, over the re-planned
+weeks. The rule check counts each tank-week (or system-week, or week) that breaks a rule, judged by the same code on
+both layouts. The engine's densities are its own tank densities; the least-moves layout uses the batch's average
+weight in every tank (it does not grade).
+
+**First result (10.18 PR, live 4,200 t set, 2026-W49..2029-W06, 2026-10-28):** 2.37 → 1.53 transfers per harvested
+fish (2027 2.37 → 1.62, 2028 2.32 → 1.53) with the same harvest; move events 10.6 → 6.0 per week; density 0
+tank-weeks over cap (engine 198 by the same check); one system-week 12 kg/day over the feed cap.

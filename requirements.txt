@@ -4,3 +4,5 @@ openpyxl>=3.1
 streamlit>=1.49
 plotly>=5.18
 pandas>=2.0
+# Least-moves layout (tools/least_moves.py, forecast/least_moves.py) only. Optional for everything else.
+ortools>=9.10
