@@ -89,6 +89,17 @@ def test_companion_workbook(solved, tmp_path):
     assert wb['Transfers'].max_row > 1 and wb['Layout'].max_row > 1
 
 
+def test_staged_fish_match_the_plan_with_mortality():
+    # 50 fish die in the staging week: the staged piece is still the plan's 8,000, not 8,000 x the survivors' factor
+    D = _endpoint()
+    D['batch']['B1'][WEEKS[-1]]['n'] = 15950.0
+    D['batch']['B1'][WEEKS[-1]]['kg'] = 15950.0 * WT[-1]
+    R = lm.solve(D, horizon=6, commit=6, secs=20, workers=4, retries=1, log=lambda s: None)
+    staged = sum(r['st'] for r in R['plan'][-1]['rows'])
+    assert staged == pytest.approx(8000, abs=1)
+    assert lm.check(D, R['plan'])['ok']
+
+
 # --------------------------------------------------------------------------- #
 # A real run: the endpoint read back from the workbook matches the engine's own layout
 # --------------------------------------------------------------------------- #

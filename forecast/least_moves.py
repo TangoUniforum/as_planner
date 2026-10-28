@@ -322,11 +322,13 @@ def solve(D: dict, horizon: int = 10, commit: int = 5, secs: float = 360, lam: f
                 for t in T:
                     key = (b, t, w); V = sv.Value
                     nv = V(n[key]); f = cs[(b, w)] * UNIT
+                    # staged pieces add up to the plan's own 6N staging (the unit factor is the one after the week)
+                    fs = B[b][w]['stage'] / stage_u[(b, w)] if stage_u.get((b, w), 0) and B[b][w]['stage'] > 0 else f
                     if nv or V(inn[key]) or V(out[key]) or (key in st and V(st[key])) or (key in av and V(av[key])):
                         rows.append(dict(b=b, t=t, u=nv, iu=V(inn[key]), ou=V(out[key]),
                                          su=V(st[key]) if key in st else 0, au=V(av[key]) if key in av else 0,
                                          n=nv * f, inn=V(inn[key]) * f, out=V(out[key]) * f,
-                                         st=V(st[key]) * f if key in st else 0, arr=V(av[key]) * f if key in av else 0,
+                                         st=V(st[key]) * fs if key in st else 0, arr=V(av[key]) * f if key in av else 0,
                                          dens=nv * bkg(b, w) / 10 / VOL[t] if units.get((b, w), 0) else 0))
             plan.append(dict(week=w, moved=sum(r['inn'] for r in rows), rows=rows))
         lastw = keep[-1]
