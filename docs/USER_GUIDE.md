@@ -4054,6 +4054,8 @@ weeks. The rule check counts each tank-week (or system-week, or week) that break
 both layouts. The engine's densities are its own tank densities; the least-moves layout uses the batch's average
 weight in every tank (it does not grade).
 
-**First result (10.18 PR, live 4,200 t set, 2026-W49..2029-W06, 2026-10-28):** 2.37 → 1.53 transfers per harvested
-fish (2027 2.37 → 1.62, 2028 2.32 → 1.53) with the same harvest; move events 10.6 → 6.0 per week; density 0
-tank-weeks over cap (engine 198 by the same check); one system-week 12 kg/day over the feed cap.
+**First result (10.18 PR, live 4,200 t set, 2026-W49..2029-W06, 2026-10-28):** 2.37 → 1.51 transfers per harvested
+fish (2027 2.37 → 1.62, 2028 2.32 → 1.46) with the same harvest; move events 10.6 → 5.9 per week (max 15); run time
+157 min. Same checker on both: density over cap 198 → 0 tank-weeks, system feed over cap 27 → 0, system biomass 3 → 0,
+weeks over the move budget 11 → 0, moves under 7k 148 → 0. Left: 2 partial 6N stagings 42 and 53 fish under the
+plan's staged amount (100-fish rounding).
