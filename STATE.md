@@ -3,6 +3,20 @@
 Updated at the end of every working session (`/forecast-handoff`). Newest first in
 each list. Last updated: **2026-10-28**.
 
+## 2026-10-28: least-moves layout (Global v2) merged (27a2477) - plan numbers unchanged
+
+- New tool `python -m tools.least_moves --workbook "<planned .xlsm>"` (~2.5 h): reads a finished run, re-lays
+  the same fish per batch per week into tanks with the fewest moves (CP-SAT rolling windows + independent checker),
+  writes `<name>_least_moves.xlsx` next to the workbook (Summary / Transfers / Layout / Batches). Changes nothing else.
+  Code `forecast/least_moves.py`, tests `tests/test_least_moves.py` (6, with negative controls), USER_GUIDE section 16,
+  `ortools` optional in requirements.txt. Tag `v2-before-least-moves-2026-10-28`; backup
+  `..\_backups6-10-28_before_least_moves\`.
+- Live 10-26 plan: transfers per harvested fish 2.37 -> 1.51 (2027 1.62, 2028 1.46); move events/wk 10.6 -> 5.9;
+  same checker: density over cap 198 -> 0, system feed over 27 -> 0, weeks over 15 moves 11 -> 0. Companion workbook
+  in `Forecasts6\Oct\` next to the live workbook. Fix 27a2477: 6N staged pieces now equal the plan's staging
+  (two pieces were 42/53 fish short); confirming rerun from the merged tree in progress.
+- Next (after the book is closed): fixed 4->8 tank standard schedule (parked; 310k at 95 kg/m3 looked possible).
+
 ## 2026-10-28: code merged (af9312a), best settings REVERTED - live set unchanged from 2026-10-26
 
 - Merged (ff, rebased onto f4751ed; code identical to the gated d3bb8ef): density trim (`density_trim_budget`,
