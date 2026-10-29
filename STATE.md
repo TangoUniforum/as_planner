@@ -17,6 +17,9 @@ each list. Last updated: **2026-10-28**.
   expects 7 modes. Suite in sandbox: 2535 passed, 111 skipped, 1 failed = that mode-count guard (updated). Live tree:
   new + render + least-moves tests 35 passed. USER_GUIDE section 17. Tag `v2-before-tank-rota-2026-10-28`;
   backup `..\_backups\2026-10-28_before_tank_rota\`.
+- Vetted after the push (2026-10-29), old 0f15a7b vs new 418d21e: gate 24/24 plan-identical, no report changes
+  (corpus + Oct Scenario 1/2/V6); live set "10.18 PR build to 4200t, B48 Actual, ..." on the 10.18 PR: plan
+  identical, no report changes; full suite on 418d21e 2536 passed, 111 skipped, 0 failed.
 - Not done: transition from today's plan into a rota (operator: not pursuing for now).
 
 ## 2026-10-28: least-moves layout (Global v2) merged (27a2477) - plan numbers unchanged
