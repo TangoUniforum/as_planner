@@ -3,6 +3,22 @@
 Updated at the end of every working session (`/forecast-handoff`). Newest first in
 each list. Last updated: **2026-10-28**.
 
+## 2026-10-28 late: Tank layouts app mode + tank rota merged (57a6478) - plan numbers unchanged
+
+- New app mode **Tank layouts (fewer moves)** (`tank_layouts_page.py`, 7th mode, appended last):
+  - *Tank rota*: upload a planned workbook, pick a batch's life + fish per batch, steps table (entry tanks wk 0,
+    whole-batch move to grow-out, +n tanks later) -> instant tank count -> full check (~25 s-5 min) -> workbook.
+    Engine `forecast/tank_rota.py`, CLI `python -m tools.tank_rota --steps "0:4, 21:6, 32:+1"`.
+  - *Least-moves*: starts `tools.least_moves` as a detached background job (jobs in %TEMP%/as_forecast_layout_jobs),
+    lists running/done/failed with download.
+- Results on the 10.18 plan (B59 life): 4->8 cannot fit (needs >= 25 of 21 grow tanks); 4->6 +1@32 at 310k clean,
+  1.16 transfers/fish, busiest system 439 t (uses the x1.1 tolerance); at 330k too dense at week 31.
+- Tests: tests/test_tank_rota.py (6, negative controls), tests/test_tank_layouts_page.py (2); test_decide_mode now
+  expects 7 modes. Suite in sandbox: 2535 passed, 111 skipped, 1 failed = that mode-count guard (updated). Live tree:
+  new + render + least-moves tests 35 passed. USER_GUIDE section 17. Tag `v2-before-tank-rota-2026-10-28`;
+  backup `..\_backups\2026-10-28_before_tank_rota\`.
+- Not done: transition from today's plan into a rota (operator: not pursuing for now).
+
 ## 2026-10-28: least-moves layout (Global v2) merged (27a2477) - plan numbers unchanged
 
 - New tool `python -m tools.least_moves --workbook "<planned .xlsm>"` (~2.5 h): reads a finished run, re-lays
