@@ -277,7 +277,10 @@ def solve(D: dict, horizon: int = 10, commit: int = 5, secs: float = 360, lam: f
                         s3b = m.NewIntVar(0, mmu, ''); pen.append((s3b, 10 ** 6, 'move_size'))
                         m.Add(inn[key] + s3b >= mmu).OnlyEnforceIf(yi[key])               # received piece
                         if key in st and stage_u.get((b, w), 0) > 0:                       # partial 6N staging
-                            smu = min(mmu, stage_u[(b, w)])
+                            # staged pieces are counted at the staging factor (the plan's own staging / units), so
+                            # the floor is too - at the after-week factor a 7,000 floor could come out 6,998 fish
+                            fsu = B[b][w]['stage'] / stage_u[(b, w)] if B[b][w]['stage'] > 0 else cs[(b, w)] * UNIT
+                            smu = min(math.ceil(D['min_move'] / fsu), stage_u[(b, w)])
                             s3c = m.NewIntVar(0, smu, ''); pen.append((s3c, 10 ** 6, 'move_size'))
                             m.Add(st[key] + s3c >= smu).OnlyEnforceIf([ys[key], x[key]])
             for t in T:
