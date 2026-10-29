@@ -4060,3 +4060,51 @@ fish (2027 2.37 → 1.62, 2028 2.32 → 1.46) with the same harvest; move events
 weeks over the move budget 11 → 0, moves under 7k 148 → 0. A second run (after the 6N staging fix) gave 1.47
 (2027 1.28, 2028 1.60; one system-week 1.7 kg/day over the feed cap): the solver stops on time, so two runs differ a
 little - compare the 'All weeks' line, not single years.
+
+**In the app:** mode **Tank layouts (fewer moves)** → *Least-moves layout*: upload the planned workbook and press
+**Start least-moves**. It runs in the background (you can close the app; the PC must stay awake); the list below the
+button shows each job as running / done / failed with its last log line, and a download button when it is done.
+
+## 17. Tank rota — a fixed schedule in steps you choose (2026-10-28)
+
+**What it is.** A *standard schedule*: every batch is handled the same way, in steps you choose. Step 1 is the entry
+(how many OG1/2 tanks the batch arrives into). Step 2 is the week the **whole batch** moves to grow-out and into how
+many tanks. Later steps add grow tanks at a week of life (filled with pieces of at least 7,000 fish from the tanks
+the batch already has). The 6N staging is the plan's own, week by week of life, so the harvest is the same. The tool
+answers: *can this rota run in this facility, within every rule, and how many transfers does it cost?*
+
+**What it does not do.** It covers the steady state only — how to get from today's fish into the rota is not worked
+out. It changes nothing: it reads a planned workbook and writes its own workbook.
+
+**How to use it.** App mode **Tank layouts (fewer moves)** → *Tank rota*:
+1. Upload a planned workbook (made with the config that is live now).
+2. Pick whose life to copy (default: the latest batch that is done a cadence before the plan ends — the last batches
+   carry end-of-plan tails) and the fish per batch (default: the plan's; changing it scales the counts and the 6N
+   staging, weights and timing stay).
+3. Fill the steps table, e.g. `0 / 4`, `21 / 6`, `32 / 1` (entry 4 tanks, whole batch to 6 grow tanks at week 21,
+   one more grow tank at week 32).
+4. The **tank count** appears at once. It is a necessary condition only: it checks density at every step, that the
+   entry has room (12 entry tanks / tanks per batch = batches in entry at a time), and a lower bound on the grow tanks
+   needed in the busiest week (each batch needs at least biomass / tank capacity while it holds fish). If it says
+   *cannot fit*, no rota with these steps exists.
+5. If it passes, **Run the full check** (about 1–5 minutes): it designs one batch's tank plan with every rule hard,
+   puts the batches on real tanks (entry by rule: one tank per entry system in turn; grow by solver within the system
+   biomass and feed caps × buffer), lays three cycles out week by week and judges them with the **same independent
+   checker as the least-moves layout**. The result shows the rule check, transfers per harvested fish, the most move
+   events in a week and the busiest system, plus a download.
+
+Command line: `python -m tools.tank_rota --workbook "<planned .xlsm>" --steps "0:4, 21:6, 32:+1" [--fish 310000]
+[--check-only]`.
+
+**The workbook.** *Summary* (result and limits), *Batch recipe* (fish in every tank for every week of life, and what
+happens that week), *Tank calendar* (one cycle, colour by batch, with density) and *Transfers* (every move in a cycle).
+
+**First results (10.18 PR plan, batch B59's life, one batch every 7 weeks, 2026-10-28):**
+
+| Steps | Fish per batch | Result |
+|---|---|---|
+| 4 → 8 at week 21 | 310k or 330k | cannot fit: the busiest week needs at least 25 grow tanks of 21 |
+| 4 → 6 at 21, +1 at 32 | 310k | clean; 1.16 transfers per harvested fish; ≤ 13 moves a week; busiest system 439 t (uses the 10% system tolerance) |
+| 4 → 6 at 21, +1 at 32 | 330k | too dense: 1,001 t at week 31 in 6 tanks (980 t) |
+
+For comparison on the same plan: engine 2.37, least-moves layout about 1.5 transfers per harvested fish.

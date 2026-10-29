@@ -11482,7 +11482,8 @@ with st.sidebar:
         "Mode",
         ["Configure (models & control)", "Run forecast",
          "Decide (which plan should I run?)", "Ideal (what should we stock?)",
-         "Accuracy (forecast vs actuals)", "How it works (the rules)"],
+         "Accuracy (forecast vs actuals)", "How it works (the rules)",
+         "Tank layouts (fewer moves)"],
         captions=[
             "Set up once — biology curves, tanks, batches, per-week limits, "
             "control knobs, harvest targets, prices and operating costs.",
@@ -11498,6 +11499,9 @@ with st.sidebar:
             "the PR that followed it.",
             "The rulebook — what each layer decides, what it may never do, "
             "and the honest list of known limits.",
+            "“Can we move fish less?” — a fixed tank rota in steps you "
+            "choose, and the least-moves layout of a finished plan. Changes "
+            "nothing; each writes its own workbook.",
         ],
         help="Listed in the order you normally work: Configure once, then Run "
              "forecast every day. Decide answers 'which plan?' — the monthly "
@@ -11563,7 +11567,13 @@ with st.sidebar:
             "entry → placement → harvest → depuration → audits → the Ideal's "
             "hard limits), what each "
             "decides, what it may never do, which checks bind it, and the "
-            "honest known-limits list.\n\n"
+            "honest known-limits list.\n"
+            "- **Tank layouts (fewer moves)** — for a finished plan: a fixed "
+            "tank rota in steps you choose (entry tanks, the move to "
+            "grow-out, tanks added later), checked in minutes against every "
+            "rule; and the least-moves layout (the same plan with the fewest "
+            "moves, ~2.5 h in the background). Changes nothing — each writes "
+            "its own workbook.\n\n"
             "*(Retired modes: **Tune** (2026-08-06) — its density readout is "
             "a checklist gate + drill-in, the stocking frontier moved with "
             "it, and `tools/tune_sweep.py` still runs headless. **Analyze**, "
@@ -15515,6 +15525,11 @@ if app_mode.startswith("Ideal"):
 
 if app_mode.startswith("Optimize"):
     _optimizer()
+    st.stop()
+
+if app_mode.startswith("Tank layouts"):
+    import tank_layouts_page
+    tank_layouts_page.render(_cpu_workers())
     st.stop()
 
 
