@@ -4101,6 +4101,12 @@ two-year horizon takes 1–2+ hours. It is **not** on the Decide/Compare roster 
 fish 2.33 → 1.92 over the whole run (2.01 → 1.49 over the 68 weeks it re-planned; from 2028-W03, where production
 mode starts, the plan is the normal one); harvest, 6N and fish per batch-week identical; continuity audit flags 2 → 0;
 system feed over-cap cells 24 → 22.
+Live 10.18 PR set (build to 4,200 t, hold to 2029), 60 s per step, 47 min solver / 47 min run: transfers per harvested
+fish 2.26 → 1.80 (2027 2.37 → 1.95, 2028 2.32 → 1.94); OG-to-OG move rows 844 → 426 (mean 7.3 → 4.4 per week, max
+16 → 13); harvest, HOG (17,137 t), 6N and fish per batch-week identical (sheet rounding ≤ 4 fish); density over cap
+223 → 26 tank-weeks (the 21 in the manual starting weeks are untouched); system feed over cap 20 → 10 (worst 1.35× →
+1.14×), system biomass over cap 3 → 0; continuity audit clean on both; total feed 27,110 → 27,122 t (+0.04%, batch
+average weight per tank).
 
 ## 17. Tank rota — a fixed schedule in steps you choose (2026-10-28)
 
