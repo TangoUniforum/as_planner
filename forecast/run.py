@@ -1193,6 +1193,23 @@ def main(
             print(f"  LNS placement: refine failed ({type(e).__name__}: {e}); "
                   f"greedy stands")
 
+    # ----- Stage 2.6: optional least-moves layout (opt-in) -----
+    #
+    # placement_method=="least_moves": keep the plan's endpoint (fish per batch per
+    # week, arrivals, 6N staging, harvest) and re-lay the grow-out tanks with as few
+    # fish moves as possible (forecast/least_moves_stage.py). The normal placement is
+    # the fallback: any failed check keeps it, and the reason goes to the log.
+    if getattr(control, "placement_method", "greedy") == "least_moves":
+        from . import least_moves_stage
+        placement, _lm_info = least_moves_stage.relayout(
+            placement, start_state=state, control=control, facility=facility,
+            facility_limits=facility_limits, system_limits=system_limits,
+            batch_by_id=batch_by_id, tables=tables,
+            log=lambda m: print(f"  least-moves: {m}"))
+        _lm_line = least_moves_stage.summary_line(_lm_info)
+        print(f"  {_lm_line}")
+        placement.warnings.append(_lm_line)
+
     # Stitch the manual override window (weeks 1..N) into the output so the
     # operator's scripted weeks are visible + audited. The continuity audit is
     # event-stream driven, so the prefix BatchLocations + realized_biology

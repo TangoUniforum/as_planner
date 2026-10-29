@@ -142,6 +142,22 @@ def read_endpoint(workbook: str, config_dir: str, scenario_dir: str, start_week:
     return D
 
 
+def open_wt(B: dict, b: str, w: str, weeks: list) -> float:
+    """A batch's weight when the week opens (= the end of the week before), which is when moves happen; the
+    week's own weight when there is no week before or the batch was not yet in OG."""
+    i = weeks.index(w)
+    if i > 0 and B[b][weeks[i - 1]]['n'] > 0:
+        return B[b][weeks[i - 1]]['wt']
+    return B[b][w]['wt']
+
+
+def sys_cap(D: dict, week: str, system: str) -> tuple:
+    """(biomass kg, feed kg/day) caps of a system in a week: the week's own caps when the endpoint carries them
+    (built inside a run, from limits.yaml rows), else the system defaults."""
+    v = (D.get('sys_cap_w') or {}).get(week, {}).get(system)
+    return tuple(v) if v else tuple(D['sys_cap'].get(system, (0, 0)))
+
+
 # ------------------------------------------------------------------------------------------------ 2. solve
 def solve(D: dict, horizon: int = 10, commit: int = 5, secs: float = 360, lam: float = 2000.0,
           workers: int = 8, retries: int = 3, warm_start: bool = True, log=print) -> dict:
@@ -153,6 +169,11 @@ def solve(D: dict, horizon: int = 10, commit: int = 5, secs: float = 360, lam: f
     SYS = {t[0]: t[1] for t in TK}; VOL = {t[0]: t[2] for t in TK}; CAP0 = {t[0]: t[3] for t in TK}
     ENTRY = [t for t in T if SYS[t] in OG12]; GROW = [t for t in T if SYS[t] not in OG12]
     BUF = 1 + D['buffer']; MAXMV = D['max_moves']; B = D['batch']
+    _wi = {w: i for i, w in enumerate(W)}
+
+    def open_wt(b, w):                                   # weight when the week opens (moves happen then)
+        i = _wi[w]
+        return B[b][W[i - 1]]['wt'] if i > 0 and B[b][W[i - 1]]['n'] > 0 else B[b][w]['wt']
 
     # per-batch unit bookkeeping: units change only by arrivals and 6N staging; cs = fish per unit / UNIT
     units = {}; cs = {}; stage_u = {}; arr_u = {}
@@ -231,7 +252,9 @@ def solve(D: dict, horizon: int = 10, commit: int = 5, secs: float = 360, lam: f
                 m.Add(sum(st.get((b, t, w), 0) for t in GROW) == stage_u.get((b, w), 0))
                 if arr_u.get((b, w), 0) > 0:
                     m.Add(sum(av[(b, t, w)] for t in ENTRY) == arr_u[(b, w)])
-                if B[b][w]['wt'] >= 1.0:
+                # the rule applies to the weight when the fish move; with entry tanks fixed to the source plan its own
+                # (per-tank, graded) entry moves stand, so only "never back into OG1/2" is kept
+                if open_wt(b, w) >= 1.0 and not D.get('fix_entry'):
                     for t in ENTRY:
                         m.Add(inn[(b, t, w)] == 0)                               # no split inside OG1/2 at >= 1 kg
                 else:
@@ -260,7 +283,7 @@ def solve(D: dict, horizon: int = 10, commit: int = 5, secs: float = 360, lam: f
             for t in T:
                 m.Add(sum(x[(b, t, w)] for b in alive) <= 1)                          # one batch per tank
             for sname in sorted({SYS[t] for t in T}):
-                bc, fc = D['sys_cap'].get(sname, [0, 0])
+                bc, fc = sys_cap(D, w, sname)
                 ts = [t for t in T if SYS[t] == sname]
                 if bc:
                     s4 = m.NewIntVar(0, int(bc * 10), ''); pen.append((s4, 10 ** 4, 'sys_bio'))
@@ -280,6 +303,30 @@ def solve(D: dict, horizon: int = 10, commit: int = 5, secs: float = 360, lam: f
                 s6 = m.NewIntVar(0, 200, ''); pen.append((s6, 10 ** 9, 'moves'))
                 m.Add(sum(yo[(b, t, w)] + yi[(b, t, w)] for b in alive for t in T) - sum(zs)
                       + sum(ys[(b, t, w)] for b in alive for t in GROW) <= MAXMV + s6)
+        def targets(lay, b, w):                          # a layout's fish for batch b, in units summing to the batch's
+            want = units.get((b, w), 0); f = cs[(b, w)] * UNIT
+            ts = [(int(t), v[1] / f) for t, v in lay.items() if v[0] == b]
+            fl = {t: int(math.floor(q)) for t, q in ts}
+            for t, q in sorted(ts, key=lambda v: v[1] - math.floor(v[1]), reverse=True)[:max(0, want - sum(fl.values()))]:
+                fl[t] += 1
+            return fl
+        def near(v, u):                                  # same occupancy; fish within one unit (the unit rounding)
+            if u <= 0:
+                m.Add(v == 0)
+            else:
+                m.Add(v >= max(1, u - 1)); m.Add(v <= u + 1)
+        if D.get('fix_entry'):                           # entry tanks as the source plan, every week
+            for w in win:
+                for b in alive:
+                    tg = targets(D['engine_layout'].get(w, {}), b, w)
+                    for t in ENTRY:
+                        near(n[(b, t, w)], tg.get(t, 0))
+        if D.get('end_layout') and W[-1] in win:         # pinned last week: exactly the given tanks
+            wl = W[-1]
+            for b in alive:
+                tg = targets(D['end_layout'], b, wl)
+                for t in T:
+                    near(n[(b, t, wl)], tg.get(t, 0))
         if warm_start and D.get('engine_layout'):       # start from the engine's own layout for these weeks
             for w in win:
                 lay = D['engine_layout'].get(w, {})
@@ -372,7 +419,7 @@ def check(D: dict, plan: list[dict]) -> dict:
                     issues['density over cap (tank-weeks)'] += 1; worst['density_over_kg_m3'] = max(worst['density_over_kg_m3'], r['dens'] - cap)
                 if r['n'] < D['min_tank'] - 1 and rec['n'] >= D['min_tank']:
                     issues['tank under min fish'] += 1
-            if SYS[t] in OG12 and r['inn'] > 0.5 and rec['wt'] >= 1.0:
+            if SYS[t] in OG12 and r['inn'] > 0.5 and open_wt(D['batch'], b, w, D['weeks']) >= 1.0:
                 issues['entry split at >= 1 kg'] += 1
             if SYS[t] in OG12 and r['st'] > 0.5:
                 issues['6N staging from an entry tank'] += 1
@@ -388,7 +435,7 @@ def check(D: dict, plan: list[dict]) -> dict:
             if r['st'] > 0.5: stg += 1
         issues['two batches in a tank'] += sum(1 for bs in occ.values() if len(bs) > 1)
         for s, kg in sb.items():
-            bc, fc = D['sys_cap'].get(s, [0, 0])
+            bc, fc = sys_cap(D, w, s)
             if bc and kg > bc * BUF + 1:
                 issues['system biomass over cap x buffer'] += 1; worst['sys_bio_over_t'] = max(worst['sys_bio_over_t'], (kg - bc * BUF) / 1e3)
             if fc and sf[s] > fc * BUF + 1:

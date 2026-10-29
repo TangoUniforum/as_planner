@@ -392,6 +392,15 @@ class ControlParams:
     placement_method: str = "greedy"
     # LNS budget: max relocations/swaps per run (only used when placement_method=="lns").
     lns_max_moves: int = 30
+    # placement_method=="least_moves": after the normal placement, re-lay the grow-out tanks with as few fish moves
+    # as possible for the SAME endpoint (fish per batch per week, arrivals, 6N staging, harvest) - see
+    # forecast/least_moves_stage.py. Solver budget: look `least_moves_horizon` weeks ahead, keep
+    # `least_moves_commit`, `least_moves_secs` seconds per step on `least_moves_workers` threads. Any failed check
+    # keeps the normal plan (logged). Needs ortools.
+    least_moves_secs: float = 60.0
+    least_moves_horizon: int = 10
+    least_moves_commit: int = 5
+    least_moves_workers: int = 8
     # Auto-calibrate FW growth (OPT-IN, default OFF -> shipped behaviour unchanged).
     # When True, before projecting, each FW batch's `fw_correction` is REPLACED by
     # the value that lands its pre-cull avg weight exactly on `tran_og_avg_wt_g` at
