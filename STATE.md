@@ -3,6 +3,21 @@
 Updated at the end of every working session (`/forecast-handoff`). Newest first in
 each list. Last updated: **2026-10-28**.
 
+## 2026-10-29: least-moves as a pipeline step merged (3d52575) - OFF by default, plan numbers unchanged
+
+- `placement_method: least_moves` (forecast/least_moves_stage.py, run.py Stage 2.6): after the normal placement,
+  re-lays OG1-5/6S with the least-moves solver on the run's own endpoint; gates = rule check no worse per category,
+  fewer transfers, per-tank biology reconciles per batch-week, else the normal plan stands (ValidationLog line).
+  Weeks with harvest from grow-out / 6N back to grow-out cut the span (pinned end, entry tanks as planned).
+  Method `controller-least-moves` registered but OFF the Decide/Compare roster (slow). USER_GUIDE 16.1.
+- Live 10.18 set, 60 s/step (47 min): tpf 2.26 -> 1.80, move rows 844 -> 426, density over cap 223 -> 26 (21 in manual
+  weeks), sys feed overs 20 -> 10, sys bio 3 -> 0; harvest/HOG/6N identical; feed +0.04%. Fixture: 2.33 -> 1.92.
+- Solver fixes (also in tools.least_moves / tank rota): 1 kg rule at week-open weight; 6N staging piece floor at the
+  staging factor; per-week system caps.
+- Gate 24/24 plan-identical with it off; suite 2542 passed. Tag `v2-before-least-moves-stage-2026-10-29`; backup
+  `..\_backups\2026-10-29_before_least_moves_stage\`. Live control stays `placement_method: greedy`.
+- Next: step 3 - faster variants judged on the corpus (`python -m tools.knob_corpus --method controller-least-moves`).
+
 ## 2026-10-28 late: Tank layouts app mode + tank rota merged (57a6478) - plan numbers unchanged
 
 - New app mode **Tank layouts (fewer moves)** (`tank_layouts_page.py`, 7th mode, appended last):
