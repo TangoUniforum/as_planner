@@ -379,6 +379,25 @@ register(Method(
           "where the alternatives drift to 3-4.",
 ))
 
+register(Method(
+    key="controller-least-moves",
+    label="Controller + least-moves layout",
+    family="Controller",
+    engine="controller",
+    # Same pin as "controller" (hybrid off) so the two arms differ ONLY in the layout step.
+    overrides={"hybrid_follow": "off", "placement_method": "least_moves"},
+    knob_grid=CONTROLLER_KNOB_GRID,
+    knob_space=CONTROLLER_KNOB_SPACE,
+    blurb="The reactive controller's plan, then the least-moves layout step "
+          "(forecast/least_moves_stage.py): the same endpoint -- fish and biomass "
+          "per batch per week, arrivals, 6N staging, harvest -- re-laid in the "
+          "grow-out tanks with as few fish moves as possible (CP-SAT, rolling "
+          "windows). Any failed check keeps the controller's plan. SLOW (minutes "
+          "per solver step, ~1-2 h on a 2-year horizon), so it is NOT on the "
+          "comparison roster: run it with `tools.knob_corpus --method "
+          "controller-least-moves` or `placement_method: least_moves` in control.",
+))
+
 
 # Default comparison roster. controller-hybrid is IN it as of 2026-08-03: with
 # the zero-harvest-week blind spot fixed (34ecbaf) the plain controller was shown

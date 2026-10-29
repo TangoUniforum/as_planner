@@ -314,6 +314,7 @@ def _active_config_summary(cd: dict) -> list[tuple]:
         _lever_row("rebalance_balance_budget", "Rebalancer budget"),
         ("Placement engine", pm.upper(),
          "greedy heuristic + rebalancer (default)" if pm == "greedy"
+         else "least-moves layout: same plan, re-laid with fewest moves (slow)" if pm == "least_moves"
          else "LP-guided LNS optimal-layout refinement"),
         ("FW auto-calibration", "ON" if bool(g("auto_calibrate_fw")) else "OFF",
          "FW growth is auto-adjusted so each batch hits its pre-cull transfer target "
@@ -1342,11 +1343,27 @@ _CONTROL_HELP = {
         "onto cooler ones; every move is audit-checked (no fish lost, "
         "strictly less crowding) with greedy as the fallback, so it can't "
         "make a run worse — it just takes longer, and only helps when free "
-        "tanks exist.",
+        "tanks exist. 'least_moves' runs greedy, then re-lays the grow-out "
+        "tanks with as few fish moves as possible for the SAME plan (same fish "
+        "per batch per week, 6N staging and harvest); any failed check keeps "
+        "greedy. Slow: about least_moves_secs per 5 weeks of horizon, often "
+        "1-2 hours. Needs ortools.",
     "lns_max_moves":
         "How many refinement moves the 'lns' placement engine may make per "
         "run. Only used when the placement engine is 'lns'. Higher = chases "
         "more crowding but runs slower. Unit: moves.",
+    "least_moves_secs":
+        "Solver time per step of the 'least_moves' placement engine. Each step "
+        "looks least_moves_horizon weeks ahead and keeps least_moves_commit of "
+        "them. Less time = a rougher layout, which the step's checks may then "
+        "refuse (the normal plan is kept). Unit: seconds.",
+    "least_moves_horizon":
+        "Weeks the 'least_moves' engine looks ahead in each step. Unit: weeks.",
+    "least_moves_commit":
+        "Weeks of each 'least_moves' step that are kept before the next step "
+        "starts. Unit: weeks.",
+    "least_moves_workers":
+        "Processor threads the 'least_moves' solver uses. Unit: threads.",
     "auto_calibrate_fw":
         "Auto-tune freshwater growth so each batch lands exactly on its "
         "planned seawater-entry weight. On = the forecast ASSUMES the growth "
@@ -1558,6 +1575,10 @@ _CONTROL_LABEL = {
     "harvest_grade_to_min": "Grade-harvest to the floor (INACTIVE)",
     "placement_method": "Placement engine",
     "lns_max_moves": "LNS move budget",
+    "least_moves_secs": "Least-moves: seconds per step",
+    "least_moves_horizon": "Least-moves: look-ahead (weeks)",
+    "least_moves_commit": "Least-moves: weeks kept per step",
+    "least_moves_workers": "Least-moves: solver threads",
     "auto_calibrate_fw": "Auto-calibrate FW to transfer target",
     "auto_calibrate_fw_min": "  ↳ FW correction clamp — min",
     "auto_calibrate_fw_max": "  ↳ FW correction clamp — max",
@@ -1804,7 +1825,8 @@ _CONTROL_GROUPS = [
      "Which planner runs and how hard it works. Rarely worth touching by hand — "
      "Decide tunes these for you.",
      ["plan_tank_feasibility",
-      "placement_method", "lns_max_moves", "hybrid_follow", "hybrid_follow_band",
+      "placement_method", "lns_max_moves", "least_moves_secs", "least_moves_horizon",
+      "least_moves_commit", "least_moves_workers", "hybrid_follow", "hybrid_follow_band",
       "hybrid_guide_min_frac", "hybrid_guide_smooth_weeks", "hybrid_purge_lever",
       "hybrid_production_lever", "global_buffer_pct", "global_assume_primed_6n",
       "auto_calibrate_fw", "auto_calibrate_fw_min", "auto_calibrate_fw_max"]),

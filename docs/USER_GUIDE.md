@@ -4065,6 +4065,43 @@ little - compare the 'All weeks' line, not single years.
 **Start least-moves**. It runs in the background (you can close the app; the PC must stay awake); the list below the
 button shows each job as running / done / failed with its last log line, and a download button when it is done.
 
+### 16.1 Least-moves as a pipeline step (`placement_method: least_moves`, 2026-10-29)
+
+The same solver can run **inside** a forecast run, so the run's own workbook — every sheet — describes the re-laid
+plan instead of a companion file. Set `placement_method: least_moves` in control (Configure → Control → Engine
+internals → Placement engine), or run the method `controller-least-moves` (e.g.
+`python -m tools.knob_corpus --method controller-least-moves`). Off by default; `greedy` is unchanged.
+
+**What stays exactly as the normal plan:** fish and biomass per batch per week, TranOG arrivals, 6N staging per
+batch-week, everything in 6N, harvest and HOG. Mortality per batch-week too (the handling mortality of the normal
+plan's moves included — fewer moves are not credited with fewer deaths, so harvest stays identical).
+**What changes:** which tank holds which fish in OG1–5 and OG6S, the OG-to-OG transfers (TransferPlan channel
+`least_moves`), which entry tanks an arrival lands in, which tank each 6N staging leaves from. Fish in a tank carry the
+batch's average weight that week, so per-system feed can differ slightly from the normal plan's graded tanks.
+
+**Checks before it is used** (any failure keeps the normal plan, and the ValidationLog says why):
+1. the same rule check as §16 on both layouts — the new one may not be worse in any category (density, system
+   biomass/feed, move budget, two batches in a tank, 1 kg rule, min fish, 7k pieces);
+2. fewer fish moved between tanks;
+3. the per-tank biology of the new layout reconciles with the normal plan for every batch-week (mortality and
+   biomass), and no tank-week shows more than 250 fish of negative mortality (rounding).
+The ValidationLog line reads *"Least-moves layout used: transfers per harvested fish 2.01 → 1.49 …"* or *"…NOT used
+— the normal plan stands: <reason>"*.
+
+**Weeks it cannot re-lay:** harvest straight from a grow-out tank (6N production mode / in-place purge) and fish
+moving out of 6N back into grow-out. It then re-plans only the weeks before the first such week, keeps the entry
+tanks (OG1/2) as the normal plan has them for that span, and ends that span in the normal plan's own tanks, so the
+weeks after join on unchanged. A graded harvest is handled as 6N staging.
+
+**Time:** knobs `least_moves_secs` (60 per step), `least_moves_horizon` (10 weeks ahead), `least_moves_commit` (keep 5),
+`least_moves_workers` (8). A step the solver cannot settle within the rules is retried with double the time, so a
+two-year horizon takes 1–2+ hours. It is **not** on the Decide/Compare roster for that reason.
+
+**First results (sandbox, 2026-10-29):** 9/30 fixture PR, committed settings, 20 s per step: transfers per harvested
+fish 2.33 → 1.92 over the whole run (2.01 → 1.49 over the 68 weeks it re-planned; from 2028-W03, where production
+mode starts, the plan is the normal one); harvest, 6N and fish per batch-week identical; continuity audit flags 2 → 0;
+system feed over-cap cells 24 → 22.
+
 ## 17. Tank rota — a fixed schedule in steps you choose (2026-10-28)
 
 **What it is.** A *standard schedule*: every batch is handled the same way, in steps you choose. Step 1 is the entry
