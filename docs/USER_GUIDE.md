@@ -4057,5 +4057,6 @@ weight in every tank (it does not grade).
 **First result (10.18 PR, live 4,200 t set, 2026-W49..2029-W06, 2026-10-28):** 2.37 → 1.51 transfers per harvested
 fish (2027 2.37 → 1.62, 2028 2.32 → 1.46) with the same harvest; move events 10.6 → 5.9 per week (max 15); run time
 157 min. Same checker on both: density over cap 198 → 0 tank-weeks, system feed over cap 27 → 0, system biomass 3 → 0,
-weeks over the move budget 11 → 0, moves under 7k 148 → 0. Left: 2 partial 6N stagings 42 and 53 fish under the
-plan's staged amount (100-fish rounding).
+weeks over the move budget 11 → 0, moves under 7k 148 → 0. A second run (after the 6N staging fix) gave 1.47
+(2027 1.28, 2028 1.60; one system-week 1.7 kg/day over the feed cap): the solver stops on time, so two runs differ a
+little - compare the 'All weeks' line, not single years.
