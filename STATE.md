@@ -1,7 +1,22 @@
 # Where things stand
 
 Updated at the end of every working session (`/forecast-handoff`). Newest first in
-each list. Last updated: **2026-10-28**.
+each list. Last updated: **2026-10-30**.
+
+## LIVE since 2026-10-30: "10.29 PR taper 105-110t to W07 then limits" on the 10.29 PR
+
+- Rebuild of the 10.18 "taper ... Dec +5.8k" plan on `Reports6\Oct.29.26 PR.xlsx`, with the operator's moves as
+  manual events (`scenario/manual_events/2026-10-29.yaml`): W45 harvest 61 (fish moved into 63) + 63, 43 -> 65 38.8k,
+  3k off 65 Thu, rest of 43 + 31.8k of 52 -> 61; W46 rest of 65; W47 61. Scripted fills (planner can't fill 6N inside
+  the manual window): W46 rest of 52 -> 63 + 34.8k of 36 -> 69 (sister); W47 32 -> 65.
+- Limits: 100 t HOG floor on 2026-W48/W51, 2027-W01/W04 (100-105 t), others 105-110 t to 2027-W07 via resized fish
+  caps; 3,200 g min weight 2027-W01/W02; 2027-W10 cap 44,000. Batches = 10-22 file (Actual growth, 290k). Horizon 85.
+- Result: 2026 1,598 / 2027 6,398 / 2028 2,916 t HOG; peak 3,714 t; feed overs 3, bio 0. Only miss in the band:
+  2027-W04 99.5 t. W49 whole-tank fill is 42.0k vs its 39.0k row (ValidationLog). Dec +5.8k dropped.
+- Saved set `..\_backups\scenario_sets.29 PR taper 105-110t to W07 then limits\`; previous live set backup
+  `..\_backups6-10-30_before_10.29_pr_set\` (= saved set "10.18 PR build to 4200t, B48 Actual, ...").
+  Scratch re-run from the live files = candidate (plan sheets identical).
+- Open: operator never ruled on graded harvest into 6N for W48-W52 (whole tanks used; <4 lb 0.9-2.1%).
 
 ## 2026-10-29: least-moves as a pipeline step merged (3d52575) - OFF by default, plan numbers unchanged
 
