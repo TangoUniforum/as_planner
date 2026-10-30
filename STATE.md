@@ -3,7 +3,16 @@
 Updated at the end of every working session (`/forecast-handoff`). Newest first in
 each list. Last updated: **2026-10-30**.
 
-## LIVE since 2026-10-30: "10.29 PR taper 105-110t to W07 then limits" on the 10.29 PR
+## LIVE since 2026-10-30 (later): "10.29 PR sheet moves, graded 6N, 105-110t to W07 then limits"
+
+- Replaces the earlier 10.29 set the same day. Events from the operator's movement sheet: 43 -> 65 36,000 (3k off 65
+  Thu W45 = W46 fish pulled forward, no harvest Monday W46), 52 -> 61 30,000, graded 36 (top 32k -> 63) and 32 (top
+  38k -> 65) with B-grade -> 52, rest of 52 (B44) -> sister 69, B48 OG moves 12->53, 25->43, 15->33. 2027-W02 cap 36,000.
+- 2026 1,586 / 2027 6,394 / 2028 2,800 t; W46 99 t (by design), 2027-W02 100 t; W31 drain 71,880 fish; <4 lb W48/W49 1.1%.
+- Saved set `..\_backups\scenario_sets\10.29 PR sheet moves, graded 6N, 105-110t to W07 then limits\` (README);
+  backup of the earlier 10.29 live set `..\_backups\2026-10-30_before_10.29_pr_sheet_moves\`. Re-run from live = candidate.
+
+## Superseded 2026-10-30: "10.29 PR taper 105-110t to W07 then limits" on the 10.29 PR
 
 - Rebuild of the 10.18 "taper ... Dec +5.8k" plan on `Reports6\Oct.29.26 PR.xlsx`, with the operator's moves as
   manual events (`scenario/manual_events/2026-10-29.yaml`): W45 harvest 61 (fish moved into 63) + 63, 43 -> 65 38.8k,
