@@ -32,6 +32,12 @@ each list. Last updated: **2026-11-02**.
   wants it on the base SW curve. A v2: B47 and earlier Actual x1.0, B48+ Base x0.90, FCR 1.20 all, 290k, no holds (ride limits),
   44k Control fish cap. 2027 ~6,620 t (feed-bound at 28 t/d), 2028 6,415 t at 4.04 kg. Scenario B to be redone on the same basis.
   Saved set `Scenario A v2 - 10.31 PR, ...`; backup `..\_backups\2026-11-02_before_scenario_A_v2\`.
+- **Scenario A v2 hold 2028 LIVE (2026-11-02, latest):** v2 + 34,000 fish/week cap 2028-W01..W24 so standing builds to the
+  32 t/d feed limit (2027 already at 28 t/d, no hold there). 2028 6,628 t (+213) at 4.14 kg, feed 31.4-31.6 t/d Jun-Sep,
+  max 3,942 t; 2 weeks < 100 t (min 86), max week 204 t; 2027 6,543 t (-78, planner reshuffle). Alternative not taken:
+  35k to W26 (2028 6,452 t, 4.08 kg, min week 98, 2027 unchanged). Saved set `Scenario A v2 hold 2028 - ...`; backup
+  `..\_backups\2026-11-02_before_scenario_A_v2_hold2028\`; tag `v2-before-scenario-A-v2-hold2028-2026-11-02`.
+  Next: operator runs it in the app; then redo Scenario B on the base-curve basis (Base x0.925 B48+, FCR 1.15) with the same hold logic.
 
 ## Superseded 2026-11-02: "10.29 PR sheet moves, graded 6N, 105-110t to W07 then limits"
 
