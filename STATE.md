@@ -18,6 +18,9 @@ each list. Last updated: **2026-11-02**.
 - **Re-based to the 10.31 PR (2026-11-02 later):** events `scenario/manual_events/2026-10-31.yaml` (61 already in 63 -> "harvest 61"
   dropped); 2027-W02 cap 38,000, 2026-W53 min weight 3,000 g. 2027 5,883 t / 2028 7,036 t; known 2027-W29..W32 gap 53-85 t.
   Saved set `Scenario A - 10.31 PR, ...`; backup `..\_backups\2026-11-02_before_10.31_pr\`. Run the app on the 10.31 PR.
+- **Flat 3,400 g in 2027 (2026-11-02 latest, LIVE):** min weight rows 2027-W09..W52 = 3,400 g (ramp to 3,500 g left a B49->B50
+  gap W29-W32). 2027 5,896 t, all weeks >= 99 t, max 3,884 t; 2028 6,928 t. Open: 2028-W09 77 t, 2027-W23 156 t.
+  Saved set `Scenario A - 10.31 PR, ... min 3.4kg 2027 3.5kg 2028, ...`; backup `..\_backups6-11-02_before_flat_3400\`.
 
 ## Superseded 2026-11-02: "10.29 PR sheet moves, graded 6N, 105-110t to W07 then limits"
 
