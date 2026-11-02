@@ -21,6 +21,9 @@ each list. Last updated: **2026-11-02**.
 - **Flat 3,400 g in 2027 (2026-11-02 latest, LIVE):** min weight rows 2027-W09..W52 = 3,400 g (ramp to 3,500 g left a B49->B50
   gap W29-W32). 2027 5,896 t, all weeks >= 99 t, max 3,884 t; 2028 6,928 t. Open: 2028-W09 77 t, 2027-W23 156 t.
   Saved set `Scenario A - 10.31 PR, ... min 3.4kg 2027 3.5kg 2028, ...`; backup `..\_backups\2026-11-02_before_flat_3400\`.
+- **Scenario B LIVE (2026-11-02, latest):** Scenario A flat-3,400 but 290k for all future batches, hold ~110 t (34k fish cap)
+  2027-W08..W38 and 2028-W01..W30 then ride the 4,000/4,200 t limits, 3,700 g from 2028. 2027 5,888 t (3.72 kg), 2028 6,435 t
+  (3.93 kg); 9 weeks >1% over 4,200 t in 2028 to tidy. Saved set `Scenario B - 10.31 PR, ...`; backup `..\_backups\2026-11-02_before_scenario_B\`.
 
 ## Superseded 2026-11-02: "10.29 PR sheet moves, graded 6N, 105-110t to W07 then limits"
 
