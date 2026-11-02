@@ -1,9 +1,22 @@
 # Where things stand
 
 Updated at the end of every working session (`/forecast-handoff`). Newest first in
-each list. Last updated: **2026-10-30**.
+each list. Last updated: **2026-11-02**.
 
-## LIVE since 2026-10-30 (later): "10.29 PR sheet moves, graded 6N, 105-110t to W07 then limits"
+## LIVE since 2026-11-02: "Scenario A" forecast trial (10.29 PR, to 2029-W07)
+
+- Built on the 10.29 sheet-moves set (same manual events/taper). Every batch Actual 2026-10-18 x 0.90, new FCR curve
+  '1.20' (biology.yaml, between 1.18 and 1.21); B53-B59 330k to OG, B60+ 310k (B51/B52 290k); biomass cap 4,000 t 2027
+  rows / 4,200 t 2028+; feed 28 t/d 2027 rows / 32 t/d 2028+; min weight 3,100 g W01-W02, ramp 3,300 -> 3,500 g W09-W30,
+  3,500 g Control; 2028+ weekly fish limit 48,500; horizon 121.
+- 2027 5,857 t (26.9 t/d feed, max 4,075 t standing); 2028 7,048 t (29.6 t/d, max 4,278 t). Operator findings: 32 t/d at
+  3.8 kg needs ~4.7-5.0 kt (not housable); 2027 feed capped by fish already in water under 4,000 t.
+- Saved set `..\_backups\scenario_sets\Scenario A - 10.29 PR, growth 90pct, ...\` (README); backup
+  `..\_backups\2026-11-02_before_scenario_A\`; tag `v2-before-scenario-A-2026-11-02`. Re-run from live = candidate.
+- To go back: copy the 5 files from the backup (or the saved set "10.29 PR sheet moves, graded 6N, ...").
+- Operator asked to use the app (Ideal -> Transition) as the sandbox for further batch-size/cap trials.
+
+## Superseded 2026-11-02: "10.29 PR sheet moves, graded 6N, 105-110t to W07 then limits"
 
 - Replaces the earlier 10.29 set the same day. Events from the operator's movement sheet: 43 -> 65 36,000 (3k off 65
   Thu W45 = W46 fish pulled forward, no harvest Monday W46), 52 -> 61 30,000, graded 36 (top 32k -> 63) and 32 (top
