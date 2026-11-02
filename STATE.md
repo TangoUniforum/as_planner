@@ -24,6 +24,10 @@ each list. Last updated: **2026-11-02**.
 - **Scenario A mod 290k LIVE (2026-11-02, latest; not Scenario B):** Scenario A flat-3,400 but 290k for all future batches, hold ~110 t (34k fish cap)
   2027-W08..W38 and 2028-W01..W30 then ride the 4,000/4,200 t limits, 3,700 g from 2028. 2027 5,888 t (3.72 kg), 2028 6,435 t
   (3.93 kg); 9 weeks >1% over 4,200 t in 2028 to tidy. Saved set `Scenario A mod 290k - 10.31 PR, ...`; backup `..\_backups\2026-11-02_before_scenario_A_mod_290k\`.
+- **Scenario B LIVE (2026-11-02, latest):** same limits as A; FCR 1.15 curve, growth x0.925, 310k from B53; hold 110 t
+  2027-W08..W38 and 2028-W01..W08, ride limits (52k Control), 3,500 g from 2028. 2027 6,109 t, 2028 6,759 t, every week >= 96 t,
+  max 3,994 / 4,007 t. 310k beat 290k/310k (cap unused) and 310k/330k (short weeks). Saved set `Scenario B - 10.31 PR, ...`;
+  backup `..\_backups\2026-11-02_before_scenario_B\`. Scenario A mod 290k: hold-to-W22 fix offered, not applied.
 
 ## Superseded 2026-11-02: "10.29 PR sheet moves, graded 6N, 105-110t to W07 then limits"
 
