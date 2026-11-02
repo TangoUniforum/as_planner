@@ -15,6 +15,9 @@ each list. Last updated: **2026-11-02**.
   `..\_backups\2026-11-02_before_scenario_A\`; tag `v2-before-scenario-A-2026-11-02`. Re-run from live = candidate.
 - To go back: copy the 5 files from the backup (or the saved set "10.29 PR sheet moves, graded 6N, ...").
 - Operator asked to use the app (Ideal -> Transition) as the sandbox for further batch-size/cap trials.
+- **Re-based to the 10.31 PR (2026-11-02 later):** events `scenario/manual_events/2026-10-31.yaml` (61 already in 63 -> "harvest 61"
+  dropped); 2027-W02 cap 38,000, 2026-W53 min weight 3,000 g. 2027 5,883 t / 2028 7,036 t; known 2027-W29..W32 gap 53-85 t.
+  Saved set `Scenario A - 10.31 PR, ...`; backup `..\_backups\2026-11-02_before_10.31_pr\`. Run the app on the 10.31 PR.
 
 ## Superseded 2026-11-02: "10.29 PR sheet moves, graded 6N, 105-110t to W07 then limits"
 
