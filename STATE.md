@@ -28,6 +28,10 @@ each list. Last updated: **2026-11-02**.
   2027-W08..W38 and 2028-W01..W08, ride limits (52k Control), 3,500 g from 2028. 2027 6,109 t, 2028 6,759 t, every week >= 96 t,
   max 3,994 / 4,007 t. 310k beat 290k/310k (cap unused) and 310k/330k (short weeks). Saved set `Scenario B - 10.31 PR, ...`;
   backup `..\_backups\2026-11-02_before_scenario_B\`. Scenario A mod 290k: hold-to-W22 fix offered, not applied.
+- **CORRECTION + Scenario A v2 LIVE (2026-11-02, latest):** earlier A/B sets applied the growth % to the Actual curve; operator
+  wants it on the base SW curve. A v2: B47 and earlier Actual x1.0, B48+ Base x0.90, FCR 1.20 all, 290k, no holds (ride limits),
+  44k Control fish cap. 2027 ~6,620 t (feed-bound at 28 t/d), 2028 6,415 t at 4.04 kg. Scenario B to be redone on the same basis.
+  Saved set `Scenario A v2 - 10.31 PR, ...`; backup `..\_backups\2026-11-02_before_scenario_A_v2\`.
 
 ## Superseded 2026-11-02: "10.29 PR sheet moves, graded 6N, 105-110t to W07 then limits"
 
