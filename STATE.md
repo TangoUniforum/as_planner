@@ -94,6 +94,13 @@ each list. Last updated: **2026-11-03**.
   310k -170 t). 2027-only levelling (scenB5/LB it3, gain 0.4). 2027 6,804 t (4.03 kg, months 121-146), 2028 7,665 t (4.19 kg),
   0 weeks over, no week < 100 t. Saved set `Scenario B4 - ...`; backup `..\_backups\2026-11-03_ScenarioBv3b_before_scenario_B4\`;
   tag `v2-before-scenario-B4-2026-11-03`. Next: operator runs B4 in the app on the updated PR; push.
+  Operator ran it: workbook = verified run, reviewed (2027-W10 218 t / 70.7k fish whole-tank drain before B53 arrival).
+- **Scenario A4 LIVE (2026-11-03, latest; replaces B4):** A on the common framework (same limits as B4 / C levelled v2), updated
+  10.31 PR. B48+ Base x0.90, FCR 1.20 all, 290k B50-53, 320k B54+ (operator pick). 2027-only levelling (scenA5/LA it7).
+  2027 6,675 t (3.95 kg, months 110-143), 2028 7,456 t (4.09 kg, 28% 8 lb+), 0 weeks over, 2028 weeks >= 101 t.
+  Comparable set on the updated PR (2027 / 2028 HOG): A4 6,675 / 7,456; B4 6,804 / 7,665; C lev v2 7,011 / 7,902.
+  Saved set `Scenario A4 - ...`; backup `..\_backups\2026-11-03_ScenarioB4_before_scenario_A4\`; tag `v2-before-scenario-A4-2026-11-03`.
+  Next: operator runs A4 in the app; push.
 
 ## Superseded 2026-11-02: "10.29 PR sheet moves, graded 6N, 105-110t to W07 then limits"
 
