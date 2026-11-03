@@ -38,6 +38,19 @@ each list. Last updated: **2026-11-02**.
   35k to W26 (2028 6,452 t, 4.08 kg, min week 98, 2027 unchanged). Saved set `Scenario A v2 hold 2028 - ...`; backup
   `..\_backups\2026-11-02_before_scenario_A_v2_hold2028\`; tag `v2-before-scenario-A-v2-hold2028-2026-11-02`.
   Next: operator runs it in the app; then redo Scenario B on the base-curve basis (Base x0.925 B48+, FCR 1.15) with the same hold logic.
+- **CULL CAP MERGED e2fce72 + Scenario B v2 LIVE (2026-11-03, latest):** found the culling plan (biology.yaml, unit %) at 0.07 =
+  0.07% per cull (~300 fish), so FW carried ~100k surplus fish to the transfer cull (FW feed ~3.4 t/d). Operator: 7% per cull,
+  and "never cull below the transfer to OG plan count". New `biology.scheduled_cull_fractions` caps each scheduled cull at the
+  TranOG target (both FW projections + both FW calibration solvers); tests/test_cull_cap.py (neg. control: old code 291k vs 330k).
+  Golden re-frozen (fixture B06/B07 short of target). Gate 13/24 identical, rest move by batches-already-short no longer culled
+  (planner amplifies to up to +-250 t/yr on old PRs). Live 10.31 Scenario A identical on the new code with 0.07%. Suite: 2547 pass,
+  least-moves broken-rebuild test flaky under full-suite load (passes alone). Tag `v2-before-cull-cap-2026-11-03`; backup
+  `..\_backups\2026-11-03_before_cull_cap\` (code + biology/control/batches/limits).
+  Scenario B v2 live: Actual to B47, B48+ Base x0.925, FCR 1.15 all, 290k B50-52, 310k B53+, culls 7/7/7, no hold, same limits.
+  2027 6,801 t (3.90 kg), 2028 7,080 t (4.12 kg, 30% 8 lb+), weeks >= 101 t, biomass never over. Scenario A with 7% culls (not live):
+  6,618 / 6,546 t. Facility limits are FW-inclusive in the engine (placement.py:5652) - only my old check script excluded FW.
+  2028 vs 2027: +862 t growth but +571 t goes into standing (ramp to 4,200 t) and harvested fish ~flat (~7.5 batches/yr).
+  Saved set `Scenario B v2 - 10.31 PR, ...`. Next: operator runs it in the app; push; option = 330k to use 2029 feed.
 
 ## Superseded 2026-11-02: "10.29 PR sheet moves, graded 6N, 105-110t to W07 then limits"
 
