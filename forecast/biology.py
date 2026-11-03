@@ -331,6 +331,65 @@ def _apply_bottom_cull(
     return new_count, new_avg, culled_count, culled_biomass_kg
 
 
+def scheduled_cull_fractions(
+    batch, tables: BiologyTables, handling_frac: float,
+    start_date, start_count: float, fw_from=None, fired=frozenset(),
+) -> dict[int, float]:
+    """Fraction each scheduled FW cull (biology.yaml `culling`, % of the batch)
+    actually removes, capped so the batch still reaches its TranOG target.
+
+    Operator rule 2026-11-03: "the culling plan should never cull below the
+    transfer to OG plan count for each batch". A scheduled cull takes its %
+    only while the count it leaves, after mortality to TranOG_Date and the
+    transfer handling loss, stays >= tran_og_count; otherwise it takes just
+    the surplus (or nothing). A cull falling on/after TranOG_Date takes
+    nothing -- the reconcile cull has already landed on the target.
+
+    Counts follow mortality only (never weight), so this replays the batch's
+    count path once -- the same day order as project_batch /
+    project_in_flight_fw_batch (fw_from = the day the batch becomes FW and
+    takes handling loss; None if already FW at start_date) -- and every
+    caller (both projections, both FW calibration solvers) uses one answer.
+    No tran_og_count / tran_og_date = no target to protect: plain %.
+    """
+    plain = {int(d): float(p) / 100.0 for d, p in tables.culling}
+    target = float(batch.tran_og_count or 0)
+    if target <= 0 or not batch.tran_og_date or not batch.input_date:
+        return plain
+    input_date = _as_date(batch.input_date)
+    tran_og = _as_date(batch.tran_og_date)
+    fw_from = _as_date(fw_from) if fw_from else None
+    pending = sorted((d, p) for d, p in plain.items() if d not in fired)
+    out = dict(plain)
+    cur = float(start_count)
+    is_fw = fw_from is None
+    day = _as_date(start_date)
+    while pending:
+        dsi = (day - input_date).days
+        if day >= tran_og:
+            for d, _p in pending:
+                out[d] = 0.0
+            break
+        if not is_fw and day >= fw_from:
+            cur *= (1.0 - handling_frac)
+            is_fw = True
+        while is_fw and pending and dsi >= pending[0][0]:
+            d, frac = pending.pop(0)
+            surv = 1.0
+            k = day
+            while k < tran_og:
+                surv *= _daily_survival_factor(
+                    _mortality_weekly_pct(tables, max(0, (k - input_date).days // 7)))
+                k += timedelta(days=1)
+            at_tranog = cur * surv * (1.0 - handling_frac)
+            room = (1.0 - target * (1.0 + 1e-9) / at_tranog) if at_tranog > 0 else 0.0
+            out[d] = max(0.0, min(frac, room))
+            cur *= (1.0 - out[d])
+        cur *= _daily_survival_factor(_mortality_weekly_pct(tables, max(0, dsi // 7)))
+        day += timedelta(days=1)
+    return out
+
+
 def apply_grade_efficiency(mean_g: float, upper_g: float, lower_g: float,
                            efficiency: float) -> tuple[float, float]:
     """Shrink a perfect size split toward the tank mean — an imperfect grader.
@@ -680,6 +739,9 @@ def project_batch(
 
     cull_thresh_dsi = [(dsi, pct) for dsi, pct in tables.culling]
     handling_frac = control.handling_mortality_pct / 100.0
+    cull_fracs = scheduled_cull_fractions(
+        batch, tables, handling_frac, input_date, batch.input_count,
+        fw_from=tran_sf_date)
 
     # State.
     cur_count = float(batch.input_count)
@@ -784,14 +846,16 @@ def project_batch(
             stage = "SW"
             og_transferred = True
 
-        # ----- Scheduled bottom culls (FW only). Fire once per DSI threshold. -----
+        # ----- Scheduled bottom culls (FW only). Fire once per DSI threshold,
+        # capped at the TranOG target (scheduled_cull_fractions). -----
         for thresh_dsi, pct in cull_thresh_dsi:
             if stage == "FW" and dsi >= thresh_dsi and thresh_dsi not in fired_culls:
+                frac = cull_fracs.get(int(thresh_dsi), pct / 100.0)
                 cur_count, cur_weight, _c_n, _c_b = _apply_bottom_cull(
-                    cur_count, cur_weight, batch.tran_og_cv, pct / 100.0,
+                    cur_count, cur_weight, batch.tran_og_cv, frac,
                 )
                 fired_culls.add(thresh_dsi)
-                cull_pct_today += pct
+                cull_pct_today += pct if frac == pct / 100.0 else frac * 100.0
                 cull_count_today += _c_n
                 cull_biomass_today += _c_b
 
@@ -893,12 +957,15 @@ def _simulate_fw_avg_weight_at_tran_og(
     batch: BatchInput,
     tables: BiologyTables,
     fw_correction: float,
+    cull_fracs: Optional[dict] = None,
 ) -> Optional[float]:
     """Fast FW-only daily sim from TranSF -> TranOG (exclusive).
 
     Returns the pre-cull avg weight at TranOG_Date that would be
     produced by project_batch under the given fw_correction. Walks the
     same daily grid so the residual matches the full sim exactly.
+    `cull_fracs` = the batch's capped scheduled culls
+    (scheduled_cull_fractions); None = the plain table %.
     """
     if not batch.tran_sf_date or not batch.tran_og_date or not batch.input_date:
         return None
@@ -913,7 +980,9 @@ def _simulate_fw_avg_weight_at_tran_og(
         dsi = (cur_date - input_date).days
         for thresh, pct in tables.culling:
             if dsi >= thresh and thresh not in fired:
-                _, cur_weight, _, _ = _apply_bottom_cull(1.0, cur_weight, batch.tran_og_cv, pct / 100.0)
+                frac = (cull_fracs.get(int(thresh), pct / 100.0)
+                        if cull_fracs is not None else pct / 100.0)
+                _, cur_weight, _, _ = _apply_bottom_cull(1.0, cur_weight, batch.tran_og_cv, frac)
                 fired.add(thresh)
         sgr_base = _interp(cur_weight, tables.sgr_size_g, tables.sgr_fw_pct_day)
         sgr_eff = sgr_base * fw_correction
@@ -963,17 +1032,27 @@ def _bisect_fw_correction(
 def solve_fw_correction(
     batch: BatchInput,
     tables: BiologyTables,
+    handling_mortality_pct: Optional[float] = None,
 ) -> Optional[float]:
     """FW_Correction landing pre-cull avg wt at TranOG on TranOG_AvgWt, for an
-    INCOMING batch simulated from TranSF (egg-up)."""
+    INCOMING batch simulated from TranSF (egg-up). Pass the run's
+    handling_mortality_pct so the scheduled culls are capped exactly as
+    project_batch caps them; None = the plain table % (pre-cap behaviour)."""
+    fracs = None
+    if handling_mortality_pct is not None and batch.input_date:
+        fracs = scheduled_cull_fractions(
+            batch, tables, handling_mortality_pct / 100.0,
+            _as_date(batch.input_date), batch.input_count,
+            fw_from=_as_date(batch.tran_sf_date) if batch.tran_sf_date else None)
     return _bisect_fw_correction(
-        lambda c: _simulate_fw_avg_weight_at_tran_og(batch, tables, c),
+        lambda c: _simulate_fw_avg_weight_at_tran_og(batch, tables, c, fracs),
         batch.tran_og_avg_wt_g)
 
 
 def _simulate_inflight_fw_weight_at_tran_og(
     batch: BatchInput, tables: BiologyTables,
     start_date, start_weight: float, dsi_at_close: int, fw_correction: float,
+    cull_fracs: Optional[dict] = None,
 ) -> Optional[float]:
     """Pre-cull avg wt at TranOG for an IN-FLIGHT batch: walk the FW daily grid
     from `start_date`/`start_weight` (the PR-measured state) to TranOG under a
@@ -991,8 +1070,10 @@ def _simulate_inflight_fw_weight_at_tran_og(
         dsi = (cur_date - input_date).days
         for thresh, pct in tables.culling:
             if dsi >= thresh and thresh not in fired:
+                frac = (cull_fracs.get(int(thresh), pct / 100.0)
+                        if cull_fracs is not None else pct / 100.0)
                 _, cur_weight, _, _ = _apply_bottom_cull(
-                    1.0, cur_weight, batch.tran_og_cv, pct / 100.0)
+                    1.0, cur_weight, batch.tran_og_cv, frac)
                 fired.add(thresh)
         sgr_base = _interp(cur_weight, tables.sgr_size_g, tables.sgr_fw_pct_day)
         cur_weight = cur_weight * (1.0 + sgr_base * fw_correction / 100.0)
@@ -1003,14 +1084,23 @@ def _simulate_inflight_fw_weight_at_tran_og(
 def solve_inflight_fw_correction(
     batch: BatchInput, tables: BiologyTables,
     start_date, start_weight: float, dsi_at_close: int,
+    start_count: Optional[float] = None,
+    handling_mortality_pct: Optional[float] = None,
 ) -> Optional[float]:
     """FW_Correction for an IN-FLIGHT batch: the correction applied to its
     REMAINING FW growth (from its current PR weight/date to TranOG) that lands the
     pre-cull avg wt on TranOG_AvgWt. So a running batch gets a recalibration target
-    just like a not-yet-input one."""
+    just like a not-yet-input one. Pass start_count + handling_mortality_pct
+    so the scheduled culls are capped exactly as project_in_flight_fw_batch
+    caps them; None = the plain table % (pre-cap behaviour)."""
+    fracs = None
+    if start_count is not None and handling_mortality_pct is not None:
+        fracs = scheduled_cull_fractions(
+            batch, tables, handling_mortality_pct / 100.0, start_date, start_count,
+            fired={int(d) for d, _p in tables.culling if int(d) <= dsi_at_close})
     return _bisect_fw_correction(
         lambda c: _simulate_inflight_fw_weight_at_tran_og(
-            batch, tables, start_date, start_weight, dsi_at_close, c),
+            batch, tables, start_date, start_weight, dsi_at_close, c, fracs),
         batch.tran_og_avg_wt_g)
 
 
@@ -1288,6 +1378,9 @@ def project_in_flight_fw_batch(
         stage = "EGG"
     crossed_tran_og = (stage == "SW")
     og_transferred = (stage == "SW")
+    cull_fracs = scheduled_cull_fractions(
+        batch, tables, handling_frac, forecast_start, cur_count,
+        fw_from=hatch_date if pre_hatch else None, fired=fired_culls)
 
     residuals: list[CalibrationResidual] = []
     splits: list[SizeClassSplit] = []
@@ -1339,7 +1432,8 @@ def project_in_flight_fw_batch(
                     # the PR state at forecast_start to TranOG) so a running batch
                     # gets a recalibration target too, not just incoming ones.
                     suggested_fw_correction=solve_inflight_fw_correction(
-                        batch, tables, forecast_start, initial_avg_wt_g, dsi_at_close),
+                        batch, tables, forecast_start, initial_avg_wt_g, dsi_at_close,
+                        initial_count, control.handling_mortality_pct),
                 ))
             target_count = float(batch.tran_og_count or 0)
             if target_count > 0 and cur_count > target_count:
@@ -1367,14 +1461,16 @@ def project_in_flight_fw_batch(
             og_transferred = True
 
         # Scheduled FW bottom culls — fire if DSI threshold reached AND
-        # not already fired (incl. pre-PR threshold tracking).
+        # not already fired (incl. pre-PR threshold tracking); capped at the
+        # TranOG target (scheduled_cull_fractions).
         for thresh_dsi, pct in cull_thresh_dsi:
             if stage == "FW" and dsi >= thresh_dsi and thresh_dsi not in fired_culls:
+                frac = cull_fracs.get(thresh_dsi, pct / 100.0)
                 cur_count, cur_weight, _c_n, _c_b = _apply_bottom_cull(
-                    cur_count, cur_weight, batch.tran_og_cv, pct / 100.0,
+                    cur_count, cur_weight, batch.tran_og_cv, frac,
                 )
                 fired_culls.add(thresh_dsi)
-                cull_pct_today += pct
+                cull_pct_today += pct if frac == pct / 100.0 else frac * 100.0
                 cull_count_today += _c_n
                 cull_biomass_today += _c_b
 
@@ -1492,7 +1588,8 @@ def project_all_batches(
             continue
         states.extend(rows)
         if resid is not None:
-            resid.suggested_fw_correction = solve_fw_correction(b, tables)
+            resid.suggested_fw_correction = solve_fw_correction(
+                b, tables, control.handling_mortality_pct)
             residuals.append(resid)
         if split is not None:
             splits.append(split)

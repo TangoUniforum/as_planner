@@ -388,6 +388,16 @@ These are the curves every batch grows and eats along, edited as four grids:
 | **Feed types** | max size (g) | which feed a fish of that size is on |
 | **Culling** | days since input | scheduled cull % |
 
+**Culling is in %, and never cuts below the transfer target.** A cull row of `7`
+removes 7% of the batch (the smallest fish); `0.07` removes 0.07%. Each scheduled
+FW cull takes its % only while the batch, after mortality to TranOG and the
+transfer handling loss, still reaches its `tran_og_count`; otherwise it takes just
+the surplus, or nothing (operator rule 2026-11-03: *"the culling plan should never
+cull below the transfer to OG plan count for each batch"*). A cull falling on or
+after TranOG takes nothing — the transfer cull has already landed on the target.
+A batch with no `tran_og_count` gets the plain %. The FW auto-calibration uses the
+same capped culls, so the solved FW_Correction still lands on the target weight.
+
 Each grid is a **lookup curve read by size or age**, so the rows must run smallest
 to largest. You don't have to maintain that by hand — add a row wherever it's
 convenient and the app sorts it into place when you save, which is why a row can

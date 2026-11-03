@@ -637,7 +637,7 @@ def main(
     if control.auto_calibrate_fw:
         from .biology import solve_fw_correction as _solve_fw
         for _b in incoming_batches:
-            _apply_fw_calib(_b, _solve_fw(_b, tables))
+            _apply_fw_calib(_b, _solve_fw(_b, tables, control.handling_mortality_pct))
 
     states, residuals, splits, warnings = project_all_batches(incoming_batches, tables, control)
     # INCOMING BATCHES' MANUAL-WINDOW WEEKS -- REPORT-ONLY (operator 2026-10-09:
@@ -741,7 +741,8 @@ def main(
                                   _as_date as _asd)
             _dsi = (_asd(pr_closing) - _asd(b_meta.input_date)).days
             _apply_fw_calib(
-                b_meta, _solve_ifw(b_meta, tables, _fw_proj_fs, avg_wt_g, _dsi))
+                b_meta, _solve_ifw(b_meta, tables, _fw_proj_fs, avg_wt_g, _dsi,
+                                   agg["count"], control.handling_mortality_pct))
         import dataclasses as _dc_fw
         _fw_control = _dc_fw.replace(
             control, forecast_start=_fw_proj_fs, horizon_weeks=_fw_proj_horizon)
