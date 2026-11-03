@@ -69,6 +69,15 @@ each list. Last updated: **2026-11-03**.
   levelling saved little for 310k (131-150 -> 128-146, -56 t 2028). Live rerun = candidate. Saved set `Scenario B v3 - ...`;
   backup `..\_backups\2026-11-03_ScenarioAv3_before_scenario_B_v3\`; tag `v2-before-scenario-B-v3-2026-11-03`.
   Next: operator runs B v3 in the app on the 10.31 PR and sends the workbook; push.
+  Operator ran it: workbook = verified run; reviewed (2027 density overs 55 tank-weeks vs A's 6; 1 handling overrun 2028-W15).
+- **Scenario C LIVE (2026-11-03, latest; replaces B v3 as live):** B48+ Base x0.95 + new FCR curve '1.12' (biology.yaml; 1.15 minus
+  the 1.15->1.18 step, floored 1.0, non-decreasing), 290k B50-53, 330k B54+. Operator reframed feed limits as whole-facility:
+  30 t/d 2027 (rows), 34 t/d 2028+ (Control); standing 4,000/4,200 t; weekly fish cap 52k 2028+ (plant OK); HOG yield 0.83 rows
+  2028 (NB yield feeds the 105 t HOG floor -> plan moves, not report-only). 2027-only month levelling (scenC2/LB it3).
+  2027 7,031 t (4.07 kg), 2028 7,903 t (4.17 kg), 0 weeks over limits. Findings: at 32 t/d feed binds (~4,250-4,300 t standing),
+  so 4,400 t cap/345k gave nothing; at 34 t/d the 4,200 t cap + 44k fish/wk bind (330k ran 31 wks over until 52k); 2028 month
+  levelling breaks the 4,200 t cap. Saved set `Scenario C - ...`; backup `..\_backups\2026-11-03_ScenarioBv3_before_scenario_C\`;
+  tag `v2-before-scenario-C-2026-11-03`. Next: operator runs C in the app and sends the workbook; push.
 
 ## Superseded 2026-11-02: "10.29 PR sheet moves, graded 6N, 105-110t to W07 then limits"
 
