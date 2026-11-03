@@ -85,6 +85,15 @@ each list. Last updated: **2026-11-03**.
   2027 7,011 t, 2028 7,902 t (harvest-week basis; harvest_by_period books 2027 as 7,032), 0 weeks over, months 137-151 / 132-167,
   5 weeks 94-99 t. Saved set `Scenario C - ... 2027 levelled v2 ...`; backup `..\_backups\2026-11-03_ScenarioC_before_relevel_new_pr\`;
   tag `v2-before-scenario-C-relevel-2026-11-03`. Next: operator runs C on the UPDATED 10.31 PR in the app; push.
+  Operator ran it: workbook = verified run (Models "after 2026-10-18" check rows differ: app stored the updated PR in history).
+- **Scenario B v3b LIVE (interim, 2026-11-03):** B v3 on the updated 10.31 PR (6,825/7,175 t, 1 wk +0.07% feed) + 2027-only
+  levelling (scenB4/LV it1): 6,839/7,115 t, 0 over. Live biology.yaml keeps the 1.12 curve (B unaffected - checked). Backup of
+  live C v2: `..\_backups\2026-11-03_ScenarioCv2_before_scenario_B_v3b\`; tag `v2-before-scenario-B-v3b-2026-11-03`.
+- **Scenario B4 LIVE (2026-11-03, latest; replaces B v3b):** B on C's framework per operator (feed 30/34 t/d, 4.0/4.2 kt, 52k
+  fish 2028, HOG 0.83 2028), updated 10.31 PR. B48+ Base x0.925, FCR 1.15, 290k B50-53, 320k B54+ (operator pick; 330k 2 wks over,
+  310k -170 t). 2027-only levelling (scenB5/LB it3, gain 0.4). 2027 6,804 t (4.03 kg, months 121-146), 2028 7,665 t (4.19 kg),
+  0 weeks over, no week < 100 t. Saved set `Scenario B4 - ...`; backup `..\_backups\2026-11-03_ScenarioBv3b_before_scenario_B4\`;
+  tag `v2-before-scenario-B4-2026-11-03`. Next: operator runs B4 in the app on the updated PR; push.
 
 ## Superseded 2026-11-02: "10.29 PR sheet moves, graded 6N, 105-110t to W07 then limits"
 
