@@ -78,6 +78,13 @@ each list. Last updated: **2026-11-03**.
   so 4,400 t cap/345k gave nothing; at 34 t/d the 4,200 t cap + 44k fish/wk bind (330k ran 31 wks over until 52k); 2028 month
   levelling breaks the 4,200 t cap. Saved set `Scenario C - ...`; backup `..\_backups\2026-11-03_ScenarioBv3_before_scenario_C\`;
   tag `v2-before-scenario-C-2026-11-03`. Next: operator runs C in the app and sends the workbook; push.
+  Operator ran it: workbook = verified run; reviewed (density overs 88 tank-weeks 2027 / 173 2028, 5 handling overruns).
+- **Scenario C "2027 levelled v2" LIVE (2026-11-03, latest):** operator updated the 10.31 PR (Reports\2026\Oct, 15:41; +20 t biomass,
+  -386 fish, OG fish 0.5-1% heavier, B51 FW 157 g vs 145 g, no tank changes). Live C on it: 7,075/7,918 t but 1 week +0.1% feed and
+  3 weeks < 100 t -> re-ran the 2027-only levelling on the new PR (scenC3/NA it2): 35 max_harvest_per_week rows 2027-W18..W52 changed.
+  2027 7,011 t, 2028 7,902 t (harvest-week basis; harvest_by_period books 2027 as 7,032), 0 weeks over, months 137-151 / 132-167,
+  5 weeks 94-99 t. Saved set `Scenario C - ... 2027 levelled v2 ...`; backup `..\_backups\2026-11-03_ScenarioC_before_relevel_new_pr\`;
+  tag `v2-before-scenario-C-relevel-2026-11-03`. Next: operator runs C on the UPDATED 10.31 PR in the app; push.
 
 ## Superseded 2026-11-02: "10.29 PR sheet moves, graded 6N, 105-110t to W07 then limits"
 
