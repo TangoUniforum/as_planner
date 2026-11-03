@@ -1,7 +1,7 @@
 # Where things stand
 
 Updated at the end of every working session (`/forecast-handoff`). Newest first in
-each list. Last updated: **2026-11-02**.
+each list. Last updated: **2026-11-03**.
 
 ## LIVE since 2026-11-02: "Scenario A" forecast trial (10.29 PR, to 2029-W07)
 
@@ -51,6 +51,15 @@ each list. Last updated: **2026-11-02**.
   6,618 / 6,546 t. Facility limits are FW-inclusive in the engine (placement.py:5652) - only my old check script excluded FW.
   2028 vs 2027: +862 t growth but +571 t goes into standing (ramp to 4,200 t) and harvested fish ~flat (~7.5 batches/yr).
   Saved set `Scenario B v2 - 10.31 PR, ...`. Next: operator runs it in the app; push; option = 330k to use 2029 feed.
+- **Scenario A v3 levelled LIVE (2026-11-03, latest; replaces B v2 as live):** operator asked for 2027 feed 28.5 t/d and steadier
+  monthly HOG, A first then B ("don't move to B until A is finished and the workbook reviewed"). A v2 hold 2028 + 7% culls, 2027
+  feed rows 28,500, plus per-week max fish caps 2027-W09..2028-W52 from a levelling loop (scenA3/level.py, propose_bands).
+  2027 6,610 t (3.92 kg, Apr-Dec 126-134 t/5-day wk), 2028 6,758 t (4.24 kg, 35% 8 lb+; Jan-Jun 109-127, Jul-Dec 138-145),
+  0 weeks over limits, min week 94 t. Remaining early-2028 bump = whole-tank 6N dumps freeing entry tanks for B60/B62 arrivals
+  (W08 103 t, W09-W10 ~140 t); pre-arrival cap relief (P1-P3) unsettled 2027, not taken. Live rerun = candidate (plan sheets
+  identical). Saved set `Scenario A v3 levelled - ...`; backup `..\_backups\2026-11-03_ScenarioBv2_before_scenario_A_v3_levelled\`;
+  tag `v2-before-scenario-A-v3-levelled-2026-11-03`. Next: operator runs it in the app on the 10.31 PR, we review the
+  workbook, THEN Scenario B gets the same 28.5 t/d + levelling (B v2 saved set is the start point).
 
 ## Superseded 2026-11-02: "10.29 PR sheet moves, graded 6N, 105-110t to W07 then limits"
 
