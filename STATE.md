@@ -60,6 +60,15 @@ each list. Last updated: **2026-11-03**.
   identical). Saved set `Scenario A v3 levelled - ...`; backup `..\_backups\2026-11-03_ScenarioBv2_before_scenario_A_v3_levelled\`;
   tag `v2-before-scenario-A-v3-levelled-2026-11-03`. Next: operator runs it in the app on the 10.31 PR, we review the
   workbook, THEN Scenario B gets the same 28.5 t/d + levelling (B v2 saved set is the start point).
+  Operator ran it in the app: workbook = verified run (all plan sheets identical); reviewed and closed.
+- **Scenario B v3 LIVE (2026-11-03, latest; replaces A v3 as live):** on A v3's base limits (AH: 28.5 t/d 2027), B48+ Base x0.925,
+  FCR 1.15 all, 290k to B53, 310k from B54, no hold, no levelling caps. 2027 6,844 t (3.98 kg, Apr-Dec 131-150 t/wk), 2028 7,136 t
+  (4.15 kg, 31% 8 lb+), 0 weeks over limits, weeks 95-166 t. Compared (scratch scenB3/): 290k all (+/-hold, levelled: 6,788/6,883 t
+  at 4.00/4.29 kg = closest A counterpart), 310k from B53 (2027 over feed 4-19 wks), 310k from B51 (no gain). Findings: any 2028
+  hold or month-levelling cap pushes B over the 2028 limits (B rides 4,200 t / 32 t/d, harvest must follow growth); 2027-only
+  levelling saved little for 310k (131-150 -> 128-146, -56 t 2028). Live rerun = candidate. Saved set `Scenario B v3 - ...`;
+  backup `..\_backups\2026-11-03_ScenarioAv3_before_scenario_B_v3\`; tag `v2-before-scenario-B-v3-2026-11-03`.
+  Next: operator runs B v3 in the app on the 10.31 PR and sends the workbook; push.
 
 ## Superseded 2026-11-02: "10.29 PR sheet moves, graded 6N, 105-110t to W07 then limits"
 
