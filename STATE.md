@@ -115,6 +115,18 @@ each list. Last updated: **2026-11-04**.
   tag `v2-before-scenario-Av5-2026-11-04`. Next: operator runs Av5 in the app on the updated 10.31 PR; push.
   Operator ran it (Downloads\10.31.26_PR_planned_Scenario Av5.xlsm): workbook = verified run (all data sheets identical;
   RunConfig / RunConfig YAML differ only in order/comments - parsed values identical).
+- **Scenario Bv5 LIVE (2026-11-04, latest; replaces Av5 as live):** B4 under the same rule (monthly steps < 100 t). B4 had 6 steps
+  >= 100 t (Mar-27 +208, Apr-27 -102, Mar-28 +206, Apr-28 -163, May-28 +182, Jun-28 -114). Bv5 = B4 + 63 limits.yaml rows
+  (Jan-Feb 2027 HOG floors 121/128 t + 48k caps W01-W08, March 40k W09-W13, 2027-W36..W38 caps 44k, 2028 Jan-Feb/Apr-Jun/Oct
+  floors/caps, 2029-W02..W03 130 t floor to clear 2 weeks 0.1-0.4% over 4,200 t in 2029). Found by scratch q1lev LB_s4 it12
+  (level4 from the B Q1 fix, gain 0.4, 80 t) + R2/s4_h130; 13 searches / 126 iterations, the only other all-rules plan lost
+  267 t in 2028. 2027 6,683 t (-120), 2028 7,614 t (-52), largest step 97 t, heaviest month 3.51 kg HOG (B4 3.63; months
+  > 3.4 kg 4 vs 9), 0 weeks over (2029 incl.), 2027-W34/W41 96/94 t, moves 1,097 vs 1,163, density warnings 53/163 vs 61/171.
+  Months 2027: 533 509 583 524 567 530 518 544 586 558 609 643; 2028: 608 587 589 636 714 621 656 583 680 630 703 608.
+  Live rerun = candidate (plan/report sheets identical except name). Saved set `Scenario Bv5\`; backup
+  `..\_backups\2026-11-04_ScenarioAv5_before_scenario_Bv5\`; tag `v2-before-scenario-Bv5-2026-11-04`.
+  Next: operator runs Bv5 in the app on the updated 10.31 PR; push. Then Scenario C under the same rule (Q1 fix ready:
+  Jan-Feb HOG floors 115/121 t + 48k caps W01-W08 + March 40k; base set scratch q1lev/base_C).
   Open: B and C under the step rule (Q1-only fix found: Jan-Feb HOG floors B 121/128, C 115/121 + caps 48k W01-W08 + March 40k);
   the 3.4 kg monthly rule as its own step (tested: costs ~140 t 2027 and rough weeks); rename the long B/C workbooks and
   long saved-set folders (asked, not answered). NB the comparison PDF's 2028 "avg harvest weight (live)" row used 0.81 yield:
