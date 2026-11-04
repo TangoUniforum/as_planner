@@ -113,6 +113,8 @@ each list. Last updated: **2026-11-04**.
   Live rerun = candidate (all plan/report sheets identical except the name column). Short name per operator (long names made
   workbooks unopenable). Saved set `Scenario Av5\`; backup `..\_backups\2026-11-04_ScenarioA4_before_scenario_Av5\`;
   tag `v2-before-scenario-Av5-2026-11-04`. Next: operator runs Av5 in the app on the updated 10.31 PR; push.
+  Operator ran it (Downloads\10.31.26_PR_planned_Scenario Av5.xlsm): workbook = verified run (all data sheets identical;
+  RunConfig / RunConfig YAML differ only in order/comments - parsed values identical).
   Open: B and C under the step rule (Q1-only fix found: Jan-Feb HOG floors B 121/128, C 115/121 + caps 48k W01-W08 + March 40k);
   the 3.4 kg monthly rule as its own step (tested: costs ~140 t 2027 and rough weeks); rename the long B/C workbooks and
   long saved-set folders (asked, not answered). NB the comparison PDF's 2028 "avg harvest weight (live)" row used 0.81 yield:
