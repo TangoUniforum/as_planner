@@ -1,7 +1,7 @@
 # Where things stand
 
 Updated at the end of every working session (`/forecast-handoff`). Newest first in
-each list. Last updated: **2026-11-03**.
+each list. Last updated: **2026-11-04**.
 
 ## LIVE since 2026-11-02: "Scenario A" forecast trial (10.29 PR, to 2029-W07)
 
@@ -101,6 +101,22 @@ each list. Last updated: **2026-11-03**.
   Comparable set on the updated PR (2027 / 2028 HOG): A4 6,675 / 7,456; B4 6,804 / 7,665; C lev v2 7,011 / 7,902.
   Saved set `Scenario A4 - ...`; backup `..\_backups\2026-11-03_ScenarioB4_before_scenario_A4\`; tag `v2-before-scenario-A4-2026-11-03`.
   Next: operator runs A4 in the app; push.
+- **Scenario Av5 LIVE (2026-11-04, latest; replaces A4):** reviewer comments on the A4/B4/C set -> operator rule: every
+  month-to-month step < 100 t HOG (gradual for sales contracts, not levelled), keep A4's totals; also prefer monthly avg
+  <= 3.4 kg HOG (harvest big fish earlier). A4 had 4 steps >= 100 t (Mar-27 +237 = B53-arrival make-room 6N drains, Apr-27 -175,
+  Jun-28 +135, Jul-28 -133). Av5 = A4 + 68 limits.yaml rows only (Jan-Feb 2027 HOG floors 119/125 t + 48k caps W01-W08,
+  March caps 40k W09-W13, smoothing floors/caps 2027 May-Jun/Nov and 2028 Feb, Apr-Jul; list in the set's
+  limits_changes_vs_A4.txt), from an anchored step-limit search (scratch q1lev/L5_A_s2 it3; 8 more anchored searches found
+  nothing closer). 2027 6,583 t (-92), 2028 7,453 t (-3), largest step 86 t, heaviest month 3.46 kg HOG (A4 3.55), 0 weeks
+  over limits; costs: 2028-W20/W34 at 90 t, moves 1,171 vs 1,067, density warnings 42/158 vs 35/145. Months 2027:
+  535 504 512 497 562 586 526 580 520 583 575 625; 2028: 565 543 542 598 632 674 638 679 620 604 690 666.
+  Live rerun = candidate (all plan/report sheets identical except the name column). Short name per operator (long names made
+  workbooks unopenable). Saved set `Scenario Av5\`; backup `..\_backups\2026-11-04_ScenarioA4_before_scenario_Av5\`;
+  tag `v2-before-scenario-Av5-2026-11-04`. Next: operator runs Av5 in the app on the updated 10.31 PR; push.
+  Open: B and C under the step rule (Q1-only fix found: Jan-Feb HOG floors B 121/128, C 115/121 + caps 48k W01-W08 + March 40k);
+  the 3.4 kg monthly rule as its own step (tested: costs ~140 t 2027 and rough weeks); rename the long B/C workbooks and
+  long saved-set folders (asked, not answered). NB the comparison PDF's 2028 "avg harvest weight (live)" row used 0.81 yield:
+  true 2028 live weights A4/B4/C = 3.99 / 4.08 / 4.08 kg (HOG tonnes in the PDF are right).
 
 ## Superseded 2026-11-02: "10.29 PR sheet moves, graded 6N, 105-110t to W07 then limits"
 
