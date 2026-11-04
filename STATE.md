@@ -140,6 +140,11 @@ each list. Last updated: **2026-11-04**.
   tag `v2-before-scenario-Cv5-2026-11-04`.
   Operator ran it (Downloads\10.31.26_PR_planned_Scenario Cv5.xlsm): workbook = verified run (all data sheets identical,
   RunConfig values + parsed YAML identical, ledger OK). All three step-rule workbooks (Av5/Bv5/Cv5) now verified.
+  Comparison PDF for the reviewer: `Forecasts\2026\Nov\10.31.26 PR - Scenario comparison Av5 Bv5 Cv5.pdf` (5 pages; growth/FCR
+  model table + plain explanation of the measured "Actual 2026-10-18" curve for B37-B47 vs Base curve x 90/92.5/95% for B48+,
+  monthly HOG + monthly kg HOG charts with the 3.4 kg guide, month tables, feed/biomass charts; corrects the 3 Nov PDF's 2028
+  live weights). All figures on the workbook YearlySummary basis (harvest weeks split over Mon-Fri days): 2027 6,605 / 6,705 /
+  6,967 t, 2028 7,453 / 7,614 / 7,820 t. Built by scratch cmp5/data.py + mkcharts.py + mkpdf.py from the verified app workbooks.
   52k finding: the step searches' limits controller raised 2028 fish-cap rows above 52k (Av5 to 53,161, Bv5 to 58,890) and
   whole-tank 6N drains exceed the cap anyway (A4/B4 originals too: B4 2027-W10 70.7k; "Harvest ceiling" warnings). Operator
   ruling 2026-11-04: OK to go over 52k fish/week -> Av5 and Bv5 stand unchanged (clamped variants scratch R3/A_clamp,
