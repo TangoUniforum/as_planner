@@ -129,6 +129,19 @@ each list. Last updated: **2026-11-04**.
   RunConfig values + parsed YAML identical, ledger OK).
   Next: push. Then Scenario C under the same rule (Q1 fix ready:
   Jan-Feb HOG floors 115/121 t + 48k caps W01-W08 + March 40k; base set scratch q1lev/base_C).
+  Pushed by operator (fd782b7).
+- **Scenario Cv5 LIVE (2026-11-04, latest; replaces Bv5 as live):** C levelled v2 under the step rule. C had 3 steps >= 100 t
+  (Mar-27 +151, May-28 +106, Oct-28 +122). Cv5 = C + 79 limits.yaml rows (Q1 fix: Jan-Feb HOG floors 115/121 t + 48k caps,
+  March 40k; step-search rows 2027 Aug-Sep/Dec, 2028 Jan/Apr-May/Aug/Oct-Nov; 2028 cap rows held <= 52,000; 2029-W06 150 t
+  floor to clear 2029-W07 +16 t over 4,200 t). From scratch q1lev LC_s4 it7 -> R3/C_cl_h6. 2027 6,946 t (-65), 2028 7,820 t
+  (-83), largest step 94 t, 0 weeks over (2029 incl.), weeks >= 95 t, moves 1,116 vs 1,201, density warnings 55/172 vs 86/195,
+  0 handling overruns (C 4). Months 2027: 519 488 551 583 556 593 585 663 619 552 633 625; 2028: 663 580 565 639 680 635 624
+  718 631 701 699 685. Live rerun = candidate. Saved set `Scenario Cv5\`; backup `..\_backups\2026-11-04_ScenarioBv5_before_scenario_Cv5\`;
+  tag `v2-before-scenario-Cv5-2026-11-04`. Next: operator runs Cv5 in the app; push.
+  52k finding: the step searches' limits controller raised 2028 fish-cap rows above 52k (Av5 to 53,161, Bv5 to 58,890) and
+  whole-tank 6N drains exceed the cap anyway (A4/B4 originals too: B4 2027-W10 70.7k; "Harvest ceiling" warnings). Operator
+  ruling 2026-11-04: OK to go over 52k fish/week -> Av5 and Bv5 stand unchanged (clamped variants scratch R3/A_clamp,
+  R3/B_clamp not used). Comparable set (2027 / 2028 HOG): Av5 6,583 / 7,453; Bv5 6,683 / 7,614; Cv5 6,946 / 7,820.
   Open: B and C under the step rule (Q1-only fix found: Jan-Feb HOG floors B 121/128, C 115/121 + caps 48k W01-W08 + March 40k);
   the 3.4 kg monthly rule as its own step (tested: costs ~140 t 2027 and rough weeks); rename the long B/C workbooks and
   long saved-set folders (asked, not answered). NB the comparison PDF's 2028 "avg harvest weight (live)" row used 0.81 yield:
