@@ -137,7 +137,9 @@ each list. Last updated: **2026-11-04**.
   (-83), largest step 94 t, 0 weeks over (2029 incl.), weeks >= 95 t, moves 1,116 vs 1,201, density warnings 55/172 vs 86/195,
   0 handling overruns (C 4). Months 2027: 519 488 551 583 556 593 585 663 619 552 633 625; 2028: 663 580 565 639 680 635 624
   718 631 701 699 685. Live rerun = candidate. Saved set `Scenario Cv5\`; backup `..\_backups\2026-11-04_ScenarioBv5_before_scenario_Cv5\`;
-  tag `v2-before-scenario-Cv5-2026-11-04`. Next: operator runs Cv5 in the app; push.
+  tag `v2-before-scenario-Cv5-2026-11-04`.
+  Operator ran it (Downloads\10.31.26_PR_planned_Scenario Cv5.xlsm): workbook = verified run (all data sheets identical,
+  RunConfig values + parsed YAML identical, ledger OK). All three step-rule workbooks (Av5/Bv5/Cv5) now verified.
   52k finding: the step searches' limits controller raised 2028 fish-cap rows above 52k (Av5 to 53,161, Bv5 to 58,890) and
   whole-tank 6N drains exceed the cap anyway (A4/B4 originals too: B4 2027-W10 70.7k; "Harvest ceiling" warnings). Operator
   ruling 2026-11-04: OK to go over 52k fish/week -> Av5 and Bv5 stand unchanged (clamped variants scratch R3/A_clamp,
