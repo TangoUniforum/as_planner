@@ -125,7 +125,9 @@ each list. Last updated: **2026-11-04**.
   Months 2027: 533 509 583 524 567 530 518 544 586 558 609 643; 2028: 608 587 589 636 714 621 656 583 680 630 703 608.
   Live rerun = candidate (plan/report sheets identical except name). Saved set `Scenario Bv5\`; backup
   `..\_backups\2026-11-04_ScenarioAv5_before_scenario_Bv5\`; tag `v2-before-scenario-Bv5-2026-11-04`.
-  Next: operator runs Bv5 in the app on the updated 10.31 PR; push. Then Scenario C under the same rule (Q1 fix ready:
+  Operator ran it (Downloads\10.31.26_PR_planned_Scenario Bv5.xlsm): workbook = verified run (all data sheets identical,
+  RunConfig values + parsed YAML identical, ledger OK).
+  Next: push. Then Scenario C under the same rule (Q1 fix ready:
   Jan-Feb HOG floors 115/121 t + 48k caps W01-W08 + March 40k; base set scratch q1lev/base_C).
   Open: B and C under the step rule (Q1-only fix found: Jan-Feb HOG floors B 121/128, C 115/121 + caps 48k W01-W08 + March 40k);
   the 3.4 kg monthly rule as its own step (tested: costs ~140 t 2027 and rough weeks); rename the long B/C workbooks and
