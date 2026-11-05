@@ -1,7 +1,7 @@
 # Where things stand
 
 Updated at the end of every working session (`/forecast-handoff`). Newest first in
-each list. Last updated: **2026-11-04**.
+each list. Last updated: **2026-11-05**.
 
 ## LIVE since 2026-11-02: "Scenario A" forecast trial (10.29 PR, to 2029-W07)
 
@@ -153,6 +153,18 @@ each list. Last updated: **2026-11-04**.
   the 3.4 kg monthly rule as its own step (tested: costs ~140 t 2027 and rough weeks); rename the long B/C workbooks and
   long saved-set folders (asked, not answered). NB the comparison PDF's 2028 "avg harvest weight (live)" row used 0.81 yield:
   true 2028 live weights A4/B4/C = 3.99 / 4.08 / 4.08 kg (HOG tonnes in the PDF are right).
+- **Scenario Av6 LIVE (2026-11-05, latest; replaces Cv5 as live):** reviewer table: growth/FCR by harvest year. A: B37-B47
+  Actual 100% FCR 1.20 (same); B48-B52 Base x0.90 FCR 1.18; B53+ Base x0.925 FCR 1.16 (table listed B52 in both rows - put
+  in the 2027 group, all of it harvested 2027). Same constraints as Av5; harvest rows re-searched (scratch q1lev A6/s1 it6,
+  level4 from A4 + Q1 fix, gain 0.6, 85 t; 9 searches). YearlySummary: 2027 6,727 t (+122 vs Av5), 2028 7,423 t (-30), feed
+  -365 t over 2027-28, largest step 79 t, 0 weeks over, months > 3.4 kg 3 (max 3.48), 2027-W34 93 t, 4 weeks > 52k (max 54.3k),
+  moves 1,106. Without the re-search 2028 = 7,717 t but 15 weeks over and steps to 191 t. Live rerun = candidate (all plan/report
+  sheets identical except the name column). Saved set `Scenario Av6\` (README, limits_changes_vs_Av5.txt); backup
+  `..\_backups\2026-11-05_ScenarioCv5_before_scenario_Av6\`; tag `v2-before-scenario-Av6-2026-11-05`.
+  Next: operator runs Av6 in the app on the updated 10.31 PR; then Bv6 and Cv6 (B: 1.20 / 92.5% 1.16 / 95% 1.14; C: 1.20 /
+  95% 1.14 / 97.5% 1.12) - they need a new FCR curve '1.14' in biology.yaml (show the operator first).
+- Study 2026-11-05 (scratch, nothing live): Cv5 is within 2.1% of the HOG ceiling; no planner knob robustly beats it;
+  3.4 kg guide ~400 t per 0.1 kg; least-moves on Cv5 tpf 2.15 -> 1.59. Three offers open (memory ceiling_and_template_study).
 
 ## Superseded 2026-11-02: "10.29 PR sheet moves, graded 6N, 105-110t to W07 then limits"
 
