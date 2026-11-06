@@ -174,7 +174,19 @@ each list. Last updated: **2026-11-05**.
   end-2028 standing 4,094 t, Dec 2026 948 t (-2). 2026-W49 feed 27,550 vs 27,500 kg/d (+0.2%) ACCEPTED by operator (manual
   Nov moves; B37-B47 FCR 1.20). Live rerun = candidate (only the name differs). Saved set `Scenario Bv6\` (README,
   limits_changes_vs_Bv5.txt, curve builder); backup `..\_backups\2026-11-05_ScenarioAv6_before_scenario_Bv6\`; tag
-  `v2-before-scenario-Bv6-2026-11-05`. Next: operator runs Bv6 in the app; then Cv6 the same way (curves 1.14/1.12 exist).
+  `v2-before-scenario-Bv6-2026-11-05`. Operator ran it (`Downloads\10.31.26_PR_planned_Scenario Bv6.xlsm`): workbook =
+  verified run (all data sheets identical; only "Generated" stamps; RunConfig YAML identical parsed). Next: Cv6 the same
+  way (curves 1.14/1.12 exist; scratch q1lev C6/ searches started 2026-11-05).
+- **Scenario Cv6 LIVE (2026-11-05, latest; replaces Bv6 as live):** reviewer table on C: B37-B47 Actual FCR 1.20, B48-B52
+  Base x0.95 FCR 1.14, B53+ Base x0.975 FCR 1.12; stocking unchanged (290k B50-53, 330k B54+). Rows re-searched like Av6/Bv6
+  (q1lev C6/s2 it2, level4 from C + Q1 fix, gain 0.6, 85 t). YearlySummary: 2027 7,085 t (+118 vs Cv5), 2028 7,859 t (+39),
+  largest step 92 t, 0 weeks < 100 t, months > 3.4 kg 6 (max 3.54), 3 weeks > 52k. 2027-W46 feed 30,003 vs 30,000 kg/d
+  (+0.01%) ACCEPTED by operator ("near-clean"). 8,000 t in 2028 studied: rows only -> no clean plan above 7,769 t; 350k
+  B54-B60 + 160 t/wk floors 2028-W44..W52 -> 8,009 t clean on rules but 9 weeks < 100 t (min 73) and 170 t less standing
+  into 2029 (scratch C6/N/v2) - operator kept 330k. Live rerun = candidate. Saved set `Scenario Cv6\` (README,
+  limits_changes_vs_Cv5.txt); backup `..\_backups\2026-11-05_ScenarioBv6_before_scenario_Cv6\`; tag
+  `v2-before-scenario-Cv6-2026-11-05`. Comparable set (YearlySummary 2027 / 2028): Av6 6,727 / 7,423; Bv6 6,807 / 7,740;
+  Cv6 7,085 / 7,859. Next: operator runs Cv6 in the app; then the comparison PDF for the v6 set (if wanted).
 - Study 2026-11-05 (scratch, nothing live): Cv5 is within 2.1% of the HOG ceiling; no planner knob robustly beats it;
   3.4 kg guide ~400 t per 0.1 kg; least-moves on Cv5 tpf 2.15 -> 1.59. Three offers open (memory ceiling_and_template_study).
 
