@@ -1,7 +1,7 @@
 # Where things stand
 
 Updated at the end of every working session (`/forecast-handoff`). Newest first in
-each list. Last updated: **2026-11-05**.
+each list. Last updated: **2026-11-06**.
 
 ## LIVE since 2026-11-02: "Scenario A" forecast trial (10.29 PR, to 2029-W07)
 
@@ -200,6 +200,17 @@ each list. Last updated: **2026-11-05**.
   (YearlySummary) with 12 weeks over the cap (to +2.3%, every 7 weeks) and 9 steps >= 100 t. Mean 2028 biomass gap to cap
   Q2/Q3/Q4: Cv6 191/163/138 t; 350k plan (8,009) 88/106/186; ride 72/56/46. Conclusion: the 350k plan is about as close
   as the rules allow; riding the cap adds ~40 t and breaks the cap and the step rule.
+- **Scenario Av6 LIVE again + 11.5.26 PR short-term plan (2026-11-06, latest; replaces Cv6 as live):** operator: "match Av6",
+  "very conservative", next 8 weeks only, "plan the transfers so that we can feed 6N properly". Live = saved set Av6 + NEW
+  `scenario/manual_events/2026-11-05.yaml`: movement sheet re-based from 10-31 (week 1 = W45; done moves dropped) + direct 6N
+  fills W48-W49 (31 -> 61 41,000; relief 64 -> 41 and 44 -> 41 7,000 each; B47/B48/B50 moves as the Av6 plan but B48 split into
+  32/36; W49 rest of 44 -> 63); planner from W50. Why: B45 tanks 31/44/64 reach the 85 kg/m3 OG cap ~23-30 Nov with one 6N
+  main free per week; the planner's own answer was ~14 OG->OG B45 shuffles, and left alone in W49 it put 52k in 63 (W51 136 t).
+  W46-W53 t HOG 96.6 110.3 104.3 102.7 106.3 99.0 112.1 108.8 = 840 (Av6 alone 842). No density/feed/biomass/system overs
+  W46 - 2027-W08. Run on the 11.5 PR: 2027 6,779 / 2028 7,347 t. Live rerun = tested plan (all sheets identical but stamps).
+  Working-sheet rows: `Forecasts\2026\Nov\11.5.26 PR - short term harvest plan W46-W53.xlsx`. Saved set `Scenario Av6\`
+  (+ manual_events_2026-11-05.yaml, README); backup `..\_backups\2026-11-06_ScenarioCv6_before_shortterm_11_5\`; tag
+  `v2-before-shortterm-11-5-2026-11-06`. Next: operator runs the app on `Reports\2026\Nov\11.5.26 PR.xlsx` (Scenario Av6).
 - Study 2026-11-05 (scratch, nothing live): Cv5 is within 2.1% of the HOG ceiling; no planner knob robustly beats it;
   3.4 kg guide ~400 t per 0.1 kg; least-moves on Cv5 tpf 2.15 -> 1.59. Three offers open (memory ceiling_and_template_study).
 
