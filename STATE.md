@@ -161,8 +161,20 @@ each list. Last updated: **2026-11-05**.
   moves 1,106. Without the re-search 2028 = 7,717 t but 15 weeks over and steps to 191 t. Live rerun = candidate (all plan/report
   sheets identical except the name column). Saved set `Scenario Av6\` (README, limits_changes_vs_Av5.txt); backup
   `..\_backups\2026-11-05_ScenarioCv5_before_scenario_Av6\`; tag `v2-before-scenario-Av6-2026-11-05`.
-  Next: operator runs Av6 in the app on the updated 10.31 PR; then Bv6 and Cv6 (B: 1.20 / 92.5% 1.16 / 95% 1.14; C: 1.20 /
+  Operator ran it (`Forecasts\2026\Nov\10.31.26_PR_planned_Scenario Av6.xlsm`): workbook = verified run (all data sheets
+  identical; only "Generated" stamps differ; RunConfig YAML identical parsed). Next: Bv6 and Cv6 (B: 1.20 / 92.5% 1.16 / 95% 1.14; C: 1.20 /
   95% 1.14 / 97.5% 1.12) - they need a new FCR curve '1.14' in biology.yaml (show the operator first).
+- **Scenario Bv6 LIVE (2026-11-05, latest; replaces Av6 as live):** reviewer table on B: B37-B47 Actual FCR 1.20 (was 1.15),
+  B48-B52 Base x0.925 FCR 1.16, B53+ Base x0.95 FCR 1.14. NEW FCR curve '1.14' in biology.yaml (operator: accumulated FCR
+  at 4 kg = 1.14 = feed per kg gained 0.1 g -> 4 kg; blend of 1.12/1.16, weight 0.288; existing curves sit on that basis;
+  adding it leaves Av6 identical; engine feeds ~0.7% above every curve - closing-biomass pricing, not changed). Harvest
+  rows re-searched like Av6 (q1lev B6/s3 it4, level4 from B4 + Q1 fix, gain 0.5, 85 t, weight check off); operator picked
+  this "most tonnes" plan over a lighter fish-floor variant as the like-for-like comparison with Av6. YearlySummary:
+  2027 6,807 t (+102 vs Bv5), 2028 7,740 t (+126), largest step 95 t, months > 3.4 kg 8 (max 3.54), 1 week > 52k,
+  end-2028 standing 4,094 t, Dec 2026 948 t (-2). 2026-W49 feed 27,550 vs 27,500 kg/d (+0.2%) ACCEPTED by operator (manual
+  Nov moves; B37-B47 FCR 1.20). Live rerun = candidate (only the name differs). Saved set `Scenario Bv6\` (README,
+  limits_changes_vs_Bv5.txt, curve builder); backup `..\_backups\2026-11-05_ScenarioAv6_before_scenario_Bv6\`; tag
+  `v2-before-scenario-Bv6-2026-11-05`. Next: operator runs Bv6 in the app; then Cv6 the same way (curves 1.14/1.12 exist).
 - Study 2026-11-05 (scratch, nothing live): Cv5 is within 2.1% of the HOG ceiling; no planner knob robustly beats it;
   3.4 kg guide ~400 t per 0.1 kg; least-moves on Cv5 tpf 2.15 -> 1.59. Three offers open (memory ceiling_and_template_study).
 
