@@ -200,7 +200,24 @@ each list. Last updated: **2026-11-06**.
   (YearlySummary) with 12 weeks over the cap (to +2.3%, every 7 weeks) and 9 steps >= 100 t. Mean 2028 biomass gap to cap
   Q2/Q3/Q4: Cv6 191/163/138 t; 350k plan (8,009) 88/106/186; ride 72/56/46. Conclusion: the 350k plan is about as close
   as the rules allow; riding the cap adds ~40 t and breaks the cap and the step rule.
-- **Scenario Av6 LIVE again + 11.5.26 PR short-term plan (2026-11-06, latest; replaces Cv6 as live):** operator: "match Av6",
+- **LIVE 2026-11-06 pm (latest): "Scenario Av6 ST2" on the UPDATED 11.5.26 PR (3:31 pm weights)** - saved set
+  `..\_backups\scenario_sets\Scenario Av6 ST2\` (README has every move). scenario_name still "Scenario Av6".
+  Operator asks: new samples (36 2,472 g -20%, 32 2,942 g -5.5%; 36 sampled ~10% low in Aug/Sep too, never reached the PR);
+  "actual growth model for all batches ... conservative"; "harvest dropping is okay ... standing biomass increasing ... into
+  q2 of 27 with bigger fish"; FIFO while hitting harvest weights; "Nov and Dec too"; Schedule Plan W46-47 incorporated.
+  Live changes (3 files): batches.yaml every batch Actual 2026-10-18, sgr_correction 1.0 (B48+ were Base x0.90/0.925);
+  manual_events/2026-11-05.yaml scripts ALL of W46-W53 (9-week window; planner from 2027-W01; W46 grade 64 not 36; B47 26 -> 64;
+  31 graded W48; 35,000 of 66 W49; B51 fw_to_og W49 on its date; W50-W53 B45 fills + B46/B47/B48/B49 reliefs);
+  limits.yaml 29 rows (W52/W53 floors 100 t, W53 max 37,600; 2027-W01..W13 floor 100 t, max 45,000 fish).
+  Result: W46-W53 t HOG 96.6 110.3 100.4 97.3 102.0 89.5 89.5 99.8 = 785.5; B45 ends 2027-W02 (FIFO); standing 3,311 ->
+  3,544 (W53) -> 3,827 (2027-W13); Dec 478 t; Apr-27 623 t (+156 step, breaks <100 t rule); 2027 6,542 / 2028 7,209 t.
+  Nov can't go lower: 27.5 t/d feed row is 97-99% W46-W48 (6N fish don't eat). OPEN: 2027-W11 OG1S feed 3,400 kg/d
+  (FEED_OVER), 32 tank-weeks > 85 kg/m3 in 2027 (planner weeks) -> re-plan at next PR. REPORT BUG found: a scripted fw_to_og
+  drops that batch's FW fish from the W45-W48 totals in the workbook (standing 47-94 t / feed ~2 t/d low; moves fine) -
+  fix offered via /forecast-change. Live rerun = scratch st1105/v2 (identical but stamps). Rows workbook replaced in
+  `Forecasts\2026\Nov\` (am kept as "(6-Nov am, superseded)"). Backup `..\_backups\2026-11-06_ScenarioAv6_before_shortterm_v2\`;
+  tag `v2-before-shortterm-v2-2026-11-06`.
+- Superseded 2026-11-06 pm by Av6 ST2 above. **Scenario Av6 LIVE again + 11.5.26 PR short-term plan (2026-11-06 am; replaces Cv6 as live):** operator: "match Av6",
   "very conservative", next 8 weeks only, "plan the transfers so that we can feed 6N properly". Live = saved set Av6 + NEW
   `scenario/manual_events/2026-11-05.yaml`: movement sheet re-based from 10-31 (week 1 = W45; done moves dropped) + direct 6N
   fills W48-W49 (31 -> 61 41,000; relief 64 -> 41 and 44 -> 41 7,000 each; B47/B48/B50 moves as the Av6 plan but B48 split into
