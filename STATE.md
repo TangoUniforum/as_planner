@@ -174,7 +174,7 @@ each list. Last updated: **2026-11-05**.
   end-2028 standing 4,094 t, Dec 2026 948 t (-2). 2026-W49 feed 27,550 vs 27,500 kg/d (+0.2%) ACCEPTED by operator (manual
   Nov moves; B37-B47 FCR 1.20). Live rerun = candidate (only the name differs). Saved set `Scenario Bv6\` (README,
   limits_changes_vs_Bv5.txt, curve builder); backup `..\_backups\2026-11-05_ScenarioAv6_before_scenario_Bv6\`; tag
-  `v2-before-scenario-Bv6-2026-11-05`. Operator ran it (`Downloads\10.31.26_PR_planned_Scenario Bv6.xlsm`): workbook =
+  `v2-before-scenario-Bv6-2026-11-05`. Operator ran it (`Forecasts\2026\Nov\10.31.26_PR_planned_Scenario Bv6.xlsm`, moved from Downloads, byte-identical): workbook =
   verified run (all data sheets identical; only "Generated" stamps; RunConfig YAML identical parsed). Next: Cv6 the same
   way (curves 1.14/1.12 exist; scratch q1lev C6/ searches started 2026-11-05).
 - **Scenario Cv6 LIVE (2026-11-05, latest; replaces Bv6 as live):** reviewer table on C: B37-B47 Actual FCR 1.20, B48-B52
@@ -186,7 +186,7 @@ each list. Last updated: **2026-11-05**.
   into 2029 (scratch C6/N/v2) - operator kept 330k. Live rerun = candidate. Saved set `Scenario Cv6\` (README,
   limits_changes_vs_Cv5.txt); backup `..\_backups\2026-11-05_ScenarioBv6_before_scenario_Cv6\`; tag
   `v2-before-scenario-Cv6-2026-11-05`. Comparable set (YearlySummary 2027 / 2028): Av6 6,727 / 7,423; Bv6 6,807 / 7,740;
-  Cv6 7,085 / 7,859. Operator ran it (`Downloads\10.31.26_PR_planned_Scenario Cv6.xlsm`): workbook = verified run (all data
+  Cv6 7,085 / 7,859. Operator ran it (`Forecasts\2026\Nov\10.31.26_PR_planned_Scenario Cv6.xlsm`, moved from Downloads, byte-identical): workbook = verified run (all data
   sheets identical; only "Generated" stamps; RunConfig YAML identical parsed). All three v6 workbooks verified.
   Comparison PDF for the reviewer: `Forecasts\2026\Nov\10.31.26 PR - Scenario comparison Av6 Bv6 Cv6.pdf` (5 pages, v5 layout;
   top table = growth/FCR per batch group and harvest year; built by scratch cmp6/ data.py + mkcharts.py + mkpdf.py from the
