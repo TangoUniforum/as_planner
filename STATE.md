@@ -216,7 +216,9 @@ each list. Last updated: **2026-11-06**.
   drops that batch's FW fish from the W45-W48 totals in the workbook (standing 47-94 t / feed ~2 t/d low; moves fine) -
   fix offered via /forecast-change. Live rerun = scratch st1105/v2 (identical but stamps). Rows workbook replaced in
   `Forecasts\2026\Nov\` (am kept as "(6-Nov am, superseded)"). Backup `..\_backups\2026-11-06_ScenarioAv6_before_shortterm_v2\`;
-  tag `v2-before-shortterm-v2-2026-11-06`.
+  tag `v2-before-shortterm-v2-2026-11-06`. App workbook VERIFIED 16:36 (`Downloads\11.5.26 PR_planned_Scenario Av6 (1).xlsm`):
+  identical to st1105/live2 on every plan/report sheet; only stamps + 2 Models check rows (the app's run added the updated
+  11.5 PR to growth_history.json, moving one tank-month between size bands; report-only).
 - Superseded 2026-11-06 pm by Av6 ST2 above. **Scenario Av6 LIVE again + 11.5.26 PR short-term plan (2026-11-06 am; replaces Cv6 as live):** operator: "match Av6",
   "very conservative", next 8 weeks only, "plan the transfers so that we can feed 6N properly". Live = saved set Av6 + NEW
   `scenario/manual_events/2026-11-05.yaml`: movement sheet re-based from 10-31 (week 1 = W45; done moves dropped) + direct 6N
