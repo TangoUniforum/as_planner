@@ -191,6 +191,15 @@ each list. Last updated: **2026-11-05**.
   Comparison PDF for the reviewer: `Forecasts\2026\Nov\10.31.26 PR - Scenario comparison Av6 Bv6 Cv6.pdf` (5 pages, v5 layout;
   top table = growth/FCR per batch group and harvest year; built by scratch cmp6/ data.py + mkcharts.py + mkpdf.py from the
   three verified app workbooks; results compared with v5).
+- **"Ride the limits" study on C (2026-11-05/06, scratch q1lev RIDE/, nothing live; operator KEPT near-clean Cv6):** the
+  graphs are whole facility (Advisory Total_Biomass/Feed = OG + FW + 6N). Why the plans don't ride a limit: 2027 H2 is
+  feed-bound (30 t/d); 2027 H1 gap comes from the stocking history; in 2028 the 4,200 t biomass cap binds before 34 t/d
+  feed, and the leftover gap is structural (1% planner margin + 7-week batch rhythm). Removing rows (R0/R1) gives about
+  Cv6's totals, so stocking is the constraint. More fish raw (330k B51-53, 360k B54+, 60k fish cap) ~7,250-7,300 /
+  8,190-8,200 t but 32-50 weeks over and steps to 353 t; level9 searches (level4 + over-week rows) best 7,169 / 8,050 t
+  (YearlySummary) with 12 weeks over the cap (to +2.3%, every 7 weeks) and 9 steps >= 100 t. Mean 2028 biomass gap to cap
+  Q2/Q3/Q4: Cv6 191/163/138 t; 350k plan (8,009) 88/106/186; ride 72/56/46. Conclusion: the 350k plan is about as close
+  as the rules allow; riding the cap adds ~40 t and breaks the cap and the step rule.
 - Study 2026-11-05 (scratch, nothing live): Cv5 is within 2.1% of the HOG ceiling; no planner knob robustly beats it;
   3.4 kg guide ~400 t per 0.1 kg; least-moves on Cv5 tpf 2.15 -> 1.59. Three offers open (memory ceiling_and_template_study).
 
