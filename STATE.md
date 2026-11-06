@@ -186,7 +186,9 @@ each list. Last updated: **2026-11-05**.
   into 2029 (scratch C6/N/v2) - operator kept 330k. Live rerun = candidate. Saved set `Scenario Cv6\` (README,
   limits_changes_vs_Cv5.txt); backup `..\_backups\2026-11-05_ScenarioBv6_before_scenario_Cv6\`; tag
   `v2-before-scenario-Cv6-2026-11-05`. Comparable set (YearlySummary 2027 / 2028): Av6 6,727 / 7,423; Bv6 6,807 / 7,740;
-  Cv6 7,085 / 7,859. Next: operator runs Cv6 in the app; then the comparison PDF for the v6 set (if wanted).
+  Cv6 7,085 / 7,859. Operator ran it (`Downloads\10.31.26_PR_planned_Scenario Cv6.xlsm`): workbook = verified run (all data
+  sheets identical; only "Generated" stamps; RunConfig YAML identical parsed). All three v6 workbooks verified.
+  Next (offered): comparison PDF for the v6 set.
 - Study 2026-11-05 (scratch, nothing live): Cv5 is within 2.1% of the HOG ceiling; no planner knob robustly beats it;
   3.4 kg guide ~400 t per 0.1 kg; least-moves on Cv5 tpf 2.15 -> 1.59. Three offers open (memory ceiling_and_template_study).
 
