@@ -188,7 +188,9 @@ each list. Last updated: **2026-11-05**.
   `v2-before-scenario-Cv6-2026-11-05`. Comparable set (YearlySummary 2027 / 2028): Av6 6,727 / 7,423; Bv6 6,807 / 7,740;
   Cv6 7,085 / 7,859. Operator ran it (`Downloads\10.31.26_PR_planned_Scenario Cv6.xlsm`): workbook = verified run (all data
   sheets identical; only "Generated" stamps; RunConfig YAML identical parsed). All three v6 workbooks verified.
-  Next (offered): comparison PDF for the v6 set.
+  Comparison PDF for the reviewer: `Forecasts\2026\Nov\10.31.26 PR - Scenario comparison Av6 Bv6 Cv6.pdf` (5 pages, v5 layout;
+  top table = growth/FCR per batch group and harvest year; built by scratch cmp6/ data.py + mkcharts.py + mkpdf.py from the
+  three verified app workbooks; results compared with v5).
 - Study 2026-11-05 (scratch, nothing live): Cv5 is within 2.1% of the HOG ceiling; no planner knob robustly beats it;
   3.4 kg guide ~400 t per 0.1 kg; least-moves on Cv5 tpf 2.15 -> 1.59. Three offers open (memory ceiling_and_template_study).
 
